@@ -9,7 +9,7 @@ Morpho Blue position for a fresh, gasless smart account.
 
 Built for ZECATHON 2026 (Cross-Chain track). **Testnet experiment — not a financial product.**
 
-Status: work in progress. Full design: [docs/PLAN.md](docs/PLAN.md).
+Status: work in progress. Design: [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md), [docs/INTERFACES.md](docs/INTERFACES.md), [docs/DECISIONS.md](docs/DECISIONS.md).
 
 ## Repository layout
 
@@ -27,7 +27,9 @@ Status: work in progress. Full design: [docs/PLAN.md](docs/PLAN.md).
 
 | Real | Mock |
 |---|---|
-| _(filled in as features land)_ | Price oracle (MOCK), USDC (MOCK), signer independence (all 5 nodes run by us) |
+| Shielded Ironwood transactions on Zcash testnet (NU7) | Price oracle (`MockZecOracle`, price set manually for the demo) |
+| 3-of-5 FROST threshold vaults, keys per ZIP 2005 (`use_qsk`) | USDC (`MockUSDC`) |
+| Morpho Blue market on Base Sepolia (real Morpho deployment) | Signer independence (all 5 nodes run by us) |
 
 ## License
 

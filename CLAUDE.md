@@ -1,7 +1,9 @@
 # Zecured
 
 Borrow against shielded ZEC without unshielding it. ZECATHON 2026, Cross-Chain track.
-Full plan: docs/PLAN.md. Verified constants: docs/ref/FACTS.md.
+Internal plan (never committed): docs/private/PLAN.md (in a worktree, use the main checkout's copy).
+Public design: docs/ARCHITECTURE.md, docs/INTERFACES.md, docs/DECISIONS.md. Verified constants: docs/ref/FACTS.md.
+Everything committed to this repository is in English (it will be published).
 Deadline: 2026-10-28 23:59 UTC. Gates: 10-13 (Spike A go/no-go), 10-20 (v0.1), 10-25 (feature freeze).
 
 ## Do not trust your memory for Zcash APIs
@@ -17,7 +19,7 @@ Deadline: 2026-10-28 23:59 UTC. Gates: 10-13 (Spike A go/no-go), 10-20 (v0.1), 1
 - ZEC flow is Ironwood-only: no transparent, Sapling or Orchard addresses, inputs or outputs.
 - Deposits with transparent inputs, Sapling spends or Orchard actions are never attested.
 - Third-party outputs (liquidator, market maker) use ovk = None.
-- Smart accounts never receive ETH. The paymaster sponsors only the allowlist in docs/PLAN.md 9.7.
+- Smart accounts never receive ETH. The paymaster sponsors only the allowlist in docs/INTERFACES.md § 4.
 - Smart accounts never hold zZEC. The Registry mints it and supplies it straight into Morpho.
 - Vaults are opened off-chain. Nothing about a vault touches Base before attestDeposit.
 - The browser never calls RPC, bundler or paymaster providers directly; only our proxy.
@@ -29,7 +31,7 @@ Deadline: 2026-10-28 23:59 UTC. Gates: 10-13 (Spike A go/no-go), 10-20 (v0.1), 1
 
 ## Rules of the hackathon
 - All code is new and written during the build window. No code from earlier projects.
-- Libraries are fine. Testnets only unless docs/PLAN.md says otherwise.
+- Libraries are fine. Testnets only.
 
 ## Invariants (must have tests)
 I1  zZEC totalSupply == sum of outstanding over active vaults
@@ -47,7 +49,7 @@ I10 (signer, off-chain) vault notes == outstanding + unpaid claims + unrefunded 
 
 ## Commands
 contracts: cd contracts && forge build && forge test
-signer:    cd signer && cargo build && cargo test
+signer:    cargo build -p "zecured-*" && cargo test   (Rust workspace at repo root)
 backend:   cd backend && cargo build && cargo test
 app:       cd app && pnpm install && pnpm build
 

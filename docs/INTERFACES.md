@@ -1,7 +1,7 @@
 # Interfaces (shared contract between modules)
 
 `contracts/`, `signer/`, `backend/`, `bots/` and `app/` are built against this file. Change it
-first, then the code. Design rationale lives in docs/PLAN.md § 9; decisions in docs/DECISIONS.md.
+first, then the code. Design rationale lives in docs/ARCHITECTURE.md; decisions in docs/DECISIONS.md.
 
 Units: ZEC amounts are **zatoshi** everywhere (zZEC has 8 decimals, so 1 zZEC wei = 1 zatoshi).
 USDC amounts are 6-decimal units. Heights are Zcash block heights unless stated otherwise.
@@ -73,11 +73,13 @@ the user against price moves; `deadline` is a short Unix-time expiry (≈ 10 min
 ### 3.1 `ZZEC` (ERC-20, 8 decimals)
 
 - `mint`/`burn`: Registry only.
-- Transfers allowed only: Registry → Morpho (collateral supply, pulled by Morpho), Morpho →
-  Registry and Morpho → SettlementAdapter **while the receiver holds a one-shot transient
-  expectation** set by itself: `expectFromMorpho(address recipient, uint256 maxAmount)`
-  (callable by Registry and Adapter only, EIP-1153 transient storage, consumed by the
-  transfer). Everything else reverts. No account ever holds zZEC (I2).
+- Transfers allowed only: Registry → Morpho (collateral supply, pulled by Morpho), and Morpho →
+  Registry or Morpho → SettlementAdapter **while that receiver has armed a one-shot transient
+  expectation** with `expectFromMorpho(uint256 maxAmount)` (callable by Registry and Adapter
+  only; the expected recipient is `msg.sender`; EIP-1153 transient storage; consumed by the
+  transfer; armed right before the Morpho call that moves zZEC). The Registry burns zZEC held
+  by the Adapter directly. Everything else reverts (Morpho surfaces it as "transfer reverted").
+  No account ever holds zZEC (I2).
 
 ### 3.2 `ZecuredRegistry`
 
@@ -132,8 +134,9 @@ function onMorphoRepay(uint256 repaidAssets, bytes calldata data) external;     
 event NonceInvalidated(address indexed account, uint256 nonce);
 ```
 
-- `liquidate`: exactly one of `seizedAssets`/`repaidShares` non-zero; seized ≥ 0.01 ZEC
-  (1,000,000 zat) or the whole remaining `outstanding`; USDC pulled from `msg.sender` inside
+- `liquidate`: exactly one of `seizedAssets`/`repaidShares` non-zero (`repaidShares` capped at
+  the borrower's shares read in the same call); seized ≥ `MIN_SEIZE` = 100,000 zat (0.001 ZEC)
+  and the remainder is either 0 or ≥ `MIN_SEIZE` (dust guard, D11); USDC pulled from `msg.sender` inside
   `onMorphoLiquidate`; seized zZEC → `Registry.recordLiquidation`.
 - `closeWithCollateral`: `msg.sender == req.executor`, `block.timestamp <= req.deadline`, nonce
   unused and not invalidated, `marginBps <= MAX_MARGIN_BPS`, ERC-1271 valid on `req.account`;
@@ -169,6 +172,21 @@ addresses, salts, viewing keys or IPs.
 | `GET /quotes/close/:vaultId` | — | `{ executor, marginBps, repayAssets, mmAmount, userAmount, expiresAt }` |
 | `POST /proxy/rpc` | JSON-RPC | Base RPC passthrough (read methods + `eth_sendRawTransaction` disallowed) |
 | `POST /proxy/bundler` | JSON-RPC | ERC-4337 bundler passthrough |
-| `POST /proxy/paymaster` | JSON-RPC | Sponsors only the allowlist in PLAN § 9.7; rejects anything else |
+| `POST /proxy/paymaster` | JSON-RPC | Sponsors only the allowlist below; rejects anything else |
 
 Vault status values: `awaiting_deposit`, `deposit_seen`, `active`, `closing`, `closed`, `expired`.
+
+### 4.1 Paymaster allowlist (enforced by the proxy)
+
+A UserOp is sponsored only if every call it makes is one of:
+
+| Target | Calls |
+|---|---|
+| Smart account factory | deployment in the account's first UserOp (`initCode` / `factory`) |
+| `ZecuredRegistry` | `requestRelease` |
+| `SettlementAdapter` | `invalidateNonce` |
+| Morpho Blue | `setAuthorization` (only for the Registry and the Adapter), `borrow` and `repay` (only the Zecured market) |
+| MockUSDC | `approve` (spender = Morpho) and `transfer` |
+
+Anything else is rejected. The account never receives ETH. The first UserOp must skip
+authorizations that are already set (Morpho reverts on re-setting).

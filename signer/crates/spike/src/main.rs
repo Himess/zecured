@@ -1,6 +1,6 @@
 //! Spike A: a 3-of-5 FROST vault in Zcash's Ironwood pool, end to end.
 //!
-//! SPIKE CODE: throwaway driver for docs/PLAN.md § 18 "Spike A". It keeps every share in
+//! SPIKE CODE: throwaway driver for docs/spikes/SPIKE_A.md. It keeps every share in
 //! one JSON file on disk (gitignored), which the real signer nodes never do.
 
 use std::{collections::BTreeMap, fs, path::PathBuf};

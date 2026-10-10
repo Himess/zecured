@@ -2,7 +2,7 @@
 
 Date: 2026-10-11 (plan Day 1; gate 1 was scheduled for 2026-10-13).
 
-## Success criterion (PLAN § 18)
+## Success criterion
 
 > A two-output transaction leaving the vault is confirmed on testnet.
 

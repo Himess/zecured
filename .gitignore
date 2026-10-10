@@ -38,3 +38,9 @@ docs/ref/vendor/
 
 # Logs
 *.log
+
+# Local state directories (vault keys, node stores)
+/data/
+
+# Internal planning documents (not published)
+docs/private/
