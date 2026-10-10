@@ -1,0 +1,27 @@
+[package]
+name = "zecured-policy"
+version = "0.1.0"
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+publish.workspace = true
+
+[dependencies]
+zecured-zcash-ops = { path = "../zcash-ops" }
+orchard.workspace = true
+pczt.workspace = true
+pasta_curves.workspace = true
+blake2b_simd.workspace = true
+anyhow.workspace = true
+thiserror.workspace = true
+serde.workspace = true
+hex.workspace = true
+sha3 = "0.10"
+
+[dev-dependencies]
+zecured-threshold = { path = "../threshold" }
+rand_core_06.workspace = true
+rand_010.workspace = true
+incrementalmerkletree.workspace = true
+zcash_protocol.workspace = true
+zcash_primitives.workspace = true
