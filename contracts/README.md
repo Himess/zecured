@@ -18,13 +18,14 @@ src/
   mocks/                       MockUSDC, MockZecOracle (MOCK)
 script/
   DeployZecured.s.sol          full deployment, writes deployments/base-sepolia.json
-  DeployMocks.s.sol            Spike C market dry run (superseded by DeployZecured)
+  export-abis.sh               writes abi/*.json
 test/
   unit/                        zZEC transfer guard (no fork); EIP-712 vectors checked against an independent implementation
   fork/                        Registry, Adapter, transfer guard, end-to-end flows, real Safe v1.4.1 ERC-1271
   invariant/                   handler-based invariants (I1, I2, I3 Base side, I4/I5, I6, I7, I8, I9)
   utils/                       fork fixture, OneTx (several pranked calls in one transaction), Safe helpers
   mocks/, spike/               earlier tests (Spike C, throwaway)
+abi/                           bare ABI arrays for the app and the off-chain services (committed)
 deployments/                   base-sepolia.json after a real deployment (dry runs: *.dry-run.json, gitignored)
 ```
 
@@ -38,7 +39,7 @@ DepositAttestation also with `cast`. The Rust signer and the app can test agains
 ```bash
 cd contracts
 forge build
-forge test --isolate          # 163 tests (122 for the production contracts), about 2 s once the fork is cached
+forge test --isolate          # 166 tests (125 for the production contracts), about 2 s once the fork is cached
 ```
 
 - **Use `--isolate`.** It makes every top-level call of a test its own transaction, so EIP-1153 transient storage is
@@ -142,7 +143,8 @@ Neither has a code path that borrows or withdraws loan assets. The flow tests as
 - **Market maker amount.** `mmAmount = ceil(repaidAssets × (10,000 + marginBps) × 1e36 / (10,000 × price))`, computed
   with a 512-bit `Math.mulDiv`. The borrower gets `outstanding − mmAmount`, which must be at least `minUserAmount`.
 - **Liquidation.** `repaidShares` is capped at the borrower's current shares, so a front-running 1-share repay cannot
-  make Morpho underflow. D11: seized ≥ 100,000 zat and the remainder is 0 or ≥ 100,000 zat.
+  make Morpho underflow. D11: seized ≥ 100,000 zat, or seized = the vault's whole remaining outstanding. The
+  remainder has no floor: a sub-floor remainder stays with the borrower (dust in the vault if below the payout fee).
 - **Claims.** `claimId = keccak256(abi.encode(vaultId, sequence))`, with a per-vault sequence starting at 0. A close
   creates the user claim, then the market maker claim.
 
@@ -183,8 +185,23 @@ text:
 
 - Zero vault ids, accounts, amounts, deposit tags and commitments are rejected.
 - An account can never get a second vault, even after its vault is closed (I4).
-- `invalidateNonce` reverts on a nonce that is already used or invalidated.
 - `closeWithCollateral` requires `req.vaultId` to be the account's vault, an active vault and existing debt.
+
+Where the spec is silent: `invalidateNonce` is idempotent (it never reverts, also for a nonce that is already used or
+invalidated, and emits `NonceInvalidated` on every call). The D11 rule follows docs/DECISIONS.md (2026-10-11): seized ≥
+`MIN_SEIZE` or the whole remaining outstanding, with no floor on the remainder.
+
+## ABIs
+
+`abi/*.json` hold the bare ABI arrays of ZZEC, ZecuredRegistry, SettlementAdapter, MockUSDC and MockZecOracle for the
+app and the off-chain services. After any change to an external interface, regenerate them with
+`script/export-abis.sh` (it builds first) and commit them.
+
+## Known gaps
+
+- The Adapter's `nonReentrant` guard is not exercised by any test. Reaching it needs a loan token that calls back during
+  transfers, i.e. another market. With MockUSDC and the real Morpho, no untrusted code with state access runs inside
+  `liquidate` or `closeWithCollateral` (the ERC-1271 check is a staticcall).
 
 ## Mocks
 

@@ -30,7 +30,7 @@ Foundry serves the pinned block from its disk cache.)
 
 | # | Claim | Evidence |
 |---|---|---|
-| 1 | A zZEC stand-in (8 dec) / MockUSDC (6 dec) / MockZecOracle / AdaptiveCurveIRM / LLTV 62.5% market can be created on the real Morpho. IRM and LLTV are enabled | `SpikeC.t.sol` test_01, `DeployMocks` dry run |
+| 1 | A zZEC stand-in (8 dec) / MockUSDC (6 dec) / MockZecOracle / AdaptiveCurveIRM / LLTV 62.5% market can be created on the real Morpho. IRM and LLTV are enabled | `SpikeC.t.sol` test_01, `DeployMocks` dry run (script removed later, see Files) |
 | 2 | Registry mints to itself and calls `supplyCollateral(onBehalf = account)`. No authorization is needed, and it works **before the account exists** (counterfactual Safe address) | test_03, `Safe4337UserOp.t.sol` (deposit before UserOp 1) |
 | 3 | The account does `setAuthorization(registry)` + `setAuthorization(adapter)` + `borrow(receiver = another address)`. The USDC never touches the account | test_04; as one Safe batch (`SafeErc1271.t.sol`); as one sponsored UserOp (`test_userOp1…`) |
 | 4 | `repay(shares)` pulls exactly `MorphoBalancesLib.expectedBorrowAssets` (160 → 160.042384 USDC after 30 days of real AdaptiveCurveIRM interest). Then the registry withdraws the collateral to itself using the account's authorization, and burns it | test_04, `test_userOp2…` (approve + repay + requestRelease in one sponsored UserOp) |
@@ -43,7 +43,7 @@ Foundry serves the pinned block from its disk cache.)
 | 11 | ERC-1271 with a real Safe 1.4.1 (3 configurations, see below) | `SafeErc1271.t.sol` |
 | 12 | ERC-4337: real `EntryPoint.handleOps` deploys the Safe from `initCode` and runs the batched authorize + borrow. The paymaster deposit pays; the account has 0 ETH and no EntryPoint deposit throughout. Non-allowlisted calls are rejected with `AA33` | `Safe4337UserOp.t.sol` (3 tests) |
 | 13 | EIP-1153 is live on Base Sepolia (real node, not only the fork EVM): `cast rpc eth_call '{"data":"0x602a5f5d5f5c5f5260205ff3"}' latest --rpc-url https://sepolia.base.org` returns `0x…2a` (TSTORE/TLOAD round-trip); unknown opcodes error | manual, 2026-10-10 |
-| 14 | `DeployMocks` dry run prints a market id and sends nothing. On a **local anvil fork**, `--broadcast` without `COLLATERAL_TOKEN` is refused, and with it the market is created (the local-fork broadcast artifacts were deleted afterwards) | manual |
+| 14 | `DeployMocks` dry run (script removed on 2026-10-11, superseded by `DeployZecured.s.sol`) prints a market id and sends nothing. On a **local anvil fork**, `--broadcast` without `COLLATERAL_TOKEN` is refused, and with it the market is created (the local-fork broadcast artifacts were deleted afterwards) | manual |
 | 15 | With D7 vault sizes, a **0.01 TAZ** vault cannot satisfy INTERFACES.md 3.3's 0.01 ZEC minimum seize near LLTV (see Recommendations); 0.05 TAZ vaults can | test_15, test_16, test_17 |
 
 Gas: UserOp 1 (Safe deploy + 2 × setAuthorization + borrow) was charged 663,004 gas,
@@ -56,8 +56,8 @@ base fee.
 contracts/foundry.toml
 contracts/src/mocks/MockUSDC.sol                 MOCK: 6 dec, owner-only mint
 contracts/src/mocks/MockZecOracle.sol            MOCK: IOracle, price = USD/ZEC * 1e34, owner-only setPrice, PriceSet event
-contracts/script/DeployMocks.s.sol               mocks + market, prints market id
-contracts/script/DryRunPlaceholderCollateral.sol MOCK: dry-run-only placeholder for zZEC
+contracts/script/DeployMocks.s.sol               mocks + market, prints market id   (removed 2026-10-11, see below)
+contracts/script/DryRunPlaceholderCollateral.sol MOCK: dry-run-only placeholder     (removed 2026-10-11, see below)
 contracts/test/mocks/MockUSDC.t.sol              5 tests (incl. fuzz)
 contracts/test/mocks/MockZecOracle.t.sol         10 tests (incl. fuzz of the 1e34 scaling)
 contracts/test/spike/  (throwaway, MOCK/SPIKE-ONLY)
@@ -76,12 +76,11 @@ forge test                                    # 41 tests; fork tests use $BASE_S
 forge test --isolate                          # each top-level call is its own tx (real transient-storage semantics)
 forge test --no-match-path 'test/spike/*'     # offline: mock unit tests only (15)
 SPIKE_FORK_BLOCK=0 forge test --match-path 'test/spike/*'    # latest block instead of 47,948,000
-forge script script/DeployMocks.s.sol --rpc-url https://sepolia.base.org      # dry run, sends nothing
-
-# later, when zZEC is deployed and a deployer key is funded (do not run before):
-COLLATERAL_TOKEN=<zZEC> ZEC_USD_PRICE_CENTS=4000 \
-  forge script script/DeployMocks.s.sol --rpc-url base_sepolia --broadcast --account <keystore>
 ```
+
+The spike's `DeployMocks.s.sol` / `DryRunPlaceholderCollateral.sol` were removed on 2026-10-11:
+`script/DeployZecured.s.sol` deploys the mocks, zZEC, Registry and Adapter and creates the market (see
+`contracts/README.md`).
 
 Dependencies were installed with `forge install --root contracts --no-git [--shallow]`
 (forge-std@v1.17.0, OpenZeppelin/openzeppelin-contracts@v5.7.0,

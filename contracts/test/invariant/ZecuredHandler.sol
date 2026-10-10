@@ -216,7 +216,7 @@ contract ZecuredHandler is Test {
     }
 
     /// Goal-directed: makes sure the vault has a loan, moves the price so that its LTV is 63 %..95 %, then
-    /// liquidates through the Adapter (either Morpho path; the amount may violate the D11 floor on purpose).
+    /// liquidates through the Adapter (either Morpho path; the amount may be below the D11 floor on purpose).
     function liquidate(uint256 vaultSeed, bool bySeize, uint256 amount, uint256 ltvSeed) external {
         (bool found, bytes32 vaultId, address account) = _vault(vaultSeed);
         if (!found) return;
@@ -252,7 +252,8 @@ contract ZecuredHandler is Test {
         view
         returns (uint256 seizedAssets, uint256 repaidShares)
     {
-        if (bySeize) return (bound(amount, 50_000, outstanding), 0);
+        // Mostly around the 100,000 zat floor; sub-floor remainders (now allowed by D11) can be smaller than that.
+        if (bySeize) return (bound(amount, outstanding < 50_000 ? 1 : 50_000, outstanding), 0);
         uint256 shares = morpho.position(marketId, account).borrowShares;
         return (0, bound(amount, 1, shares + shares / 4)); // above the position: capped by the Adapter
     }
@@ -263,10 +264,11 @@ contract ZecuredHandler is Test {
     {
         (, uint64 outstandingAfter,) = registry.vault(vaultId);
         (,, uint64 claimed,,) = registry.claim(registry.claimIdOf(vaultId, claimsBefore));
-        uint256 floor = adapter.MIN_SEIZE();
+        // D11: at least MIN_SEIZE, or the whole remaining outstanding.
+        bool belowFloor = seized < adapter.MIN_SEIZE() && seized != outstandingBefore;
         if (
             seized > outstandingBefore || claimed != seized || outstandingAfter != outstandingBefore - seized
-                || seized < floor || (outstandingAfter != 0 && outstandingAfter < floor)
+                || belowFloor
         ) i9Violated = true;
     }
 

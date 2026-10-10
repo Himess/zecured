@@ -87,8 +87,7 @@ contract SettlementAdapterTest is ZecuredFixture {
         assertEq(seized, expectedSeized);
         assertEq(repaid, expectedRepaid);
         assertApproxEqRel(seized * WAD / VAULT_001, 0.707e18, 0.002e18);
-        assertGe(seized, MIN_SEIZE);
-        assertGe(VAULT_001 - seized, MIN_SEIZE, "D11: remainder 0 or >= floor");
+        assertGe(seized, MIN_SEIZE, "D11");
         assertEq(liquidatorBefore - usdc.balanceOf(liquidator), repaid, "exactly repaidAssets pulled");
         assertEq(usdc.balanceOf(address(adapter)), 0);
         assertEq(usdc.allowance(address(adapter), address(MORPHO)), 0);
@@ -191,7 +190,7 @@ contract SettlementAdapterTest is ZecuredFixture {
         adapter.liquidate(account, MIN_SEIZE, 0, LIQUIDATOR_COMMITMENT);
     }
 
-    /// D11: seizing less than 100,000 zat is refused.
+    /// D11: seizing less than 100,000 zat (and less than the whole remaining outstanding) is refused.
     function test_liquidate_revertsBelowTheMinimumSeize() public {
         _openLoan(account, VAULT_001, 4_000);
         oracle.setPrice(PRICE_25_50);
@@ -204,30 +203,86 @@ contract SettlementAdapterTest is ZecuredFixture {
         assertEq(seized, MIN_SEIZE);
     }
 
-    /// D11: a liquidation may not leave a remainder between 0 and 100,000 zat (exclusive).
-    function test_liquidate_revertsWhenLeavingASubFloorRemainder() public {
-        _openLoan(account, VAULT_001, 4_000); // 160,000 units of debt
+    /// D11 puts no floor on the remainder: repaying all debt at $18.50 seizes ~974,500 zat and leaves ~25,500 zat,
+    /// which stays with the borrower (released through requestRelease; dust on Zcash if below the payout fee).
+    function test_liquidate_subFloorRemainderIsAllowed() public {
+        (bytes32 vaultId, uint256 shares) = _openLoan(account, VAULT_001, 4_000); // 160,000 units of debt
         oracle.setPrice(1850e32); // $18.50: LTV 86.5 %
         _fundAndApproveAdapter(liquidator, 1 * USDC);
 
-        // Repaying all debt would seize ~974,500 zat and leave ~25,500.
-        Market memory m = MORPHO.market(marketId);
-        uint256 shares = _position(account).borrowShares;
-        uint256 wouldSeize = shares.toAssetsDown(m.totalBorrowAssets, m.totalBorrowShares).wMulDown(_lif())
-            .mulDivDown(ORACLE_PRICE_SCALE, 1850e32);
-        vm.prank(liquidator);
-        vm.expectRevert(
-            abi.encodeWithSelector(ISettlementAdapter.RemainderBelowMinimum.selector, VAULT_001 - wouldSeize, MIN_SEIZE)
+        (uint256 seized,) = _liquidate(account, 0, shares);
+        uint256 remainder = VAULT_001 - seized;
+        assertGt(remainder, 0);
+        assertLt(remainder, MIN_SEIZE, "sub-floor remainder");
+        assertEq(_position(account).borrowShares, 0, "all debt repaid");
+        assertEq(_outstanding(vaultId), remainder);
+        assertEq(uint8(_status(vaultId)), uint8(VaultStatus.Active));
+
+        vm.prank(account);
+        bytes32 claimId = registry.requestRelease(vaultId, RELEASE_COMMITMENT);
+        _assertClaim(claimId, vaultId, ClaimKind.Release, uint64(remainder), RELEASE_COMMITMENT, ClaimStatus.Pending);
+        assertEq(zzec.totalSupply(), 0, "I1");
+    }
+
+    /// A partial liquidation leaves 150,000 zat with debt remaining; a later liquidation (all remaining shares)
+    /// seizes >= MIN_SEIZE and leaves a sub-floor remainder without debt.
+    function test_liquidate_partialLeavingDebt_thenALaterLiquidation() public {
+        (bytes32 vaultId,) = _openLoan(account, VAULT_001, 4_000);
+        oracle.setPrice(1850e32); // $18.50
+        _fundAndApproveAdapter(liquidator, 1 * USDC);
+
+        (uint256 seized1,) = _liquidate(account, 850_000, 0);
+        assertEq(seized1, 850_000);
+        assertEq(_outstanding(vaultId), 150_000);
+        assertEq(_position(account).collateral, 150_000);
+        assertGt(_position(account).borrowShares, 0, "debt remains");
+
+        (uint256 seized2,) = _liquidate(account, 0, type(uint256).max);
+        assertGe(seized2, MIN_SEIZE);
+        assertLt(150_000 - seized2, MIN_SEIZE);
+        assertEq(_position(account).borrowShares, 0);
+        assertEq(_outstanding(vaultId), 150_000 - seized2);
+        assertEq(uint8(_status(vaultId)), uint8(VaultStatus.Active));
+        _assertClaim(
+            registry.claimIdOf(vaultId, 0),
+            vaultId,
+            ClaimKind.Liquidation,
+            850_000,
+            LIQUIDATOR_COMMITMENT,
+            ClaimStatus.Pending
         );
-        adapter.liquidate(account, 0, shares, LIQUIDATOR_COMMITMENT);
+        _assertClaim(
+            registry.claimIdOf(vaultId, 1),
+            vaultId,
+            ClaimKind.Liquidation,
+            uint64(seized2),
+            LIQUIDATOR_COMMITMENT,
+            ClaimStatus.Pending
+        );
+        assertEq(zzec.totalSupply(), 150_000 - seized2, "I1");
+        _assertZZECOnlyInMorpho(_list(account, liquidator));
+    }
 
+    /// Below MIN_SEIZE only the vault's whole remaining outstanding may be seized.
+    function test_liquidate_wholeSubFloorRemainderIsAllowed() public {
+        (bytes32 vaultId,) = _openLoan(account, VAULT_001, 4_000);
+        oracle.setPrice(1850e32);
+        _fundAndApproveAdapter(liquidator, 1 * USDC);
+        _liquidate(account, 940_000, 0); // leaves 60,000 zat and some debt (healthy again at $18.50)
+        assertEq(_outstanding(vaultId), 60_000);
+        assertGt(_position(account).borrowShares, 0);
+
+        oracle.setPrice(10e34); // $10.00: LTV ~94 % > 1/LIF, the whole remainder can be seized
         vm.prank(liquidator);
-        vm.expectRevert(abi.encodeWithSelector(ISettlementAdapter.RemainderBelowMinimum.selector, 99_999, MIN_SEIZE));
-        adapter.liquidate(account, VAULT_001 - 99_999, 0, LIQUIDATOR_COMMITMENT);
+        vm.expectRevert(abi.encodeWithSelector(ISettlementAdapter.SeizeBelowMinimum.selector, 50_000, MIN_SEIZE));
+        adapter.liquidate(account, 50_000, 0, LIQUIDATOR_COMMITMENT);
 
-        // Leaving exactly the floor is fine.
-        (uint256 seized,) = _liquidate(account, VAULT_001 - MIN_SEIZE, 0);
-        assertEq(VAULT_001 - seized, MIN_SEIZE);
+        (uint256 seized,) = _liquidate(account, 60_000, 0);
+        assertEq(seized, 60_000);
+        assertEq(_outstanding(vaultId), 0);
+        assertEq(uint8(_status(vaultId)), uint8(VaultStatus.Closed));
+        assertEq(_position(account).borrowShares, 0, "Morpho realized the bad debt");
+        assertEq(zzec.totalSupply(), 0, "I1");
     }
 
     /// Past 1/LIF (88.75 % LTV) the whole vault can be seized; Morpho realizes the shortfall as bad debt and the vault
@@ -601,16 +656,35 @@ contract SettlementAdapterTest is ZecuredFixture {
         vm.stopPrank();
     }
 
-    function test_invalidateNonce() public {
+    function test_invalidateNonce_isIdempotentAndPerAccount() public {
         assertFalse(adapter.nonceUsed(account, 5));
         vm.expectEmit(address(adapter));
         emit ISettlementAdapter.NonceInvalidated(account, 5);
         vm.prank(account);
         adapter.invalidateNonce(5);
         assertTrue(adapter.nonceUsed(account, 5));
-        assertFalse(adapter.nonceUsed(stranger, 5), "per account");
+        assertFalse(adapter.nonceUsed(stranger, 5), "only the caller's nonce");
+
+        // Invalidating again neither reverts nor changes anything.
+        vm.expectEmit(address(adapter));
+        emit ISettlementAdapter.NonceInvalidated(account, 5);
         vm.prank(account);
-        vm.expectRevert(abi.encodeWithSelector(ISettlementAdapter.NonceAlreadyUsed.selector, account, 5));
         adapter.invalidateNonce(5);
+        assertTrue(adapter.nonceUsed(account, 5));
+        assertFalse(adapter.nonceUsed(stranger, 5));
+    }
+
+    /// A cancel that races the market maker's close does not revert (the nonce was already consumed by the close).
+    function test_invalidateNonce_afterTheNonceWasUsedByAClose() public {
+        (bytes32 vaultId,) = _openLoan(account, VAULT_001, 4_000);
+        _fundAndApproveAdapter(marketMaker, 1 * USDC);
+        CloseRequest memory req = _closeRequest(vaultId, account, 100, 0, 11);
+        _close(req, _signClose(accountKey, req));
+        assertTrue(adapter.nonceUsed(account, 11));
+
+        vm.prank(account);
+        adapter.invalidateNonce(11);
+        assertTrue(adapter.nonceUsed(account, 11));
+        assertEq(uint8(_status(vaultId)), uint8(VaultStatus.Closed), "the close stands");
     }
 }

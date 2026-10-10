@@ -138,7 +138,6 @@ contract FlowsTest is ZecuredFixture {
         (uint256 seized,) = adapter.liquidate(account, 0, shares, LIQUIDATOR_COMMITMENT);
         assertGe(seized, MIN_SEIZE);
         uint64 remainder = uint64(VAULT_001 - seized);
-        assertGe(remainder, MIN_SEIZE, "D11");
         assertEq(_outstanding(vaultId), remainder);
         assertEq(uint8(_status(vaultId)), uint8(VaultStatus.Active));
         _assertInvariants(vaultId, VAULT_001);

@@ -117,10 +117,9 @@ contract SettlementAdapter is ISettlementAdapter, EIP712, ReentrancyGuardTransie
 
         uint256 received = zzec.balanceOf(address(this)) - balanceBefore;
         if (received != seized) revert UnexpectedCollateralReceived(received, seized);
-        // D11 dust guard. `seized <= outstanding` is enforced by the zZEC expectation and again by the Registry (I9).
-        if (seized < MIN_SEIZE) revert SeizeBelowMinimum(seized, MIN_SEIZE);
-        uint256 remainder = outstanding - seized;
-        if (remainder != 0 && remainder < MIN_SEIZE) revert RemainderBelowMinimum(remainder, MIN_SEIZE);
+        // D11 dust guard: at least MIN_SEIZE, or the vault's whole remaining outstanding. Any remainder is allowed (it
+        // stays with the borrower). `seized <= outstanding` is enforced by the zZEC expectation and the Registry (I9).
+        if (seized < MIN_SEIZE && seized != outstanding) revert SeizeBelowMinimum(seized, MIN_SEIZE);
 
         // seized <= outstanding (a uint64): the checked cast cannot fail.
         registry.recordLiquidation(vaultId, SafeCast.toUint64(seized), liquidatorCommitment);
@@ -166,8 +165,7 @@ contract SettlementAdapter is ISettlementAdapter, EIP712, ReentrancyGuardTransie
 
     /// @inheritdoc ISettlementAdapter
     function invalidateNonce(uint256 nonce) external {
-        if (_nonceUsed[msg.sender][nonce]) revert NonceAlreadyUsed(msg.sender, nonce);
-        _nonceUsed[msg.sender][nonce] = true;
+        _nonceUsed[msg.sender][nonce] = true; // idempotent: also fine for a nonce already used or invalidated
         emit NonceInvalidated(msg.sender, nonce);
     }
 

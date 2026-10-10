@@ -136,7 +136,7 @@ event NonceInvalidated(address indexed account, uint256 nonce);
 
 - `liquidate`: exactly one of `seizedAssets`/`repaidShares` non-zero (`repaidShares` capped at
   the borrower's shares read in the same call); seized ≥ `MIN_SEIZE` = 100,000 zat (0.001 ZEC)
-  and the remainder is either 0 or ≥ `MIN_SEIZE` (dust guard, D11); USDC pulled from `msg.sender` inside
+  or seized = the vault's entire remaining `outstanding` (dust guard, D11); USDC pulled from `msg.sender` inside
   `onMorphoLiquidate`; seized zZEC → `Registry.recordLiquidation`.
 - `closeWithCollateral`: `msg.sender == req.executor`, `block.timestamp <= req.deadline`, nonce
   unused and not invalidated, `marginBps <= MAX_MARGIN_BPS`, ERC-1271 valid on `req.account`;
