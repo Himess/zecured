@@ -22,6 +22,9 @@ use tracing::{info, warn};
 use zecured_coordinator::{Coordinator, OpenVaultRequest};
 use zecured_node::config::NetworkConfig;
 
+mod allowlist;
+mod proxy;
+
 #[derive(Parser)]
 #[command(about = "Zecured backend: coordinator + public API")]
 struct Cli {
@@ -33,6 +36,13 @@ struct Cli {
     bind: SocketAddr,
     #[arg(long, env = "COORDINATOR_PRIVATE_KEY", hide_env_values = true)]
     coordinator_key: String,
+    /// Deployment file written by `contracts/script/DeployZecured.s.sol` (enables sponsorship).
+    #[arg(long, env = "ZECURED_DEPLOYMENTS", default_value = "contracts/deployments/base-sepolia.json")]
+    deployments: PathBuf,
+    #[arg(long, env = "BUNDLER_URL", hide_env_values = true, default_value = "")]
+    bundler_url: String,
+    #[arg(long, env = "PAYMASTER_URL", hide_env_values = true, default_value = "")]
+    paymaster_url: String,
     /// Token protecting the demo control endpoints (empty = disabled).
     #[arg(long, env = "DEMO_ADMIN_TOKEN", hide_env_values = true, default_value = "")]
     admin_token: String,
@@ -241,6 +251,32 @@ async fn health() -> Json<serde_json::Value> {
     Json(json!({ "ok": true }))
 }
 
+/// Reads the allowlist parameters from the deployment file (key names as written by the
+/// deploy script; both camelCase and contract-name keys are accepted).
+fn load_allowlist(path: &std::path::Path) -> Option<allowlist::Allowlist> {
+    let raw: serde_json::Value = serde_json::from_slice(&std::fs::read(path).ok()?).ok()?;
+    let pick = |keys: &[&str]| -> Option<String> {
+        keys.iter().find_map(|k| {
+            raw.get(*k)
+                .or_else(|| raw.get("market").and_then(|m| m.get(*k)))
+                .and_then(|v| v.as_str().map(str::to_owned).or_else(|| v.as_u64().map(|n| n.to_string())))
+        })
+    };
+    let addr = |keys: &[&str]| pick(keys)?.parse::<Address>().ok();
+    let usdc = addr(&["usdc", "MockUSDC", "loanToken"])?;
+    Some(allowlist::Allowlist {
+        morpho: addr(&["morpho", "Morpho"])?,
+        registry: addr(&["registry", "ZecuredRegistry"])?,
+        adapter: addr(&["adapter", "SettlementAdapter"])?,
+        usdc,
+        loan_token: addr(&["loanToken"]).unwrap_or(usdc),
+        collateral_token: addr(&["zzec", "ZZEC", "collateralToken"])?,
+        oracle: addr(&["oracle", "MockZecOracle"])?,
+        irm: addr(&["irm", "adaptiveCurveIrm"])?,
+        lltv: pick(&["lltv"])?.parse().ok()?,
+    })
+}
+
 #[tokio::main]
 async fn main() -> Result<()> {
     tracing_subscriber::fmt()
@@ -248,6 +284,16 @@ async fn main() -> Result<()> {
         .init();
     let cli = Cli::parse();
     let cfg = NetworkConfig::load(&cli.config)?;
+    let allowlist = load_allowlist(&cli.deployments);
+    if allowlist.is_none() {
+        warn!("no deployment file: paymaster sponsorship disabled");
+    }
+    let proxy = Arc::new(proxy::Proxy::new(
+        cfg.base_rpc_url.clone(),
+        Some(cli.bundler_url.clone()),
+        Some(cli.paymaster_url.clone()),
+        allowlist,
+    )?);
     let coordinator = Arc::new(Coordinator::new(cfg, &cli.data, &cli.coordinator_key)?);
 
     let worker = coordinator.clone();
@@ -273,6 +319,13 @@ async fn main() -> Result<()> {
         .route("/admin/nodes/{index}/mode", post(admin_mode))
         .route("/admin/vaults/{id}/drain", post(admin_drain))
         .layer(axum::Extension(AdminToken(Arc::new(cli.admin_token.clone()))))
+        .merge(
+            Router::new()
+                .route("/proxy/rpc", post(proxy::rpc))
+                .route("/proxy/bundler", post(proxy::bundler))
+                .route("/proxy/paymaster", post(proxy::paymaster))
+                .with_state(proxy),
+        )
         // The app calls this API from the browser; tighten the origin when deployed.
         .layer(CorsLayer::permissive())
         .with_state(coordinator);
