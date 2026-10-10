@@ -7452,6 +7452,7 @@ dependencies = [
  "serde",
  "serde_json",
  "tokio",
+ "zcash_keys",
  "zcash_protocol",
  "zecured-base",
  "zecured-zcash-ops",

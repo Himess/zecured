@@ -12,6 +12,7 @@ zecured-base = { path = "../signer/crates/base-client" }
 orchard.workspace = true
 pczt.workspace = true
 zcash_protocol.workspace = true
+zcash_keys.workspace = true
 alloy.workspace = true
 reqwest.workspace = true
 tokio.workspace = true

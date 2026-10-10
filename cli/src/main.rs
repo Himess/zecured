@@ -64,6 +64,15 @@ enum Cmd {
         #[arg(long)]
         amount: f64,
     },
+    /// Watch any vault (or wallet) with its unified full viewing key: shows the notes it
+    /// received and spent. This is how a borrower verifies their vault independently.
+    Watch {
+        #[arg(long)]
+        ufvk: String,
+        /// First block to scan (e.g. the vault's birthday).
+        #[arg(long)]
+        from: u32,
+    },
     #[command(subcommand)]
     Loan(LoanCmd),
 }
@@ -279,6 +288,28 @@ async fn main() -> Result<()> {
         Cmd::Send { to, amount } => {
             let w = load_wallet(&cli.wallet)?;
             println!("broadcast {}", send(&w, &cli.lwd, &to, zats(amount)?).await?);
+        }
+        Cmd::Watch { ufvk, from } => {
+            let fvk = zcash_keys::keys::UnifiedFullViewingKey::decode(&NETWORK, &ufvk)
+                .map_err(|e| anyhow!("invalid UFVK: {e}"))?
+                .orchard()
+                .cloned()
+                .context("UFVK has no Orchard-protocol key")?;
+            let mut client = lwd::connect(&cli.lwd).await?;
+            let tip = u32::try_from(lwd::latest_block(&mut client).await?.height)?;
+            let mut state = ScanState::from_birthday(&mut client, fvk, from).await?;
+            state.scan_to(&mut client, tip).await?;
+            state.verify_against_server(&mut client).await?;
+            for n in &state.notes {
+                println!(
+                    "  {:>12} zat  received h={} ({:?})  {}",
+                    n.value(),
+                    n.position.height,
+                    n.scope,
+                    n.spent_at.map_or("unspent".to_owned(), |h| format!("spent h={h}"))
+                );
+            }
+            println!("unspent {} zat (scanned {from}..={tip}, tree root verified)", state.balance());
         }
         Cmd::Loan(cmd) => loan(&cli.wallet, &cli.lwd, &cli.backend, cmd).await?,
     }
