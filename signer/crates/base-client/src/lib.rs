@@ -229,6 +229,21 @@ mod tests {
         assert!(order_signatures(&domain, &msg, &[sigs[0].clone(), sigs[0].clone()]).is_err());
     }
 
+    /// Domain separators computed by the Solidity contracts (contracts/deployments dry run).
+    #[test]
+    fn domain_separators_match_solidity() {
+        let registry: Address = "0xbdB942d882882bF795aA9c0Cd20ADe2115c73AAc".parse().unwrap();
+        let adapter: Address = "0xC0a2A554dcFB5a1bd7e5E769A2Ad0c33BA0500fc".parse().unwrap();
+        assert_eq!(
+            registry_domain(BASE_SEPOLIA_CHAIN_ID, registry).separator(),
+            "0x69d16596f5fe8b56a5a842fcca4461f0bef9d0a76fc625604317d9581a6b74c7".parse::<B256>().unwrap()
+        );
+        assert_eq!(
+            adapter_domain(BASE_SEPOLIA_CHAIN_ID, adapter).separator(),
+            "0x59e17d33c50be097bde376a1c88c46c405743fb47b43fea0eb1fac767095e5d4".parse::<B256>().unwrap()
+        );
+    }
+
     #[test]
     fn claim_ids_hash_is_packed_keccak() {
         let ids = [B256::repeat_byte(1), B256::repeat_byte(2)];

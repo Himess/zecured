@@ -62,9 +62,9 @@ registry = adapter = "0x000000000000000000000000000000000000dEaD"
 from_block = None
 if os.path.exists(deployments):
     d = json.load(open(deployments))
-    registry = d.get("registry") or d.get("ZecuredRegistry") or registry
-    adapter = d.get("adapter") or d.get("SettlementAdapter") or adapter
-    from_block = d.get("deployBlock") or d.get("startBlock")
+    registry = d["contracts"]["ZecuredRegistry"]
+    adapter = d["contracts"]["SettlementAdapter"]
+    from_block = d["block"]
 if from_block is None:
     from_block = int(subprocess.run(["cast", "block-number", "--rpc-url", rpc], capture_output=True, text=True, check=True).stdout)
 cfg = {

@@ -251,29 +251,21 @@ async fn health() -> Json<serde_json::Value> {
     Json(json!({ "ok": true }))
 }
 
-/// Reads the allowlist parameters from the deployment file (key names as written by the
-/// deploy script; both camelCase and contract-name keys are accepted).
+/// Reads the allowlist parameters from the deployment file written by the deploy script.
 fn load_allowlist(path: &std::path::Path) -> Option<allowlist::Allowlist> {
     let raw: serde_json::Value = serde_json::from_slice(&std::fs::read(path).ok()?).ok()?;
-    let pick = |keys: &[&str]| -> Option<String> {
-        keys.iter().find_map(|k| {
-            raw.get(*k)
-                .or_else(|| raw.get("market").and_then(|m| m.get(*k)))
-                .and_then(|v| v.as_str().map(str::to_owned).or_else(|| v.as_u64().map(|n| n.to_string())))
-        })
-    };
-    let addr = |keys: &[&str]| pick(keys)?.parse::<Address>().ok();
-    let usdc = addr(&["usdc", "MockUSDC", "loanToken"])?;
+    let contract = |name: &str| raw.get("contracts")?.get(name)?.as_str()?.parse::<Address>().ok();
+    let market = |name: &str| raw.get("market")?.get(name)?.as_str().map(str::to_owned);
     Some(allowlist::Allowlist {
-        morpho: addr(&["morpho", "Morpho"])?,
-        registry: addr(&["registry", "ZecuredRegistry"])?,
-        adapter: addr(&["adapter", "SettlementAdapter"])?,
-        usdc,
-        loan_token: addr(&["loanToken"]).unwrap_or(usdc),
-        collateral_token: addr(&["zzec", "ZZEC", "collateralToken"])?,
-        oracle: addr(&["oracle", "MockZecOracle"])?,
-        irm: addr(&["irm", "adaptiveCurveIrm"])?,
-        lltv: pick(&["lltv"])?.parse().ok()?,
+        morpho: market("morphoBlue")?.parse().ok()?,
+        registry: contract("ZecuredRegistry")?,
+        adapter: contract("SettlementAdapter")?,
+        usdc: contract("MockUSDC")?,
+        loan_token: market("loanToken")?.parse().ok()?,
+        collateral_token: market("collateralToken")?.parse().ok()?,
+        oracle: market("oracle")?.parse().ok()?,
+        irm: market("irm")?.parse().ok()?,
+        lltv: market("lltv")?.parse().ok()?,
     })
 }
 
