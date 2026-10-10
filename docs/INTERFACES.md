@@ -169,7 +169,8 @@ addresses, salts, viewing keys or IPs.
 | `POST /vaults/:id/refund` | `{ noteId, receiver, salt, nonce, deadline, signature }` (`RefundRequest`) | `{ accepted: true }` |
 | `POST /vaults/:id/viewing-key` | `{ nonce, deadline, signature }` (`ViewKeyRequest`) | `{ ufvk }` |
 | `POST /recipients` | `{ receiver (UA), salt }` (liquidator / market maker) | `{ commitment }` |
-| `GET /quotes/close/:vaultId` | — | `{ executor, marginBps, repayAssets, mmAmount, userAmount, expiresAt }` |
+| `GET /quotes/close/:vaultId` | — | `{ executor, marginBps, repayAssets, mmAmount, userAmount, expiresAt }` (relayed to the market maker) |
+| `POST /closes` | `{ request: CloseRequest (camelCase), signature }` | `{ txHash }` (relayed; the market maker executes `closeWithCollateral`) |
 | `POST /proxy/rpc` | JSON-RPC | Base RPC passthrough (read methods + `eth_sendRawTransaction` disallowed) |
 | `POST /proxy/bundler` | JSON-RPC | ERC-4337 bundler passthrough |
 | `POST /proxy/paymaster` | JSON-RPC | Sponsors only the allowlist below; rejects anything else |

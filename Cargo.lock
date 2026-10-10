@@ -7324,6 +7324,25 @@ dependencies = [
 ]
 
 [[package]]
+name = "zecured-bots"
+version = "0.1.0"
+dependencies = [
+ "alloy",
+ "anyhow",
+ "axum",
+ "clap",
+ "hex",
+ "rand_core 0.6.4",
+ "reqwest 0.12.28",
+ "serde",
+ "serde_json",
+ "tokio",
+ "tracing",
+ "tracing-subscriber",
+ "zecured-base",
+]
+
+[[package]]
 name = "zecured-coordinator"
 version = "0.1.0"
 dependencies = [

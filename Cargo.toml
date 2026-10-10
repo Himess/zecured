@@ -1,6 +1,6 @@
 [workspace]
 resolver = "3"
-members = ["signer/crates/*", "backend", "cli"]
+members = ["signer/crates/*", "backend", "cli", "bots"]
 
 [workspace.package]
 edition = "2024"

@@ -43,6 +43,9 @@ struct Cli {
     bundler_url: String,
     #[arg(long, env = "PAYMASTER_URL", hide_env_values = true, default_value = "")]
     paymaster_url: String,
+    /// The market maker's quote service (close from collateral).
+    #[arg(long, env = "MARKET_MAKER_URL", default_value = "http://127.0.0.1:8090")]
+    market_maker_url: String,
     /// Token protecting the demo control endpoints (empty = disabled).
     #[arg(long, env = "DEMO_ADMIN_TOKEN", hide_env_values = true, default_value = "")]
     admin_token: String,
@@ -247,6 +250,31 @@ async fn admin_nodes(
     Ok(Json(json!({ "nodes": c.node_health().await })))
 }
 
+#[derive(Clone)]
+struct MarketMaker(Arc<String>);
+
+/// Relays a market maker call so the browser never contacts the market maker directly.
+async fn mm_forward(mm: &MarketMaker, req: reqwest::RequestBuilder) -> ApiResult {
+    let _ = mm;
+    let resp = req.send().await.map_err(|_| anyhow!("market maker unreachable"))?;
+    let status = resp.status();
+    let v: serde_json::Value = resp.json().await.map_err(|_| anyhow!("market maker returned invalid JSON"))?;
+    if !status.is_success() {
+        return Err(ApiError(StatusCode::BAD_GATEWAY, v["error"].as_str().unwrap_or("market maker refused").to_owned()));
+    }
+    Ok(Json(v))
+}
+
+async fn close_quote(axum::Extension(mm): axum::Extension<MarketMaker>, Path(id): Path<B256>) -> ApiResult {
+    let req = reqwest::Client::new().get(format!("{}/quote/{id}", mm.0));
+    mm_forward(&mm, req).await
+}
+
+async fn close_submit(axum::Extension(mm): axum::Extension<MarketMaker>, Json(b): Json<serde_json::Value>) -> ApiResult {
+    let req = reqwest::Client::new().post(format!("{}/close", mm.0)).json(&b);
+    mm_forward(&mm, req).await
+}
+
 async fn health() -> Json<serde_json::Value> {
     Json(json!({ "ok": true }))
 }
@@ -307,10 +335,13 @@ async fn main() -> Result<()> {
         .route("/vaults/{id}/refund", post(refund))
         .route("/vaults/{id}/viewing-key", post(viewing_key))
         .route("/recipients", post(recipients))
+        .route("/quotes/close/{id}", get(close_quote))
+        .route("/closes", post(close_submit))
         .route("/admin/nodes", get(admin_nodes))
         .route("/admin/nodes/{index}/mode", post(admin_mode))
         .route("/admin/vaults/{id}/drain", post(admin_drain))
         .layer(axum::Extension(AdminToken(Arc::new(cli.admin_token.clone()))))
+        .layer(axum::Extension(MarketMaker(Arc::new(cli.market_maker_url.trim_end_matches('/').to_owned()))))
         .merge(
             Router::new()
                 .route("/proxy/rpc", post(proxy::rpc))
