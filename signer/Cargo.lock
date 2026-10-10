@@ -3245,6 +3245,7 @@ dependencies = [
  "pasta_curves 0.6.1",
  "pczt",
  "rand 0.10.3",
+ "rand_core 0.6.4",
  "serde",
  "serde_json",
  "thiserror",
@@ -3256,6 +3257,7 @@ dependencies = [
  "zcash_note_encryption",
  "zcash_primitives",
  "zcash_protocol",
+ "zecured-threshold",
  "zip321",
 ]
 
