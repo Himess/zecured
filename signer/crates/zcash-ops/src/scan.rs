@@ -76,6 +76,8 @@ pub struct ScanState {
     /// Last fully scanned block height.
     pub scanned_to: u32,
     pub notes: Vec<ReceivedNote>,
+    /// Hash of block `scanned_to`, to detect reorgs (empty before the first block).
+    last_hash: Vec<u8>,
     ivks: [(Scope, PreparedIncomingViewingKey); 2],
 }
 
@@ -105,6 +107,7 @@ impl ScanState {
             tree,
             scanned_to: prior,
             notes: vec![],
+            last_hash: vec![],
             ivks,
         })
     }
@@ -151,6 +154,11 @@ impl ScanState {
             height == self.scanned_to + 1,
             "expected block {}, got {height}",
             self.scanned_to + 1
+        );
+        // A reorg replaced a block we already scanned: the caller must rescan.
+        ensure!(
+            self.last_hash.is_empty() || block.prev_hash == self.last_hash,
+            "chain reorganized below height {height}"
         );
         for tx in &block.vtx {
             for (action_index, action) in tx.ironwood_actions.iter().enumerate() {
@@ -201,6 +209,7 @@ impl ScanState {
             }
         }
         self.scanned_to = height;
+        self.last_hash = block.hash.clone();
         Ok(())
     }
 

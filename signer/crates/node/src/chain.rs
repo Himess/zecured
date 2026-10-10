@@ -112,11 +112,19 @@ impl ZcashView {
             let state = ScanState::from_birthday(&mut client, fvk.clone(), birthday).await?;
             self.scans.insert(*vault_id, state);
         }
-        self.scans
+        let scanned = self
+            .scans
             .get_mut(vault_id)
             .expect("inserted")
             .scan_to(&mut client, tip)
-            .await?;
+            .await;
+        if let Err(e) = scanned {
+            // Reorg (or a broken stream): start over from the birthday; vault scans are short.
+            tracing::warn!("rescanning vault after: {e:#}");
+            let mut state = ScanState::from_birthday(&mut client, fvk.clone(), birthday).await?;
+            state.scan_to(&mut client, tip).await?;
+            self.scans.insert(*vault_id, state);
+        }
 
         // P1: classify external notes in chain order; persist new decisions.
         let externals: Vec<ReceivedNote> = self.scans[vault_id]
