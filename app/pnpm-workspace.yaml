@@ -1,0 +1,4 @@
+# pnpm settings for this standalone project.
+# Every resolved package version (direct and transitive) must have been published at
+# least 14 days (20160 minutes) before installation.
+minimumReleaseAge: 20160

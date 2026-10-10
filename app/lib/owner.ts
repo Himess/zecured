@@ -1,0 +1,128 @@
+/**
+ * The borrower's off-chain requests, signed with the per-loan owner key (docs/INTERFACES.md
+ * § 2.3, § 4): open a vault, pre-validate a payout destination, ask for a refund, fetch the
+ * viewing key. Each builds the EIP-712 message, signs it in the browser and calls the API.
+ */
+import type { Address, Hex } from "viem";
+import { api as defaultApi, type Api, type OpenVaultResult } from "./api";
+import { prepareDestination, decodeUnifiedAddress, isIronwoodOnly } from "./commitment";
+import { config } from "./config";
+import {
+  deadlineIn,
+  destinationTypedData,
+  openVaultTypedData,
+  randomNonce64,
+  refundRequestTypedData,
+  REQUEST_TTL_SECONDS,
+  signWithOwnerKey,
+  viewKeyRequestTypedData,
+} from "./eip712";
+import type { StoredLoan } from "./keys";
+import { zip321Uri } from "./zcash";
+
+export interface OwnerContext {
+  api?: Api;
+  registry?: Address;
+  now?: number;
+}
+
+/** Checks of the vault address returned by the backend, before anyone pays it. */
+export interface VaultAddressCheck {
+  ok: boolean;
+  problems: string[];
+  /** The ZIP 321 URI built locally from the checked address and the loan amount. */
+  uri: string | null;
+}
+
+/**
+ * The vault must be an Ironwood-only testnet UA (D4: a single Orchard-protocol receiver), and
+ * the payment request must be for exactly the loan's denomination.
+ */
+export function checkVaultAddress(address: string, amount: bigint, backendZip321?: string): VaultAddressCheck {
+  const problems: string[] = [];
+  let uri: string | null = null;
+  try {
+    const d = decodeUnifiedAddress(address);
+    if (d.network !== "test") problems.push("The vault address is not a testnet address.");
+    if (!isIronwoodOnly(d)) problems.push("The vault address is not Ironwood-only (it must have a single Orchard-protocol receiver).");
+    if (d.expiryHeight !== undefined || d.expiryTime !== undefined) problems.push("The vault address carries an expiry.");
+    uri = zip321Uri(address.trim(), amount);
+    if (backendZip321 !== undefined && backendZip321 !== uri) {
+      problems.push("The backend's payment request differs from the one built in this browser; using the local one.");
+    }
+  } catch (e) {
+    problems.push(`The vault address does not decode: ${e instanceof Error ? e.message : "invalid"}.`);
+  }
+  const fatal = problems.some((p) => !p.startsWith("The backend's payment request differs"));
+  return { ok: !fatal, problems, uri: fatal ? null : uri };
+}
+
+/** POST /vaults with a fresh OpenVault signature. */
+export async function openVault(loan: StoredLoan, ctx: OwnerContext = {}): Promise<OpenVaultResult> {
+  const a = ctx.api ?? defaultApi;
+  const registry = ctx.registry ?? config.registry;
+  const amount = BigInt(loan.amount);
+  const deadline = deadlineIn(REQUEST_TTL_SECONDS, ctx.now);
+  const message = { owner: loan.owner, account: loan.account, amount, requestId: loan.requestId, deadline };
+  const signature = await signWithOwnerKey(loan.ownerKey, openVaultTypedData(registry, message));
+  const res = await a.openVault({ ...message, signature });
+  if (res.amount !== amount) throw new Error("The backend opened a vault for a different amount.");
+  return res;
+}
+
+/**
+ * Pre-validates the Ironwood destination of an exit (P2 / P6) with the signers. The app
+ * computes the commitment itself and checks that the backend returns the same value.
+ * Returns the commitment to use on Base. The salt is sent to the signers only.
+ */
+export async function submitDestination(
+  loan: StoredLoan,
+  vaultId: Hex,
+  ua: string,
+  ctx: OwnerContext = {},
+): Promise<{ commitment: Hex; hasOtherReceivers: boolean }> {
+  const a = ctx.api ?? defaultApi;
+  const registry = ctx.registry ?? config.registry;
+  const dest = prepareDestination(ua, "test");
+  const nonce = randomNonce64();
+  const deadline = deadlineIn(REQUEST_TTL_SECONDS, ctx.now);
+  const signature = await signWithOwnerKey(
+    loan.ownerKey,
+    destinationTypedData(registry, { vaultId, commitment: dest.commitment, nonce, deadline }),
+  );
+  const returned = await a.postDestination(vaultId, { receiver: dest.ua, salt: dest.saltHex, nonce, deadline, signature });
+  if (returned.toLowerCase() !== dest.commitment.toLowerCase()) {
+    throw new Error("The signers acknowledged a different commitment than the one computed here. Nothing was sent to Base.");
+  }
+  return { commitment: dest.commitment, hasOtherReceivers: dest.hasOtherReceivers };
+}
+
+/** P5: asks for a non-conforming note back, to an Ironwood address. */
+export async function requestRefund(
+  loan: StoredLoan,
+  vaultId: Hex,
+  noteId: Hex,
+  ua: string,
+  ctx: OwnerContext = {},
+): Promise<boolean> {
+  const a = ctx.api ?? defaultApi;
+  const registry = ctx.registry ?? config.registry;
+  const dest = prepareDestination(ua, "test");
+  const nonce = randomNonce64();
+  const deadline = deadlineIn(REQUEST_TTL_SECONDS, ctx.now);
+  const signature = await signWithOwnerKey(
+    loan.ownerKey,
+    refundRequestTypedData(registry, { vaultId, noteId, commitment: dest.commitment, nonce, deadline }),
+  );
+  return a.postRefund(vaultId, { noteId, receiver: dest.ua, salt: dest.saltHex, nonce, deadline, signature });
+}
+
+/** The vault's unified full viewing key (owner only). Never stored by the app. */
+export async function fetchViewingKey(loan: StoredLoan, vaultId: Hex, ctx: OwnerContext = {}): Promise<string> {
+  const a = ctx.api ?? defaultApi;
+  const registry = ctx.registry ?? config.registry;
+  const nonce = randomNonce64();
+  const deadline = deadlineIn(REQUEST_TTL_SECONDS, ctx.now);
+  const signature = await signWithOwnerKey(loan.ownerKey, viewKeyRequestTypedData(registry, { vaultId, nonce, deadline }));
+  return a.postViewingKey(vaultId, { nonce, deadline, signature });
+}

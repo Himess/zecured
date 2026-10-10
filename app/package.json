@@ -1,0 +1,36 @@
+{
+  "name": "zecured-app",
+  "version": "0.1.0",
+  "private": true,
+  "description": "Zecured web app: borrow against shielded ZEC on Base Sepolia (testnet).",
+  "license": "MIT",
+  "type": "module",
+  "scripts": {
+    "dev": "next dev",
+    "build": "next build",
+    "start": "next start",
+    "test": "vitest run",
+    "test:watch": "vitest",
+    "typecheck": "tsc --noEmit"
+  },
+  "dependencies": {
+    "@noble/hashes": "2.4.0",
+    "@scure/base": "2.4.0",
+    "geist": "1.7.2",
+    "next": "16.3.6",
+    "permissionless": "0.4.1",
+    "qrcode-generator": "2.0.4",
+    "react": "19.3.0",
+    "react-dom": "19.3.0",
+    "viem": "2.56.9"
+  },
+  "devDependencies": {
+    "@tailwindcss/postcss": "4.3.3",
+    "@types/node": "24.19.0",
+    "@types/react": "19.3.0",
+    "@types/react-dom": "19.3.0",
+    "tailwindcss": "4.3.3",
+    "typescript": "6.0.3",
+    "vitest": "5.0.2"
+  }
+}

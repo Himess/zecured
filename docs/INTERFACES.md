@@ -90,6 +90,7 @@ enum ClaimStatus { None, Pending, Paid }
 
 function attestDeposit(DepositAttestation calldata att, bytes[] calldata sigs) external;
 function requestRelease(bytes32 vaultId, bytes32 destCommitment) external returns (bytes32 claimId);
+function requestPartialRelease(bytes32 vaultId, uint64 amount, bytes32 destCommitment) external returns (bytes32 claimId);
 function recordLiquidation(bytes32 vaultId, uint64 seized, bytes32 liquidatorCommitment) external returns (bytes32 claimId);   // adapter only
 function recordClose(bytes32 vaultId, uint64 mmAmount, uint64 userAmount, bytes32 mmCommitment, bytes32 userCommitment)
     external returns (bytes32 userClaimId, bytes32 mmClaimId);                                                             // adapter only
@@ -114,6 +115,11 @@ event PayoutConfirmed(bytes32 indexed vaultId, bytes32[] claimIds);
 - `requestRelease`: caller must be the vault's account; withdraws `outstanding` from Morpho on
   behalf of the account to the Registry (reverts while debt remains), burns it,
   `outstanding = 0`, `Closed`.
+- `requestPartialRelease` (D14): caller must be the vault's account; `MIN_RELEASE = 100,000 zat
+  <= amount < outstanding`; withdraws `amount` from Morpho to the Registry (Morpho enforces
+  LLTV) and additionally requires the position's LTV after the withdrawal to be <= 50%
+  (`MAX_WITHDRAW_LTV_BPS = 5_000`, oracle price, debt rounded up); burns; `outstanding -= amount`;
+  emits `ReleaseRequested` (a `Release` claim); the vault stays `Active`.
 - `recordLiquidation`: `seized <= outstanding` (I9), burns, `outstanding -= seized`; the vault
   stays `Active` while `outstanding > 0`.
 - `recordClose`: `mmAmount + userAmount == outstanding` (I7), burns, `Closed`, two claims.
@@ -194,7 +200,7 @@ A UserOp is sponsored only if every call it makes is one of:
 | Target | Calls |
 |---|---|
 | Smart account factory | deployment in the account's first UserOp (`initCode` / `factory`) |
-| `ZecuredRegistry` | `requestRelease` |
+| `ZecuredRegistry` | `requestRelease`, `requestPartialRelease` |
 | `SettlementAdapter` | `invalidateNonce` |
 | Morpho Blue | `setAuthorization` (only for the Registry and the Adapter), `borrow` and `repay` (only the Zecured market) |
 | MockUSDC | `approve` (spender = Morpho) and `transfer` |
