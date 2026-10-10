@@ -7304,6 +7304,34 @@ dependencies = [
 ]
 
 [[package]]
+name = "zecured-coordinator"
+version = "0.1.0"
+dependencies = [
+ "alloy",
+ "anyhow",
+ "base64 0.22.1",
+ "futures",
+ "hex",
+ "orchard",
+ "pczt",
+ "rand_core 0.6.4",
+ "reddsa 0.5.2",
+ "reqwest 0.12.28",
+ "serde",
+ "serde_json",
+ "tokio",
+ "tracing",
+ "zcash_keys",
+ "zcash_primitives",
+ "zcash_protocol",
+ "zecured-base",
+ "zecured-node",
+ "zecured-policy",
+ "zecured-threshold",
+ "zecured-zcash-ops",
+]
+
+[[package]]
 name = "zecured-node"
 version = "0.1.0"
 dependencies = [

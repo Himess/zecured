@@ -85,6 +85,8 @@ pub struct Round3Out {
     pub ak: String,
     pub ufvk: String,
     pub address: String,
+    /// Public: group key + verifying shares (needed by the coordinator to aggregate).
+    pub public_key_package: serde_json::Value,
 }
 
 /// What travels inside a sealed round-2 message.
@@ -243,6 +245,7 @@ pub fn round3(
         ak: hex::encode(ak),
         ufvk: encode_ufvk(&network, &fvk)?,
         address: encode_ironwood_ua(&network, vault_address(&fvk))?,
+        public_key_package: serde_json::to_value(&public_key_package)?,
     };
     let open = pending.open;
     store.save_vault(VaultRecord {

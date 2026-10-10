@@ -1,0 +1,31 @@
+[package]
+name = "zecured-coordinator"
+version = "0.1.0"
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+publish.workspace = true
+
+[dependencies]
+zecured-node = { path = "../node" }
+zecured-zcash-ops = { path = "../zcash-ops" }
+zecured-threshold = { path = "../threshold" }
+zecured-policy = { path = "../policy" }
+zecured-base = { path = "../base-client" }
+orchard.workspace = true
+pczt.workspace = true
+reddsa.workspace = true
+zcash_protocol.workspace = true
+zcash_primitives.workspace = true
+zcash_keys.workspace = true
+alloy.workspace = true
+reqwest.workspace = true
+tokio.workspace = true
+tracing.workspace = true
+anyhow.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+hex.workspace = true
+rand_core_06.workspace = true
+base64 = "0.22"
+futures = "0.3"

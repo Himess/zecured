@@ -134,6 +134,7 @@ fn five_nodes_agree_on_the_vault() {
         assert_eq!(o.ak, outs[0].ak);
         assert_eq!(o.ufvk, outs[0].ufvk);
         assert_eq!(o.address, outs[0].address);
+        assert_eq!(o.public_key_package, outs[0].public_key_package);
     }
     assert!(outs[0].address.starts_with("utest1"));
     // Every node stored the vault with the same sk but its own key share.

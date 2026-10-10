@@ -80,15 +80,36 @@ impl ZcashView {
         Ok(u32::try_from(res?.height)?)
     }
 
-    /// Scans the vault up to the current tip and sorts its notes.
+    /// Scans the vault up to the current tip and sorts its notes (node store variant).
     pub async fn vault_notes(&mut self, store: &mut Store, vault_id: &B256, confirmations: u32) -> Result<VaultNotes> {
         let mut v = store.vaults.get(vault_id).context("unknown vault")?.clone();
+        let rules = DepositRules {
+            amount: v.amount,
+            expiry_height: v.expiry_height,
+            confirmations,
+        };
+        let fvk = vault_fvk(&v)?;
+        let notes = self.notes(vault_id, &fvk, v.birthday, &rules, &mut v.decisions).await?;
+        store.save_vault(v)?;
+        Ok(notes)
+    }
+
+    /// Scans a vault up to the current tip, extends its persisted P1 `decisions` and sorts
+    /// its notes into the two lineages.
+    pub async fn notes(
+        &mut self,
+        vault_id: &B256,
+        fvk: &FullViewingKey,
+        birthday: u32,
+        rules: &DepositRules,
+        decisions: &mut Vec<(classify::NotePosition, Classification)>,
+    ) -> Result<VaultNotes> {
         let tip = self.tip().await?;
         // tonic clients are cheap handles over one connection; clone to scan while `self`
         // stays borrowable.
         let mut client = self.client().await?.clone();
         if !self.scans.contains_key(vault_id) {
-            let state = ScanState::from_birthday(&mut client, vault_fvk(&v)?, v.birthday).await?;
+            let state = ScanState::from_birthday(&mut client, fvk.clone(), birthday).await?;
             self.scans.insert(*vault_id, state);
         }
         self.scans
@@ -113,28 +134,22 @@ impl ZcashView {
                 ironwood_only,
             });
         }
-        let rules = DepositRules {
-            amount: v.amount,
-            expiry_height: v.expiry_height,
-            confirmations,
-        };
-        let decided = classify::classify(&rules, tip, &deposits);
+        let decided = classify::classify(rules, tip, &deposits);
         for (note, class) in &decided {
-            if *class != Classification::Pending && !v.decisions.iter().any(|(p, _)| *p == note.position) {
-                v.decisions.push((note.position, *class));
+            if *class != Classification::Pending && !decisions.iter().any(|(p, _)| *p == note.position) {
+                decisions.push((note.position, *class));
             }
         }
         // A persisted decision is final, even if a later reorg would reorder things.
-        for (pos, class) in &v.decisions {
+        for (pos, class) in decisions.iter() {
             if let Some((_, now)) = decided.iter().find(|(n, _)| n.position == *pos) {
                 ensure!(now == class || *now == Classification::Pending, "P1 decision changed for {pos:?}");
             }
         }
-        store.save_vault(v.clone())?;
 
         let scan = &self.scans[vault_id];
         let decision = |n: &ReceivedNote| {
-            v.decisions
+            decisions
                 .iter()
                 .find(|(p, _)| *p == to_policy_position(&n.position))
                 .map(|(_, c)| *c)
@@ -164,6 +179,11 @@ impl ZcashView {
             non_conforming,
             conforming,
         })
+    }
+
+    /// The scan state of a vault already scanned through [`Self::notes`].
+    pub fn scan(&self, vault_id: &B256) -> Option<&ScanState> {
+        self.scans.get(vault_id)
     }
 
     async fn ironwood_only(&mut self, txid: &TxId) -> Result<bool> {

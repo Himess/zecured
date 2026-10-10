@@ -40,7 +40,7 @@ thiserror = "2"
 tokio = { version = "1", features = ["full"] }
 alloy = { version = "2.5", features = ["eip712"] }
 axum = "0.8"
-reqwest = { version = "0.13", default-features = false, features = ["json", "rustls-tls"] }
+reqwest = { version = "0.12", default-features = false, features = ["json", "rustls-tls"] }
 tracing = "0.1"
 tracing-subscriber = { version = "0.3", features = ["env-filter"] }
 tonic = { version = "0.14", default-features = false, features = ["transport", "tls-ring", "tls-webpki-roots"] }
