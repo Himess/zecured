@@ -113,6 +113,14 @@ pub fn claim_ids_hash(claim_ids: &[B256]) -> B256 {
     keccak256(packed)
 }
 
+/// `claimIdOf(vaultId, sequence) = keccak256(abi.encode(vaultId, uint64(sequence)))`.
+pub fn claim_id_of(vault_id: B256, sequence: u64) -> B256 {
+    let mut buf = [0u8; 64];
+    buf[..32].copy_from_slice(vault_id.as_slice());
+    buf[56..].copy_from_slice(&sequence.to_be_bytes());
+    keccak256(buf)
+}
+
 /// Signs `message` under `domain`; returns the 65-byte `r || s || v` (v = 27/28) form that
 /// OpenZeppelin's `ECDSA.recover` accepts.
 pub fn sign_typed<T: SolStruct>(signer: &PrivateKeySigner, domain: &Eip712Domain, message: &T) -> Result<Bytes> {
@@ -242,6 +250,73 @@ mod tests {
             adapter_domain(BASE_SEPOLIA_CHAIN_ID, adapter).separator(),
             "0x59e17d33c50be097bde376a1c88c46c405743fb47b43fea0eb1fac767095e5d4".parse::<B256>().unwrap()
         );
+    }
+
+    /// Golden vectors pinned in contracts/test/unit/ZecuredEIP712.t.sol (computed by the
+    /// Solidity library, Foundry's EIP-712 implementation and `cast`).
+    #[test]
+    fn digests_match_solidity_golden_vectors() {
+        let registry = Address::repeat_byte(0x11);
+        let adapter = Address::repeat_byte(0x22);
+        let vault = B256::repeat_byte(0x55);
+        let rd = registry_domain(BASE_SEPOLIA_CHAIN_ID, registry);
+        let ad = adapter_domain(BASE_SEPOLIA_CHAIN_ID, adapter);
+        let b = |h: &str| h.parse::<B256>().unwrap();
+        assert_eq!(rd.separator(), b("0x489271068185e1811817d2dfae78e2be898ee5fc9768bf01d870981f667ef9f8"));
+        assert_eq!(ad.separator(), b("0xb62551e236af33b3b84da5fe38134bcea7c80b912f8b172bb4020080457a9260"));
+
+        let att = DepositAttestation {
+            vaultId: vault,
+            account: Address::repeat_byte(0x33),
+            amount: 1_000_000,
+            depositTag: B256::repeat_byte(0x66),
+        };
+        assert_eq!(
+            att.eip712_signing_hash(&rd),
+            b("0xbe0251d9c909749194da8ebf137e42a33a60d6fba8672a022c4923558fecb90f")
+        );
+
+        let payout = PayoutConfirmation {
+            vaultId: vault,
+            claimIdsHash: claim_ids_hash(&[claim_id_of(vault, 0), claim_id_of(vault, 1)]),
+        };
+        assert_eq!(
+            payout.eip712_signing_hash(&rd),
+            b("0xf166a0191609bbccd2b7aa9e7527b1553a418f7626902cc10099034b838e4973")
+        );
+
+        let close = CloseRequest {
+            vaultId: vault,
+            account: Address::repeat_byte(0x33),
+            executor: Address::repeat_byte(0x44),
+            marginBps: 100,
+            minUserAmount: 500_000,
+            userCommitment: B256::repeat_byte(0x77),
+            nonce: U256::from(42u8),
+            deadline: 1_800_000_000,
+        };
+        assert_eq!(
+            close.eip712_signing_hash(&ad),
+            b("0x2207e7a8cd1b3966d87015d4b554f9271a760f2854c1c9d37ae0391b885ae8f7")
+        );
+    }
+
+    /// The Registry rejects high-s signatures (OpenZeppelin ECDSA).
+    #[test]
+    fn signatures_are_low_s() {
+        let half_n: U256 = "0x7fffffffffffffffffffffffffffffff5d576e7357a4501ddfe92f46681b20a0".parse().unwrap();
+        let domain = registry_domain(BASE_SEPOLIA_CHAIN_ID, Address::repeat_byte(0x11));
+        let signer = PrivateKeySigner::random();
+        for i in 0..64u8 {
+            let msg = ViewKeyRequest {
+                vaultId: B256::repeat_byte(i),
+                nonce: u64::from(i),
+                deadline: 1,
+            };
+            let sig = sign_typed(&signer, &domain, &msg).unwrap();
+            let s_value = U256::from_be_slice(&sig[32..64]);
+            assert!(s_value <= half_n, "high-s signature");
+        }
     }
 
     #[test]
