@@ -1,0 +1,23 @@
+[package]
+name = "zecured-zcash-ops"
+version = "0.1.0"
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+publish.workspace = true
+
+[dependencies]
+orchard.workspace = true
+zcash_protocol.workspace = true
+zcash_primitives.workspace = true
+zcash_keys.workspace = true
+zcash_address.workspace = true
+zcash_client_backend.workspace = true
+pczt.workspace = true
+zip321.workspace = true
+pasta_curves.workspace = true
+blake2b_simd.workspace = true
+blake3.workspace = true
+anyhow.workspace = true
+hex.workspace = true
+thiserror.workspace = true

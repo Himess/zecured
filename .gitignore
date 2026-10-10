@@ -1,0 +1,40 @@
+# OS / editors
+.DS_Store
+.idea/
+.vscode/
+
+# Secrets — never commit
+.env
+.env.*
+!.env.example
+*.key
+*.pem
+
+# Signer / node state (FROST key packages, wallet DBs, salts)
+signer/data/
+infra/data/
+*.sqlite
+*.sqlite-journal
+*.db
+
+# Rust
+target/
+
+# Foundry
+contracts/out/
+contracts/cache/
+contracts/broadcast/*/31337/
+contracts/broadcast/**/dry-run/
+
+# Node / Next.js
+node_modules/
+.next/
+out/
+*.tsbuildinfo
+.vercel
+
+# Vendored reference sources (fetched by scripts/fetch-refs.sh)
+docs/ref/vendor/
+
+# Logs
+*.log
