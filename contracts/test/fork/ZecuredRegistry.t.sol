@@ -6,6 +6,7 @@ import {IERC20Errors} from "@openzeppelin/contracts/interfaces/draft-IERC6093.so
 import {IMorpho, MarketParams, Id, Position} from "morpho-blue/src/interfaces/IMorpho.sol";
 import {EventsLib} from "morpho-blue/src/libraries/EventsLib.sol";
 import {MorphoStorageLib} from "morpho-blue/src/libraries/periphery/MorphoStorageLib.sol";
+import {MorphoBalancesLib} from "morpho-blue/src/libraries/periphery/MorphoBalancesLib.sol";
 import {ZZEC} from "../../src/ZZEC.sol";
 import {ZecuredRegistry} from "../../src/ZecuredRegistry.sol";
 import {SettlementAdapter} from "../../src/SettlementAdapter.sol";
@@ -18,6 +19,8 @@ import {ZecuredFixture} from "../utils/ZecuredFixture.sol";
 /// @notice ZecuredRegistry against the real Morpho Blue on a Base Sepolia fork: deployment wiring, every function and
 ///         every revert path (I1, I3, I4, I5, I6, I9).
 contract ZecuredRegistryTest is ZecuredFixture {
+    using MorphoBalancesLib for IMorpho;
+
     uint256 internal constant SECP256K1_N = 0xFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFEBAAEDCE6AF48A03BBFD25E8CD0364141;
 
     address internal account;
@@ -571,6 +574,189 @@ contract ZecuredRegistryTest is ZecuredFixture {
         vm.prank(account);
         vm.expectRevert(abi.encodeWithSelector(IZecuredRegistry.UnexpectedCollateralReceived.selector, 0, VAULT_005));
         registry.requestRelease(vaultId, RELEASE_COMMITMENT);
+    }
+
+    // ================================================================== requestPartialRelease (D14)
+
+    bytes32 internal constant PARTIAL_COMMITMENT = keccak256("zecured.test.commitment.partial");
+
+    /// 0.05 ZEC vault (2,000,000 USDC units of collateral at $40), both authorizations, optional loan.
+    function _vaultWithLoan(uint256 borrowAssets) internal returns (bytes32 vaultId) {
+        vaultId = _attest(account, VAULT_005);
+        _authorizeBoth(account);
+        if (borrowAssets != 0) _borrow(account, borrowAssets);
+    }
+
+    function test_requestPartialRelease_withoutDebt() public {
+        bytes32 vaultId = _vaultWithLoan(0);
+        bytes32 expectedClaimId = registry.claimIdOf(vaultId, 0);
+
+        vm.expectEmit(address(registry));
+        emit IZecuredRegistry.ReleaseRequested(vaultId, expectedClaimId, 2_000_000, PARTIAL_COMMITMENT);
+        vm.expectEmit(address(MORPHO));
+        emit EventsLib.WithdrawCollateral(marketId, address(registry), account, address(registry), 2_000_000);
+        vm.prank(account);
+        bytes32 claimId = registry.requestPartialRelease(vaultId, 2_000_000, PARTIAL_COMMITMENT);
+
+        assertEq(claimId, expectedClaimId);
+        _assertClaim(claimId, vaultId, ClaimKind.Release, 2_000_000, PARTIAL_COMMITMENT, ClaimStatus.Pending);
+        assertEq(_outstanding(vaultId), VAULT_005 - 2_000_000);
+        assertEq(uint8(_status(vaultId)), uint8(VaultStatus.Active), "the vault stays Active");
+        assertEq(_position(account).collateral, VAULT_005 - 2_000_000);
+        assertEq(zzec.totalSupply(), VAULT_005 - 2_000_000, "I1");
+        _assertZZECOnlyInMorpho(_list(account));
+
+        // Without debt everything but MIN_RELEASE may go (the vault stays Active, its rest stays payable).
+        vm.prank(account);
+        vm.expectRevert(abi.encodeWithSelector(IZecuredRegistry.ReleaseRemainderTooSmall.selector, 99_999, 100_000));
+        registry.requestPartialRelease(vaultId, VAULT_005 - 2_000_000 - 99_999, PARTIAL_COMMITMENT);
+        vm.prank(account);
+        registry.requestPartialRelease(vaultId, VAULT_005 - 2_000_000 - 100_000, PARTIAL_COMMITMENT);
+        assertEq(_outstanding(vaultId), 100_000);
+        assertEq(uint8(_status(vaultId)), uint8(VaultStatus.Active));
+        assertEq(registry.claimCount(vaultId), 2);
+    }
+
+    /// With debt the LTV after the withdrawal may reach exactly 50 %, not more.
+    function test_requestPartialRelease_withDebt_upToExactlyFiftyPercent() public {
+        bytes32 vaultId = _vaultWithLoan(600_000); // 30 % LTV at $40
+        // 2,000,001 zat out leaves 2,999,999 zat = 1,199,999 units (rounded down): just above 50 %.
+        vm.prank(account);
+        vm.expectRevert(abi.encodeWithSelector(IZecuredRegistry.ReleaseLtvTooHigh.selector, 600_000, 1_199_999));
+        registry.requestPartialRelease(vaultId, 2_000_001, PARTIAL_COMMITMENT);
+
+        // 2,000,000 zat out leaves 3,000,000 zat = 1,200,000 units: exactly 50 %.
+        vm.prank(account);
+        bytes32 claimId = registry.requestPartialRelease(vaultId, 2_000_000, PARTIAL_COMMITMENT);
+        _assertClaim(claimId, vaultId, ClaimKind.Release, 2_000_000, PARTIAL_COMMITMENT, ClaimStatus.Pending);
+        assertEq(_outstanding(vaultId), 3_000_000);
+        assertGt(_position(account).borrowShares, 0, "the loan stays open");
+        assertEq(usdc.balanceOf(borrowReceiver), 600_000);
+        assertEq(zzec.totalSupply(), 3_000_000, "I1");
+        _assertZZECOnlyInMorpho(_list(account));
+    }
+
+    /// Between 50 % and LLTV (62.5 %) Morpho would allow the withdrawal; the Registry refuses it.
+    function test_requestPartialRelease_revertsAboveFiftyPercentBelowLltv() public {
+        bytes32 vaultId = _vaultWithLoan(800_000); // 40 % LTV
+        // 1,500,000 zat out leaves 3,500,000 zat = 1,400,000 units: LTV 57.1 %.
+        vm.prank(account);
+        vm.expectRevert(abi.encodeWithSelector(IZecuredRegistry.ReleaseLtvTooHigh.selector, 800_000, 1_400_000));
+        registry.requestPartialRelease(vaultId, 1_500_000, PARTIAL_COMMITMENT);
+        assertEq(_outstanding(vaultId), VAULT_005, "nothing released");
+        assertEq(registry.claimCount(vaultId), 0, "no claim");
+    }
+
+    /// Above LLTV Morpho's own health check refuses the withdrawal.
+    function test_requestPartialRelease_revertsAboveLltv() public {
+        bytes32 vaultId = _vaultWithLoan(800_000);
+        // 2,000,000 zat out leaves 3,000,000 zat = 1,200,000 units: LTV 66.7 % > 62.5 %.
+        vm.prank(account);
+        vm.expectRevert(bytes("insufficient collateral"));
+        registry.requestPartialRelease(vaultId, 2_000_000, PARTIAL_COMMITMENT);
+        assertEq(_outstanding(vaultId), VAULT_005);
+    }
+
+    function test_requestPartialRelease_revertsOnAmountBounds() public {
+        bytes32 vaultId = _vaultWithLoan(0);
+        vm.startPrank(account);
+        vm.expectRevert(abi.encodeWithSelector(IZecuredRegistry.ReleaseAmountTooSmall.selector, 99_999, 100_000));
+        registry.requestPartialRelease(vaultId, 99_999, PARTIAL_COMMITMENT);
+        vm.expectRevert(abi.encodeWithSelector(IZecuredRegistry.ReleaseAmountTooSmall.selector, 0, 100_000));
+        registry.requestPartialRelease(vaultId, 0, PARTIAL_COMMITMENT);
+        vm.expectRevert(abi.encodeWithSelector(IZecuredRegistry.ReleaseAmountNotPartial.selector, VAULT_005, VAULT_005));
+        registry.requestPartialRelease(vaultId, VAULT_005, PARTIAL_COMMITMENT);
+        vm.expectRevert(
+            abi.encodeWithSelector(IZecuredRegistry.ReleaseAmountNotPartial.selector, VAULT_005 + 1, VAULT_005)
+        );
+        registry.requestPartialRelease(vaultId, VAULT_005 + 1, PARTIAL_COMMITMENT);
+        vm.expectRevert(abi.encodeWithSelector(IZecuredRegistry.ReleaseRemainderTooSmall.selector, 1, 100_000));
+        registry.requestPartialRelease(vaultId, VAULT_005 - 1, PARTIAL_COMMITMENT);
+        // Exactly MIN_RELEASE is fine.
+        registry.requestPartialRelease(vaultId, 100_000, PARTIAL_COMMITMENT);
+        vm.stopPrank();
+        assertEq(_outstanding(vaultId), VAULT_005 - 100_000);
+        assertEq(registry.MIN_RELEASE(), 100_000);
+        assertEq(registry.MAX_WITHDRAW_LTV_BPS(), 5_000);
+    }
+
+    function test_requestPartialRelease_revertsForAnyoneButTheAccount() public {
+        bytes32 vaultId = _vaultWithLoan(0);
+        address[4] memory callers = [stranger, address(adapter), signerSet[0], marketMaker];
+        for (uint256 i; i < callers.length; ++i) {
+            vm.prank(callers[i]);
+            vm.expectRevert(abi.encodeWithSelector(IZecuredRegistry.NotVaultAccount.selector, vaultId, callers[i]));
+            registry.requestPartialRelease(vaultId, 1_000_000, PARTIAL_COMMITMENT);
+        }
+    }
+
+    function test_requestPartialRelease_revertsOnZeroCommitmentUnknownOrClosedVaultOrMissingAuthorization() public {
+        bytes32 unknown = keccak256("zecured.registry.unknownVault");
+        vm.prank(account);
+        vm.expectRevert(abi.encodeWithSelector(IZecuredRegistry.VaultNotActive.selector, unknown));
+        registry.requestPartialRelease(unknown, 1_000_000, PARTIAL_COMMITMENT);
+
+        bytes32 vaultId = _attest(account, VAULT_005);
+        vm.prank(account);
+        vm.expectRevert(IZecuredRegistry.ZeroCommitment.selector);
+        registry.requestPartialRelease(vaultId, 1_000_000, bytes32(0));
+        vm.prank(account);
+        vm.expectRevert(bytes("unauthorized")); // the account has not authorized the Registry on Morpho yet
+        registry.requestPartialRelease(vaultId, 1_000_000, PARTIAL_COMMITMENT);
+
+        vm.prank(account);
+        MORPHO.setAuthorization(address(registry), true);
+        vm.prank(account);
+        registry.requestRelease(vaultId, RELEASE_COMMITMENT);
+        vm.prank(account);
+        vm.expectRevert(abi.encodeWithSelector(IZecuredRegistry.VaultNotActive.selector, vaultId));
+        registry.requestPartialRelease(vaultId, 1_000_000, PARTIAL_COMMITMENT);
+    }
+
+    /// The debt includes the interest accrued up to this block (Morpho accrues inside withdrawCollateral).
+    function test_requestPartialRelease_countsAccruedInterest() public {
+        bytes32 vaultId = _vaultWithLoan(600_000); // releasing 2,000,000 lands exactly on 50 % without interest
+        skip(30 days);
+        uint256 debt = MORPHO.expectedBorrowAssets(params, account);
+        assertGt(debt, 600_000, "interest accrued");
+        vm.prank(account);
+        vm.expectRevert(abi.encodeWithSelector(IZecuredRegistry.ReleaseLtvTooHigh.selector, debt, 1_200_000));
+        registry.requestPartialRelease(vaultId, 2_000_000, PARTIAL_COMMITMENT);
+        // A bit less still fits.
+        vm.prank(account);
+        registry.requestPartialRelease(vaultId, 1_900_000, PARTIAL_COMMITMENT);
+        assertEq(_outstanding(vaultId), VAULT_005 - 1_900_000);
+    }
+
+    /// Property: a partial release is accepted exactly when the LTV after it, computed independently (Morpho's expected
+    /// debt rounded up; collateral value rounded down), is at most 50 %. Above LLTV Morpho refuses, in between the
+    /// Registry does.
+    function testFuzz_requestPartialRelease_ltvRule(
+        uint64 amountSeed,
+        uint256 debtBps,
+        uint256 priceCents,
+        uint256 elapsed
+    ) public {
+        bytes32 vaultId = _vaultWithLoan(2_000_000 * bound(debtBps, 0, 6_000) / 10_000); // 0..60 % LTV at $40
+        skip(bound(elapsed, 0, 365 days));
+        oracle.setPrice(bound(priceCents, 2_000, 8_000) * 1e32); // $20..$80
+        uint64 amount = uint64(bound(amountSeed, 100_000, VAULT_005 - 100_000));
+
+        uint256 debt = MORPHO.expectedBorrowAssets(params, account);
+        uint256 value = uint256(VAULT_005 - amount) * oracle.price() / 1e36;
+        bool morphoAccepts = debt == 0 || value * LLTV / 1e18 >= debt;
+        bool registryAccepts = debt * 10_000 <= value * 5_000;
+
+        vm.prank(account);
+        try registry.requestPartialRelease(vaultId, amount, PARTIAL_COMMITMENT) {
+            assertTrue(morphoAccepts && registryAccepts, "accepted above 50 %");
+            assertEq(_outstanding(vaultId), VAULT_005 - amount);
+            assertEq(zzec.totalSupply(), VAULT_005 - amount, "I1");
+        } catch (bytes memory reason) {
+            assertFalse(morphoAccepts && registryAccepts, "refused at or below 50 %");
+            if (!morphoAccepts) assertEq(reason, abi.encodeWithSignature("Error(string)", "insufficient collateral"));
+            else assertEq(bytes4(reason), IZecuredRegistry.ReleaseLtvTooHigh.selector);
+        }
     }
 
     // ================================================================== recordLiquidation / recordClose

@@ -3,8 +3,12 @@ pragma solidity 0.8.28;
 
 import {ECDSA} from "@openzeppelin/contracts/utils/cryptography/ECDSA.sol";
 import {EIP712} from "@openzeppelin/contracts/utils/cryptography/EIP712.sol";
-import {IMorpho, MarketParams, Id, Position} from "morpho-blue/src/interfaces/IMorpho.sol";
+import {Math} from "@openzeppelin/contracts/utils/math/Math.sol";
+import {IMorpho, MarketParams, Id, Position, Market} from "morpho-blue/src/interfaces/IMorpho.sol";
+import {IOracle} from "morpho-blue/src/interfaces/IOracle.sol";
 import {MarketParamsLib} from "morpho-blue/src/libraries/MarketParamsLib.sol";
+import {SharesMathLib} from "morpho-blue/src/libraries/SharesMathLib.sol";
+import {ORACLE_PRICE_SCALE} from "morpho-blue/src/libraries/ConstantsLib.sol";
 import {IZZEC} from "./interfaces/IZZEC.sol";
 import {IZecuredRegistry, VaultStatus, ClaimKind, ClaimStatus} from "./interfaces/IZecuredRegistry.sol";
 import {ZecuredEIP712, DepositAttestation} from "./libraries/ZecuredEIP712.sol";
@@ -14,20 +18,28 @@ import {ZecuredEIP712, DepositAttestation} from "./libraries/ZecuredEIP712.sol";
 ///         - `attestDeposit`: a 3-of-5 signer attestation activates a vault, mints its zZEC and supplies it straight
 ///           into the account's Morpho position (I1, I4, I5, I6);
 ///         - `requestRelease`: the account itself withdraws and burns its whole outstanding once the debt is repaid;
+///         - `requestPartialRelease` (D14): the account withdraws and burns part of its outstanding, debt or not, as
+///           long as the position's LTV stays <= 50 % afterwards and at least MIN_RELEASE stays in the vault;
 ///         - `recordLiquidation` / `recordClose`: the SettlementAdapter reports seized / closed collateral, which the
 ///           Registry burns (I7, I9);
 ///         - every burn creates a claim (payout instruction for the signers, I3); `confirmPayout` marks claims paid.
 /// @dev Morpho authorization is all-or-nothing: an account that authorizes the Registry lets it do anything on its
 ///      behalf. This contract therefore calls exactly two Morpho functions: `supplyCollateral` (needs no authorization)
-///      and `withdrawCollateral` (only inside the account's own `requestRelease`, to the Registry). It has no code path
-///      that borrows or withdraws loan assets, and it is not upgradeable and has no admin.
+///      and `withdrawCollateral` (only inside the account's own `requestRelease` / `requestPartialRelease`, to the
+///      Registry). It has no code path that borrows or withdraws loan assets, and it is not upgradeable and has no admin.
 contract ZecuredRegistry is IZecuredRegistry, EIP712 {
     using MarketParamsLib for MarketParams;
+    using SharesMathLib for uint256;
 
     /// @inheritdoc IZecuredRegistry
     uint256 public constant THRESHOLD = 3;
     /// @notice Size of the signer set.
     uint256 public constant SIGNER_COUNT = 5;
+    /// @inheritdoc IZecuredRegistry
+    uint64 public constant MIN_RELEASE = 100_000;
+    /// @inheritdoc IZecuredRegistry
+    uint256 public constant MAX_WITHDRAW_LTV_BPS = 5_000;
+    uint256 private constant BPS = 10_000;
 
     /// @inheritdoc IZecuredRegistry
     IMorpho public immutable morpho;
@@ -179,12 +191,35 @@ contract ZecuredRegistry is IZecuredRegistry, EIP712 {
         claimId = _newClaim(vaultId, v, ClaimKind.Release, amount, destCommitment);
         emit ReleaseRequested(vaultId, claimId, amount, destCommitment);
 
-        // Uses the account's Morpho authorization of the Registry; the zZEC guard admits exactly this transfer.
-        uint256 balanceBefore = zzec.balanceOf(address(this));
-        zzec.expectFromMorpho(amount);
-        morpho.withdrawCollateral(_marketParams(), amount, account, address(this));
-        uint256 received = zzec.balanceOf(address(this)) - balanceBefore;
-        if (received != amount) revert UnexpectedCollateralReceived(received, amount);
+        _withdrawToRegistry(account, amount);
+        zzec.burn(address(this), amount);
+    }
+
+    /// @inheritdoc IZecuredRegistry
+    function requestPartialRelease(bytes32 vaultId, uint64 amount, bytes32 destCommitment)
+        external
+        returns (bytes32 claimId)
+    {
+        Vault storage v = _vaults[vaultId];
+        if (v.status != VaultStatus.Active) revert VaultNotActive(vaultId);
+        address account = v.account;
+        if (msg.sender != account) revert NotVaultAccount(vaultId, msg.sender);
+        if (destCommitment == bytes32(0)) revert ZeroCommitment();
+        if (amount < MIN_RELEASE) revert ReleaseAmountTooSmall(amount, MIN_RELEASE);
+        uint64 outstanding = v.outstanding;
+        if (amount >= outstanding) revert ReleaseAmountNotPartial(amount, outstanding);
+
+        uint64 remaining = outstanding - amount;
+        // The rest must stay payable on its own: a remainder below MIN_RELEASE could not cover its payout fee.
+        if (remaining < MIN_RELEASE) revert ReleaseRemainderTooSmall(remaining, MIN_RELEASE);
+        v.outstanding = remaining;
+        claimId = _newClaim(vaultId, v, ClaimKind.Release, amount, destCommitment);
+        emit ReleaseRequested(vaultId, claimId, amount, destCommitment);
+
+        // Morpho accrues interest and enforces its LLTV health check inside withdrawCollateral; the Registry then
+        // applies the stricter D14 limit on the resulting position.
+        _withdrawToRegistry(account, amount);
+        _checkWithdrawLtv(vaultId, account, remaining);
         zzec.burn(address(this), amount);
     }
 
@@ -314,6 +349,32 @@ contract ZecuredRegistry is IZecuredRegistry, EIP712 {
     }
 
     // ------------------------------------------------------------------ internal
+
+    /// @dev Withdraws `amount` of `account`'s collateral to the Registry, using the account's Morpho authorization of
+    ///      the Registry. The zZEC expectation is armed immediately before the Morpho call (the guard then admits exactly
+    ///      this transfer) and the received amount is checked afterwards.
+    function _withdrawToRegistry(address account, uint64 amount) internal {
+        uint256 balanceBefore = zzec.balanceOf(address(this));
+        zzec.expectFromMorpho(amount);
+        morpho.withdrawCollateral(_marketParams(), amount, account, address(this));
+        uint256 received = zzec.balanceOf(address(this)) - balanceBefore;
+        if (received != amount) revert UnexpectedCollateralReceived(received, amount);
+    }
+
+    /// @dev D14: the position's LTV after a partial release must be <= MAX_WITHDRAW_LTV_BPS.
+    ///      Called right after Morpho.withdrawCollateral, which has already accrued interest for this block, so the
+    ///      market totals read here are current and `debt` is exactly the amount Morpho's own health check used:
+    ///      borrow shares converted to loan units with Morpho's share math, rounded up. The collateral value is
+    ///      collateral * price / 1e36, rounded down. A position without debt always passes.
+    function _checkWithdrawLtv(bytes32 vaultId, address account, uint64 remaining) internal view {
+        Position memory p = morpho.position(marketId, account);
+        if (p.collateral != remaining) revert CollateralMismatch(vaultId, p.collateral, remaining);
+        if (p.borrowShares == 0) return;
+        Market memory m = morpho.market(marketId);
+        uint256 debt = uint256(p.borrowShares).toAssetsUp(m.totalBorrowAssets, m.totalBorrowShares);
+        uint256 collateralValue = Math.mulDiv(p.collateral, IOracle(_oracle).price(), ORACLE_PRICE_SCALE);
+        if (debt * BPS > collateralValue * MAX_WITHDRAW_LTV_BPS) revert ReleaseLtvTooHigh(debt, collateralValue);
+    }
 
     function _checkAdapter() internal view {
         if (msg.sender != adapter) revert OnlyAdapter(msg.sender);

@@ -116,7 +116,7 @@ event PayoutConfirmed(bytes32 indexed vaultId, bytes32[] claimIds);
   behalf of the account to the Registry (reverts while debt remains), burns it,
   `outstanding = 0`, `Closed`.
 - `requestPartialRelease` (D14): caller must be the vault's account; `MIN_RELEASE = 100,000 zat
-  <= amount < outstanding`; withdraws `amount` from Morpho to the Registry (Morpho enforces
+  <= amount <= outstanding - MIN_RELEASE` (the rest must stay payable on its own); withdraws `amount` from Morpho to the Registry (Morpho enforces
   LLTV) and additionally requires the position's LTV after the withdrawal to be <= 50%
   (`MAX_WITHDRAW_LTV_BPS = 5_000`, oracle price, debt rounded up); burns; `outstanding -= amount`;
   emits `ReleaseRequested` (a `Release` claim); the vault stays `Active`.

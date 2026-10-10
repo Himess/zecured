@@ -216,6 +216,105 @@ contract FlowsTest is ZecuredFixture {
         _assertInvariants(vaultId, VAULT_005);
     }
 
+    // ------------------------------------------------------------------ D14: partial releases
+
+    /// Two partial releases while the loan is open, then repay and release the rest: three Release claims that add up
+    /// to the attested amount.
+    function test_flow_twoPartialReleasesThenFullRelease() public {
+        bytes32 vaultId = _attest(account, VAULT_005);
+        _authorizeBoth(account);
+        _borrow(account, 400_000); // 20 % LTV at $40
+        _expectNoBorrowOrWithdrawFromHereOn();
+
+        vm.prank(account);
+        bytes32 first = registry.requestPartialRelease(vaultId, 1_000_000, keccak256("zecured.flows.partial1"));
+        assertEq(_outstanding(vaultId), 4_000_000);
+        _assertInvariants(vaultId, VAULT_005);
+
+        skip(10 days);
+        vm.prank(account); // leaves 2,500,000 zat = 1,000,000 units for ~400,000 of debt: LTV ~40 %
+        bytes32 second = registry.requestPartialRelease(vaultId, 1_500_000, keccak256("zecured.flows.partial2"));
+        assertEq(_outstanding(vaultId), 2_500_000);
+        assertEq(uint8(_status(vaultId)), uint8(VaultStatus.Active));
+        _assertInvariants(vaultId, VAULT_005);
+
+        _repayAll(account);
+        vm.prank(account);
+        bytes32 last = registry.requestRelease(vaultId, RELEASE_COMMITMENT);
+        assertEq(uint8(_status(vaultId)), uint8(VaultStatus.Closed));
+        _assertInvariants(vaultId, VAULT_005);
+
+        assertEq(first, registry.claimIdOf(vaultId, 0));
+        assertEq(second, registry.claimIdOf(vaultId, 1));
+        assertEq(last, registry.claimIdOf(vaultId, 2));
+        _assertClaim(
+            first, vaultId, ClaimKind.Release, 1_000_000, keccak256("zecured.flows.partial1"), ClaimStatus.Pending
+        );
+        _assertClaim(
+            second, vaultId, ClaimKind.Release, 1_500_000, keccak256("zecured.flows.partial2"), ClaimStatus.Pending
+        );
+        _assertClaim(last, vaultId, ClaimKind.Release, 2_500_000, RELEASE_COMMITMENT, ClaimStatus.Pending);
+
+        bytes32[] memory ids = new bytes32[](2);
+        (ids[0], ids[1]) = (first, second);
+        _confirm(vaultId, ids);
+        ids = new bytes32[](1);
+        ids[0] = last;
+        _confirm(vaultId, ids);
+    }
+
+    /// Partial release, then a liquidation, then a close: claims and outstanding stay consistent throughout.
+    function test_flow_partialReleaseThenLiquidationThenClose() public {
+        bytes32 vaultId = _attest(account, VAULT_005);
+        _authorizeBoth(account);
+        _borrow(account, 600_000); // 30 % LTV at $40
+        _expectNoBorrowOrWithdrawFromHereOn();
+
+        vm.prank(account); // leaves 4,000,000 zat: LTV 37.5 %
+        registry.requestPartialRelease(vaultId, 1_000_000, keccak256("zecured.flows.partial"));
+        _assertInvariants(vaultId, VAULT_005);
+
+        oracle.setPrice(2200e32); // $22: LTV 600,000 / 880,000 = 68 % > LLTV
+        _fundAndApproveAdapter(liquidator, 10 * USDC);
+        vm.prank(liquidator);
+        (uint256 seized,) = adapter.liquidate(account, 1_000_000, 0, LIQUIDATOR_COMMITMENT);
+        assertEq(seized, 1_000_000);
+        assertEq(_outstanding(vaultId), 3_000_000);
+        assertGt(_position(account).borrowShares, 0, "debt remains");
+        _assertInvariants(vaultId, VAULT_005);
+
+        uint256 debt = MORPHO.expectedBorrowAssets(params, account);
+        CloseRequest memory req = _closeRequest(vaultId, account, 100, 0, 3);
+        bytes memory sig = _signClose(accountKey, req);
+        _fundAndApproveAdapter(marketMaker, debt);
+        vm.prank(marketMaker);
+        adapter.closeWithCollateral(req, sig, MM_COMMITMENT);
+
+        (,, uint64 userAmount,,) = registry.claim(registry.claimIdOf(vaultId, 2));
+        (,, uint64 mmAmount,,) = registry.claim(registry.claimIdOf(vaultId, 3));
+        assertEq(uint256(userAmount) + mmAmount, 3_000_000, "I7");
+        assertEq(mmAmount, _expectedMmAmount(debt, 100));
+        _assertClaim(
+            registry.claimIdOf(vaultId, 0),
+            vaultId,
+            ClaimKind.Release,
+            1_000_000,
+            keccak256("zecured.flows.partial"),
+            ClaimStatus.Pending
+        );
+        _assertClaim(
+            registry.claimIdOf(vaultId, 1),
+            vaultId,
+            ClaimKind.Liquidation,
+            1_000_000,
+            LIQUIDATOR_COMMITMENT,
+            ClaimStatus.Pending
+        );
+        assertEq(uint8(_status(vaultId)), uint8(VaultStatus.Closed));
+        assertEq(registry.claimCount(vaultId), 4);
+        _assertInvariants(vaultId, VAULT_005); // attested == sum of the four claims
+    }
+
     // ------------------------------------------------------------------ several vaults side by side (I1, I4)
 
     function test_flow_severalVaultsKeepSeparateBooks() public {

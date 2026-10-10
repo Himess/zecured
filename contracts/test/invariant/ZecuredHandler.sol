@@ -48,6 +48,7 @@ contract ZecuredHandler is Test {
     bool public attackSucceeded;
     bool public i7Violated;
     bool public i9Violated;
+    bool public d14Violated;
     mapping(string => uint256) public calls;
 
     constructor(
@@ -187,6 +188,45 @@ contract ZecuredHandler is Test {
         vm.prank(account);
         registry.requestRelease(vaultId, keccak256(abi.encode("zecured.inv.release", vaultId)));
         calls["release"]++;
+    }
+
+    /// D14: the account withdraws part of its collateral (debt or not); refused when the LTV would exceed 50 %.
+    function partialRelease(uint256 vaultSeed, uint256 amountSeed) external {
+        (bool found, bytes32 vaultId, address account) = _vault(vaultSeed);
+        if (!found) return;
+        (bool active, uint64 outstandingBefore) = _active(vaultId);
+        uint64 minRelease = registry.MIN_RELEASE();
+        if (!active || outstandingBefore < 2 * minRelease) return;
+        _authorize(account);
+        uint64 amount = uint64(bound(amountSeed, minRelease, outstandingBefore - minRelease));
+        uint64 claimsBefore = registry.claimCount(vaultId);
+
+        vm.prank(account);
+        try registry.requestPartialRelease(vaultId, amount, keccak256(abi.encode("zecured.inv.partial", vaultId))) {
+            calls["partialRelease"]++;
+            _checkPartialRelease(vaultId, account, claimsBefore, outstandingBefore, amount);
+        } catch {
+            calls["partialRelease (reverted)"]++;
+        }
+    }
+
+    /// D14 at the moment of a successful partial release, with the LTV recomputed independently (Morpho's expected
+    /// debt, rounded up; collateral value rounded down).
+    function _checkPartialRelease(
+        bytes32 vaultId,
+        address account,
+        uint64 claimsBefore,
+        uint64 outstandingBefore,
+        uint64 amount
+    ) internal {
+        (bool stillActive, uint64 outstandingAfter) = _active(vaultId);
+        (,, uint64 claimed,,) = registry.claim(registry.claimIdOf(vaultId, claimsBefore));
+        uint256 debt = morpho.expectedBorrowAssets(params, account);
+        uint256 value = uint256(outstandingAfter) * oracle.price() / ORACLE_PRICE_SCALE;
+        if (
+            !stillActive || outstandingAfter != outstandingBefore - amount || claimed != amount
+                || outstandingAfter < registry.MIN_RELEASE() || debt * 10_000 > value * registry.MAX_WITHDRAW_LTV_BPS()
+        ) d14Violated = true;
     }
 
     function setPrice(uint256 cents) external {
@@ -353,6 +393,23 @@ contract ZecuredHandler is Test {
             attackSucceeded = true;
         } catch {}
         calls["attack: direct liquidation"]++;
+    }
+
+    /// Nobody but the vault's account can partially release its collateral.
+    function attackPartialRelease(uint256 vaultSeed, uint256 amountSeed) external {
+        (bool found, bytes32 vaultId,) = _vault(vaultSeed);
+        if (!found) return;
+        (, uint64 outstanding) = _active(vaultId);
+        uint64 minRelease = registry.MIN_RELEASE();
+        if (outstanding < 2 * minRelease) return;
+        address[3] memory intruders = [stranger, liquidator, marketMaker];
+        vm.prank(intruders[amountSeed % 3]);
+        try registry.requestPartialRelease(
+            vaultId, uint64(bound(amountSeed, minRelease, outstanding - minRelease)), keccak256("zecured.inv.x")
+        ) {
+            attackSucceeded = true;
+        } catch {}
+        calls["attack: partial release"]++;
     }
 
     function attackFlashLoan(uint256 amount) external {

@@ -17,7 +17,7 @@ contract ZecuredInvariantsTest is ZecuredFixture {
         usdc.transferOwnership(address(handler)); // MOCK mint for the handler's actors
         oracle.transferOwnership(address(handler)); // MOCK price moves
 
-        bytes4[] memory selectors = new bytes4[](15);
+        bytes4[] memory selectors = new bytes4[](17);
         selectors[0] = ZecuredHandler.attest.selector;
         selectors[1] = ZecuredHandler.attest.selector; // weighted: vaults first
         selectors[2] = ZecuredHandler.borrow.selector;
@@ -33,6 +33,8 @@ contract ZecuredInvariantsTest is ZecuredFixture {
         selectors[12] = ZecuredHandler.attackFlashLoan.selector;
         selectors[13] = ZecuredHandler.attackWeakAttestation.selector;
         selectors[14] = ZecuredHandler.attackCloseRequest.selector;
+        selectors[15] = ZecuredHandler.partialRelease.selector;
+        selectors[16] = ZecuredHandler.attackPartialRelease.selector;
         targetSelector(FuzzSelector({addr: address(handler), selectors: selectors}));
         targetContract(address(handler));
         // The handler pranks its own actors, so the caller does not matter. A fixed caller matters on a fork: every
@@ -86,6 +88,12 @@ contract ZecuredInvariantsTest is ZecuredFixture {
         assertFalse(handler.i9Violated(), "I9 / D11 violated by a liquidation");
     }
 
+    /// D14: every partial release left the position at <= 50 % LTV and at least MIN_RELEASE in the vault, kept the
+    ///      vault Active and created a Release claim of exactly the released amount.
+    function invariant_D14_partialReleaseKeepsLtvAtMostFiftyPercent() public view {
+        assertFalse(handler.d14Violated(), "D14");
+    }
+
     /// I7: every close burned exactly the outstanding and split it exactly into the two claims.
     function invariant_I7_closeConservation() public view {
         assertFalse(handler.i7Violated(), "I7");
@@ -101,17 +109,20 @@ contract ZecuredInvariantsTest is ZecuredFixture {
     }
 
     /// I2 / I6 / I8: no attack ever succeeded (account self-withdrawal, direct Morpho liquidation, zZEC flash loan,
-    /// attestation with < 3 distinct signers, close request executed by a stranger or after its deadline).
+    /// attestation with < 3 distinct signers, close request executed by a stranger or after its deadline, partial
+    /// release by anyone but the account).
     function invariant_attacksAlwaysFail() public view {
         assertFalse(handler.attackSucceeded(), "an attack succeeded");
     }
 
     function afterInvariant() external view {
-        string[16] memory names = [
+        string[19] memory names = [
             "attest",
             "borrow",
             "repay",
             "release",
+            "partialRelease",
+            "partialRelease (reverted)",
             "setPrice",
             "warp",
             "liquidate",
@@ -123,7 +134,8 @@ contract ZecuredInvariantsTest is ZecuredFixture {
             "attack: direct liquidation",
             "attack: flash loan",
             "attack: weak attestation",
-            "attack: close request"
+            "attack: close request",
+            "attack: partial release"
         ];
         for (uint256 i; i < names.length; ++i) {
             console.log(names[i], handler.calls(names[i]));

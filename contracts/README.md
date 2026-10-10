@@ -11,7 +11,7 @@ top of a real Morpho Blue market. The cross-module spec is [docs/INTERFACES.md](
 ```
 src/
   ZZEC.sol                     zZEC (8 decimals): non-transferable receipt, transient "expected transfer from Morpho" guard
-  ZecuredRegistry.sol          vaults, 3-of-5 signer attestations, burns + claims, payout confirmation
+  ZecuredRegistry.sol          vaults, 3-of-5 signer attestations, releases (full and partial), claims, payouts
   SettlementAdapter.sol        liquidation (D11 floor) and close from collateral (ERC-1271 CloseRequest)
   interfaces/                  IZZEC, IZecuredRegistry (+ VaultStatus, ClaimKind, ClaimStatus), ISettlementAdapter
   libraries/ZecuredEIP712.sol  EIP-712 domain names, type hashes, DepositAttestation / CloseRequest structs
@@ -22,7 +22,7 @@ script/
 test/
   unit/                        zZEC transfer guard (no fork); EIP-712 vectors checked against an independent implementation
   fork/                        Registry, Adapter, transfer guard, end-to-end flows, real Safe v1.4.1 ERC-1271
-  invariant/                   handler-based invariants (I1, I2, I3 Base side, I4/I5, I6, I7, I8, I9)
+  invariant/                   handler-based invariants (I1, I2, I3 Base side, I4/I5, I6, I7, I8, I9, D14)
   utils/                       fork fixture, OneTx (several pranked calls in one transaction), Safe helpers
   mocks/, spike/               earlier tests (Spike C, throwaway)
 abi/                           bare ABI arrays for the app and the off-chain services (committed)
@@ -39,7 +39,7 @@ DepositAttestation also with `cast`. The Rust signer and the app can test agains
 ```bash
 cd contracts
 forge build
-forge test --isolate          # 166 tests (125 for the production contracts), about 2 s once the fork is cached
+forge test --isolate          # 178 tests (137 for the production contracts), about 2 s once the fork is cached
 ```
 
 - **Use `--isolate`.** It makes every top-level call of a test its own transaction, so EIP-1153 transient storage is
@@ -128,13 +128,36 @@ the Adapter.
 Accounts authorize the Registry and the Adapter, which lets those contracts do anything on the account's behalf. They
 therefore call only:
 
-- Registry: `supplyCollateral` and `withdrawCollateral` (the latter only inside the account's own `requestRelease`, to
-  the Registry);
+- Registry: `supplyCollateral` and `withdrawCollateral` (the latter only inside the account's own `requestRelease` or
+  `requestPartialRelease`, to the Registry);
 - Adapter: `liquidate`, `repay` and `withdrawCollateral` (the latter only for a valid signed CloseRequest whose
   executor is the caller, I8).
 
 Neither has a code path that borrows or withdraws loan assets. The flow tests assert that Morpho's `borrow` and
 `withdraw` are never called after the account's own borrow.
+
+### Partial release (D14)
+
+`requestPartialRelease(vaultId, amount, destCommitment)` lets the account take part of its ZEC back without closing.
+The account itself must call it, `MIN_RELEASE` (100,000 zat) ≤ `amount` ≤ `outstanding − MIN_RELEASE`, and the
+commitment must be non-zero. The remainder floor keeps what stays in the vault payable on its own: a smaller rest could
+not cover its payout fee (`ReleaseRemainderTooSmall`). Releasing everything stays `requestRelease`.
+
+The Registry arms the zZEC expectation and calls `withdrawCollateral(amount)`, where Morpho applies its own LLTV health
+check. It then requires the position's LTV after the withdrawal to be at most `MAX_WITHDRAW_LTV_BPS` (5,000 = 50 %):
+
+- **Debt.** The check runs right after `withdrawCollateral`, which accrues interest itself before its health check. So
+  `market()` is already current for this block, and the debt is the account's borrow shares converted with Morpho's
+  share math, rounded up. This is exactly the amount Morpho's own health check used. There is no extra
+  `accrueInterest` call and no view-side estimate.
+- **Collateral value.** `remaining collateral × oracle price / 1e36`, rounded down.
+- **Rule.** `debt × 10,000 ≤ value × 5,000`, else `ReleaseLtvTooHigh(debt, value)`. A position without debt always
+  passes.
+
+The Registry then burns `amount`, lowers `outstanding` and creates a `Release` claim (`ReleaseRequested` event). The
+vault stays Active. A fuzz test checks that a release is accepted exactly when an independent computation (Morpho's
+expected debt, rounded up) gives an LTV of at most 50 %. Above LLTV, Morpho refuses with `"insufficient collateral"`;
+between 50 % and LLTV, the Registry refuses.
 
 ### Rounding and amounts
 
@@ -163,6 +186,7 @@ Neither has a code path that borrows or withdraws loan assets. The flow tests as
 | | |
 |---|---|
 | `requestRelease(bytes32,bytes32)` | `0xf55cc22b` |
+| `requestPartialRelease(bytes32,uint64,bytes32)` | `0x6990cc7d` |
 | `invalidateNonce(uint256)` | `0xb70e36f0` |
 | `attestDeposit((bytes32,address,uint64,bytes32),bytes[])` | `0x23f77140` |
 | `confirmPayout(bytes32,bytes32[],bytes[])` | `0x0722ba58` |
@@ -177,19 +201,19 @@ Neither has a code path that borrows or withdraws loan assets. The flow tests as
 
 ### Beyond docs/INTERFACES.md
 
-Every function, event and type string of INTERFACES.md § 2–3 is implemented exactly as specified. The additions are
-views (`THRESHOLD`, `morpho`, `zzec`, `adapter`, `marketId`, `depositTagUsed`, `claimCount`, `claimIdOf`,
-`hashDepositAttestation`, `hashPayoutConfirmation`, `hashCloseRequest`, `domainSeparator`, ERC-5267 `eip712Domain`,
-`MIN_SEIZE`, `MAX_MARGIN_BPS`, `pendingExpectation`) and custom errors. The rules below are stricter than the spec
-text:
+Every function, event and type string of INTERFACES.md § 2–3 is implemented exactly as specified, including D11
+(seized ≥ `MIN_SEIZE` or the whole remaining outstanding) and D14 (`requestPartialRelease`). The additions are views
+(`THRESHOLD`, `MIN_RELEASE`, `MAX_WITHDRAW_LTV_BPS`, `morpho`, `zzec`, `adapter`, `marketId`, `depositTagUsed`,
+`claimCount`, `claimIdOf`, `hashDepositAttestation`, `hashPayoutConfirmation`, `hashCloseRequest`, `domainSeparator`,
+ERC-5267 `eip712Domain`, `MIN_SEIZE`, `MAX_MARGIN_BPS`, `pendingExpectation`) and custom errors. The rules below are
+stricter than the spec text:
 
 - Zero vault ids, accounts, amounts, deposit tags and commitments are rejected.
 - An account can never get a second vault, even after its vault is closed (I4).
 - `closeWithCollateral` requires `req.vaultId` to be the account's vault, an active vault and existing debt.
 
 Where the spec is silent: `invalidateNonce` is idempotent (it never reverts, also for a nonce that is already used or
-invalidated, and emits `NonceInvalidated` on every call). The D11 rule follows docs/DECISIONS.md (2026-10-11): seized ≥
-`MIN_SEIZE` or the whole remaining outstanding, with no floor on the remainder.
+invalidated, and emits `NonceInvalidated` on every call).
 
 ## ABIs
 

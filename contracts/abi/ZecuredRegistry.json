@@ -47,6 +47,32 @@
   },
   {
     "type": "function",
+    "name": "MAX_WITHDRAW_LTV_BPS",
+    "inputs": [],
+    "outputs": [
+      {
+        "name": "",
+        "type": "uint256",
+        "internalType": "uint256"
+      }
+    ],
+    "stateMutability": "view"
+  },
+  {
+    "type": "function",
+    "name": "MIN_RELEASE",
+    "inputs": [],
+    "outputs": [
+      {
+        "name": "",
+        "type": "uint64",
+        "internalType": "uint64"
+      }
+    ],
+    "stateMutability": "view"
+  },
+  {
+    "type": "function",
     "name": "SIGNER_COUNT",
     "inputs": [],
     "outputs": [
@@ -510,6 +536,35 @@
   },
   {
     "type": "function",
+    "name": "requestPartialRelease",
+    "inputs": [
+      {
+        "name": "vaultId",
+        "type": "bytes32",
+        "internalType": "bytes32"
+      },
+      {
+        "name": "amount",
+        "type": "uint64",
+        "internalType": "uint64"
+      },
+      {
+        "name": "destCommitment",
+        "type": "bytes32",
+        "internalType": "bytes32"
+      }
+    ],
+    "outputs": [
+      {
+        "name": "claimId",
+        "type": "bytes32",
+        "internalType": "bytes32"
+      }
+    ],
+    "stateMutability": "nonpayable"
+  },
+  {
+    "type": "function",
     "name": "requestRelease",
     "inputs": [
       {
@@ -956,6 +1011,70 @@
         "name": "caller",
         "type": "address",
         "internalType": "address"
+      }
+    ]
+  },
+  {
+    "type": "error",
+    "name": "ReleaseAmountNotPartial",
+    "inputs": [
+      {
+        "name": "amount",
+        "type": "uint64",
+        "internalType": "uint64"
+      },
+      {
+        "name": "outstanding",
+        "type": "uint64",
+        "internalType": "uint64"
+      }
+    ]
+  },
+  {
+    "type": "error",
+    "name": "ReleaseAmountTooSmall",
+    "inputs": [
+      {
+        "name": "amount",
+        "type": "uint64",
+        "internalType": "uint64"
+      },
+      {
+        "name": "minimum",
+        "type": "uint64",
+        "internalType": "uint64"
+      }
+    ]
+  },
+  {
+    "type": "error",
+    "name": "ReleaseLtvTooHigh",
+    "inputs": [
+      {
+        "name": "debt",
+        "type": "uint256",
+        "internalType": "uint256"
+      },
+      {
+        "name": "collateralValue",
+        "type": "uint256",
+        "internalType": "uint256"
+      }
+    ]
+  },
+  {
+    "type": "error",
+    "name": "ReleaseRemainderTooSmall",
+    "inputs": [
+      {
+        "name": "remaining",
+        "type": "uint64",
+        "internalType": "uint64"
+      },
+      {
+        "name": "minimum",
+        "type": "uint64",
+        "internalType": "uint64"
       }
     ]
   },

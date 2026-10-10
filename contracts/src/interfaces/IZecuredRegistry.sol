@@ -79,6 +79,15 @@ interface IZecuredRegistry {
     error OnlyAdapter(address caller);
     /// @notice `requestRelease` while the account still has Morpho debt.
     error DebtOutstanding(bytes32 vaultId);
+    /// @notice D14: a partial release must be at least `MIN_RELEASE` zatoshi.
+    error ReleaseAmountTooSmall(uint64 amount, uint64 minimum);
+    /// @notice D14: a partial release must be smaller than the outstanding (use `requestRelease` for all of it).
+    error ReleaseAmountNotPartial(uint64 amount, uint64 outstanding);
+    /// @notice D14: a partial release must leave at least `MIN_RELEASE` zatoshi in the vault.
+    error ReleaseRemainderTooSmall(uint64 remaining, uint64 minimum);
+    /// @notice D14: after a partial release the position's LTV would exceed `MAX_WITHDRAW_LTV_BPS`
+    ///         (`debt` in loan units rounded up, `collateralValue` in loan units rounded down).
+    error ReleaseLtvTooHigh(uint256 debt, uint256 collateralValue);
     /// @notice The account's Morpho collateral differs from the vault's outstanding (should be unreachable).
     error CollateralMismatch(bytes32 vaultId, uint256 morphoCollateral, uint64 outstanding);
     /// @notice Morpho transferred a different zZEC amount than requested (should be unreachable).
@@ -102,6 +111,13 @@ interface IZecuredRegistry {
     /// @notice Vault account only. Withdraws the whole outstanding from Morpho to the Registry (reverts while debt
     ///         remains), burns it, closes the vault and creates a Release claim.
     function requestRelease(bytes32 vaultId, bytes32 destCommitment) external returns (bytes32 claimId);
+
+    /// @notice D14. Vault account only. Withdraws `amount` (MIN_RELEASE <= amount <= outstanding - MIN_RELEASE) from
+    ///         Morpho to the Registry, requires the position's LTV after the withdrawal to be <= MAX_WITHDRAW_LTV_BPS
+    ///         (besides Morpho's own LLTV check), burns it and creates a Release claim. The vault stays Active.
+    function requestPartialRelease(bytes32 vaultId, uint64 amount, bytes32 destCommitment)
+        external
+        returns (bytes32 claimId);
 
     /// @notice SettlementAdapter only. Burns `seized` zZEC held by the Adapter and creates a Liquidation claim. The
     ///         vault stays Active while outstanding > 0.
@@ -138,6 +154,10 @@ interface IZecuredRegistry {
 
     /// @notice Minimum number of distinct signer signatures (3).
     function THRESHOLD() external view returns (uint256);
+    /// @notice D14: smallest partial release, in zatoshi (100,000 = 0.001 ZEC).
+    function MIN_RELEASE() external view returns (uint64);
+    /// @notice D14: highest LTV a partial release may leave, in basis points (5,000 = 50 %).
+    function MAX_WITHDRAW_LTV_BPS() external view returns (uint256);
     function morpho() external view returns (IMorpho);
     function zzec() external view returns (IZZEC);
     function adapter() external view returns (address);
