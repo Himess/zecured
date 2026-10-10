@@ -73,6 +73,12 @@ pub struct CoordVault {
     pub inflight: Option<Inflight>,
     #[serde(default)]
     pub refunds: Vec<Refund>,
+    /// Extra confirmations before attesting (D15), drawn once.
+    #[serde(default)]
+    pub attest_delay: Option<u32>,
+    /// `ViewKeyRequest` nonces already used.
+    #[serde(default)]
+    pub used_view_nonces: Vec<u64>,
 }
 
 pub struct Store {

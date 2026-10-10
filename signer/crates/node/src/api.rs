@@ -5,8 +5,10 @@ use std::sync::Arc;
 use alloy::primitives::B256;
 use axum::{
     Json, Router,
-    extract::{Path, State},
+    body::{Body, to_bytes},
+    extract::{Path, Request, State},
     http::StatusCode,
+    middleware::{self, Next},
     response::{IntoResponse, Response},
     routing::{get, post},
 };
@@ -133,6 +135,38 @@ async fn set_mode(State(n): State<Arc<Node>>, Json(b): Json<ModeIn>) -> ApiResul
     Ok(Json(json!({ "mode": mode })))
 }
 
+/// Largest request body a node accepts (PCZTs are a few hundred kB at most).
+const MAX_BODY_BYTES: usize = 8 * 1024 * 1024;
+
+/// D16: every request except health and the demo mode switch must be signed by the
+/// configured coordinator.
+async fn authenticate(State(n): State<Arc<Node>>, req: Request, next: Next) -> Response {
+    let Some(coordinator) = n.cfg.coordinator else {
+        return next.run(req).await;
+    };
+    let path = req.uri().path().to_owned();
+    if path == "/v1/health" || path == "/v1/admin/mode" {
+        return next.run(req).await;
+    }
+    let method = req.method().as_str().to_owned();
+    let (ts, sig) = {
+        let headers = req.headers();
+        let get = |name: &str| headers.get(name).and_then(|v| v.to_str().ok()).map(str::to_owned);
+        (get(crate::auth::TS_HEADER), get(crate::auth::SIG_HEADER))
+    };
+    let (Some(ts), Some(sig)) = (ts, sig) else {
+        return ApiError(StatusCode::UNAUTHORIZED, "unsigned request".into()).into_response();
+    };
+    let (parts, body) = req.into_parts();
+    let Ok(bytes) = to_bytes(body, MAX_BODY_BYTES).await else {
+        return ApiError(StatusCode::PAYLOAD_TOO_LARGE, "body too large".into()).into_response();
+    };
+    if let Err(e) = crate::auth::verify(coordinator, &method, &path, &bytes, &ts, &sig, crate::now()) {
+        return ApiError(StatusCode::UNAUTHORIZED, e.to_string()).into_response();
+    }
+    next.run(Request::from_parts(parts, Body::from(bytes))).await
+}
+
 pub fn router(node: Arc<Node>) -> Router {
     Router::new()
         .route("/v1/health", get(health))
@@ -148,5 +182,7 @@ pub fn router(node: Arc<Node>) -> Router {
         .route("/v1/sign/share", post(share))
         .route("/v1/sync", post(sync))
         .route("/v1/admin/mode", post(set_mode))
+        .layer(axum::extract::DefaultBodyLimit::max(MAX_BODY_BYTES))
+        .route_layer(middleware::from_fn_with_state(node.clone(), authenticate))
         .with_state(node)
 }

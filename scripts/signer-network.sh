@@ -83,6 +83,10 @@ cfg = {
     "vault_expiry_blocks": 288,
     "denominations": [1000000, 5000000],
     "nodes": [json.load(open(p)) for p in infos],
+    # D16: nodes only accept requests signed by the coordinator.
+    "coordinator": os.environ.get("COORDINATOR_ADDRESS") or None,
+    # D15: random extra confirmations before attesting (0 for the demo).
+    "attest_delay_max_blocks": int(os.environ.get("ATTEST_DELAY_MAX_BLOCKS", "0")),
 }
 json.dump(cfg, open(out, "w"), indent=2)
 print(f"wrote {out} (registry {registry})")

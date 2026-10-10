@@ -14,7 +14,7 @@ use zecured_base::events::{self, RegistryEvent, VaultEvent};
 use zecured_policy::{
     classify::{self, Classification, DepositNote, DepositRules},
     derive::note_id,
-    ledger::{ClaimKind, ClaimState},
+    ledger::ClaimState,
 };
 use zecured_zcash_ops::{
     keys::VaultSecret,
@@ -267,10 +267,8 @@ fn apply(store: &mut Store, ev: VaultEvent) -> Result<bool> {
                 if v.claims.iter().any(|x| x.id == c.id) {
                     continue;
                 }
-                v.outstanding = match c.kind {
-                    ClaimKind::Release => 0,
-                    _ => v.outstanding.checked_sub(c.amount).context("claim exceeds outstanding")?,
-                };
+                // Every claim burns exactly its amount (a full release burns all of it).
+                v.outstanding = v.outstanding.checked_sub(c.amount).context("claim exceeds outstanding")?;
                 v.claims.push(c);
             }
         }

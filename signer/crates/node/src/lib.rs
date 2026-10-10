@@ -5,6 +5,7 @@
 //! payout plan and verifies the PCZT against it before contributing a signature share.
 
 pub mod api;
+pub mod auth;
 pub mod chain;
 pub mod config;
 pub mod dkg;

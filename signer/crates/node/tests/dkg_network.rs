@@ -71,6 +71,8 @@ fn setup() -> (NetworkConfig, Vec<TestNode>) {
         vault_expiry_blocks: 288,
         denominations: vec![1_000_000, 5_000_000],
         nodes: infos,
+        coordinator: None,
+        attest_delay_max_blocks: 0,
     };
     (cfg, nodes)
 }

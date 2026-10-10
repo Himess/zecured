@@ -130,6 +130,8 @@ async fn get_vault(State(c): App, Path(id): Path<B256>) -> ApiResult {
         "expiryHeight": v.expiry_height,
         "outstanding": v.outstanding.to_string(),
         "payoutInFlight": v.inflight,
+        "birthdayHeight": v.birthday_height,
+        "tipHeight": v.tip_height,
         "nonConforming": v.non_conforming.iter().map(|n| json!({ "noteId": n.note_id, "amount": n.amount.to_string() })).collect::<Vec<_>>(),
         "claims": v.claims.iter().map(|c| json!({ "claimId": c.claim_id, "kind": c.kind, "amount": c.amount.to_string(), "paid": c.paid })).collect::<Vec<_>>(),
     })))
@@ -343,8 +345,34 @@ async fn admin_set_oracle(
     Ok(Json(json!({ "priceUsdCents": b.price_usd_cents.to_string(), "txHash": receipt.transaction_hash })))
 }
 
+#[derive(Clone)]
+struct PublicConfig(Arc<serde_json::Value>);
+
+/// Public deployment parameters, so the app and the signers cannot drift apart.
+async fn public_config(axum::Extension(c): axum::Extension<PublicConfig>) -> Json<serde_json::Value> {
+    Json((*c.0).clone())
+}
+
 async fn health() -> Json<serde_json::Value> {
     Json(json!({ "ok": true }))
+}
+
+/// `GET /config`: chain, contract addresses, market and signer-network parameters.
+fn public_config_json(cfg: &NetworkConfig, deployments: &std::path::Path) -> serde_json::Value {
+    let dep: serde_json::Value = std::fs::read(deployments)
+        .ok()
+        .and_then(|raw| serde_json::from_slice(&raw).ok())
+        .unwrap_or(serde_json::Value::Null);
+    json!({
+        "chainId": cfg.chain_id,
+        "registry": cfg.registry,
+        "adapter": cfg.adapter,
+        "contracts": dep.get("contracts").cloned().unwrap_or(serde_json::Value::Null),
+        "market": dep.get("market").cloned().unwrap_or(serde_json::Value::Null),
+        "denominations": cfg.denominations.iter().map(|d| d.to_string()).collect::<Vec<_>>(),
+        "confirmations": cfg.confirmations,
+        "vaultExpiryBlocks": cfg.vault_expiry_blocks,
+    })
 }
 
 /// Reads the allowlist parameters from the deployment file written by the deploy script.
@@ -404,12 +432,14 @@ async fn main() -> Result<()> {
         .route("/vaults/{id}/refund", post(refund))
         .route("/vaults/{id}/viewing-key", post(viewing_key))
         .route("/recipients", post(recipients))
+        .route("/config", get(public_config))
         .route("/quotes/close/{id}", get(close_quote))
         .route("/closes", post(close_submit))
         .route("/admin/nodes", get(admin_nodes))
         .route("/admin/nodes/{index}/mode", post(admin_mode))
         .route("/admin/vaults/{id}/drain", post(admin_drain))
         .route("/admin/oracle", get(admin_get_oracle).post(admin_set_oracle))
+        .layer(axum::Extension(PublicConfig(Arc::new(public_config_json(&coordinator.cfg, &cli.deployments)))))
         .layer(axum::Extension(AdminToken(Arc::new(cli.admin_token.clone()))))
         .layer(axum::Extension(Oracle {
             rpc: coordinator.cfg.base_rpc_url.clone(),

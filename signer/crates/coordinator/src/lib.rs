@@ -97,6 +97,9 @@ pub struct VaultView {
     pub claims: Vec<ClaimView>,
     pub non_conforming: Vec<NoteView>,
     pub inflight: bool,
+    pub birthday_height: u32,
+    /// Zcash tip at the last coordinator pass (0 before the first pass).
+    pub tip_height: u32,
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
@@ -115,6 +118,7 @@ pub struct NoteView {
 
 /// One signer's reaction to the demo attack.
 #[derive(Clone, Debug, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
 pub struct DrainVote {
     pub index: u16,
     pub signed: bool,
@@ -123,6 +127,7 @@ pub struct DrainVote {
 
 /// Result of the threshold demo: an attempt to sweep a vault to an arbitrary address.
 #[derive(Clone, Debug, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
 pub struct DrainReport {
     pub vault_id: B256,
     pub amount: u64,
@@ -138,6 +143,8 @@ pub struct Coordinator {
     zcash: Mutex<ZcashView>,
     gas: PrivateKeySigner,
     pk: OnceLock<Arc<ProvingKey>>,
+    /// Zcash tip seen by the last coordinator pass (for the app's countdowns).
+    last_tip: std::sync::atomic::AtomicU32,
 }
 
 /// `zcash:` payment URI for `amount` zatoshis (ZIP 321).
@@ -182,12 +189,14 @@ fn at_least<T>(answers: Vec<Answer<T>>, need: usize, what: &str) -> Result<Vec<(
 
 impl Coordinator {
     pub fn new(cfg: NetworkConfig, data_dir: &Path, gas_key: &str) -> Result<Self> {
+        let gas: PrivateKeySigner = gas_key.parse().context("coordinator gas key")?;
         Ok(Self {
-            nodes: Nodes::new(&cfg)?,
+            nodes: Nodes::new(&cfg, Some(gas.clone()))?,
             zcash: Mutex::new(ZcashView::new(&cfg.lightwalletd_url)),
             store: Mutex::new(Store::open(data_dir)?),
-            gas: gas_key.parse().context("coordinator gas key")?,
+            gas,
             pk: OnceLock::new(),
+            last_tip: std::sync::atomic::AtomicU32::new(0),
             cfg,
         })
     }
@@ -280,6 +289,8 @@ impl Coordinator {
             claims: vec![],
             inflight: None,
             refunds: vec![],
+            attest_delay: None,
+            used_view_nonces: vec![],
         };
         let resp = OpenVaultResponse {
             vault_id: vault.vault_id,
@@ -360,8 +371,8 @@ impl Coordinator {
 
     /// The vault's viewing key, for the owner only.
     pub async fn viewing_key(&self, vault_id: B256, nonce: u64, deadline: u64, signature: &[u8]) -> Result<String> {
-        let store = self.store.lock().await;
-        let v = store.vaults.get(&vault_id).context("unknown vault")?;
+        let mut store = self.store.lock().await;
+        let mut v = store.vaults.get(&vault_id).context("unknown vault")?.clone();
         let msg = ViewKeyRequest {
             vaultId: vault_id,
             nonce,
@@ -370,7 +381,11 @@ impl Coordinator {
         let signer = recover_typed(&registry_domain(self.cfg.chain_id, self.cfg.registry), &msg, signature)?;
         ensure!(signer == v.owner, "not signed by the vault owner");
         ensure!(deadline >= now(), "request expired");
-        Ok(v.ufvk.clone())
+        ensure!(!v.used_view_nonces.contains(&nonce), "nonce already used");
+        v.used_view_nonces.push(nonce);
+        let ufvk = v.ufvk.clone();
+        store.save(v)?;
+        Ok(ufvk)
     }
 
     pub async fn view(&self, vault_id: B256) -> Result<VaultView> {
@@ -425,6 +440,8 @@ impl Coordinator {
                 .collect(),
             non_conforming,
             inflight: v.inflight.is_some(),
+            birthday_height: v.birthday,
+            tip_height: self.last_tip.load(std::sync::atomic::Ordering::Relaxed),
         })
     }
 
@@ -536,10 +553,8 @@ impl Coordinator {
                             if v.claims.iter().any(|x| x.id == c.id) {
                                 continue;
                             }
-                            v.outstanding = match c.kind {
-                                ledger::ClaimKind::Release => 0,
-                                _ => v.outstanding.saturating_sub(c.amount),
-                            };
+                            // Every claim burns exactly its amount (D14: releases may be partial).
+                            v.outstanding = v.outstanding.saturating_sub(c.amount);
                             v.claims.push(c);
                         }
                     }
@@ -585,6 +600,7 @@ impl Coordinator {
             return Ok(());
         }
         let notes = self.notes(&mut v).await?;
+        self.last_tip.fetch_max(notes.tip, std::sync::atomic::Ordering::Relaxed);
         self.store.lock().await.save(v.clone())?;
 
         if let Some(inflight) = v.inflight.clone() {
@@ -592,7 +608,26 @@ impl Coordinator {
         }
         match v.status {
             VaultStatus::AwaitingDeposit => {
-                if notes.conforming.is_some() {
+                if let Some(conforming) = &notes.conforming {
+                    // D15: wait a random number of extra confirmations, drawn once per vault.
+                    let delay = match v.attest_delay {
+                        Some(d) => d,
+                        None => {
+                            let max = self.cfg.attest_delay_max_blocks;
+                            let d = if max == 0 {
+                                0
+                            } else {
+                                rand_core_06::RngCore::next_u32(&mut rand_core_06::OsRng) % (max + 1)
+                            };
+                            v.attest_delay = Some(d);
+                            self.store.lock().await.save(v.clone())?;
+                            d
+                        }
+                    };
+                    let confs = classify::confirmations(conforming.position.height, notes.tip);
+                    if confs < self.cfg.confirmations + delay {
+                        return Ok(());
+                    }
                     self.attest(v.clone()).await?;
                 } else if notes.tip > v.expiry_height + self.cfg.confirmations {
                     v.status = VaultStatus::Expired;

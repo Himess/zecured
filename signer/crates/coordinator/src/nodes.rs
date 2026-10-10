@@ -14,10 +14,12 @@ pub type Answer<T> = (u16, Result<T>);
 pub struct Nodes {
     http: reqwest::Client,
     nodes: Vec<(u16, String)>,
+    /// Key that signs every request (D16).
+    key: Option<alloy::signers::local::PrivateKeySigner>,
 }
 
 impl Nodes {
-    pub fn new(cfg: &NetworkConfig) -> Result<Self> {
+    pub fn new(cfg: &NetworkConfig, key: Option<alloy::signers::local::PrivateKeySigner>) -> Result<Self> {
         let http = reqwest::Client::builder()
             .timeout(Duration::from_secs(120))
             .build()
@@ -25,6 +27,7 @@ impl Nodes {
         Ok(Self {
             http,
             nodes: cfg.nodes.iter().map(|n| (n.index, n.url.trim_end_matches('/').to_owned())).collect(),
+            key,
         })
     }
 
@@ -39,10 +42,19 @@ impl Nodes {
             .iter()
             .find(|(i, _)| *i == index)
             .with_context(|| format!("unknown node {index}"))?;
-        let resp = self
+        let bytes = serde_json::to_vec(body)?;
+        let mut req = self
             .http
             .post(format!("{base}{path}"))
-            .json(body)
+            .header("content-type", "application/json");
+        if let Some(key) = &self.key {
+            let (ts, sig) = zecured_node::auth::sign(key, "POST", path, &bytes, zecured_node::now())?;
+            req = req
+                .header(zecured_node::auth::TS_HEADER, ts)
+                .header(zecured_node::auth::SIG_HEADER, sig);
+        }
+        let resp = req
+            .body(bytes)
             .send()
             .await
             .with_context(|| format!("node {index} unreachable"))?;

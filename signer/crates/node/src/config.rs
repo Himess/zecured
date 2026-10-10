@@ -48,6 +48,13 @@ pub struct NetworkConfig {
     /// Accepted collateral denominations, in zatoshis.
     pub denominations: Vec<u64>,
     pub nodes: Vec<NodeInfo>,
+    /// Address whose signature every coordinator request must carry (D16). `None` disables
+    /// the check (local development only).
+    #[serde(default)]
+    pub coordinator: Option<Address>,
+    /// Upper bound of the random extra confirmations before a deposit is attested (D15).
+    #[serde(default)]
+    pub attest_delay_max_blocks: u32,
 }
 
 impl NetworkConfig {

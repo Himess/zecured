@@ -17,6 +17,8 @@ use serde::Deserialize;
 pub const SAFE_PROXY_FACTORY: Address = address!("4e1DCf7AD4e460CfD30791CCC4F9c8a4f820ec67");
 pub const SAFE_SINGLETON: Address = address!("41675C099F32341bf84BFc5382aF534df5C7461a");
 pub const MULTI_SEND_CALL_ONLY: Address = address!("9641d764fc13c8B624c04430C7356C1C7C8102e2");
+pub const SAFE_MODULE_SETUP: Address = address!("2dd68b007B46fBe91B9A7c3EDa5A7a1063cB5b47");
+pub const SAFE_4337_MODULE: Address = address!("75cf11467937ce3F2f357CE24ffc3DBF8fD5c226");
 
 const OPERATION_CALL: u8 = 0;
 const OPERATION_DELEGATECALL: u8 = 1;
@@ -34,6 +36,8 @@ sol! {
     function executeUserOpWithErrorString(address to, uint256 value, bytes data, uint8 operation);
     function multiSend(bytes transactions);
     function createProxyWithNonce(address singleton, bytes initializer, uint256 saltNonce);
+    function setup(address[] owners, uint256 threshold, address to, bytes data, address fallbackHandler, address paymentToken, uint256 payment, address paymentReceiver);
+    function enableModules(address[] modules);
 
     function setAuthorization(address authorized, bool newIsAuthorized);
     function borrow(MarketParams marketParams, uint256 assets, uint256 shares, address onBehalf, address receiver);
@@ -41,6 +45,7 @@ sol! {
     function approve(address spender, uint256 amount);
     function transfer(address to, uint256 amount);
     function requestRelease(bytes32 vaultId, bytes32 destCommitment);
+    function requestPartialRelease(bytes32 vaultId, uint64 amount, bytes32 destCommitment);
     function invalidateNonce(uint256 nonce);
 }
 
@@ -86,6 +91,18 @@ impl Allowlist {
             let data = op.factory_data.as_ref().map(|d| d.as_ref()).unwrap_or_default();
             let call = createProxyWithNonceCall::abi_decode(data)?;
             ensure!(call.singleton == SAFE_SINGLETON, "unexpected Safe singleton");
+            // The exact account the app creates: one owner, threshold 1, the 4337 module
+            // enabled through SafeModuleSetup and set as fallback handler, no payment.
+            let s = setupCall::abi_decode(&call.initializer)?;
+            ensure!(s.owners.len() == 1 && s.threshold == U256::from(1u8), "unexpected Safe owners");
+            ensure!(s.to == SAFE_MODULE_SETUP, "unexpected Safe setup target");
+            let modules = enableModulesCall::abi_decode(&s.data)?;
+            ensure!(modules.modules == [SAFE_4337_MODULE], "unexpected Safe modules");
+            ensure!(s.fallbackHandler == SAFE_4337_MODULE, "unexpected fallback handler");
+            ensure!(
+                s.paymentToken == Address::ZERO && s.payment.is_zero() && s.paymentReceiver == Address::ZERO,
+                "Safe setup payment not allowed"
+            );
         }
         let data = op.call_data.as_ref();
         let (to, value, inner, operation) = if let Ok(c) = executeUserOpCall::abi_decode(data) {
@@ -146,6 +163,9 @@ impl Allowlist {
             }
         } else if to == self.registry && selector == requestReleaseCall::SELECTOR {
             requestReleaseCall::abi_decode(data)?;
+            return Ok(());
+        } else if to == self.registry && selector == requestPartialReleaseCall::SELECTOR {
+            requestPartialReleaseCall::abi_decode(data)?;
             return Ok(());
         } else if to == self.adapter && selector == invalidateNonceCall::SELECTOR {
             invalidateNonceCall::abi_decode(data)?;
@@ -270,6 +290,34 @@ mod tests {
             (l.registry, requestReleaseCall { vaultId: B256::repeat_byte(1), destCommitment: B256::repeat_byte(2) }.abi_encode()),
         ];
         l.check(&op(me, batch(&calls))).unwrap();
+    }
+
+    fn deployment(owner: Address, module: Address) -> (Option<Address>, Option<Bytes>) {
+        let init = setupCall {
+            owners: vec![owner],
+            threshold: U256::from(1u8),
+            to: SAFE_MODULE_SETUP,
+            data: enableModulesCall { modules: vec![module] }.abi_encode().into(),
+            fallbackHandler: module,
+            paymentToken: Address::ZERO,
+            payment: U256::ZERO,
+            paymentReceiver: Address::ZERO,
+        }
+        .abi_encode();
+        let data = createProxyWithNonceCall { singleton: SAFE_SINGLETON, initializer: init.into(), saltNonce: U256::ZERO }.abi_encode();
+        (Some(SAFE_PROXY_FACTORY), Some(data.into()))
+    }
+
+    #[test]
+    fn only_the_apps_safe_configuration_is_deployed() {
+        let l = list();
+        let me = Address::repeat_byte(0x99);
+        let call = single(l.registry, requestPartialReleaseCall { vaultId: B256::repeat_byte(1), amount: 200_000, destCommitment: B256::repeat_byte(2) }.abi_encode());
+        let mut op = op(me, call);
+        (op.factory, op.factory_data) = deployment(Address::repeat_byte(0x01), SAFE_4337_MODULE);
+        l.check(&op).unwrap();
+        (op.factory, op.factory_data) = deployment(Address::repeat_byte(0x01), Address::repeat_byte(0x02));
+        assert!(l.check(&op).is_err(), "a different module must be refused");
     }
 
     #[test]
