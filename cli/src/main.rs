@@ -30,6 +30,8 @@ use zecured_zcash_ops::{
     spend::{self, OutputPrivacy, Payment},
 };
 
+mod base_test;
+
 const NETWORK: Network = Network::TestNetwork;
 const ZATS_PER_ZEC: f64 = 100_000_000.0;
 /// Owner requests expire after this many seconds.
@@ -112,6 +114,35 @@ enum LoanCmd {
     },
     /// Fetch the vault's viewing key (UFVK) to verify it independently.
     ViewingKey { vault: B256 },
+    /// TEST ONLY (the app uses a gasless smart account): borrow USDC with the owner EOA as
+    /// the account, after authorizing the Registry and the Adapter on Morpho.
+    Borrow {
+        vault: B256,
+        /// USDC amount (6 decimals), e.g. 1.5
+        #[arg(long)]
+        usdc: f64,
+        #[arg(long, env = "BASE_SEPOLIA_RPC_URL", default_value = "https://sepolia.base.org")]
+        rpc: String,
+    },
+    /// TEST ONLY: repay all debt with the owner EOA, pre-validate the destination and call
+    /// requestRelease (P2).
+    RepayRelease {
+        vault: B256,
+        #[arg(long)]
+        to: Option<String>,
+        #[arg(long, env = "BASE_SEPOLIA_RPC_URL", default_value = "https://sepolia.base.org")]
+        rpc: String,
+    },
+    /// Close from collateral (P6): take the market maker's quote, sign the CloseRequest and
+    /// hand it to the market maker through the backend.
+    Close {
+        vault: B256,
+        #[arg(long)]
+        to: Option<String>,
+        /// Extra slippage tolerance on the quoted user amount, in basis points.
+        #[arg(long, default_value_t = 200)]
+        slippage_bps: u64,
+    },
 }
 
 #[derive(Serialize, Deserialize)]
@@ -374,28 +405,8 @@ async fn loan(wallet: &Path, lwd_url: &str, backend: &str, cmd: LoanCmd) -> Resu
             println!("broadcast {}", send(&w, lwd_url, &l.address, amount).await?);
         }
         LoanCmd::Destination { vault, to } => {
-            let (mut l, owner, to) = owner_ctx(wallet, &vault, to)?;
-            let salt = fresh_salt();
-            let receiver = ironwood_receiver(&NETWORK, &to)?.to_raw_address_bytes();
-            let nonce = l.next_nonce;
-            let deadline = now() + REQUEST_TTL_SECS;
-            let msg = Destination {
-                vaultId: vault,
-                commitment: B256::from(commitment(&salt, &receiver)),
-                nonce,
-                deadline,
-            };
-            let sig = sign_typed(&owner, &registry_domain(l.chain_id, l.registry), &msg)?;
-            let r = post(
-                backend,
-                &format!("/vaults/{vault}/destination"),
-                json!({ "receiver": to, "salt": hex::encode(salt), "nonce": nonce.to_string(),
-                        "deadline": deadline.to_string(), "signature": sig }),
-            )
-            .await?;
-            l.next_nonce += 1;
-            write_json(&loan_path(wallet, &vault), &l)?;
-            println!("{}", serde_json::to_string_pretty(&r)?);
+            let c = destination(wallet, backend, &vault, to).await?;
+            println!("{}", json!({ "commitment": c }));
         }
         LoanCmd::Refund { vault, note, to } => {
             let (mut l, owner, to) = owner_ctx(wallet, &vault, to)?;
@@ -442,8 +453,77 @@ async fn loan(wallet: &Path, lwd_url: &str, backend: &str, cmd: LoanCmd) -> Resu
             write_json(&loan_path(wallet, &vault), &l)?;
             println!("{}", r["ufvk"].as_str().unwrap_or_default());
         }
+        LoanCmd::Borrow { vault, usdc, rpc } => base_test::borrow(wallet, &vault, usdc, &rpc).await?,
+        LoanCmd::RepayRelease { vault, to, rpc } => {
+            let commitment = destination(wallet, backend, &vault, to).await?;
+            base_test::repay_release(wallet, &vault, commitment, &rpc).await?;
+        }
+        LoanCmd::Close { vault, to, slippage_bps } => {
+            let (l, owner, to) = owner_ctx(wallet, &vault, to)?;
+            let quote: serde_json::Value = reqwest::get(format!("{}/quotes/close/{vault}", backend.trim_end_matches('/')))
+                .await?
+                .json()
+                .await?;
+            ensure!(quote.get("error").is_none(), "quote failed: {}", quote["error"]);
+            let user_amount: u64 = quote["userAmount"].as_str().context("quote")?.parse()?;
+            let min_user = user_amount.saturating_mul(10_000 - slippage_bps) / 10_000;
+            let commitment = destination(wallet, backend, &vault, Some(to)).await?;
+            let deployments = base_test::Deployment::load()?;
+            let mut nonce_bytes = [0u8; 16];
+            OsRng.fill_bytes(&mut nonce_bytes);
+            let req = zecured_base::CloseRequest {
+                vaultId: vault,
+                account: l.account,
+                executor: quote["executor"].as_str().context("quote")?.parse()?,
+                marginBps: u16::try_from(quote["marginBps"].as_u64().context("quote")?)?,
+                minUserAmount: min_user,
+                userCommitment: commitment,
+                nonce: alloy::primitives::U256::from(u128::from_be_bytes(nonce_bytes)),
+                deadline: now() + REQUEST_TTL_SECS,
+            };
+            let sig = sign_typed(&owner, &zecured_base::adapter_domain(l.chain_id, deployments.adapter), &req)?;
+            let r = post(
+                backend,
+                "/closes",
+                json!({ "request": {
+                            "vaultId": req.vaultId, "account": req.account, "executor": req.executor,
+                            "marginBps": req.marginBps, "minUserAmount": req.minUserAmount.to_string(),
+                            "userCommitment": req.userCommitment, "nonce": req.nonce.to_string(),
+                            "deadline": req.deadline.to_string() },
+                        "signature": sig }),
+            )
+            .await?;
+            println!("{}", serde_json::to_string_pretty(&r)?);
+        }
     }
     Ok(())
+}
+
+/// Pre-validates a destination with the signers; returns its commitment.
+async fn destination(wallet: &Path, backend: &str, vault: &B256, to: Option<String>) -> Result<B256> {
+    let (mut l, owner, to) = owner_ctx(wallet, vault, to)?;
+    let salt = fresh_salt();
+    let receiver = ironwood_receiver(&NETWORK, &to)?.to_raw_address_bytes();
+    let nonce = l.next_nonce;
+    let deadline = now() + REQUEST_TTL_SECS;
+    let c = B256::from(commitment(&salt, &receiver));
+    let msg = Destination {
+        vaultId: *vault,
+        commitment: c,
+        nonce,
+        deadline,
+    };
+    let sig = sign_typed(&owner, &registry_domain(l.chain_id, l.registry), &msg)?;
+    post(
+        backend,
+        &format!("/vaults/{vault}/destination"),
+        json!({ "receiver": to, "salt": hex::encode(salt), "nonce": nonce.to_string(),
+                "deadline": deadline.to_string(), "signature": sig }),
+    )
+    .await?;
+    l.next_nonce += 1;
+    write_json(&loan_path(wallet, vault), &l)?;
+    Ok(c)
 }
 
 /// Loan file, owner key and destination (defaults to the wallet's own address).
