@@ -133,7 +133,8 @@ async fn liquidation_pass<P: Provider>(
             warn!("liquidation would revert: {e}");
             continue;
         }
-        let receipt = call.send().await?.get_receipt().await?;
+        let gas = zecured_base::gas_with_headroom(call.estimate_gas().await?);
+        let receipt = call.gas(gas).send().await?.get_receipt().await?;
         ensure!(receipt.status(), "liquidation reverted");
         info!(tx = %receipt.transaction_hash, "liquidated");
         if pos.collateral > 0 {
@@ -283,7 +284,8 @@ async fn close(State(mm): State<Arc<Mm>>, Json(b): Json<CloseBody>) -> Result<Js
     let adapter = ISettlementAdapter::new(mm.d.adapter, &p);
     let call = adapter.closeWithCollateral(req, b.signature.clone(), mm_commitment);
     call.call().await.map_err(|e| anyhow!("close would revert: {e}"))?;
-    let receipt = call.send().await.map_err(anyhow::Error::from)?.get_receipt().await.map_err(anyhow::Error::from)?;
+    let gas = zecured_base::gas_with_headroom(call.estimate_gas().await.map_err(anyhow::Error::from)?);
+    let receipt = call.gas(gas).send().await.map_err(anyhow::Error::from)?.get_receipt().await.map_err(anyhow::Error::from)?;
     if !receipt.status() {
         return Err(ApiError(StatusCode::BAD_GATEWAY, "close reverted".into()));
     }

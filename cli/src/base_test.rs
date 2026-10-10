@@ -14,6 +14,7 @@ use alloy::{
     sol,
 };
 use anyhow::{Context, Result, anyhow, ensure};
+use zecured_base::gas_with_headroom;
 
 sol! {
     struct MarketParams {
@@ -94,12 +95,16 @@ pub async fn borrow(wallet: &Path, vault: &B256, usdc: f64, rpc: &str) -> Result
     let morpho = IMorpho::new(d.morpho, &p);
     for target in [d.registry, d.adapter] {
         if !morpho.isAuthorized(me, target).call().await? {
-            let r = morpho.setAuthorization(target, true).send().await?.get_receipt().await?;
+            let call = morpho.setAuthorization(target, true);
+            let gas = gas_with_headroom(call.estimate_gas().await?);
+            let r = call.gas(gas).send().await?.get_receipt().await?;
             ensure!(r.status(), "setAuthorization reverted");
         }
     }
     let assets = U256::from((usdc * 1_000_000.0).round() as u64);
-    let r = morpho.borrow(d.market.clone(), assets, U256::ZERO, me, me).send().await?.get_receipt().await?;
+    let call = morpho.borrow(d.market.clone(), assets, U256::ZERO, me, me);
+    let gas = gas_with_headroom(call.estimate_gas().await?);
+    let r = call.gas(gas).send().await?.get_receipt().await?;
     ensure!(r.status(), "borrow reverted");
     println!("borrowed {usdc} USDC (tx {})", r.transaction_hash);
     Ok(())
@@ -122,22 +127,16 @@ pub async fn repay_release(wallet: &Path, vault: &B256, commitment: B256, rpc: &
         }
         let usdc = IMockUSDC::new(d.usdc, &p);
         ensure!(usdc.approve(d.morpho, U256::MAX).send().await?.get_receipt().await?.status(), "approve reverted");
-        let r = morpho
-            .repay(d.market.clone(), U256::ZERO, U256::from(pos.borrowShares), me, Bytes::new())
-            .send()
-            .await?
-            .get_receipt()
-            .await?;
+        let call = morpho.repay(d.market.clone(), U256::ZERO, U256::from(pos.borrowShares), me, Bytes::new());
+        let gas = gas_with_headroom(call.estimate_gas().await?);
+        let r = call.gas(gas).send().await?.get_receipt().await?;
         ensure!(r.status(), "repay reverted");
         println!("repaid (tx {})", r.transaction_hash);
     }
-    let r = IRegistry::new(d.registry, &p)
-        .requestRelease(*vault, commitment)
-        .send()
-        .await
-        .map_err(|e| anyhow!("requestRelease: {e}"))?
-        .get_receipt()
-        .await?;
+    let registry = IRegistry::new(d.registry, &p);
+    let call = registry.requestRelease(*vault, commitment);
+    let gas = gas_with_headroom(call.estimate_gas().await.map_err(|e| anyhow!("requestRelease: {e}"))?);
+    let r = call.gas(gas).send().await?.get_receipt().await?;
     ensure!(r.status(), "requestRelease reverted");
     println!("release requested (tx {})", r.transaction_hash);
     Ok(())

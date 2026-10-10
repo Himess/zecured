@@ -159,6 +159,15 @@ pub fn order_signatures<T: SolStruct>(
     Ok(with_signer.into_iter().map(|(_, s)| s).collect())
 }
 
+/// Gas limit with headroom over an `eth_estimateGas` result.
+///
+/// Estimates run against the latest block, but the transaction lands in a later one: Morpho
+/// then accrues interest (calling the IRM), which costs more gas, and nested calls fail under
+/// the 63/64 forwarding rule. Observed on Base Sepolia (2 s blocks) with `requestRelease`.
+pub fn gas_with_headroom(estimate: u64) -> u64 {
+    estimate.saturating_mul(13) / 10 + 50_000
+}
+
 /// Converts a zatoshi amount to the ABI's `uint64`.
 pub fn zat(value: u64) -> u64 {
     value

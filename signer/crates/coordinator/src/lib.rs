@@ -639,16 +639,18 @@ impl Coordinator {
             .wallet(EthereumWallet::from(self.gas.clone()))
             .connect_http(self.cfg.base_rpc_url.parse()?);
         let registry = IZecuredRegistry::new(self.cfg.registry, &provider);
-        let receipt = registry
-            .attestDeposit(
-                IZecuredRegistry::DepositAttestation {
-                    vaultId: att.vaultId,
-                    account: att.account,
-                    amount: att.amount,
-                    depositTag: att.depositTag,
-                },
-                sigs,
-            )
+        let call = registry.attestDeposit(
+            IZecuredRegistry::DepositAttestation {
+                vaultId: att.vaultId,
+                account: att.account,
+                amount: att.amount,
+                depositTag: att.depositTag,
+            },
+            sigs,
+        );
+        let gas = zecured_base::gas_with_headroom(call.estimate_gas().await.context("estimate attestDeposit")?);
+        let receipt = call
+            .gas(gas)
             .send()
             .await
             .context("send attestDeposit")?
@@ -866,13 +868,10 @@ impl Coordinator {
         let provider = ProviderBuilder::new()
             .wallet(EthereumWallet::from(self.gas.clone()))
             .connect_http(self.cfg.base_rpc_url.parse()?);
-        let receipt = IZecuredRegistry::new(self.cfg.registry, &provider)
-            .confirmPayout(v.vault_id, inflight.claim_ids.clone(), sigs)
-            .send()
-            .await
-            .context("send confirmPayout")?
-            .get_receipt()
-            .await?;
+        let registry = IZecuredRegistry::new(self.cfg.registry, &provider);
+        let call = registry.confirmPayout(v.vault_id, inflight.claim_ids.clone(), sigs);
+        let gas = zecured_base::gas_with_headroom(call.estimate_gas().await.context("estimate confirmPayout")?);
+        let receipt = call.gas(gas).send().await.context("send confirmPayout")?.get_receipt().await?;
         ensure!(receipt.status(), "confirmPayout reverted");
         info!(vault = %short(&v.vault_id), "payout confirmed on Base");
         Ok(())
