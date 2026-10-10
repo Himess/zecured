@@ -16,6 +16,7 @@ use reddsa::frost::redpallas::{
     round1::{SigningCommitments, SigningNonces},
 };
 use serde::{Deserialize, Serialize};
+use zcash_primitives::transaction::builder::DEFAULT_TX_EXPIRY_DELTA;
 use zcash_protocol::consensus::{BlockHeight, BranchId, Network};
 use zecured_policy::{
     ledger::{self, NextPayout, PayoutPlan},
@@ -29,8 +30,8 @@ use crate::{
     store::{Store, VaultRecord},
 };
 
-/// Blocks after the current tip a payout transaction may expire (builder default is 20).
-const MAX_EXPIRY_AHEAD: u32 = 40;
+/// Blocks the coordinator's view of the Zcash tip may be ahead of ours.
+const TIP_SKEW: u32 = 5;
 
 /// What a signing session is for.
 #[derive(Clone, Debug, Serialize, Deserialize)]
@@ -142,7 +143,7 @@ pub fn commit(
     let expectations = TxExpectations {
         consensus_branch_id: u32::from(BranchId::for_height(&Network::TestNetwork, BlockHeight::from_u32(target))),
         min_expiry: target,
-        max_expiry: tip + MAX_EXPIRY_AHEAD,
+        max_expiry: target + DEFAULT_TX_EXPIRY_DELTA + TIP_SKEW,
     };
     let expected: Vec<ExpectedInput> = inputs
         .iter()

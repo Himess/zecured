@@ -243,7 +243,7 @@ fn expiry_outside_window_is_refused() {
     let p = plan(other(), 3_500_000);
     let pczt = build(&fvk, anchor, &[&ns[0]], &honest_payments(&p));
     let mut tight = expect();
-    tight.max_expiry = TARGET + 5; // builder default expiry is target + 20
+    tight.max_expiry = TARGET + 5; // builder default expiry is target + 40
     assert!(matches!(
         verify_payout(&pczt, &fvk, &inputs(&[&ns[0]]), &p, &tight),
         Err(VerifyError::BadExpiry(_))

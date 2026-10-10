@@ -7291,6 +7291,26 @@ dependencies = [
 ]
 
 [[package]]
+name = "zecured-backend"
+version = "0.1.0"
+dependencies = [
+ "alloy",
+ "anyhow",
+ "axum",
+ "clap",
+ "hex",
+ "reqwest 0.12.28",
+ "serde",
+ "serde_json",
+ "tokio",
+ "tower-http",
+ "tracing",
+ "tracing-subscriber",
+ "zecured-coordinator",
+ "zecured-node",
+]
+
+[[package]]
 name = "zecured-base"
 version = "0.1.0"
 dependencies = [
@@ -7414,6 +7434,27 @@ dependencies = [
  "serde",
  "serde_json",
  "thiserror 2.0.21",
+]
+
+[[package]]
+name = "zecured-wallet"
+version = "0.1.0"
+dependencies = [
+ "alloy",
+ "anyhow",
+ "clap",
+ "hex",
+ "orchard",
+ "pczt",
+ "rand 0.10.3",
+ "rand_core 0.6.4",
+ "reqwest 0.12.28",
+ "serde",
+ "serde_json",
+ "tokio",
+ "zcash_protocol",
+ "zecured-base",
+ "zecured-zcash-ops",
 ]
 
 [[package]]
