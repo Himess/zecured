@@ -268,6 +268,7 @@ pub fn round3(
         claims: vec![],
         refunds: vec![],
         used_nonces: vec![],
+        inflight: None,
     })?;
     Ok(out)
 }

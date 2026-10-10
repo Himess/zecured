@@ -81,6 +81,9 @@ pub struct VaultRecord {
     /// Owner request nonces already used (P0).
     #[serde(default)]
     pub used_nonces: Vec<u64>,
+    /// The payout this node signed and has not confirmed yet (survives restarts).
+    #[serde(default)]
+    pub inflight: Option<crate::Inflight>,
 }
 
 impl VaultRecord {

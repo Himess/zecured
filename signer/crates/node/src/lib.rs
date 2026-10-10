@@ -66,7 +66,6 @@ pub struct Node {
     pub zcash: Mutex<ZcashView>,
     pub pending_dkg: Mutex<HashMap<B256, dkg::Pending>>,
     pub sessions: Mutex<HashMap<String, Session>>,
-    pub inflight: Mutex<HashMap<B256, Inflight>>,
     pub mode: Mutex<Mode>,
     pub admin_token: Option<String>,
 }
@@ -166,7 +165,6 @@ impl Node {
             zcash: Mutex::new(zcash),
             pending_dkg: Mutex::new(HashMap::new()),
             sessions: Mutex::new(HashMap::new()),
-            inflight: Mutex::new(HashMap::new()),
             mode: Mutex::new(Mode::Normal),
             admin_token,
         })
@@ -350,18 +348,16 @@ impl Node {
             .await
             .remove(&req.session_id)
             .context("unknown or finished signing session")?;
-        let store = self.store.lock().await;
-        let v = store.vaults.get(&session.vault_id).context("unknown vault")?;
+        let mut store = self.store.lock().await;
+        let mut v = store.vaults.get(&session.vault_id).context("unknown vault")?.clone();
         if let signing::SignKind::Payout { claim_ids } = &session.kind {
-            self.inflight.lock().await.insert(
-                session.vault_id,
-                Inflight {
-                    claim_ids: claim_ids.iter().map(|c| c.0).collect(),
-                    inputs: session.inputs.clone(),
-                },
-            );
+            v.inflight = Some(Inflight {
+                claim_ids: claim_ids.iter().map(|c| c.0).collect(),
+                inputs: session.inputs.clone(),
+            });
+            store.save_vault(v.clone())?;
         }
-        let shares = signing::share(self.id.index, v, session, &req)?;
+        let shares = signing::share(self.id.index, &v, session, &req)?;
         Ok(ShareResponse {
             index: self.id.index,
             shares,
@@ -370,13 +366,16 @@ impl Node {
 
     /// Signs `PayoutConfirmation` once the payout this node signed is mined and confirmed.
     pub async fn confirm(&self, vault_id: B256, c: ConfirmIn) -> Result<ConfirmResponse> {
-        let inflight = self
-            .inflight
-            .lock()
-            .await
-            .get(&vault_id)
-            .cloned()
-            .context("no payout in flight for this vault")?;
+        let inflight = {
+            let store = self.store.lock().await;
+            store
+                .vaults
+                .get(&vault_id)
+                .context("unknown vault")?
+                .inflight
+                .clone()
+                .context("no payout in flight for this vault")?
+        };
         let wanted: Vec<[u8; 32]> = c.claim_ids.iter().map(|x| x.0).collect();
         ensure!(wanted == inflight.claim_ids, "claims differ from the payout we signed");
         let txid = TxId::from_hex(&c.txid).context("invalid txid")?;
@@ -389,8 +388,8 @@ impl Node {
         for claim in v.claims.iter_mut().filter(|x| wanted.contains(&x.id)) {
             claim.state = ClaimState::Paid;
         }
+        v.inflight = None;
         store.save_vault(v)?;
-        self.inflight.lock().await.remove(&vault_id);
         let msg = PayoutConfirmation {
             vaultId: vault_id,
             claimIdsHash: claim_ids_hash(&c.claim_ids),
