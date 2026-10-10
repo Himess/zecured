@@ -528,7 +528,12 @@ async fn destination(wallet: &Path, backend: &str, vault: &B256, to: Option<Stri
 
 /// Loan file, owner key and destination (defaults to the wallet's own address).
 fn owner_ctx(wallet: &Path, vault: &B256, to: Option<String>) -> Result<(LoanFile, PrivateKeySigner, String)> {
-    let l: LoanFile = read_json(&loan_path(wallet, vault))?;
+    let mut l: LoanFile = read_json(&loan_path(wallet, vault))?;
+    // Sign under the network's current Registry domain (the signers verify against it).
+    if let Ok(net) = network_params() {
+        l.registry = net.registry;
+        l.chain_id = net.chain_id;
+    }
     let owner: PrivateKeySigner = l.owner_key.parse()?;
     let to = match to {
         Some(t) => t,

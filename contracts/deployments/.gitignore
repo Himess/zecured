@@ -1,2 +1,3 @@
 # Simulation outputs of script/DeployZecured.s.sol (addresses that do not exist on-chain).
 *.dry-run.json
+anvil.json

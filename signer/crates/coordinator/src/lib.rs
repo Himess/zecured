@@ -826,6 +826,12 @@ impl Coordinator {
                         r.done = true;
                     }
                 }
+                if v.status == VaultStatus::Active
+                    && v.outstanding == 0
+                    && v.claims.iter().all(|c| c.state == ClaimState::Paid)
+                {
+                    v.status = VaultStatus::Closed;
+                }
                 v.inflight = None;
                 self.store.lock().await.save(v)?;
                 Ok(())

@@ -17,12 +17,17 @@ PIDS="$DATA/pids"
 BIN="$ROOT/target/debug"
 
 load_env() {
+  # Values already set in the environment (e.g. a local fork RPC) win over .env.
+  local keep_rpc="${BASE_SEPOLIA_RPC_URL:-}" keep_dep="${ZECURED_DEPLOYMENTS:-}"
   if [[ -f "$ROOT/.env" ]]; then
     set -a
     # shellcheck disable=SC1091
     source "$ROOT/.env"
     set +a
   fi
+  [[ -n "$keep_rpc" ]] && export BASE_SEPOLIA_RPC_URL="$keep_rpc"
+  [[ -n "$keep_dep" ]] && export ZECURED_DEPLOYMENTS="$keep_dep"
+  return 0
 }
 
 admin_token() {
@@ -53,7 +58,7 @@ cmd_init() {
     infos+=("$dir.public.json")
   done
 
-  local deployments="$ROOT/contracts/deployments/base-sepolia.json"
+  local deployments="${ZECURED_DEPLOYMENTS:-$ROOT/contracts/deployments/base-sepolia.json}"
   local rpc="${BASE_SEPOLIA_RPC_URL:-https://sepolia.base.org}"
   python3 -I - "$NETWORK" "$deployments" "$rpc" "${LIGHTWALLETD_URL:-https://testnet.zec.rocks:443}" "${infos[@]}" <<'PY'
 import json, sys, os, subprocess
@@ -101,6 +106,7 @@ cmd_start() {
   done
   if ! { [[ -f "$PIDS/backend" ]] && kill -0 "$(cat "$PIDS/backend")" 2>/dev/null; }; then
     DEMO_ADMIN_TOKEN="$token" ZECURED_NETWORK_CONFIG="$NETWORK" ZECURED_COORDINATOR_DATA="$DATA/coordinator" \
+      ZECURED_DEPLOYMENTS="${ZECURED_DEPLOYMENTS:-$ROOT/contracts/deployments/base-sepolia.json}" \
       nohup "$BIN/zecured-backend" > "$LOGS/backend.log" 2>&1 &
     echo $! > "$PIDS/backend"
   fi
