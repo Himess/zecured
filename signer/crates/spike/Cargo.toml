@@ -18,3 +18,4 @@ serde_json.workspace = true
 reddsa.workspace = true
 rand_core_06.workspace = true
 zcash_protocol.workspace = true
+orchard.workspace = true

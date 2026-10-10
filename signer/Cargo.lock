@@ -366,6 +366,7 @@ dependencies = [
  "cfg-if",
  "cipher",
  "cpufeatures 0.3.1",
+ "rand_core 0.10.1",
 ]
 
 [[package]]
@@ -1924,6 +1925,7 @@ version = "0.10.3"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "65c9fb96cbc91e3478eaae79a69fcd3f1ae4ad052e471fe6732fff548984b4af"
 dependencies = [
+ "chacha20",
  "getrandom 0.4.3",
  "rand_core 0.10.1",
 ]
@@ -3205,6 +3207,7 @@ dependencies = [
  "anyhow",
  "clap",
  "hex",
+ "orchard",
  "rand_core 0.6.4",
  "reddsa 0.5.2",
  "serde",
@@ -3237,15 +3240,20 @@ dependencies = [
  "blake2b_simd",
  "blake3",
  "hex",
+ "incrementalmerkletree",
  "orchard",
  "pasta_curves 0.6.1",
  "pczt",
+ "rand 0.10.3",
+ "serde",
+ "serde_json",
  "thiserror",
  "tokio",
  "tonic",
  "zcash_address",
  "zcash_client_backend",
  "zcash_keys",
+ "zcash_note_encryption",
  "zcash_primitives",
  "zcash_protocol",
  "zip321",

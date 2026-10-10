@@ -17,9 +17,11 @@ zcash_primitives = "=0.31.0-pre.1"
 zcash_keys = { version = "=0.17.0-pre.1", features = ["orchard", "unstable-frost"] }
 zcash_address = "=0.14.0-pre.1"
 zcash_client_backend = { version = "=0.25.0-pre.1", default-features = false, features = ["orchard", "lightwalletd-tonic", "lightwalletd-tonic-transport", "lightwalletd-tonic-tls-webpki-roots"] }
-pczt = { version = "=0.10.0-pre.1", default-features = false, features = ["std", "orchard", "io-finalizer", "prover", "signer", "tx-extractor"] }
+pczt = { version = "=0.10.0-pre.1", default-features = false, features = ["std", "orchard", "zcp-builder", "io-finalizer", "prover", "signer", "tx-extractor"] }
 zip321 = "=0.10.0-pre.1"
 pasta_curves = "0.6"
+incrementalmerkletree = { version = "0.9", features = ["legacy-api"] }
+zcash_note_encryption = "0.5"
 # --- FROST: reddsa 0.6 dropped its `frost` feature (moving to ZcashFoundation/frost,
 #     not yet released), so FROST(Pallas, BLAKE2b-512) comes from reddsa 0.5.2.
 #     It uses pasta_curves 0.5; we bridge to orchard 0.16 types through bytes.
@@ -37,3 +39,11 @@ serde_json = "1"
 thiserror = "2"
 tokio = { version = "1", features = ["full"] }
 tonic = { version = "0.14", default-features = false, features = ["transport", "tls-ring", "tls-webpki-roots"] }
+
+# Halo 2 proving and note trial-decryption are unusably slow without optimization;
+# optimize dependencies even in dev builds, keep our own crates quick to compile.
+[profile.dev.package."*"]
+opt-level = 3
+
+[profile.test.package."*"]
+opt-level = 3

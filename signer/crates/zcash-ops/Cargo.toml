@@ -16,6 +16,9 @@ zcash_client_backend.workspace = true
 pczt.workspace = true
 zip321.workspace = true
 pasta_curves.workspace = true
+incrementalmerkletree.workspace = true
+zcash_note_encryption.workspace = true
+rand_010.workspace = true
 blake2b_simd.workspace = true
 blake3.workspace = true
 anyhow.workspace = true
@@ -23,3 +26,7 @@ hex.workspace = true
 thiserror.workspace = true
 tonic.workspace = true
 tokio.workspace = true
+
+[dev-dependencies]
+serde = { workspace = true }
+serde_json = { workspace = true }

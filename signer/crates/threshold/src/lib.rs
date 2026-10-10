@@ -214,6 +214,37 @@ pub fn aggregate(
         .context("signature is not 64 bytes")
 }
 
+/// Runs both FROST rounds for `signers` inside one process and returns the aggregate
+/// signature over `sighash` for randomizer `alpha`.
+///
+/// SPIKE / TEST ONLY: deployed nodes exchange commitments and shares over the network.
+pub fn sign_in_process(
+    key_packages: &BTreeMap<SignerId, KeyPackage>,
+    public_key_package: &PublicKeyPackage,
+    signers: &[u16],
+    sighash: &[u8; 32],
+    alpha: &[u8; 32],
+) -> Result<[u8; 64]> {
+    let mut rng = rand_core_06::OsRng;
+    let mut nonces = BTreeMap::new();
+    let mut commitments = BTreeMap::new();
+    for &i in signers {
+        let id = signer_id(i)?;
+        let kp = key_packages
+            .get(&id)
+            .with_context(|| format!("no key package for signer {i}"))?;
+        let (n, c) = commit(kp, &mut rng);
+        nonces.insert(id, n);
+        commitments.insert(id, c);
+    }
+    let package = signing_package(commitments, sighash)?;
+    let mut shares = BTreeMap::new();
+    for (id, n) in &nonces {
+        shares.insert(*id, sign_share(&package, n, &key_packages[id], alpha)?);
+    }
+    aggregate(&package, &shares, public_key_package, alpha)
+}
+
 // `reddsa` does not re-export `frost_rerandomized::sign`; depend on the same crate
 // version reddsa uses so the types unify.
 use frost_rerandomized as reddsa_frost_rerandomized;
@@ -236,21 +267,7 @@ mod tests {
     }
 
     fn sign_with(keys: &VaultKeys, signers: &[u16], msg: &[u8; 32], alpha: &[u8; 32]) -> Result<[u8; 64]> {
-        let mut rng = OsRng;
-        let mut nonces = BTreeMap::new();
-        let mut commitments = BTreeMap::new();
-        for &i in signers {
-            let id = signer_id(i)?;
-            let (n, c) = commit(&keys.key_packages[&id], &mut rng);
-            nonces.insert(id, n);
-            commitments.insert(id, c);
-        }
-        let package = signing_package(commitments, msg)?;
-        let mut shares = BTreeMap::new();
-        for (id, n) in &nonces {
-            shares.insert(*id, sign_share(&package, n, &keys.key_packages[id], alpha)?);
-        }
-        aggregate(&package, &shares, &keys.public_key_package, alpha)
+        sign_in_process(&keys.key_packages, &keys.public_key_package, signers, msg, alpha)
     }
 
     fn random_alpha() -> [u8; 32] {
