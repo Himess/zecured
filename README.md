@@ -87,12 +87,13 @@ scripts/signer-network.sh start    # 5 signer nodes + backend (logs in signer/da
 
 ### Local Base fork
 
-Everything Base-related can run against a local fork of Base Sepolia:
+Everything Base-related can run against a local fork of Base Sepolia, including the app's
+sponsored UserOps (a local alto bundler and mock paymaster replace the hosted ones, no API key):
 
 ```bash
-anvil --fork-url https://sepolia.base.org --chain-id 84532 --block-time 2
-# deploy with contracts/script/DeployZecured.s.sol (see contracts/README.md), then
-export ZECURED_DEPLOYMENTS=$PWD/contracts/deployments/anvil.json BASE_SEPOLIA_RPC_URL=http://127.0.0.1:8545
+scripts/local-fork.sh start   # anvil fork, fresh deployment (contracts/deployments/anvil.json), bundler :4337, paymaster :4338
+export ZECURED_DEPLOYMENTS=$PWD/contracts/deployments/anvil.json BASE_SEPOLIA_RPC_URL=http://127.0.0.1:8545 \
+       BUNDLER_URL=http://127.0.0.1:4337 PAYMASTER_URL=http://127.0.0.1:4338
 scripts/signer-network.sh init && scripts/signer-network.sh start
 ./target/debug/zecured-bots market-maker &    # and: zecured-bots liquidator &
 ```

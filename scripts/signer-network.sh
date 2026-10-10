@@ -16,17 +16,23 @@ LOGS="$DATA/logs"
 PIDS="$DATA/pids"
 BIN="$ROOT/target/debug"
 
+# Values already set in the environment (e.g. a local fork, see scripts/local-fork.sh) win over .env.
+OVERRIDABLE=(BASE_SEPOLIA_RPC_URL ZECURED_DEPLOYMENTS BUNDLER_URL PAYMASTER_URL)
+
 load_env() {
-  # Values already set in the environment (e.g. a local fork RPC) win over .env.
-  local keep_rpc="${BASE_SEPOLIA_RPC_URL:-}" keep_dep="${ZECURED_DEPLOYMENTS:-}"
+  local kept=() var
+  for var in "${OVERRIDABLE[@]}"; do
+    [[ -n "${!var:-}" ]] && kept+=("$var=${!var}")
+  done
   if [[ -f "$ROOT/.env" ]]; then
     set -a
     # shellcheck disable=SC1091
     source "$ROOT/.env"
     set +a
   fi
-  [[ -n "$keep_rpc" ]] && export BASE_SEPOLIA_RPC_URL="$keep_rpc"
-  [[ -n "$keep_dep" ]] && export ZECURED_DEPLOYMENTS="$keep_dep"
+  for var in "${kept[@]+"${kept[@]}"}"; do
+    export "${var?}"
+  done
   return 0
 }
 

@@ -358,7 +358,9 @@ async fn health() -> Json<serde_json::Value> {
 }
 
 /// `GET /config`: chain, contract addresses, market and signer-network parameters.
-fn public_config_json(cfg: &NetworkConfig, deployments: &std::path::Path) -> serde_json::Value {
+/// `sponsorship`: the bundler, the paymaster and the paymaster allowlist are all configured, so the
+/// app can send sponsored UserOps.
+fn public_config_json(cfg: &NetworkConfig, deployments: &std::path::Path, sponsorship: bool) -> serde_json::Value {
     let dep: serde_json::Value = std::fs::read(deployments)
         .ok()
         .and_then(|raw| serde_json::from_slice(&raw).ok())
@@ -372,6 +374,7 @@ fn public_config_json(cfg: &NetworkConfig, deployments: &std::path::Path) -> ser
         "denominations": cfg.denominations.iter().map(|d| d.to_string()).collect::<Vec<_>>(),
         "confirmations": cfg.confirmations,
         "vaultExpiryBlocks": cfg.vault_expiry_blocks,
+        "sponsorship": sponsorship,
     })
 }
 
@@ -411,6 +414,7 @@ async fn main() -> Result<()> {
         Some(cli.paymaster_url.clone()),
         allowlist,
     )?);
+    let sponsorship = proxy.bundler_url.is_some() && proxy.paymaster_url.is_some() && proxy.allowlist.is_some();
     let coordinator = Arc::new(Coordinator::new(cfg, &cli.data, &cli.coordinator_key)?);
 
     let worker = coordinator.clone();
@@ -439,7 +443,7 @@ async fn main() -> Result<()> {
         .route("/admin/nodes/{index}/mode", post(admin_mode))
         .route("/admin/vaults/{id}/drain", post(admin_drain))
         .route("/admin/oracle", get(admin_get_oracle).post(admin_set_oracle))
-        .layer(axum::Extension(PublicConfig(Arc::new(public_config_json(&coordinator.cfg, &cli.deployments)))))
+        .layer(axum::Extension(PublicConfig(Arc::new(public_config_json(&coordinator.cfg, &cli.deployments, sponsorship)))))
         .layer(axum::Extension(AdminToken(Arc::new(cli.admin_token.clone()))))
         .layer(axum::Extension(Oracle {
             rpc: coordinator.cfg.base_rpc_url.clone(),

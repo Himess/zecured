@@ -82,6 +82,7 @@ forge script script/DeployZecured.s.sol --rpc-url https://sepolia.base.org --bro
 | `ZEC_USD_PRICE_CENTS` | initial oracle price when the oracle is deployed (default `4000` = $40.00) |
 | `MOCK_USDC`, `MOCK_ZEC_ORACLE` | reuse already deployed mocks (set both) |
 | `LENDER_SEED_USDC` | whole MockUSDC the deployer mints and supplies as demo lender (default `0`) |
+| `DEPLOYMENT_NAME` | output file name under `deployments/` (default `base-sepolia`; the local fork uses `anvil`) |
 
 Deployment JSON keys: `network`, `chainId`, `dryRun`, `block`, `timestamp`, `deployer`, `contracts.{ZZEC,
 ZecuredRegistry, SettlementAdapter, MockUSDC, MockZecOracle}`, `market.{morphoBlue, marketId, loanToken,

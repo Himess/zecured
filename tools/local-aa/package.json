@@ -1,0 +1,14 @@
+{
+  "name": "zecured-local-aa",
+  "version": "0.0.0",
+  "private": true,
+  "description": "Local ERC-4337 bundler and paymaster for testing the app against an anvil fork of Base Sepolia (no API keys). Never used on a public network.",
+  "license": "MIT",
+  "type": "module",
+  "dependencies": {
+    "@pimlico/alto": "0.0.21",
+    "@pimlico/mock-paymaster": "0.0.8",
+    "prool": "0.0.25",
+    "viem": "2.56.9"
+  }
+}

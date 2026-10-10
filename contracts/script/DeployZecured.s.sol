@@ -26,6 +26,7 @@ import {SettlementAdapter} from "../src/SettlementAdapter.sol";
 ///        ZEC_USD_PRICE_CENTS   initial MockZecOracle price when the oracle is deployed (default 4000 = $40.00)
 ///        MOCK_USDC, MOCK_ZEC_ORACLE   optional: reuse already deployed mocks
 ///        LENDER_SEED_USDC      optional: whole MockUSDC to supply as demo lender (default 0 = none)
+///        DEPLOYMENT_NAME       optional: output file name (default base-sepolia; scripts/local-fork.sh uses anvil)
 ///      Dry run (simulation only, sends nothing):
 ///        forge script script/DeployZecured.s.sol --rpc-url https://sepolia.base.org
 ///      Real deployment (only once the deployer is funded):
@@ -195,7 +196,8 @@ contract DeployZecured is Script {
         );
 
         vm.createDir(OUT_DIR, true);
-        string memory path = string.concat(OUT_DIR, d.dryRun ? "/base-sepolia.dry-run.json" : "/base-sepolia.json");
+        string memory name = vm.envOr("DEPLOYMENT_NAME", string("base-sepolia"));
+        string memory path = string.concat(OUT_DIR, "/", name, d.dryRun ? ".dry-run.json" : ".json");
         vm.writeJson(json, path);
         console.log("written:", path);
     }
