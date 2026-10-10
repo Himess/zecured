@@ -170,18 +170,20 @@ addresses, salts, viewing keys or IPs.
 | Method & path | Body | Response |
 |---|---|---|
 | `POST /vaults` | `{ owner, account, amount, requestId, deadline, signature }` (`OpenVault`) | `{ vaultId, address (Ironwood-only UA), zip321, amount, expiryHeight }` |
-| `GET /vaults/:id` | — | `{ vaultId, status, amount, expiryHeight, confirmations, deposit?: { attested, txHash? }, nonConforming: [{ noteId, amount }], claims: [{ claimId, kind, amount, status }] }` |
+| `GET /vaults/:id` | — | `{ vaultId, status, amount, address, expiryHeight, birthdayHeight, tipHeight, outstanding, payoutInFlight, nonConforming: [{ noteId, amount }], claims: [{ claimId, kind, amount, paid }] }`; `kind` ∈ `Release`, `Liquidation`, `CloseUser`, `CloseMarketMaker` |
 | `POST /vaults/:id/destination` | `{ receiver (UA), salt, nonce, deadline, signature }` (`Destination`) | `{ commitment }` — validated **before** any Base tx that burns zZEC |
 | `POST /vaults/:id/refund` | `{ noteId, receiver, salt, nonce, deadline, signature }` (`RefundRequest`) | `{ accepted: true }` |
 | `POST /vaults/:id/viewing-key` | `{ nonce, deadline, signature }` (`ViewKeyRequest`) | `{ ufvk }` |
 | `POST /recipients` | `{ receiver (UA), salt }` (liquidator / market maker) | `{ commitment }` |
-| `GET /quotes/close/:vaultId` | — | `{ executor, marginBps, repayAssets, mmAmount, userAmount, expiresAt }` (relayed to the market maker) |
-| `POST /closes` | `{ request: CloseRequest (camelCase), signature }` | `{ txHash }` (relayed; the market maker executes `closeWithCollateral`) |
+| `GET /quotes/close/:vaultId` | — | `{ executor, marginBps (number), repayAssets, mmAmount, userAmount, expiresAt (number, Unix s) }` (relayed to the market maker) |
+| `POST /closes` | `{ request: CloseRequest (camelCase), signature }` | `{ txHash }` once `closeWithCollateral` is mined (relayed; executed by the market maker) |
+| `GET /config` | — | `{ chainId, registry, adapter, contracts, market, denominations, confirmations, vaultExpiryBlocks }` |
 | `POST /proxy/rpc` | JSON-RPC | Base RPC passthrough (read methods + `eth_sendRawTransaction` disallowed) |
 | `POST /proxy/bundler` | JSON-RPC | ERC-4337 bundler passthrough |
 | `POST /proxy/paymaster` | JSON-RPC | Sponsors only the allowlist below; rejects anything else |
 
 Vault status values: `awaiting_deposit`, `deposit_seen`, `active`, `closed`, `expired`.
+Amounts are decimal strings in zatoshis (ZEC) or 6-decimal units (USDC).
 
 ### 4.2 Demo control (header `x-admin-token`)
 
@@ -189,7 +191,7 @@ Vault status values: `awaiting_deposit`, `deposit_seen`, `active`, `closed`, `ex
 |---|---|---|
 | `GET /admin/nodes` | — | `{ nodes: [{ index, mode, vaults }] }` |
 | `POST /admin/nodes/:index/mode` | `{ mode: "normal" \| "compromised" \| "offline" }` | `{ mode }` |
-| `POST /admin/vaults/:id/drain` | `{ to (UA) }` | `{ vault_id, amount, votes: [{ index, signed, reason }], threshold_reached }` — never broadcasts |
+| `POST /admin/vaults/:id/drain` | `{ to (UA) }` | `{ vaultId, amount, votes: [{ index, signed, reason }], thresholdReached }` — never broadcasts |
 | `GET /admin/oracle` | — | `{ priceUsdCents, raw }` |
 | `POST /admin/oracle` | `{ priceUsdCents }` | `{ priceUsdCents, txHash }` (MOCK oracle, owner key) |
 
