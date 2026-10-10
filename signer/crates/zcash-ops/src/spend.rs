@@ -220,6 +220,33 @@ pub fn signing_requests(
     Ok((sighash, requests))
 }
 
+/// The sighash and the randomizer of every non-dummy spend in a PCZT, without any policy
+/// check. DEMO ONLY: used by a signer node switched to "compromised" mode to show that two
+/// misbehaving signers cannot move funds on their own.
+pub fn signing_requests_all(pczt: &Pczt) -> Result<([u8; 32], Vec<SpendAuthRequest>)> {
+    let mut requests = vec![];
+    LowLevelSigner::new(pczt.clone())
+        .sign_ironwood_with(|_, bundle, _| -> Result<(), OrchardParseError> {
+            for (i, action) in bundle.actions().iter().enumerate() {
+                let spend = action.spend();
+                if spend.dummy_sk().is_none() {
+                    if let Some(alpha) = spend.alpha() {
+                        requests.push(SpendAuthRequest {
+                            action_index: i,
+                            alpha: alpha.to_repr(),
+                        });
+                    }
+                }
+            }
+            Ok(())
+        })
+        .map_err(|e| anyhow!("parse Ironwood bundle: {e:?}"))?;
+    let sighash = Signer::new(pczt.clone())
+        .map_err(|e| anyhow!("signer: {e:?}"))?
+        .shielded_sighash();
+    Ok((sighash, requests))
+}
+
 /// Applies externally produced (FROST) spend authorization signatures.
 pub fn apply_signatures(pczt: Pczt, signatures: &[(usize, [u8; 64])]) -> Result<Pczt> {
     let mut signer = Signer::new(pczt).map_err(|e| anyhow!("signer: {e:?}"))?;

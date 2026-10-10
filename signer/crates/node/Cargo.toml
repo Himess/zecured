@@ -1,0 +1,43 @@
+[package]
+name = "zecured-node"
+version = "0.1.0"
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+publish.workspace = true
+
+[lib]
+path = "src/lib.rs"
+
+[[bin]]
+name = "zecured-node"
+path = "src/main.rs"
+
+[dependencies]
+zecured-zcash-ops = { path = "../zcash-ops" }
+zecured-threshold = { path = "../threshold" }
+zecured-policy = { path = "../policy" }
+zecured-base = { path = "../base-client" }
+orchard.workspace = true
+pczt.workspace = true
+reddsa.workspace = true
+zcash_protocol.workspace = true
+zcash_primitives.workspace = true
+alloy.workspace = true
+axum.workspace = true
+tokio.workspace = true
+tracing.workspace = true
+tracing-subscriber.workspace = true
+anyhow.workspace = true
+thiserror.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+hex.workspace = true
+clap.workspace = true
+blake2b_simd.workspace = true
+rand_core_06.workspace = true
+x25519-dalek = { version = "2", features = ["static_secrets"] }
+chacha20poly1305 = "0.10"
+base64 = "0.22"
+
+[dev-dependencies]
