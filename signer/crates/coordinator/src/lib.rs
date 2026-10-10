@@ -819,10 +819,11 @@ impl Coordinator {
         }
         let pczt = spend::apply_signatures(pczt, &signatures)?;
         let tx = spend::extract(pczt)?;
-        let txid = {
-            let mut client = zecured_zcash_ops::lwd::connect(&self.cfg.lightwalletd_url).await?;
-            spend::broadcast(&mut client, &tx).await?
-        };
+        let raw = spend::serialize(&tx)?;
+
+        // Record the payout before broadcasting it: if the broadcast fails or its response is
+        // lost, the same transaction is rebroadcast until it is mined or expires, and nothing
+        // else is built for these claims in the meantime.
         let mut v = v.clone();
         let (claim_ids, refund_note) = match &kind {
             SignKind::Payout { claim_ids } => (claim_ids.clone(), None),
@@ -831,12 +832,21 @@ impl Coordinator {
         v.inflight = Some(Inflight {
             claim_ids,
             refund_note,
-            txid: txid.to_string(),
+            txid: tx.txid().to_string(),
             expiry_height: expiry,
+            raw_tx: Some(hex::encode(&raw)),
         });
         self.store.lock().await.save(v.clone())?;
-        info!(vault = %short(&v.vault_id), signers = ?chosen_ids, "payout broadcast");
+        match self.broadcast(raw).await {
+            Ok(()) => info!(vault = %short(&v.vault_id), signers = ?chosen_ids, "payout broadcast"),
+            Err(e) => warn!(vault = %short(&v.vault_id), "payout broadcast failed, will retry: {e:#}"),
+        }
         Ok(())
+    }
+
+    async fn broadcast(&self, raw: Vec<u8>) -> Result<()> {
+        let mut client = zecured_zcash_ops::lwd::connect(&self.cfg.lightwalletd_url).await?;
+        spend::broadcast_raw(&mut client, raw).await
     }
 
     /// Waits for a broadcast payout; confirms it on Base once it has enough confirmations,
@@ -879,7 +889,14 @@ impl Coordinator {
                 self.store.lock().await.save(v)?;
                 Ok(())
             }
-            Err(_) => Ok(()),
+            Err(_) => {
+                // Not mined yet: make sure it is (still) in the mempool. Rejections such as
+                // "already in the mempool" are expected and harmless.
+                if let Some(raw) = inflight.raw_tx.as_deref().and_then(|h| hex::decode(h).ok()) {
+                    let _ = self.broadcast(raw).await;
+                }
+                Ok(())
+            }
         }
     }
 

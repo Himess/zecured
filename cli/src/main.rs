@@ -133,6 +133,18 @@ enum LoanCmd {
         #[arg(long, env = "BASE_SEPOLIA_RPC_URL", default_value = "https://sepolia.base.org")]
         rpc: String,
     },
+    /// TEST ONLY: withdraw part of the collateral (D14) with the owner EOA as the account; the
+    /// vault stays active. The destination is pre-validated by the signers first.
+    PartialRelease {
+        vault: B256,
+        /// ZEC to withdraw, e.g. 0.004 (at least 0.001, leaving at least 0.001 in the vault).
+        #[arg(long)]
+        amount: f64,
+        #[arg(long)]
+        to: Option<String>,
+        #[arg(long, env = "BASE_SEPOLIA_RPC_URL", default_value = "https://sepolia.base.org")]
+        rpc: String,
+    },
     /// Close from collateral (P6): take the market maker's quote, sign the CloseRequest and
     /// hand it to the market maker through the backend.
     Close {
@@ -457,6 +469,11 @@ async fn loan(wallet: &Path, lwd_url: &str, backend: &str, cmd: LoanCmd) -> Resu
         LoanCmd::RepayRelease { vault, to, rpc } => {
             let commitment = destination(wallet, backend, &vault, to).await?;
             base_test::repay_release(wallet, &vault, commitment, &rpc).await?;
+        }
+        LoanCmd::PartialRelease { vault, amount, to, rpc } => {
+            let amount = zats(amount)?;
+            let commitment = destination(wallet, backend, &vault, to).await?;
+            base_test::partial_release(wallet, &vault, amount, commitment, &rpc).await?;
         }
         LoanCmd::Close { vault, to, slippage_bps } => {
             let (l, owner, to) = owner_ctx(wallet, &vault, to)?;

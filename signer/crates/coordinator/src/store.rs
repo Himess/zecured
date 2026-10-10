@@ -39,6 +39,10 @@ pub struct Inflight {
     pub refund_note: Option<B256>,
     pub txid: String,
     pub expiry_height: u32,
+    /// The signed transaction (hex), recorded before the first broadcast and rebroadcast until
+    /// it is mined or expires: a lost broadcast response must never lead to a second payout.
+    #[serde(default)]
+    pub raw_tx: Option<String>,
 }
 
 /// A refund the owner asked for and the signers accepted.

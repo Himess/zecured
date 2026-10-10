@@ -267,8 +267,19 @@ pub fn extract(pczt: Pczt) -> Result<Transaction> {
 
 /// Broadcasts `tx` through the light wallet server.
 pub async fn broadcast(client: &mut LwdClient, tx: &Transaction) -> Result<TxId> {
+    broadcast_raw(client, serialize(tx)?).await?;
+    Ok(tx.txid())
+}
+
+/// Consensus serialization of `tx`, as broadcast.
+pub fn serialize(tx: &Transaction) -> Result<Vec<u8>> {
     let mut data = vec![];
     tx.write(&mut data).context("serialize transaction")?;
+    Ok(data)
+}
+
+/// Broadcasts an already serialized transaction (e.g. to rebroadcast a stored payout).
+pub async fn broadcast_raw(client: &mut LwdClient, data: Vec<u8>) -> Result<()> {
     let response = client
         .send_transaction(RawTransaction { data, height: 0 })
         .await
@@ -280,5 +291,5 @@ pub async fn broadcast(client: &mut LwdClient, tx: &Transaction) -> Result<TxId>
         response.error_message,
         response.error_code
     );
-    Ok(tx.txid())
+    Ok(())
 }

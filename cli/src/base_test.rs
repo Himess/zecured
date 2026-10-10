@@ -45,6 +45,7 @@ sol! {
     #[sol(rpc)]
     interface IRegistry {
         function requestRelease(bytes32 vaultId, bytes32 destCommitment) external returns (bytes32);
+        function requestPartialRelease(bytes32 vaultId, uint64 amount, bytes32 destCommitment) external returns (bytes32);
     }
 }
 
@@ -139,5 +140,27 @@ pub async fn repay_release(wallet: &Path, vault: &B256, commitment: B256, rpc: &
     let r = call.gas(gas).send().await?.get_receipt().await?;
     ensure!(r.status(), "requestRelease reverted");
     println!("release requested (tx {})", r.transaction_hash);
+    Ok(())
+}
+
+/// D14: withdraw `amount` zat of collateral while the vault stays active (debt or not); the
+/// Registry refuses it if the position's LTV afterwards would exceed 50 %.
+pub async fn partial_release(wallet: &Path, vault: &B256, amount: u64, commitment: B256, rpc: &str) -> Result<()> {
+    let d = Deployment::load()?;
+    let key = owner(wallet, vault)?;
+    let me = key.address();
+    let p = ProviderBuilder::new().wallet(EthereumWallet::from(key)).connect_http(rpc.parse()?);
+    let morpho = IMorpho::new(d.morpho, &p);
+    if !morpho.isAuthorized(me, d.registry).call().await? {
+        let call = morpho.setAuthorization(d.registry, true);
+        let gas = gas_with_headroom(call.estimate_gas().await?);
+        ensure!(call.gas(gas).send().await?.get_receipt().await?.status(), "setAuthorization reverted");
+    }
+    let registry = IRegistry::new(d.registry, &p);
+    let call = registry.requestPartialRelease(*vault, amount, commitment);
+    let gas = gas_with_headroom(call.estimate_gas().await.map_err(|e| anyhow!("requestPartialRelease: {e}"))?);
+    let r = call.gas(gas).send().await?.get_receipt().await?;
+    ensure!(r.status(), "requestPartialRelease reverted");
+    println!("partial release of {amount} zat requested (tx {})", r.transaction_hash);
     Ok(())
 }

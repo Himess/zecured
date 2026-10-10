@@ -44,3 +44,6 @@ docs/ref/vendor/
 
 # Internal planning documents (not published)
 docs/private/
+
+# Local tool configuration
+.claude/
