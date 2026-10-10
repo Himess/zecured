@@ -175,7 +175,17 @@ addresses, salts, viewing keys or IPs.
 | `POST /proxy/bundler` | JSON-RPC | ERC-4337 bundler passthrough |
 | `POST /proxy/paymaster` | JSON-RPC | Sponsors only the allowlist below; rejects anything else |
 
-Vault status values: `awaiting_deposit`, `deposit_seen`, `active`, `closing`, `closed`, `expired`.
+Vault status values: `awaiting_deposit`, `deposit_seen`, `active`, `closed`, `expired`.
+
+### 4.2 Demo control (header `x-admin-token`)
+
+| Method & path | Body | Response |
+|---|---|---|
+| `GET /admin/nodes` | — | `{ nodes: [{ index, mode, vaults }] }` |
+| `POST /admin/nodes/:index/mode` | `{ mode: "normal" \| "compromised" \| "offline" }` | `{ mode }` |
+| `POST /admin/vaults/:id/drain` | `{ to (UA) }` | `{ vault_id, amount, votes: [{ index, signed, reason }], threshold_reached }` — never broadcasts |
+| `GET /admin/oracle` | — | `{ priceUsdCents, raw }` |
+| `POST /admin/oracle` | `{ priceUsdCents }` | `{ priceUsdCents, txHash }` (MOCK oracle, owner key) |
 
 ### 4.1 Paymaster allowlist (enforced by the proxy)
 

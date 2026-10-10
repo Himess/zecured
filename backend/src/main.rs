@@ -46,6 +46,9 @@ struct Cli {
     /// The market maker's quote service (close from collateral).
     #[arg(long, env = "MARKET_MAKER_URL", default_value = "http://127.0.0.1:8090")]
     market_maker_url: String,
+    /// Owner key of the MOCK price oracle, for the demo control panel's price slider.
+    #[arg(long, env = "DEPLOYER_PRIVATE_KEY", hide_env_values = true, default_value = "")]
+    oracle_owner_key: String,
     /// Token protecting the demo control endpoints (empty = disabled).
     #[arg(long, env = "DEMO_ADMIN_TOKEN", hide_env_values = true, default_value = "")]
     admin_token: String,
@@ -275,6 +278,71 @@ async fn close_submit(axum::Extension(mm): axum::Extension<MarketMaker>, Json(b)
     mm_forward(&mm, req).await
 }
 
+#[derive(Clone)]
+struct Oracle {
+    rpc: String,
+    address: Option<Address>,
+    owner_key: String,
+}
+
+alloy::sol! {
+    #[sol(rpc)]
+    interface IMockZecOracle {
+        function price() external view returns (uint256);
+        function setPrice(uint256 newPrice) external;
+    }
+}
+
+/// MockZecOracle scale: price = ZEC/USD * 1e34 (Morpho scale 1e36, 6-decimal loan, 8-decimal collateral).
+const ORACLE_SCALE_PER_CENT: u128 = 100_000_000_000_000_000_000_000_000_000_000;
+
+async fn admin_get_oracle(
+    axum::Extension(t): axum::Extension<AdminToken>,
+    axum::Extension(o): axum::Extension<Oracle>,
+    headers: axum::http::HeaderMap,
+) -> ApiResult {
+    check_admin(&t, &headers)?;
+    let address = o.address.ok_or_else(|| anyhow!("no deployment"))?;
+    let p = alloy::providers::ProviderBuilder::new().connect_http(o.rpc.parse().map_err(anyhow::Error::from)?);
+    let raw = IMockZecOracle::new(address, &p).price().call().await.map_err(anyhow::Error::from)?;
+    let cents = raw / alloy::primitives::U256::from(ORACLE_SCALE_PER_CENT);
+    Ok(Json(json!({ "priceUsdCents": cents.to_string(), "raw": raw.to_string() })))
+}
+
+#[derive(Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct OracleBody {
+    price_usd_cents: u64,
+}
+
+async fn admin_set_oracle(
+    axum::Extension(t): axum::Extension<AdminToken>,
+    axum::Extension(o): axum::Extension<Oracle>,
+    headers: axum::http::HeaderMap,
+    Json(b): Json<OracleBody>,
+) -> ApiResult {
+    check_admin(&t, &headers)?;
+    let address = o.address.ok_or_else(|| anyhow!("no deployment"))?;
+    let key: alloy::signers::local::PrivateKeySigner =
+        o.owner_key.parse().map_err(|_| anyhow!("oracle owner key not configured"))?;
+    let p = alloy::providers::ProviderBuilder::new()
+        .wallet(alloy::network::EthereumWallet::from(key))
+        .connect_http(o.rpc.parse().map_err(anyhow::Error::from)?);
+    let raw = alloy::primitives::U256::from(b.price_usd_cents) * alloy::primitives::U256::from(ORACLE_SCALE_PER_CENT);
+    let receipt = IMockZecOracle::new(address, &p)
+        .setPrice(raw)
+        .send()
+        .await
+        .map_err(anyhow::Error::from)?
+        .get_receipt()
+        .await
+        .map_err(anyhow::Error::from)?;
+    if !receipt.status() {
+        return Err(ApiError(StatusCode::BAD_GATEWAY, "setPrice reverted".into()));
+    }
+    Ok(Json(json!({ "priceUsdCents": b.price_usd_cents.to_string(), "txHash": receipt.transaction_hash })))
+}
+
 async fn health() -> Json<serde_json::Value> {
     Json(json!({ "ok": true }))
 }
@@ -305,6 +373,7 @@ async fn main() -> Result<()> {
     let cli = Cli::parse();
     let cfg = NetworkConfig::load(&cli.config)?;
     let allowlist = load_allowlist(&cli.deployments);
+    let allowlist_oracle = allowlist.as_ref().map(|a| a.oracle);
     if allowlist.is_none() {
         warn!("no deployment file: paymaster sponsorship disabled");
     }
@@ -340,7 +409,13 @@ async fn main() -> Result<()> {
         .route("/admin/nodes", get(admin_nodes))
         .route("/admin/nodes/{index}/mode", post(admin_mode))
         .route("/admin/vaults/{id}/drain", post(admin_drain))
+        .route("/admin/oracle", get(admin_get_oracle).post(admin_set_oracle))
         .layer(axum::Extension(AdminToken(Arc::new(cli.admin_token.clone()))))
+        .layer(axum::Extension(Oracle {
+            rpc: coordinator.cfg.base_rpc_url.clone(),
+            address: allowlist_oracle,
+            owner_key: cli.oracle_owner_key.clone(),
+        }))
         .layer(axum::Extension(MarketMaker(Arc::new(cli.market_maker_url.trim_end_matches('/').to_owned()))))
         .merge(
             Router::new()
