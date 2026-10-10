@@ -71,7 +71,9 @@ async fn main() -> Result<()> {
                         Ok(n) => info!(applied = n, "base events"),
                         Err(e) => warn!("base sync failed: {e:#}"),
                     }
-                    tokio::time::sleep(Duration::from_secs(5)).await;
+                    // Public Base RPCs rate-limit aggressively; nodes poll every ~15 s,
+                    // staggered by index so five nodes do not burst together.
+                    tokio::time::sleep(Duration::from_secs(15) + Duration::from_millis(700 * u64::from(index))).await;
                 }
             });
 

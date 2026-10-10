@@ -33,6 +33,9 @@ struct Cli {
     bind: SocketAddr,
     #[arg(long, env = "COORDINATOR_PRIVATE_KEY", hide_env_values = true)]
     coordinator_key: String,
+    /// Token protecting the demo control endpoints (empty = disabled).
+    #[arg(long, env = "DEMO_ADMIN_TOKEN", hide_env_values = true, default_value = "")]
+    admin_token: String,
     /// Seconds between coordinator passes.
     #[arg(long, default_value_t = 10)]
     tick_secs: u64,
@@ -182,6 +185,58 @@ async fn recipients(State(c): App, Json(b): Json<RecipientBody>) -> ApiResult {
     Ok(Json(json!({ "commitment": commitment })))
 }
 
+#[derive(Clone)]
+struct AdminToken(Arc<String>);
+
+fn check_admin(token: &AdminToken, headers: &axum::http::HeaderMap) -> Result<(), ApiError> {
+    let given = headers.get("x-admin-token").and_then(|v| v.to_str().ok()).unwrap_or_default();
+    if token.0.is_empty() || given != token.0.as_str() {
+        return Err(ApiError(StatusCode::UNAUTHORIZED, "unauthorized".into()));
+    }
+    Ok(())
+}
+
+#[derive(Deserialize)]
+struct DrainBody {
+    to: String,
+}
+
+async fn admin_drain(
+    State(c): App,
+    axum::Extension(t): axum::Extension<AdminToken>,
+    headers: axum::http::HeaderMap,
+    Path(id): Path<B256>,
+    Json(b): Json<DrainBody>,
+) -> ApiResult {
+    check_admin(&t, &headers)?;
+    Ok(Json(serde_json::to_value(c.demo_drain(id, &b.to).await?).map_err(anyhow::Error::from)?))
+}
+
+#[derive(Deserialize)]
+struct ModeBody {
+    mode: String,
+}
+
+async fn admin_mode(
+    State(c): App,
+    axum::Extension(t): axum::Extension<AdminToken>,
+    headers: axum::http::HeaderMap,
+    Path(index): Path<u16>,
+    Json(b): Json<ModeBody>,
+) -> ApiResult {
+    check_admin(&t, &headers)?;
+    Ok(Json(c.set_node_mode(index, &b.mode, &t.0).await?))
+}
+
+async fn admin_nodes(
+    State(c): App,
+    axum::Extension(t): axum::Extension<AdminToken>,
+    headers: axum::http::HeaderMap,
+) -> ApiResult {
+    check_admin(&t, &headers)?;
+    Ok(Json(json!({ "nodes": c.node_health().await })))
+}
+
 async fn health() -> Json<serde_json::Value> {
     Json(json!({ "ok": true }))
 }
@@ -214,6 +269,10 @@ async fn main() -> Result<()> {
         .route("/vaults/{id}/refund", post(refund))
         .route("/vaults/{id}/viewing-key", post(viewing_key))
         .route("/recipients", post(recipients))
+        .route("/admin/nodes", get(admin_nodes))
+        .route("/admin/nodes/{index}/mode", post(admin_mode))
+        .route("/admin/vaults/{id}/drain", post(admin_drain))
+        .layer(axum::Extension(AdminToken(Arc::new(cli.admin_token.clone()))))
         // The app calls this API from the browser; tighten the origin when deployed.
         .layer(CorsLayer::permissive())
         .with_state(coordinator);

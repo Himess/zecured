@@ -113,6 +113,24 @@ pub struct NoteView {
     pub amount: u64,
 }
 
+/// One signer's reaction to the demo attack.
+#[derive(Clone, Debug, Serialize, Deserialize)]
+pub struct DrainVote {
+    pub index: u16,
+    pub signed: bool,
+    pub reason: Option<String>,
+}
+
+/// Result of the threshold demo: an attempt to sweep a vault to an arbitrary address.
+#[derive(Clone, Debug, Serialize, Deserialize)]
+pub struct DrainReport {
+    pub vault_id: B256,
+    pub amount: u64,
+    pub votes: Vec<DrainVote>,
+    /// True if at least three signers would have signed (the demo never broadcasts).
+    pub threshold_reached: bool,
+}
+
 pub struct Coordinator {
     pub cfg: NetworkConfig,
     nodes: Nodes,
@@ -408,6 +426,74 @@ impl Coordinator {
             non_conforming,
             inflight: v.inflight.is_some(),
         })
+    }
+
+    // ------------------------------------------------------------------ threshold demo
+
+    /// DEMO: builds a transaction sweeping every unspent note of the vault to `to` and asks
+    /// all signers for round-1 commitments. Honest signers refuse (the PCZT matches no
+    /// plan); signers switched to "compromised" mode accept. Never broadcasts anything.
+    pub async fn demo_drain(&self, vault_id: B256, to: &str) -> Result<DrainReport> {
+        let mut v = self.store.lock().await.vaults.get(&vault_id).cloned().context("unknown vault")?;
+        let notes = self.notes(&mut v).await?;
+        let mut inputs: Vec<ReceivedNote> = notes.lineage.clone();
+        inputs.extend(notes.non_conforming.iter().map(|(_, n)| n.clone()));
+        ensure!(!inputs.is_empty(), "the vault holds nothing to sweep");
+        let total: u64 = inputs.iter().map(|n| n.value()).sum();
+        let fee = spend::zip317_fee(inputs.len(), 1);
+        let attacker = keys::ironwood_receiver(&NETWORK, to)?;
+        let payments = [Payment {
+            recipient: attacker,
+            value: total.checked_sub(fee).context("vault too small to sweep")?,
+            privacy: spend::OutputPrivacy::NoOvk,
+        }];
+        let fvk = fvk_of(&v)?;
+        let anchor = self.zcash.lock().await.scan(&vault_id).context("vault not scanned")?.anchor();
+        let refs: Vec<&ReceivedNote> = inputs.iter().collect();
+        let unsigned = spend::build(&NETWORK, BlockHeight::from_u32(notes.tip + 1), &fvk, anchor, &refs, &payments)?;
+        let pk = self.proving_key().await?;
+        let pczt = tokio::task::spawn_blocking(move || spend::finalize_and_prove(unsigned.pczt, &pk)).await??;
+        let mut sid = [0u8; 16];
+        rand_core_06::RngCore::fill_bytes(&mut rand_core_06::OsRng, &mut sid);
+        let req = CommitRequest {
+            session_id: format!("demo-{}", hex::encode(sid)),
+            vault_id,
+            kind: SignKind::Payout { claim_ids: vec![] },
+            pczt: pczt.serialize().map_err(|e| anyhow!("serialize PCZT: {e:?}"))?,
+        };
+        let answers: Vec<Answer<CommitResponse>> = self.nodes.post_many(&self.nodes.indices(), "/v1/sign/commit", &req).await;
+        let votes: Vec<DrainVote> = answers
+            .into_iter()
+            .map(|(index, a)| match a {
+                Ok(_) => DrainVote { index, signed: true, reason: None },
+                Err(e) => DrainVote { index, signed: false, reason: Some(format!("{e:#}")) },
+            })
+            .collect();
+        let signed = votes.iter().filter(|v| v.signed).count();
+        info!(vault = %short(&vault_id), signed, "threshold demo: sweep attempt");
+        Ok(DrainReport {
+            vault_id,
+            amount: total,
+            threshold_reached: signed >= usize::from(MIN_SIGNERS),
+            votes,
+        })
+    }
+
+    /// Forwards a demo mode switch to one node.
+    pub async fn set_node_mode(&self, index: u16, mode: &str, token: &str) -> Result<serde_json::Value> {
+        self.nodes.post(index, "/v1/admin/mode", &serde_json::json!({ "mode": mode, "token": token })).await
+    }
+
+    /// Health of every node (unreachable nodes are reported as such).
+    pub async fn node_health(&self) -> Vec<serde_json::Value> {
+        let mut out = vec![];
+        for i in self.nodes.indices() {
+            out.push(match self.nodes.get_json(i, "/v1/health").await {
+                Ok(v) => v,
+                Err(_) => serde_json::json!({ "index": i, "mode": "unreachable" }),
+            });
+        }
+        out
     }
 
     // ------------------------------------------------------------------ main loop

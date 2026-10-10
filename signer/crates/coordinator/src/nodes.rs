@@ -55,6 +55,23 @@ impl Nodes {
         serde_json::from_value(value).with_context(|| format!("node {index}: unexpected response"))
     }
 
+    /// GETs `path` on node `index`.
+    pub async fn get_json(&self, index: u16, path: &str) -> Result<serde_json::Value> {
+        let (_, base) = self
+            .nodes
+            .iter()
+            .find(|(i, _)| *i == index)
+            .with_context(|| format!("unknown node {index}"))?;
+        Ok(self
+            .http
+            .get(format!("{base}{path}"))
+            .timeout(Duration::from_secs(3))
+            .send()
+            .await?
+            .json()
+            .await?)
+    }
+
     /// POSTs the same body to `indices` concurrently.
     pub async fn post_many<B: Serialize + Sync, T: DeserializeOwned>(&self, indices: &[u16], path: &str, body: &B) -> Vec<Answer<T>> {
         join_all(indices.iter().map(|&i| async move { (i, self.post(i, path, body).await) })).await

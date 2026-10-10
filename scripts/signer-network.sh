@@ -100,7 +100,7 @@ cmd_start() {
     echo $! > "$PIDS/node-$i"
   done
   if ! { [[ -f "$PIDS/backend" ]] && kill -0 "$(cat "$PIDS/backend")" 2>/dev/null; }; then
-    ZECURED_NETWORK_CONFIG="$NETWORK" ZECURED_COORDINATOR_DATA="$DATA/coordinator" \
+    DEMO_ADMIN_TOKEN="$token" ZECURED_NETWORK_CONFIG="$NETWORK" ZECURED_COORDINATOR_DATA="$DATA/coordinator" \
       nohup "$BIN/zecured-backend" > "$LOGS/backend.log" 2>&1 &
     echo $! > "$PIDS/backend"
   fi
