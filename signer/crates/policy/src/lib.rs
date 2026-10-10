@@ -3,4 +3,6 @@
 //! Pure functions only; every node evaluates them on its own view of both chains.
 
 pub mod classify;
+pub mod derive;
 pub mod ledger;
+pub mod verify;

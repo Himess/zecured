@@ -1,0 +1,18 @@
+[package]
+name = "zecured-base"
+version = "0.1.0"
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+publish.workspace = true
+
+[dependencies]
+zecured-policy = { path = "../policy" }
+alloy.workspace = true
+anyhow.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+hex.workspace = true
+
+[dev-dependencies]
+tokio.workspace = true

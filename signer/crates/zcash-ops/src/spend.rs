@@ -183,7 +183,7 @@ pub fn proving_key() -> ProvingKey {
 }
 
 /// What a threshold signer is asked to sign for one spend.
-#[derive(Clone, Copy, Debug)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct SpendAuthRequest {
     pub action_index: usize,
     /// `alpha`, the spend authorization randomizer (`rk = ak + [alpha] G`).

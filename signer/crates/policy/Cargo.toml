@@ -17,11 +17,11 @@ thiserror.workspace = true
 serde.workspace = true
 hex.workspace = true
 sha3 = "0.10"
+zcash_protocol.workspace = true
 
 [dev-dependencies]
 zecured-threshold = { path = "../threshold" }
 rand_core_06.workspace = true
 rand_010.workspace = true
 incrementalmerkletree.workspace = true
-zcash_protocol.workspace = true
 zcash_primitives.workspace = true
