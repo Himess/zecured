@@ -4,6 +4,7 @@
 //! fresh salt, so the bot's commitments on Base cannot be linked to each other.
 
 mod chain;
+mod relayer;
 
 use std::{collections::BTreeMap, net::SocketAddr, path::PathBuf, sync::Arc, time::Duration};
 
@@ -73,6 +74,22 @@ enum Cmd {
         #[arg(long, default_value_t = 15)]
         every_secs: u64,
     },
+    /// Keep the Zcash header relay fed from Testnet peers (K3; run two, independently).
+    Relayer {
+        /// The ZcashHeaderRelay (contracts/deployments/<name>.relay.json).
+        #[arg(long, env = "ZECURED_RELAY")]
+        relay: Address,
+        #[arg(long, env = "RELAYER_PRIVATE_KEY", hide_env_values = true)]
+        key: String,
+        /// Headers per transaction at most (split further to fit the gas cap).
+        #[arg(long, default_value_t = 20)]
+        batch: usize,
+        /// Log an alarm when the relay lags the Zcash tip by this many blocks (S10).
+        #[arg(long, default_value_t = 5)]
+        alarm_lag: u32,
+        #[arg(long, default_value_t = 20)]
+        every_secs: u64,
+    },
     /// Quote and execute close-from-collateral requests.
     MarketMaker {
         #[arg(long, env = "BOT_MARKET_MAKER_PRIVATE_KEY", hide_env_values = true)]
@@ -93,6 +110,25 @@ async fn main() -> Result<()> {
         .with_env_filter(tracing_subscriber::EnvFilter::try_from_default_env().unwrap_or_else(|_| "info".into()))
         .init();
     let cli = Cli::parse();
+    if let Cmd::Relayer {
+        relay,
+        key,
+        batch,
+        alarm_lag,
+        every_secs,
+    } = cli.cmd
+    {
+        // The relay exists before (and outlives) any one Zecured deployment.
+        return relayer::run(relayer::Relayer {
+            relay,
+            key: key.parse()?,
+            rpc: cli.rpc,
+            batch,
+            alarm_lag,
+            every: std::time::Duration::from_secs(every_secs),
+        })
+        .await;
+    }
     let d = Deployment::load(&cli.deployments)?;
     match cli.cmd {
         Cmd::Liquidator {
@@ -106,6 +142,7 @@ async fn main() -> Result<()> {
             bind,
             margin_bps,
         } => market_maker(cli.rpc, cli.backend, d, key.parse()?, zcash_address, bind, margin_bps).await,
+        Cmd::Relayer { .. } => unreachable!("handled above"),
     }
 }
 

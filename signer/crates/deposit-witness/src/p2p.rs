@@ -77,6 +77,8 @@ pub struct Peer {
     buf: Vec<u8>,
     /// The peer's user agent, from its `version` message.
     pub agent: String,
+    /// The best height the peer announced in its `version` message (its word only).
+    pub start_height: u32,
 }
 
 impl Peer {
@@ -88,6 +90,7 @@ impl Peer {
             stream,
             buf: vec![],
             agent: String::new(),
+            start_height: 0,
         };
         peer.handshake(addr)?;
         Ok(peer)
@@ -150,8 +153,11 @@ impl Peer {
             match command.as_str() {
                 "version" => {
                     let (len, pos) = read_varint(&body, 80)?;
-                    let agent = body.get(pos..pos + len as usize).context("truncated version message")?;
+                    let end = pos.checked_add(usize::try_from(len)?).context("truncated version message")?;
+                    let agent = body.get(pos..end).context("truncated version message")?;
                     self.agent = String::from_utf8_lossy(agent).into_owned();
+                    let height = body.get(end..end + 4).context("truncated version message")?;
+                    self.start_height = u32::try_from(i32::from_le_bytes(height.try_into()?)).unwrap_or(0);
                     version = true;
                     self.send("verack", &[])?;
                 }
@@ -181,9 +187,16 @@ impl Peer {
     }
 }
 
+/// Most headers one `headers` message may carry (the protocol's limit).
+const MAX_HEADERS: u64 = 2_000;
+
 /// The 1487-byte headers of a `headers` message (each followed by a zero transaction count).
 fn parse_headers(body: &[u8]) -> Result<Vec<Vec<u8>>> {
     let (count, mut pos) = read_varint(body, 0)?;
+    // The count is the peer's word: never allocate for more headers than the protocol allows or
+    // than the message can hold.
+    ensure!(count <= MAX_HEADERS, "headers message claims {count} headers");
+    ensure!(count as usize <= body.len() / HEADER_LENGTH, "headers message too short for {count} headers");
     let mut out = Vec::with_capacity(count as usize);
     for _ in 0..count {
         let (solution, at) = read_varint(body, pos + PREFIX_LENGTH)?;
@@ -221,6 +234,12 @@ fn display(hash: &[u8; 32]) -> String {
     let mut h = *hash;
     h.reverse();
     hex::encode(h)
+}
+
+/// The highest best height that up to `count` reachable peers announce: an estimate of the
+/// Zcash tip (each peer's word only), `None` if none answers.
+pub fn announced_height(peers: &[SocketAddr], count: usize) -> Option<u32> {
+    peers.iter().filter_map(|a| Peer::connect(*a).ok()).take(count).map(|p| p.start_height).max()
 }
 
 /// Up to `count` headers after the block `(from_height, from_hash)` (internal byte order), each
@@ -315,6 +334,19 @@ mod tests {
             assert_eq!(read_varint(&enc, 0).unwrap(), (n, enc.len()), "{n}");
         }
         assert!(read_varint(&[0xfd, 1], 0).is_err());
+    }
+
+    /// Review finding: a peer's claimed header count must not size an allocation.
+    #[test]
+    fn a_claimed_header_count_is_checked_before_allocating() {
+        let huge = [&[0xff][..], &u64::MAX.to_le_bytes()].concat();
+        assert!(parse_headers(&huge).is_err());
+        let too_many = [&[0xfd][..], &2_001u16.to_le_bytes()].concat();
+        assert!(parse_headers(&too_many).is_err());
+        // 2,000 claimed, no data.
+        let empty = [&[0xfd][..], &2_000u16.to_le_bytes()].concat();
+        assert!(parse_headers(&empty).is_err());
+        assert_eq!(parse_headers(&[0]).unwrap(), Vec::<Vec<u8>>::new());
     }
 
     #[test]

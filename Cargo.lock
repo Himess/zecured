@@ -2630,6 +2630,7 @@ checksum = "306286e8dcc39ab3dfceb74c792ce8baffdab90591321d3ffaae64829734c37f"
 dependencies = [
  "blake2b_simd",
  "corez",
+ "document-features",
 ]
 
 [[package]]
@@ -7363,6 +7364,7 @@ dependencies = [
  "tracing-subscriber",
  "zcash_protocol",
  "zecured-base",
+ "zecured-deposit-witness",
  "zecured-zcash-ops",
 ]
 
@@ -7399,6 +7401,17 @@ dependencies = [
 ]
 
 [[package]]
+name = "zecured-deposit-k4"
+version = "0.1.0"
+dependencies = [
+ "orchard",
+ "zcash_address",
+ "zcash_history",
+ "zcash_protocol",
+ "zecured-deposit-statement",
+]
+
+[[package]]
 name = "zecured-deposit-statement"
 version = "0.1.0"
 dependencies = [
@@ -7413,6 +7426,7 @@ dependencies = [
  "zcash_note_encryption",
  "zcash_primitives",
  "zcash_protocol",
+ "zecured-deposit-k4",
 ]
 
 [[package]]
@@ -7422,6 +7436,7 @@ dependencies = [
  "anyhow",
  "blake2b_simd",
  "clap",
+ "equihash",
  "hex",
  "incrementalmerkletree",
  "orchard",

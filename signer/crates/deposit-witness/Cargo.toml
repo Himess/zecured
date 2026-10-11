@@ -23,6 +23,8 @@ zcash_client_backend.workspace = true
 incrementalmerkletree.workspace = true
 blake2b_simd.workspace = true
 sha2 = "0.10"
+# The reference Equihash check (Zebra's), to label the relay's differential corpus.
+equihash = "0.3"
 anyhow.workspace = true
 hex.workspace = true
 serde = { workspace = true }
@@ -46,3 +48,7 @@ path = "src/bin/build_witness.rs"
 [[bin]]
 name = "update-headers"
 path = "src/bin/update_headers.rs"
+
+[[bin]]
+name = "equihash-corpus"
+path = "src/bin/equihash_corpus.rs"

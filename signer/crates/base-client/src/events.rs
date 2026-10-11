@@ -58,9 +58,22 @@ sol! {
 
 sol! {
     /// The Zcash header relay (contracts/src/relay/IZcashHeaderRelay.sol), as far as a deposit
-    /// prover needs it: an anchor header must be on its best chain under enough work.
+    /// prover (an anchor header must be on its best chain under enough work) and a relayer need it.
     #[sol(rpc)]
     interface IZcashHeaderRelay {
+        struct HeaderInfo {
+            bool known;
+            bytes32 prevHash;
+            uint256 height;
+            uint256 time;
+            uint256 bits;
+            uint256 chainWork;
+            bytes32 merkleRoot;
+            bytes32 blockCommitments;
+        }
+
+        function submitHeaders(bytes[] headers) external;
+        function headerOf(bytes32 blockHash) external view returns (HeaderInfo memory);
         function isInBestChain(bytes32 blockHash) external view returns (bool);
         function bestChainTip() external view returns (bytes32 blockHash, uint256 height, uint256 chainWork);
         function bestBlockHashAt(uint256 height) external view returns (bytes32);
