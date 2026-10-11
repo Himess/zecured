@@ -134,6 +134,7 @@ pub async fn repay_release(wallet: &Path, vault: &B256, commitment: B256, rpc: &
         ensure!(r.status(), "repay reverted");
         println!("repaid (tx {})", r.transaction_hash);
     }
+    ensure_registry_authorized(&morpho, me, d.registry).await?;
     let registry = IRegistry::new(d.registry, &p);
     let call = registry.requestRelease(*vault, commitment);
     let gas = gas_with_headroom(call.estimate_gas().await.map_err(|e| anyhow!("requestRelease: {e}"))?);
@@ -151,16 +152,26 @@ pub async fn partial_release(wallet: &Path, vault: &B256, amount: u64, commitmen
     let me = key.address();
     let p = ProviderBuilder::new().wallet(EthereumWallet::from(key)).connect_http(rpc.parse()?);
     let morpho = IMorpho::new(d.morpho, &p);
-    if !morpho.isAuthorized(me, d.registry).call().await? {
-        let call = morpho.setAuthorization(d.registry, true);
-        let gas = gas_with_headroom(call.estimate_gas().await?);
-        ensure!(call.gas(gas).send().await?.get_receipt().await?.status(), "setAuthorization reverted");
-    }
+    ensure_registry_authorized(&morpho, me, d.registry).await?;
     let registry = IRegistry::new(d.registry, &p);
     let call = registry.requestPartialRelease(*vault, amount, commitment);
     let gas = gas_with_headroom(call.estimate_gas().await.map_err(|e| anyhow!("requestPartialRelease: {e}"))?);
     let r = call.gas(gas).send().await?.get_receipt().await?;
     ensure!(r.status(), "requestPartialRelease reverted");
     println!("partial release of {amount} zat requested (tx {})", r.transaction_hash);
+    Ok(())
+}
+
+/// Releases withdraw collateral through the account's Morpho authorization of the Registry.
+async fn ensure_registry_authorized<P: alloy::providers::Provider>(
+    morpho: &IMorpho::IMorphoInstance<P>,
+    me: Address,
+    registry: Address,
+) -> Result<()> {
+    if !morpho.isAuthorized(me, registry).call().await? {
+        let call = morpho.setAuthorization(registry, true);
+        let gas = gas_with_headroom(call.estimate_gas().await?);
+        ensure!(call.gas(gas).send().await?.get_receipt().await?.status(), "setAuthorization reverted");
+    }
     Ok(())
 }

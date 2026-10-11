@@ -324,7 +324,7 @@ async fn main() -> Result<()> {
             let w = load_wallet(&cli.wallet)?;
             let s = scan(&w, &cli.lwd).await?;
             for n in s.unspent() {
-                println!("  {:>12} zat  h={} {:?}", n.value(), n.position.height, n.scope);
+                println!("  {:>12} zat  h={} {:?}  tx {}", n.value(), n.position.height, n.scope, n.txid);
             }
             println!("balance {} zat (scanned to {})", s.balance(), s.scanned_to);
         }

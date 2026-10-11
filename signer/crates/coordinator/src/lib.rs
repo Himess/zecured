@@ -11,7 +11,7 @@ pub mod store;
 
 use std::{
     collections::BTreeMap,
-    path::Path,
+    path::{Path, PathBuf},
     sync::{Arc, OnceLock},
 };
 
@@ -145,7 +145,13 @@ pub struct Coordinator {
     pk: OnceLock<Arc<ProvingKey>>,
     /// Zcash tip seen by the last coordinator pass (for the app's countdowns).
     last_tip: std::sync::atomic::AtomicU32,
+    data_dir: PathBuf,
 }
+
+/// TEST ONLY: while this file exists in the coordinator's data directory, the next payout is
+/// signed and recorded but neither broadcast nor rebroadcast, so it expires unmined and the
+/// rebuild path runs end to end (docs/TESTING.md). The file is removed when used.
+const TEST_WITHHOLD_FLAG: &str = "test-withhold-next-broadcast";
 
 /// `zcash:` payment URI for `amount` zatoshis (ZIP 321).
 pub fn zip321_uri(address: &str, amount: u64) -> String {
@@ -197,6 +203,7 @@ impl Coordinator {
             gas,
             pk: OnceLock::new(),
             last_tip: std::sync::atomic::AtomicU32::new(0),
+            data_dir: data_dir.to_owned(),
             cfg,
         })
     }
@@ -824,6 +831,7 @@ impl Coordinator {
         // Record the payout before broadcasting it: if the broadcast fails or its response is
         // lost, the same transaction is rebroadcast until it is mined or expires, and nothing
         // else is built for these claims in the meantime.
+        let withhold = std::fs::remove_file(self.data_dir.join(TEST_WITHHOLD_FLAG)).is_ok();
         let mut v = v.clone();
         let (claim_ids, refund_note) = match &kind {
             SignKind::Payout { claim_ids } => (claim_ids.clone(), None),
@@ -834,9 +842,13 @@ impl Coordinator {
             refund_note,
             txid: tx.txid().to_string(),
             expiry_height: expiry,
-            raw_tx: Some(hex::encode(&raw)),
+            raw_tx: (!withhold).then(|| hex::encode(&raw)),
         });
         self.store.lock().await.save(v.clone())?;
+        if withhold {
+            warn!(vault = %short(&v.vault_id), expiry, "TEST: payout withheld; it will expire unmined");
+            return Ok(());
+        }
         match self.broadcast(raw).await {
             Ok(()) => info!(vault = %short(&v.vault_id), signers = ?chosen_ids, "payout broadcast"),
             Err(e) => warn!(vault = %short(&v.vault_id), "payout broadcast failed, will retry: {e:#}"),
