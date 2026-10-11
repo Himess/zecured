@@ -328,8 +328,14 @@ impl Node {
             dkg::check_open(&self.cfg, &store, &open, now(), tip)?;
         }
         let vault_id = open.vault_id;
-        let (pending, out) = dkg::round1(self.id.index, open)?;
         let mut all = self.pending_dkg.lock().await;
+        // L-9: one opening at a time per account and per owner; completed vaults are refused by
+        // `check_open` (and again before round 3 saves the vault).
+        ensure!(
+            !all.iter().any(|(id, p)| *id != vault_id && p.age() < DKG_TTL && p.same_parties(&open)),
+            "account or owner already has a vault being opened"
+        );
+        let (pending, out) = dkg::round1(self.id.index, open)?;
         insert_bounded(&mut all, vault_id, pending, dkg::Pending::age, DKG_TTL, MAX_PENDING_DKGS)?;
         Ok(out)
     }

@@ -54,8 +54,8 @@ sources for availability, not for authorization.
 | L-5 | Low | Lost updates in the coordinator | **Fixed.** Read-modify-write under the lock |
 | L-6 | Low | A confirmation could drop a newer in-flight record | **Fixed.** Compare-and-clear |
 | L-7 | Low | Signing sessions and pending DKGs never expired | **Fixed.** TTLs and caps |
-| L-8 | Low | A conforming deposit that can never be attested has no refund path | **Open.** Needs an attestation deadline in the Registry |
-| L-9 | Low | Concurrent opens could bind one account to two vaults off-chain | **Open.** The Registry still enforces one account ↔ one vault (I4) on-chain |
+| L-8 | Low | A conforming deposit that can never be attested has no refund path | **Fixed** (D23). `cancelVault` (3 of 5) retires a never-activated vault on Base; the owner's refund request then pays the deposit back through P5, only once the cancellation is applied |
+| L-9 | Low | Concurrent opens could bind one account to two vaults off-chain | **Fixed.** Each node allows one DKG in progress per account and per owner and checks again before round 3 saves the vault; the Registry still enforces one account ↔ one vault (I4), and a deposit stranded by a lost race is refundable after cancellation (D23) |
 | L-10 | Low | `GET /vaults/:id` exposed more than the app needs | **Fixed.** Minimal view, no lock nesting |
 | L-11 | Low | App: `'unsafe-inline'` CSP, identifiable backup filenames, polling pattern | **Partly fixed.** Neutral filenames, staggered polling; nonce-based CSP and passphrase-encrypted keys remain |
 | L-12 | Low | A test-only broadcast hook was compiled into the coordinator | **Fixed.** Behind the `test-hooks` feature |
@@ -99,7 +99,7 @@ close arithmetic, event privacy, and the relay's consensus rules.
   on Base itself: a Zcash header relay plus deposit proofs ([TIER2.md](TIER2.md); the relay is
   built and tested, the proof is designed).
 - **Three colluding signers** can still steal: the hackathon trust assumption.
-- **L-8, L-9, M-5, L-11** as listed above.
+- **M-5, L-11** as listed above.
 
 ## Checked and found sound
 

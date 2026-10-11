@@ -101,16 +101,25 @@ fn open() -> VaultOpen {
 }
 
 fn run_dkg(cfg: &NetworkConfig, nodes: &mut [TestNode], tamper: bool) -> Vec<anyhow::Result<dkg::Round3Out>> {
+    run_dkg_for(cfg, nodes, tamper, open())
+}
+
+fn run_dkg_for(
+    cfg: &NetworkConfig,
+    nodes: &mut [TestNode],
+    tamper: bool,
+    open: VaultOpen,
+) -> Vec<anyhow::Result<dkg::Round3Out>> {
     let mut pending = BTreeMap::new();
     let mut r1: Vec<Round1Out> = vec![];
     for n in nodes.iter() {
-        let (p, out) = dkg::round1(n.index, open()).unwrap();
+        let (p, out) = dkg::round1(n.index, open.clone()).unwrap();
         pending.insert(n.index, p);
         // Everything the coordinator relays goes through JSON.
         r1.push(serde_json::from_str(&serde_json::to_string(&out).unwrap()).unwrap());
     }
     let r2_in = Round2In {
-        vault_id: open().vault_id,
+        vault_id: open.vault_id,
         round1: r1.clone(),
     };
     let mut to: BTreeMap<u16, BTreeMap<u16, dkg::Sealed>> = BTreeMap::new();
@@ -128,7 +137,7 @@ fn run_dkg(cfg: &NetworkConfig, nodes: &mut [TestNode], tamper: bool) -> Vec<any
         .iter_mut()
         .map(|n| {
             let input = Round3In {
-                vault_id: open().vault_id,
+                vault_id: open.vault_id,
                 round1: r1.clone(),
                 sealed: to.remove(&n.index).unwrap_or_default(),
             };
@@ -187,6 +196,25 @@ fn five_nodes_agree_on_the_vault() {
     assert!(sks.iter().all(|s| *s == sks[0]));
     let shares: Vec<String> = nodes.iter().map(|n| n.store.vaults[&open().vault_id].key_package.to_string()).collect();
     assert!(shares.windows(2).all(|w| w[0] != w[1]));
+}
+
+/// L-9: a second opening for the same account (or owner) that was still running when the
+/// first one completed saves no vault.
+#[test]
+fn a_second_vault_for_one_account_is_refused_before_it_is_saved() {
+    let (cfg, mut nodes) = setup();
+    assert!(run_dkg(&cfg, &mut nodes, false).iter().all(|r| r.is_ok()));
+    let second = VaultOpen {
+        vault_id: B256::repeat_byte(8),
+        ..open()
+    };
+    for r in run_dkg_for(&cfg, &mut nodes, false, second) {
+        let e = r.expect_err("a second vault for the account");
+        assert!(e.to_string().contains("already has a vault"), "{e}");
+    }
+    for n in &nodes {
+        assert!(!n.store.vaults.contains_key(&B256::repeat_byte(8)));
+    }
 }
 
 #[test]

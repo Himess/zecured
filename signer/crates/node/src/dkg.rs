@@ -128,6 +128,11 @@ impl Pending {
     pub fn age(&self) -> Duration {
         self.created.elapsed()
     }
+
+    /// L-9: whether this opening is for the same account or owner as `open`.
+    pub fn same_parties(&self, open: &VaultOpen) -> bool {
+        self.open.account == open.account || self.open.owner == open.owner
+    }
 }
 
 /// Hash of a DKG attempt's round-1 transcript: the vault id and every signer's round-1 output
@@ -275,6 +280,8 @@ pub fn round3(
     let secret2 = pending.round2_secret.as_ref().context("round 2 not run")?;
     let vault_id = pending.open.vault_id;
     ensure!(input.vault_id == vault_id, "vault id mismatch");
+    // L-9: another opening for this account or owner may have completed since round 1.
+    ensure!(!store.is_bound(pending.open.account, pending.open.owner), "account or owner already has a vault");
     let transcript = pending.transcript.context("round 2 not run")?;
     ensure!(
         transcript_hash(&vault_id, &input.round1)? == transcript,
