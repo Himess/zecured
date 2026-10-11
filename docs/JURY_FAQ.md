@@ -12,9 +12,18 @@ the rest returns to a new shielded address in the same transaction. No outside f
 touch your account.
 
 **What if three signers collude?**
-That's our hackathon trust assumption, stated openly. Roadmap: independent operators, bonds
-on Base, automatic slashing via ZK fraud proofs, Base-side verification of Zcash deposits.
-Meanwhile you can watch your vault with its viewing key.
+They could steal a vault's ZEC: that's our hackathon trust assumption for payouts, stated
+openly. They can no longer mint unbacked zZEC through Tier 2: a deposit can be activated on a
+zero-knowledge proof (RISC Zero) that the note is in a Zcash block committed by a header our
+on-chain relay verified with Equihash, without revealing which block; the signers only vouch
+for the vault's key, and all five must ([TIER2.md](TIER2.md)). Roadmap: independent operators,
+bonds on Base, slashing on proven Zcash spends. Meanwhile you can watch your vault with its
+viewing key.
+
+**Does a deposit proof leak anything on Base?**
+It reveals a recent Zcash header (the anchor, not the deposit's block), the vault id, the
+account, the denomination, a keyed tag and a hash that also depends on the vault's viewing key.
+The deposit's block, transaction, note and address stay inside the proof.
 
 **Isn't zZEC just wrapped ZEC like renZEC?**
 No. No account ever holds zZEC: it is minted straight into one Morpho position and can only
