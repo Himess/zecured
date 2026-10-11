@@ -7,7 +7,7 @@ how to reproduce all of it. Everything here ran on testnets only.
 
 | Layer | Command | Tests | Covers |
 |---|---|---|---|
-| Contracts | `cd contracts && forge test --isolate` | 178 | Unit and fork tests against the real Morpho Blue code; handler-based invariants I1, I2, I3 (Base side), I4–I9 and D14 with attacker actions; fuzzing (D14 LTV rule against an independent computation); EIP-712 golden vectors |
+| Contracts | `cd contracts && forge test --isolate` | 222 | Unit and fork tests against the real Morpho Blue code; handler-based invariants I1, I2, I3 (Base side), I4–I9 and D14 with attacker actions; fuzzing (D14 LTV rule against an independent computation); EIP-712 golden vectors; the Tier 2 Zcash header relay against real testnet headers fetched over the Zcash P2P network (Equihash, NU7 difficulty rules, reorgs) |
 | Rust workspace | `cargo test --workspace` | 61 | ZIP 2005 key derivation against published vectors; FROST DKG and re-randomized signing; an offline FROST-signed Ironwood spend; P1 classification; the payout ledger (fees, dust, set-aside claims, I10); PCZT verification (an honest payout passes; another recipient, a split payment, a third-party output readable with the vault's OVK, an extra or a missing vault input, an expiry outside the window, a fee mismatch and the wrong vault are refused); EIP-712 parity with Solidity; D16 request authentication; node-to-node DKG envelopes; scanner reorg detection; paymaster allowlist |
 | App | `cd app && pnpm test` | vitest suite | Unified address encoding (F4Jumble), commitments, EIP-712 owner messages, Safe address prediction, call allowlist, Morpho math, API parsing |
 
