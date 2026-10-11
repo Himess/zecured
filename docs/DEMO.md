@@ -6,7 +6,7 @@
 2. Bots: `zecured-bots market-maker` and `zecured-bots liquidator` (MockUSDC minted to both).
 3. A borrower wallet pre-funded in Ironwood (`zecured-wallet balance`); a second vault already
    active for the liquidation scene (liquidation needs a few minutes of confirmations).
-4. Oracle price set to a round value (e.g. $300) from the demo control panel.
+4. Oracle price at $40 (the deployment default; the demo control panel sets it).
 5. Backup video recorded (see below) in case the testnet or the light wallet server is slow.
 
 ## Live flow (≈ 6 minutes)
