@@ -33,6 +33,9 @@ const MAX_MESSAGE: usize = 8_000_000;
 /// Many seeded addresses do not answer: give up on a connection quickly, on a reply slowly.
 const CONNECT_TIMEOUT: Duration = Duration::from_secs(5);
 const TIMEOUT: Duration = Duration::from_secs(30);
+/// A peer that keeps the connection alive (pings, inventory) but never answers `getheaders`
+/// must not hold the caller forever: give up on the answer after this long.
+const HEADERS_DEADLINE: Duration = Duration::from_secs(45);
 
 /// One line of a header file: `{ height, hash (display order), raw (hex) }`.
 #[derive(Clone, Debug, Serialize, Deserialize)]
@@ -176,7 +179,9 @@ impl Peer {
         payload.extend_from_slice(&locator);
         payload.extend_from_slice(&[0u8; 32]);
         self.send("getheaders", &payload)?;
+        let started = std::time::Instant::now();
         loop {
+            ensure!(started.elapsed() < HEADERS_DEADLINE, "no headers from the peer in time");
             let (command, body) = self.recv()?;
             match command.as_str() {
                 "headers" => return parse_headers(&body),
@@ -236,10 +241,17 @@ fn display(hash: &[u8; 32]) -> String {
     hex::encode(h)
 }
 
-/// The highest best height that up to `count` reachable peers announce: an estimate of the
-/// Zcash tip (each peer's word only), `None` if none answers.
+/// The highest best height that up to `count` reachable peers announce, among the first
+/// `3 * count` addresses: an estimate of the Zcash tip (each peer's word only), `None` if none
+/// answers.
 pub fn announced_height(peers: &[SocketAddr], count: usize) -> Option<u32> {
-    peers.iter().filter_map(|a| Peer::connect(*a).ok()).take(count).map(|p| p.start_height).max()
+    peers
+        .iter()
+        .take(3 * count)
+        .filter_map(|a| Peer::connect(*a).ok())
+        .take(count)
+        .map(|p| p.start_height)
+        .max()
 }
 
 /// Up to `count` headers after the block `(from_height, from_hash)` (internal byte order), each

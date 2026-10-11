@@ -60,8 +60,10 @@ pub async fn run(r: Relayer) -> Result<()> {
 }
 
 /// The headers that follow the relay's best tip, from the peers; from up to `STEP_BACK` blocks
-/// below the tip if the peers do not continue from it.
-async fn headers_after<P: Provider>(relay: &IZcashHeaderRelay::IZcashHeaderRelayInstance<P>) -> Result<Vec<HeaderLine>> {
+/// below the tip if the peers do not continue from it. Also returns the relay's tip height.
+async fn headers_after<P: Provider>(
+    relay: &IZcashHeaderRelay::IZcashHeaderRelayInstance<P>,
+) -> Result<(Vec<HeaderLine>, u32)> {
     let tip = relay.bestChainTip().call().await.context("relay.bestChainTip")?;
     let height = u32::try_from(tip.height)?;
     for back in [0, STEP_BACK] {
@@ -74,12 +76,12 @@ async fn headers_after<P: Provider>(relay: &IZcashHeaderRelay::IZcashHeaderRelay
         let peers = p2p::seed_peers();
         let fetched = tokio::task::spawn_blocking(move || p2p::fetch(from, hash.0, FETCH, &peers)).await?;
         match fetched {
-            Ok(lines) if !lines.is_empty() => return Ok(lines),
-            Ok(_) if back == 0 => return Ok(vec![]), // the relay is at the peers' tip
+            Ok(lines) if !lines.is_empty() => return Ok((lines, height)),
+            Ok(_) if back == 0 => return Ok((vec![], height)), // the relay is at the peers' tip
             _ => {}
         }
     }
-    Ok(vec![])
+    Ok((vec![], height))
 }
 
 fn internal_hash(line: &HeaderLine) -> Result<B256> {
@@ -88,39 +90,67 @@ fn internal_hash(line: &HeaderLine) -> Result<B256> {
     Ok(B256::try_from(hash.as_slice())?)
 }
 
+/// The headers of `lines` the relay does not have yet.
+async fn unknown<P: Provider>(
+    relay: &IZcashHeaderRelay::IZcashHeaderRelayInstance<P>,
+    lines: &[HeaderLine],
+) -> Result<Vec<HeaderLine>> {
+    let mut out = vec![];
+    for line in lines {
+        if !relay.headerOf(internal_hash(line)?).call().await.context("relay.headerOf")?.known {
+            out.push(line.clone());
+        }
+    }
+    Ok(out)
+}
+
 async fn pass(r: &Relayer) -> Result<()> {
     let provider = ProviderBuilder::new().wallet(EthereumWallet::from(r.key.clone())).connect_http(r.rpc.parse()?);
     let relay = IZcashHeaderRelay::new(r.relay, &provider);
-    let lines = headers_after(&relay).await?;
+    let (lines, tip_height) = headers_after(&relay).await?;
 
-    // Skip what the relay already has (the other relayer's work, or a step back).
-    let mut fresh: Vec<Bytes> = vec![];
-    for line in &lines {
-        if relay.headerOf(internal_hash(line)?).call().await.context("relay.headerOf")?.known {
-            continue;
-        }
-        fresh.push(Bytes::from(hex::decode(&line.raw)?));
-    }
+    // Headers above the relay's tip are new unless another relayer is racing this one (then the
+    // submission's estimate fails and that batch is filtered); only a step back below the tip
+    // brings headers the relay already has.
+    let (below, above): (Vec<HeaderLine>, Vec<HeaderLine>) = lines.iter().cloned().partition(|l| l.height <= tip_height);
+    let mut fresh = unknown(&relay, &below).await?;
+    fresh.extend(above);
+    let mut submitted = 0;
     for chunk in fresh.chunks(r.batch) {
-        submit(&relay, chunk.to_vec()).await?;
+        if submit(&relay, raws(chunk)?).await.is_err() {
+            let left = unknown(&relay, chunk).await?;
+            if left.len() == chunk.len() {
+                return submit(&relay, raws(chunk)?).await; // not a race: report the error
+            }
+            if !left.is_empty() {
+                submit(&relay, raws(&left)?).await?;
+            }
+            submitted += left.len();
+        } else {
+            submitted += chunk.len();
+        }
     }
 
     // Alarms.
     let relay_height = u32::try_from(relay.bestChainTip().call().await?.height)?;
     let fetched_height = lines.last().map_or(0, |l| l.height);
-    let announced = tokio::task::spawn_blocking(|| p2p::announced_height(&p2p::seed_peers(), 3)).await?;
+    let announced = tokio::task::spawn_blocking(|| p2p::announced_height(&p2p::seed_peers(), 2)).await?;
     let zcash_tip = fetched_height.max(announced.unwrap_or(0));
     let lag = zcash_tip.saturating_sub(relay_height);
     if lag >= r.alarm_lag {
         error!(lag, relay_height, zcash_tip, "ALARM: the relay lags the Zcash tip");
-    } else if !fresh.is_empty() {
-        info!(submitted = fresh.len(), relay_height, "relay fed");
+    } else if submitted > 0 {
+        info!(submitted, relay_height, "relay fed");
     }
     let balance = provider.get_balance(r.key.address()).await?;
     if balance < U256::from(LOW_BALANCE_WEI) {
         error!(%balance, "ALARM: the relayer's gas balance is low");
     }
     Ok(())
+}
+
+fn raws(lines: &[HeaderLine]) -> Result<Vec<Bytes>> {
+    lines.iter().map(|l| Ok(Bytes::from(hex::decode(&l.raw)?))).collect()
 }
 
 /// Submits `headers` (parents first) in one transaction, or in halves while the estimate would

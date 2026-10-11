@@ -34,6 +34,7 @@ use zecured_node::config::NetworkConfig;
 
 mod allowlist;
 mod limits;
+mod paymaster;
 mod proxy;
 
 #[derive(Parser)]
@@ -58,6 +59,12 @@ struct Cli {
     bundler_url: String,
     #[arg(long, env = "PAYMASTER_URL", hide_env_values = true, default_value = "")]
     paymaster_url: String,
+    /// RQ-05: our own SingletonPaymasterV7 (contracts/deployments/<name>.paymaster.json); with
+    /// its signer key, the backend answers ERC-7677 itself instead of forwarding to PAYMASTER_URL.
+    #[arg(long, env = "PAYMASTER_ADDRESS", default_value = "")]
+    paymaster_address: String,
+    #[arg(long, env = "PAYMASTER_SIGNER_PRIVATE_KEY", hide_env_values = true, default_value = "")]
+    paymaster_signer_key: String,
     /// Base RPC behind the public `/proxy/rpc` (its own key and quota); empty = the network
     /// config's RPC, which the coordinator uses.
     #[arg(long, env = "PROXY_RPC_URL", hide_env_values = true, default_value = "")]
@@ -762,14 +769,30 @@ async fn main() -> Result<()> {
     } else {
         cli.proxy_rpc_url.clone()
     };
+    let own_paymaster = match (cli.paymaster_address.is_empty(), cli.paymaster_signer_key.is_empty()) {
+        (true, true) => None,
+        (false, false) => {
+            let own = paymaster::OwnPaymaster::new(
+                cli.paymaster_address.parse().context("PAYMASTER_ADDRESS")?,
+                cli.paymaster_signer_key.parse().context("PAYMASTER_SIGNER_PRIVATE_KEY")?,
+                cfg.base_rpc_url.clone(),
+            )?;
+            info!(paymaster = %own.address, "sponsoring with our own paymaster");
+            Some(own)
+        }
+        _ => anyhow::bail!("set both PAYMASTER_ADDRESS and PAYMASTER_SIGNER_PRIVATE_KEY, or neither"),
+    };
     let proxy = Arc::new(proxy::Proxy::new(
         proxy_rpc,
         cfg.base_rpc_url.clone(),
         Some(cli.bundler_url.clone()),
         Some(cli.paymaster_url.clone()),
+        own_paymaster,
         allowlist,
     )?);
-    let sponsorship = proxy.bundler_url.is_some() && proxy.paymaster_url.is_some() && proxy.allowlist.is_some();
+    let sponsorship = proxy.bundler_url.is_some()
+        && (proxy.paymaster_url.is_some() || proxy.own_paymaster.is_some())
+        && proxy.allowlist.is_some();
     let mut coordinator = Coordinator::new(cfg, &cli.data, &cli.coordinator_key)?;
     if let Some(host) = &cli.deposit_proof_host {
         coordinator = coordinator.with_deposit_proofs(
@@ -1017,7 +1040,7 @@ mod tests {
         let key = hex::encode(alloy::signers::local::PrivateKeySigner::random().to_bytes());
         let coordinator = Arc::new(Coordinator::new(cfg, &dir, &key).unwrap());
         let proxy = Arc::new(
-            proxy::Proxy::new("http://127.0.0.1:9".into(), "http://127.0.0.1:9".into(), None, None, None).unwrap(),
+            proxy::Proxy::new("http://127.0.0.1:9".into(), "http://127.0.0.1:9".into(), None, None, None, None).unwrap(),
         );
         let wiring = Wiring {
             public_config: PublicConfig(Arc::new(json!({}))),

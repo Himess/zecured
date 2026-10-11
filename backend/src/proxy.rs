@@ -30,6 +30,7 @@ use serde_json::{Value, json};
 use std::sync::Arc;
 
 use crate::{
+    paymaster::OwnPaymaster,
     allowlist::{
         Allowlist, ENTRY_POINT_V07, FALLBACK_HANDLER_SLOT, SAFE_4337_MODULE, SAFE_PROXY_RUNTIME_CODE, SAFE_SINGLETON,
         UserOpView,
@@ -73,6 +74,9 @@ const PAYMASTER_METHODS: &[&str] = &[
     "pm_getPaymasterData",
     "pm_sponsorUserOperation",
 ];
+
+/// ERC-7677: what our own paymaster answers (RQ-05).
+const OWN_PAYMASTER_METHODS: &[&str] = &["pm_getPaymasterStubData", "pm_getPaymasterData"];
 
 /// Methods whose params are `[userOp, entryPoint, ...]`: the UserOp must pass the allowlist.
 const USEROP_METHODS: &[&str] = &[
@@ -160,6 +164,8 @@ pub struct Proxy {
     check_rpc_url: String,
     pub bundler_url: Option<String>,
     pub paymaster_url: Option<String>,
+    /// RQ-05: our own paymaster, answered here (takes precedence over `paymaster_url`).
+    pub own_paymaster: Option<OwnPaymaster>,
     pub allowlist: Option<Allowlist>,
     senders: KeyedBuckets<Address>,
     /// Senders recently found to be Zecured Safes.
@@ -226,6 +232,7 @@ impl Proxy {
         check_rpc_url: String,
         bundler_url: Option<String>,
         paymaster_url: Option<String>,
+        own_paymaster: Option<OwnPaymaster>,
         allowlist: Option<Allowlist>,
     ) -> Result<Self> {
         Ok(Self {
@@ -234,6 +241,7 @@ impl Proxy {
             check_rpc_url,
             bundler_url: bundler_url.filter(|u| !u.is_empty()),
             paymaster_url: paymaster_url.filter(|u| !u.is_empty()),
+            own_paymaster,
             allowlist,
             senders: KeyedBuckets::new(SENDER_RATE, MAX_SENDERS),
             verified: Mutex::default(),
@@ -352,6 +360,40 @@ impl Proxy {
     async fn post(&self, url: &str, body: &Value) -> Option<Value> {
         self.http.post(url).json(body).send().await.ok()?.json().await.ok()
     }
+
+    /// RQ-05: ERC-7677 answered by our own paymaster, after the same checks as a forwarded call.
+    async fn answer_own(&self, own: &OwnPaymaster, body: Result<Json<Value>, JsonRejection>) -> Response {
+        let Ok(Json(body)) = body else {
+            return rpc_error(None, PARSE_ERROR);
+        };
+        if let Err(refusal) = self.check_all(&body, OWN_PAYMASTER_METHODS).await {
+            return rpc_error(body.get("id"), refusal);
+        }
+        let now = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).map_or(0, |d| d.as_secs());
+        let one = |req: Value| async move {
+            let id = req.get("id").cloned().unwrap_or(Value::Null);
+            let result = match req.get("method").and_then(Value::as_str) {
+                Some("pm_getPaymasterStubData") => Ok(own.stub()),
+                _ => own.data(&req["params"][0], now).await,
+            };
+            match result {
+                Ok(r) => json!({ "jsonrpc": "2.0", "id": id, "result": r }),
+                Err(_) => json!({ "jsonrpc": "2.0", "id": id,
+                                  "error": { "code": -32603, "message": UPSTREAM.message, "data": UPSTREAM.code } }),
+            }
+        };
+        let answer = match body {
+            Value::Array(items) => {
+                let mut out = Vec::with_capacity(items.len());
+                for item in items {
+                    out.push(one(item).await);
+                }
+                Value::Array(out)
+            }
+            single => one(single).await,
+        };
+        (StatusCode::OK, Json(answer)).into_response()
+    }
 }
 
 pub async fn rpc(State(p): ProxyState, body: Result<Json<Value>, JsonRejection>) -> Response {
@@ -366,6 +408,9 @@ pub async fn bundler(State(p): ProxyState, body: Result<Json<Value>, JsonRejecti
 }
 
 pub async fn paymaster(State(p): ProxyState, body: Result<Json<Value>, JsonRejection>) -> Response {
+    if let Some(own) = &p.own_paymaster {
+        return p.answer_own(own, body).await;
+    }
     match p.paymaster_url.as_deref() {
         Some(url) => p.forward(url, body, PAYMASTER_METHODS).await,
         None => rpc_error(None, NOT_CONFIGURED),
@@ -436,7 +481,7 @@ mod tests {
     async fn proxy_with(chain: Chain) -> (Proxy, Arc<Chain>) {
         let chain = Arc::new(chain);
         let url = serve(Router::new().route("/", post(chain_rpc)).with_state(chain.clone())).await;
-        let p = Proxy::new(url.clone(), url, Some("http://127.0.0.1:9".into()), None, Some(list())).unwrap();
+        let p = Proxy::new(url.clone(), url, Some("http://127.0.0.1:9".into()), None, None, Some(list())).unwrap();
         (p, chain)
     }
 
@@ -479,7 +524,7 @@ mod tests {
 
     #[test]
     fn write_methods_are_refused_on_the_rpc_proxy() {
-        let p = Proxy::new("http://127.0.0.1:1".into(), "http://127.0.0.1:1".into(), None, None, None).unwrap();
+        let p = Proxy::new("http://127.0.0.1:1".into(), "http://127.0.0.1:1".into(), None, None, None, None).unwrap();
         let run = |r: Value| futures_lite(p.check(&r, RPC_METHODS));
         assert!(run(json!({"method": "eth_call", "params": []})).is_ok());
         assert_eq!(run(json!({"method": "eth_sendRawTransaction", "params": []})), Err(METHOD_NOT_ALLOWED));
@@ -493,7 +538,7 @@ mod tests {
 
     #[test]
     fn userops_need_a_configured_allowlist() {
-        let p = Proxy::new("http://127.0.0.1:1".into(), "http://127.0.0.1:1".into(), None, None, None).unwrap();
+        let p = Proxy::new("http://127.0.0.1:1".into(), "http://127.0.0.1:1".into(), None, None, None, None).unwrap();
         let req = request("pm_getPaymasterData", release_op(Address::repeat_byte(1)), ENTRY_POINT_V07);
         assert_eq!(futures_lite(p.check(&req, PAYMASTER_METHODS)), Err(NOT_CONFIGURED));
     }
@@ -574,7 +619,7 @@ mod tests {
     /// Sponsorship fails closed when the chain cannot be read.
     #[tokio::test]
     async fn sponsorship_checks_fail_closed() {
-        let p = Proxy::new("http://127.0.0.1:9".into(), "http://127.0.0.1:9".into(), None, None, Some(list())).unwrap();
+        let p = Proxy::new("http://127.0.0.1:9".into(), "http://127.0.0.1:9".into(), None, None, None, Some(list())).unwrap();
         let req = request("pm_getPaymasterData", release_op(Address::repeat_byte(1)), ENTRY_POINT_V07);
         assert_eq!(p.check(&req, PAYMASTER_METHODS).await, Err(CHECK_UNAVAILABLE));
     }
@@ -594,7 +639,7 @@ mod tests {
         let addresses = vec![registry; MAX_LOG_ADDRESSES + 1];
         assert_eq!(logs(json!({ "address": addresses, "fromBlock": "0x1", "toBlock": "0x2" })), Err(LOG_RANGE));
 
-        let p = Proxy::new("http://127.0.0.1:1".into(), "http://127.0.0.1:1".into(), None, None, None).unwrap();
+        let p = Proxy::new("http://127.0.0.1:1".into(), "http://127.0.0.1:1".into(), None, None, None, None).unwrap();
         let call = json!({ "jsonrpc": "2.0", "id": 1, "method": "eth_chainId" });
         assert_eq!(futures_lite(p.check_all(&json!(vec![call.clone(); MAX_BATCH]), RPC_METHODS)), Ok(()));
         let too_many = json!(vec![call; MAX_BATCH + 1]);
@@ -615,7 +660,7 @@ mod tests {
             }),
         ))
         .await;
-        let p = Proxy::new(upstream.clone(), upstream.clone(), None, None, None).unwrap();
+        let p = Proxy::new(upstream.clone(), upstream.clone(), None, None, None, None).unwrap();
         let refused = p
             .forward(&upstream, Ok(Json(json!({ "id": 5, "method": "eth_sendRawTransaction" }))), RPC_METHODS)
             .await;
