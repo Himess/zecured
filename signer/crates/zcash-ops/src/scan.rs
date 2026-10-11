@@ -250,3 +250,53 @@ impl ScanState {
         self.unspent().iter().map(|n| n.value()).sum()
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use orchard::keys::SpendingKey;
+
+    fn state_at(height: u32) -> ScanState {
+        let sk = (0u8..=255)
+            .map(|i| [i; 32])
+            .find_map(|b| Option::<SpendingKey>::from(SpendingKey::from_bytes(b)))
+            .unwrap();
+        let fvk = FullViewingKey::from(&sk);
+        let ivks = [Scope::External, Scope::Internal]
+            .map(|scope| (scope, PreparedIncomingViewingKey::new(&fvk.to_ivk(scope))));
+        ScanState {
+            fvk,
+            tree: IronwoodTree::empty(),
+            scanned_to: height,
+            notes: vec![],
+            last_hash: vec![],
+            ivks,
+        }
+    }
+
+    fn block(height: u32, hash: u8, prev: u8) -> CompactBlock {
+        CompactBlock {
+            height: u64::from(height),
+            hash: vec![hash; 32],
+            prev_hash: vec![prev; 32],
+            ..Default::default()
+        }
+    }
+
+    #[test]
+    fn scanning_follows_the_chain_and_refuses_a_reorg() {
+        let mut s = state_at(99);
+        s.scan_block(&block(100, 1, 0)).unwrap(); // the first block has no known parent yet
+        s.scan_block(&block(101, 2, 1)).unwrap();
+
+        // Block 102 does not build on the block 101 we scanned: the chain was reorganized.
+        let err = s.scan_block(&block(102, 3, 9)).unwrap_err();
+        assert!(err.to_string().contains("reorganized"), "{err}");
+        assert_eq!(s.scanned_to, 101, "nothing applied from the foreign block");
+
+        // Heights must be consecutive, and the right child is still accepted.
+        assert!(s.scan_block(&block(103, 4, 2)).is_err());
+        s.scan_block(&block(102, 3, 2)).unwrap();
+        assert_eq!(s.scanned_to, 102);
+    }
+}
