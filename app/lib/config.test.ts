@@ -42,7 +42,7 @@ describe("build-time pins (production rules)", () => {
     expect(c.morpho).toBe("0xBBBBBbbBBb9cC5e90e3b3Af64bdAF62C37EEFFCb");
     expect(c.signers).toBeNull();
     expect(c).toMatchObject({ contractsDeployed: false, ownerSigning: false, sponsorship: false, remote: "pending", signersPinned: false });
-    expect(c.denominations).toEqual([1_000_000n, 5_000_000n]);
+    expect(c.denominations).toEqual([1_000_000n, 5_000_000n, 12_500_000n]);
     expect(c.confirmations).toBeNull();
     expect(configIssues(c)).toEqual([
       `This build does not pin ${ALL_PINS}. Owner signatures, Base reads and sponsored transactions stay disabled until the app is rebuilt with them (see app/.env.example).`,

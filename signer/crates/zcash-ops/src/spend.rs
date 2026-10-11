@@ -79,6 +79,12 @@ pub fn zip317_fee(spends: usize, outputs: usize) -> u64 {
     MARGINAL_FEE * actions.max(GRACE_ACTIONS)
 }
 
+/// Blocks between a transaction's target height and its expiry height: 120, the NU7 default
+/// ZIP 203 proposes (about 50 minutes at 25 s blocks; review S12). Zecured's own constant, so
+/// that a change of the library's default (40 in this release) never changes the signers'
+/// policy silently.
+pub const PAYOUT_EXPIRY_DELTA: u32 = 120;
+
 /// Builds the PCZT spending `inputs` to `payments`, returning change to the vault's
 /// internal address. Fails if the inputs do not cover payments + fee.
 pub fn build<P: Parameters + Clone>(
@@ -114,7 +120,8 @@ pub fn build<P: Parameters + Clone>(
             orchard_padding: BundlePadding::DEFAULT,
             ironwood_padding: BundlePadding::DEFAULT,
         },
-    );
+    )
+    .with_expiry_height(target_height + PAYOUT_EXPIRY_DELTA);
     for input in inputs {
         builder
             .add_ironwood_spend::<zip317::FeeError>(fvk.clone(), input.note, input.merkle_path()?)

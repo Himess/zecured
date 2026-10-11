@@ -21,14 +21,13 @@ use reddsa::frost::redpallas::{
     round1::{SigningCommitments, SigningNonces},
 };
 use serde::{Deserialize, Serialize};
-use zcash_primitives::transaction::builder::DEFAULT_TX_EXPIRY_DELTA;
 use zcash_protocol::consensus::{BlockHeight, BranchId, Network};
 use zecured_policy::{
     ledger::{self, Commitment, NextPayout, PayoutPlan},
     verify::{ExpectedInput, TxExpectations, Verified, verify_payout},
 };
 use zecured_threshold::{self as threshold, signer_id};
-use zecured_zcash_ops::scan::ReceivedNote;
+use zecured_zcash_ops::{scan::ReceivedNote, spend::PAYOUT_EXPIRY_DELTA};
 
 use crate::{
     Inflight,
@@ -212,7 +211,7 @@ pub fn expectations(tip: u32) -> Result<TxExpectations> {
     Ok(TxExpectations {
         consensus_branch_id: u32::from(BranchId::for_height(&Network::TestNetwork, BlockHeight::from_u32(target))),
         min_expiry: target,
-        max_expiry: target.saturating_add(DEFAULT_TX_EXPIRY_DELTA).saturating_add(TIP_SKEW),
+        max_expiry: target.saturating_add(PAYOUT_EXPIRY_DELTA).saturating_add(TIP_SKEW),
     })
 }
 
@@ -386,6 +385,6 @@ mod tests {
         assert_eq!(e.min_expiry, u32::MAX);
         assert_eq!(e.max_expiry, u32::MAX);
         let e = expectations(4_486_000).unwrap();
-        assert_eq!(e.max_expiry, 4_486_001 + DEFAULT_TX_EXPIRY_DELTA + TIP_SKEW);
+        assert_eq!(e.max_expiry, 4_486_001 + PAYOUT_EXPIRY_DELTA + TIP_SKEW);
     }
 }

@@ -99,9 +99,12 @@ cfg = {
     "registry": registry,
     "adapter": adapter,
     "registry_from_block": int(from_block),
-    "confirmations": 3,
+    # S12: ZIP 315's depth for an untrusted TXO (a deposit from someone else's wallet).
+    "confirmations": int(os.environ.get("CONFIRMATIONS", "10")),
     "vault_expiry_blocks": 288,
-    "denominations": [1000000, 5000000],
+    # D7 vault sizes, and 0.125 TAZ: what the Valar testnet faucet pays (S13), so a judge can
+    # fund a vault straight from the faucet.
+    "denominations": [1000000, 5000000, 12500000],
     "nodes": [json.load(open(p)) for p in infos],
     # D16: nodes only accept requests signed by the coordinator (and refuse to start without it).
     "coordinator": os.environ["COORDINATOR_ADDRESS"],

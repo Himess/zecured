@@ -42,11 +42,11 @@ describe("zatoshi ↔ ZEC", () => {
   });
 
   it("uses the D7 testnet denominations", () => {
-    expect(DENOMINATIONS).toEqual([1_000_000n, 5_000_000n]);
+    expect(DENOMINATIONS).toEqual([1_000_000n, 5_000_000n, 12_500_000n]);
   });
 
   it("lists denominations for prose", () => {
-    expect(formatDenominations(DENOMINATIONS)).toBe("0.01 or 0.05 TAZ");
+    expect(formatDenominations(DENOMINATIONS)).toBe("0.01, 0.05 or 0.125 TAZ");
     expect(formatDenominations([1_000_000n, 5_000_000n, 10_000_000n])).toBe("0.01, 0.05 or 0.1 TAZ");
     expect(formatDenominations([5_000_000n])).toBe("0.05 TAZ");
   });
