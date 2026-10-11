@@ -27,12 +27,10 @@ pub struct TxShape {
 impl TxShape {
     /// The shape of `tx`.
     pub fn of(tx: &Transaction) -> Self {
-        let (transparent_inputs, transparent_outputs) = tx
-            .transparent_bundle()
-            .map_or((0, 0), |b| (b.vin.len(), b.vout.len()));
-        let (sapling_spends, sapling_outputs) = tx.sapling_bundle().map_or((0, 0), |b| {
-            (b.shielded_spends().len(), b.shielded_outputs().len())
-        });
+        let (transparent_inputs, transparent_outputs) =
+            tx.transparent_bundle().map_or((0, 0), |b| (b.vin.len(), b.vout.len()));
+        let (sapling_spends, sapling_outputs) =
+            tx.sapling_bundle().map_or((0, 0), |b| (b.shielded_spends().len(), b.shielded_outputs().len()));
         Self {
             transparent_inputs,
             transparent_outputs,
@@ -72,8 +70,7 @@ pub async fn fetch<P: Parameters>(
         .into_inner();
     let height = BlockHeight::from_u32(u32::try_from(raw.height).context("height")?);
     anyhow::ensure!(u32::from(height) > 0, "transaction {txid} is not mined yet");
-    let tx = Transaction::read(&raw.data[..], BranchId::for_height(params, height))
-        .context("parse transaction")?;
+    let tx = Transaction::read(&raw.data[..], BranchId::for_height(params, height)).context("parse transaction")?;
     anyhow::ensure!(tx.txid() == *txid, "server returned a different transaction");
     Ok((tx, height))
 }

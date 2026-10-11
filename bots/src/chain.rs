@@ -85,11 +85,18 @@ pub struct Deployment {
 
 impl Deployment {
     pub fn load(path: &Path) -> Result<Self> {
-        let raw: Value = serde_json::from_slice(&std::fs::read(path).with_context(|| format!("read {}", path.display()))?)?;
+        let raw: Value =
+            serde_json::from_slice(&std::fs::read(path).with_context(|| format!("read {}", path.display()))?)?;
         let c = |k: &str| -> Result<Address> {
-            raw["contracts"][k].as_str().context(format!("missing contracts.{k}"))?.parse().map_err(|e| anyhow!("{k}: {e}"))
+            raw["contracts"][k]
+                .as_str()
+                .context(format!("missing contracts.{k}"))?
+                .parse()
+                .map_err(|e| anyhow!("{k}: {e}"))
         };
-        let m = |k: &str| -> Result<String> { Ok(raw["market"][k].as_str().context(format!("missing market.{k}"))?.to_owned()) };
+        let m = |k: &str| -> Result<String> {
+            Ok(raw["market"][k].as_str().context(format!("missing market.{k}"))?.to_owned())
+        };
         Ok(Self {
             registry: c("ZecuredRegistry")?,
             adapter: c("SettlementAdapter")?,
@@ -145,11 +152,8 @@ pub async fn position<P: Provider>(p: &P, d: &Deployment, user: Address) -> Resu
     let price = u128::try_from(price).map_err(|_| anyhow!("price overflow"))?;
     let lltv = u128::try_from(d.market.lltv).map_err(|_| anyhow!("lltv overflow"))?;
     let borrow_shares = pos.borrowShares;
-    let debt = mul_div_up(
-        borrow_shares,
-        mkt.totalBorrowAssets + VIRTUAL_ASSETS,
-        mkt.totalBorrowShares + VIRTUAL_SHARES,
-    );
+    let debt =
+        mul_div_up(borrow_shares, mkt.totalBorrowAssets + VIRTUAL_ASSETS, mkt.totalBorrowShares + VIRTUAL_SHARES);
     let collateral_value = mul_div_down(pos.collateral, price, ORACLE_PRICE_SCALE);
     Ok(Position {
         borrow_shares,

@@ -130,10 +130,7 @@ pub fn check_open(cfg: &NetworkConfig, store: &Store, open: &VaultOpen, now: u64
         "birthday {} too far from our tip {zcash_tip}",
         open.birthday
     );
-    ensure!(
-        open.expiry_height == open.birthday + cfg.vault_expiry_blocks,
-        "unexpected expiry height"
-    );
+    ensure!(open.expiry_height == open.birthday + cfg.vault_expiry_blocks, "unexpected expiry height");
     Ok(())
 }
 
@@ -142,8 +139,7 @@ const MAX_TIP_SKEW: u32 = 20;
 
 pub fn round1(index: u16, open: VaultOpen) -> Result<(Pending, Round1Out)> {
     let id = signer_id(index)?;
-    let (secret, package) =
-        dkg::part1(id, MAX_SIGNERS, MIN_SIGNERS, OsRng).map_err(|e| anyhow!("dkg part1: {e}"))?;
+    let (secret, package) = dkg::part1(id, MAX_SIGNERS, MIN_SIGNERS, OsRng).map_err(|e| anyhow!("dkg part1: {e}"))?;
     let mut contribution = [0u8; 32];
     OsRng.fill_bytes(&mut contribution);
     let out = Round1Out {
@@ -167,14 +163,17 @@ fn others_round1(index: u16, round1: &[Round1Out]) -> Result<BTreeMap<Identifier
     for r in round1.iter().filter(|r| r.index != index) {
         map.insert(signer_id(r.index)?, serde_json::from_value(r.package.clone())?);
     }
-    ensure!(
-        map.len() == usize::from(MAX_SIGNERS) - 1,
-        "need round-1 packages from all other signers"
-    );
+    ensure!(map.len() == usize::from(MAX_SIGNERS) - 1, "need round-1 packages from all other signers");
     Ok(map)
 }
 
-pub fn round2(cfg: &NetworkConfig, me: &x25519_dalek::StaticSecret, index: u16, pending: &mut Pending, input: &Round2In) -> Result<Round2Out> {
+pub fn round2(
+    cfg: &NetworkConfig,
+    me: &x25519_dalek::StaticSecret,
+    index: u16,
+    pending: &mut Pending,
+    input: &Round2In,
+) -> Result<Round2Out> {
     let secret = pending.round1_secret.take().context("round 1 not run or round 2 repeated")?;
     let (secret2, packages) =
         dkg::part2(secret, &others_round1(index, &input.round1)?).map_err(|e| anyhow!("dkg part2: {e}"))?;
@@ -188,10 +187,7 @@ pub fn round2(cfg: &NetworkConfig, me: &x25519_dalek::StaticSecret, index: u16, 
             package: serde_json::to_value(package)?,
             contribution: B256::from(pending.contribution),
         })?;
-        sealed.insert(
-            node.index,
-            envelope::seal(me, &node.x25519_public()?, &context(&input.vault_id), &payload)?,
-        );
+        sealed.insert(node.index, envelope::seal(me, &node.x25519_public()?, &context(&input.vault_id), &payload)?);
     }
     Ok(Round2Out { index, sealed })
 }
@@ -215,25 +211,18 @@ pub fn round3(
         let node = cfg.node(sender)?;
         let plain = envelope::open(me, &node.x25519_public()?, &context(&vault_id), sealed)?;
         let payload: Round2Payload = serde_json::from_slice(&plain)?;
-        let commitment = input
-            .round1
-            .iter()
-            .find(|r| r.index == sender)
-            .context("missing round-1 output")?
-            .sk_commitment;
+        let commitment =
+            input.round1.iter().find(|r| r.index == sender).context("missing round-1 output")?.sk_commitment;
         if sk_commitment(&vault_id.0, &payload.contribution.0) != commitment.0 {
             bail!("signer {sender} revealed a contribution that does not match its commitment");
         }
         contributions.insert(sender, payload.contribution.0);
         received.insert(signer_id(sender)?, serde_json::from_value::<round2::Package>(payload.package)?);
     }
-    ensure!(
-        contributions.len() == usize::from(MAX_SIGNERS),
-        "missing contributions"
-    );
+    ensure!(contributions.len() == usize::from(MAX_SIGNERS), "missing contributions");
 
-    let (key_package, public_key_package) = dkg::part3(secret2, &others_round1(index, &input.round1)?, &received)
-        .map_err(|e| anyhow!("dkg part3: {e}"))?;
+    let (key_package, public_key_package) =
+        dkg::part3(secret2, &others_round1(index, &input.round1)?, &received).map_err(|e| anyhow!("dkg part3: {e}"))?;
     ensure!(public_key_package.has_even_y(), "group key must have ỹ = 0");
     let ak = ak_bytes(&public_key_package)?;
     let ordered: Vec<[u8; 32]> = contributions.values().copied().collect();

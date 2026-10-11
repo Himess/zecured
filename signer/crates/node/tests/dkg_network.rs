@@ -142,10 +142,7 @@ fn five_nodes_agree_on_the_vault() {
     // Every node stored the vault with the same sk but its own key share.
     let sks: Vec<String> = nodes.iter().map(|n| n.store.vaults[&open().vault_id].sk.clone()).collect();
     assert!(sks.iter().all(|s| *s == sks[0]));
-    let shares: Vec<String> = nodes
-        .iter()
-        .map(|n| n.store.vaults[&open().vault_id].key_package.to_string())
-        .collect();
+    let shares: Vec<String> = nodes.iter().map(|n| n.store.vaults[&open().vault_id].key_package.to_string()).collect();
     assert!(shares.windows(2).all(|w| w[0] != w[1]));
 }
 

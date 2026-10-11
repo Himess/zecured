@@ -34,9 +34,7 @@ fn digest(method: &str, path: &str, body: &[u8], ts: u64) -> B256 {
 
 /// Signs a request; returns the header values `(timestamp, signature hex)`.
 pub fn sign(key: &PrivateKeySigner, method: &str, path: &str, body: &[u8], ts: u64) -> Result<(String, String)> {
-    let sig = key
-        .sign_hash_sync(&digest(method, path, body, ts))
-        .map_err(|e| anyhow!("sign request: {e}"))?;
+    let sig = key.sign_hash_sync(&digest(method, path, body, ts)).map_err(|e| anyhow!("sign request: {e}"))?;
     Ok((ts.to_string(), hex::encode(sig.as_bytes())))
 }
 
@@ -46,9 +44,7 @@ pub fn verify(expected: Address, method: &str, path: &str, body: &[u8], ts: &str
     ensure!(ts.abs_diff(now) <= MAX_SKEW_SECS, "stale request");
     let bytes = hex::decode(sig.trim_start_matches("0x")).context("bad signature encoding")?;
     let sig = Signature::try_from(bytes.as_slice()).context("bad signature")?;
-    let signer = sig
-        .recover_address_from_prehash(&digest(method, path, body, ts))
-        .context("cannot recover signer")?;
+    let signer = sig.recover_address_from_prehash(&digest(method, path, body, ts)).context("cannot recover signer")?;
     ensure!(signer == expected, "request not signed by the coordinator");
     Ok(())
 }

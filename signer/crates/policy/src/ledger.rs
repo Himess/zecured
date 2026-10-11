@@ -150,11 +150,7 @@ pub enum LedgerError {
 /// I10: the conforming lineage equals `outstanding` plus every claim not yet paid on
 /// Zcash (dust and set-aside claims included).
 pub fn check_i10(lineage_value: u64, outstanding: u64, claims: &[Claim]) -> Result<(), LedgerError> {
-    let unpaid: u64 = claims
-        .iter()
-        .filter(|c| c.state == ClaimState::Unpaid)
-        .map(|c| c.amount)
-        .sum();
+    let unpaid: u64 = claims.iter().filter(|c| c.state == ClaimState::Unpaid).map(|c| c.amount).sum();
     if lineage_value == outstanding + unpaid {
         Ok(())
     } else {
@@ -185,9 +181,7 @@ pub fn next_payout(
     for claim in &unpaid {
         // A market maker claim whose borrower claim is still unpaid is handled together
         // with it; once the borrower is paid it is an ordinary claim.
-        if claim.kind == ClaimKind::CloseMarketMaker
-            && claim.partner.as_ref().and_then(|p| by_id(p)).is_some()
-        {
+        if claim.kind == ClaimKind::CloseMarketMaker && claim.partner.as_ref().and_then(by_id).is_some() {
             continue;
         }
         // Without a recipient, a claim is set aside: its value stays in the vault and the
@@ -197,15 +191,15 @@ pub fn next_payout(
         };
 
         let mut group: Vec<(&Claim, Recipient)> = vec![(claim, rcpt)];
-        if claim.kind == ClaimKind::CloseUser {
-            if let Some(mm) = claim.partner.as_ref().and_then(|p| by_id(p)) {
-                match recipient(&mm.commitment) {
-                    Some(mm_rcpt) => group.push((mm, mm_rcpt)),
-                    None if now < claim.created_at + MARKET_MAKER_GRACE_SECS => {
-                        return Ok(NextPayout::WaitUntil(claim.created_at + MARKET_MAKER_GRACE_SECS));
-                    }
-                    None => {} // grace over: pay the borrower alone
+        if claim.kind == ClaimKind::CloseUser
+            && let Some(mm) = claim.partner.as_ref().and_then(by_id)
+        {
+            match recipient(&mm.commitment) {
+                Some(mm_rcpt) => group.push((mm, mm_rcpt)),
+                None if now < claim.created_at + MARKET_MAKER_GRACE_SECS => {
+                    return Ok(NextPayout::WaitUntil(claim.created_at + MARKET_MAKER_GRACE_SECS));
                 }
+                None => {} // grace over: pay the borrower alone
             }
         }
 
@@ -273,10 +267,7 @@ pub fn refund_plan(note_value: u64, receiver: [u8; 43]) -> Result<PayoutPlan, Le
     let value = note_value
         .checked_sub(fee)
         .filter(|v| *v > 0)
-        .ok_or(LedgerError::RefundIsDust {
-            value: note_value,
-            fee,
-        })?;
+        .ok_or(LedgerError::RefundIsDust { value: note_value, fee })?;
     Ok(PayoutPlan {
         claims: vec![],
         payments: vec![PlannedPayment {
@@ -338,8 +329,7 @@ mod tests {
     }
 
     fn known(ids: &[u8]) -> impl Fn(&Commitment) -> Option<Recipient> {
-        let map: HashMap<Commitment, Recipient> =
-            ids.iter().map(|&i| (rcpt(i).commitment(), rcpt(i))).collect();
+        let map: HashMap<Commitment, Recipient> = ids.iter().map(|&i| (rcpt(i).commitment(), rcpt(i))).collect();
         move |c| map.get(c).copied()
     }
 
@@ -353,7 +343,7 @@ mod tests {
     #[test]
     fn full_release_pays_borrower_minus_fee_without_change() {
         let c = claim(1, ClaimKind::Release, DEPOSIT, (10, 0), None);
-        let got = next_payout(&[c.clone()], known(&[1]), DEPOSIT, 1, 2_000).unwrap();
+        let got = next_payout(std::slice::from_ref(&c), known(&[1]), DEPOSIT, 1, 2_000).unwrap();
         let NextPayout::Pay(p) = got else { panic!("{got:?}") };
         assert_eq!(p.change, 0);
         assert_eq!(p.fee, FEE_1_IN_1_OUT);
@@ -367,7 +357,7 @@ mod tests {
         // ~70% seized at 62.5% LLTV; the rest stays outstanding.
         let seized = 3_520_000;
         let c = claim(2, ClaimKind::Liquidation, seized, (10, 1), None);
-        let NextPayout::Pay(p) = next_payout(&[c.clone()], known(&[2]), DEPOSIT, 1, 2_000).unwrap() else {
+        let NextPayout::Pay(p) = next_payout(std::slice::from_ref(&c), known(&[2]), DEPOSIT, 1, 2_000).unwrap() else {
             panic!()
         };
         assert_eq!(p.payments[0].value, seized - FEE_1_IN_2_OUT);
@@ -383,8 +373,7 @@ mod tests {
     fn close_pays_both_in_one_tx_and_borrower_bears_the_fee() {
         let user = claim(3, ClaimKind::CloseUser, 1_200_000, (11, 0), Some(4));
         let mm = claim(4, ClaimKind::CloseMarketMaker, 3_800_000, (11, 0), Some(3));
-        let NextPayout::Pay(p) =
-            next_payout(&[mm.clone(), user.clone()], known(&[3, 4]), DEPOSIT, 1, 1_010).unwrap()
+        let NextPayout::Pay(p) = next_payout(&[mm.clone(), user.clone()], known(&[3, 4]), DEPOSIT, 1, 1_010).unwrap()
         else {
             panic!()
         };
@@ -465,7 +454,7 @@ mod tests {
     #[test]
     fn i10_detects_mismatch() {
         let c = claim(10, ClaimKind::Liquidation, 1_000_000, (10, 0), None);
-        check_i10(DEPOSIT, DEPOSIT - 1_000_000, &[c.clone()]).unwrap();
+        check_i10(DEPOSIT, DEPOSIT - 1_000_000, std::slice::from_ref(&c)).unwrap();
         assert!(check_i10(DEPOSIT - 1, DEPOSIT - 1_000_000, &[c]).is_err());
     }
 

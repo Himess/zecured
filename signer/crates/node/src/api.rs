@@ -91,13 +91,20 @@ async fn destination(
     Ok(Json(json!({ "commitment": n.destination(id, b).await? })))
 }
 
-async fn refund(State(n): State<Arc<Node>>, Path(id): Path<B256>, Json(b): Json<RefundIn>) -> ApiResult<serde_json::Value> {
+async fn refund(
+    State(n): State<Arc<Node>>,
+    Path(id): Path<B256>,
+    Json(b): Json<RefundIn>,
+) -> ApiResult<serde_json::Value> {
     online(&n).await?;
     n.refund_request(id, b).await?;
     Ok(Json(json!({ "accepted": true })))
 }
 
-async fn commit(State(n): State<Arc<Node>>, Json(b): Json<signing::CommitRequest>) -> ApiResult<signing::CommitResponse> {
+async fn commit(
+    State(n): State<Arc<Node>>,
+    Json(b): Json<signing::CommitRequest>,
+) -> ApiResult<signing::CommitResponse> {
     online(&n).await?;
     Ok(Json(n.sign_commit(b).await?))
 }
@@ -128,10 +135,7 @@ struct ModeIn {
 }
 
 async fn set_mode(State(n): State<Arc<Node>>, Json(b): Json<ModeIn>) -> ApiResult<serde_json::Value> {
-    let mode = n
-        .set_mode(b.mode, &b.token)
-        .await
-        .map_err(|e| ApiError(StatusCode::UNAUTHORIZED, e.to_string()))?;
+    let mode = n.set_mode(b.mode, &b.token).await.map_err(|e| ApiError(StatusCode::UNAUTHORIZED, e.to_string()))?;
     Ok(Json(json!({ "mode": mode })))
 }
 

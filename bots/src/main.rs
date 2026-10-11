@@ -32,11 +32,26 @@ use crate::chain::{CloseRequest, Deployment, IRegistryView, ISettlementAdapter, 
 #[derive(Parser)]
 #[command(about = "Zecured demo bots")]
 struct Cli {
-    #[arg(long, env = "ZECURED_DEPLOYMENTS", default_value = "contracts/deployments/base-sepolia.json", global = true)]
+    #[arg(
+        long,
+        env = "ZECURED_DEPLOYMENTS",
+        default_value = "contracts/deployments/base-sepolia.json",
+        global = true
+    )]
     deployments: PathBuf,
-    #[arg(long, env = "BASE_SEPOLIA_RPC_URL", default_value = "https://sepolia.base.org", global = true)]
+    #[arg(
+        long,
+        env = "BASE_SEPOLIA_RPC_URL",
+        default_value = "https://sepolia.base.org",
+        global = true
+    )]
     rpc: String,
-    #[arg(long, env = "ZECURED_BACKEND", default_value = "http://127.0.0.1:8080", global = true)]
+    #[arg(
+        long,
+        env = "ZECURED_BACKEND",
+        default_value = "http://127.0.0.1:8080",
+        global = true
+    )]
     backend: String,
     #[command(subcommand)]
     cmd: Cmd,
@@ -76,18 +91,30 @@ async fn main() -> Result<()> {
     let cli = Cli::parse();
     let d = Deployment::load(&cli.deployments)?;
     match cli.cmd {
-        Cmd::Liquidator { key, zcash_address, every_secs } => {
-            liquidator(&cli.rpc, &cli.backend, d, key.parse()?, &zcash_address, every_secs).await
-        }
-        Cmd::MarketMaker { key, zcash_address, bind, margin_bps } => {
-            market_maker(cli.rpc, cli.backend, d, key.parse()?, zcash_address, bind, margin_bps).await
-        }
+        Cmd::Liquidator {
+            key,
+            zcash_address,
+            every_secs,
+        } => liquidator(&cli.rpc, &cli.backend, d, key.parse()?, &zcash_address, every_secs).await,
+        Cmd::MarketMaker {
+            key,
+            zcash_address,
+            bind,
+            margin_bps,
+        } => market_maker(cli.rpc, cli.backend, d, key.parse()?, zcash_address, bind, margin_bps).await,
     }
 }
 
 // ------------------------------------------------------------------------- liquidator
 
-async fn liquidator(rpc: &str, backend: &str, d: Deployment, key: PrivateKeySigner, zaddr: &str, every: u64) -> Result<()> {
+async fn liquidator(
+    rpc: &str,
+    backend: &str,
+    d: Deployment,
+    key: PrivateKeySigner,
+    zaddr: &str,
+    every: u64,
+) -> Result<()> {
     let me = key.address();
     let provider = ProviderBuilder::new().wallet(EthereumWallet::from(key)).connect_http(rpc.parse()?);
     chain::ensure_allowance(&provider, d.usdc, me, d.adapter).await?;
@@ -188,10 +215,7 @@ async fn market_maker(
         zaddr,
         margin_bps,
     });
-    let app = Router::new()
-        .route("/quote/{vault_id}", get(quote))
-        .route("/close", post(close))
-        .with_state(mm);
+    let app = Router::new().route("/quote/{vault_id}", get(quote)).route("/close", post(close)).with_state(mm);
     info!(%bind, "market maker listening");
     axum::serve(tokio::net::TcpListener::bind(bind).await?, app).await?;
     Ok(())
@@ -228,10 +252,7 @@ async fn quote(State(mm): State<Arc<Mm>>, Path(vault_id): Path<B256>) -> Result<
 }
 
 fn zecured_now() -> u64 {
-    std::time::SystemTime::now()
-        .duration_since(std::time::UNIX_EPOCH)
-        .map(|d| d.as_secs())
-        .unwrap_or(0)
+    std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).map(|d| d.as_secs()).unwrap_or(0)
 }
 
 #[derive(Deserialize)]
@@ -285,7 +306,14 @@ async fn close(State(mm): State<Arc<Mm>>, Json(b): Json<CloseBody>) -> Result<Js
     let call = adapter.closeWithCollateral(req, b.signature.clone(), mm_commitment);
     call.call().await.map_err(|e| anyhow!("close would revert: {e}"))?;
     let gas = zecured_base::gas_with_headroom(call.estimate_gas().await.map_err(anyhow::Error::from)?);
-    let receipt = call.gas(gas).send().await.map_err(anyhow::Error::from)?.get_receipt().await.map_err(anyhow::Error::from)?;
+    let receipt = call
+        .gas(gas)
+        .send()
+        .await
+        .map_err(anyhow::Error::from)?
+        .get_receipt()
+        .await
+        .map_err(anyhow::Error::from)?;
     if !receipt.status() {
         return Err(ApiError(StatusCode::BAD_GATEWAY, "close reverted".into()));
     }

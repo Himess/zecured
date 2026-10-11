@@ -49,7 +49,11 @@ const BUNDLER_METHODS: &[&str] = &[
 ];
 
 /// Paymaster methods: ERC-7677 and Pimlico's sponsorship call.
-const PAYMASTER_METHODS: &[&str] = &["pm_getPaymasterStubData", "pm_getPaymasterData", "pm_sponsorUserOperation"];
+const PAYMASTER_METHODS: &[&str] = &[
+    "pm_getPaymasterStubData",
+    "pm_getPaymasterData",
+    "pm_sponsorUserOperation",
+];
 
 /// Methods whose first parameter is a UserOp that must pass the allowlist.
 const USEROP_METHODS: &[&str] = &[
@@ -71,11 +75,14 @@ pub struct Proxy {
 pub type ProxyState = State<Arc<Proxy>>;
 
 impl Proxy {
-    pub fn new(rpc_url: String, bundler_url: Option<String>, paymaster_url: Option<String>, allowlist: Option<Allowlist>) -> Result<Self> {
+    pub fn new(
+        rpc_url: String,
+        bundler_url: Option<String>,
+        paymaster_url: Option<String>,
+        allowlist: Option<Allowlist>,
+    ) -> Result<Self> {
         Ok(Self {
-            http: reqwest::Client::builder()
-                .timeout(std::time::Duration::from_secs(60))
-                .build()?,
+            http: reqwest::Client::builder().timeout(std::time::Duration::from_secs(60)).build()?,
             rpc_url,
             bundler_url: bundler_url.filter(|u| !u.is_empty()),
             paymaster_url: paymaster_url.filter(|u| !u.is_empty()),
@@ -89,16 +96,9 @@ impl Proxy {
             bail!("method {method} not allowed");
         }
         if USEROP_METHODS.contains(&method) {
-            let op = req
-                .get("params")
-                .and_then(|p| p.get(0))
-                .cloned()
-                .context("missing UserOp")?;
+            let op = req.get("params").and_then(|p| p.get(0)).cloned().context("missing UserOp")?;
             let op: UserOpView = serde_json::from_value(op).context("malformed UserOp")?;
-            self.allowlist
-                .as_ref()
-                .context("sponsorship not configured")?
-                .check(&op)?;
+            self.allowlist.as_ref().context("sponsorship not configured")?.check(&op)?;
         }
         Ok(())
     }

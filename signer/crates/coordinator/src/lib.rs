@@ -221,10 +221,7 @@ impl Coordinator {
 
     pub async fn open_vault(&self, req: OpenVaultRequest) -> Result<OpenVaultResponse> {
         ensure!(self.cfg.denominations.contains(&req.amount), "not a standard denomination");
-        ensure!(
-            !self.store.lock().await.is_bound(req.account, req.owner),
-            "account or owner already has a vault"
-        );
+        ensure!(!self.store.lock().await.is_bound(req.account, req.owner), "account or owner already has a vault");
         let tip = self.zcash.lock().await.tip().await?;
         let mut id = [0u8; 32];
         rand_core_06::RngCore::fill_bytes(&mut rand_core_06::OsRng, &mut id);
@@ -250,7 +247,8 @@ impl Coordinator {
             vault_id: open.vault_id,
             round1: r1.clone(),
         };
-        let r2: Vec<(u16, Round2Out)> = at_least(self.nodes.post_many(&all, "/v1/dkg/round2", &r2in).await, n, "DKG round 2")?;
+        let r2: Vec<(u16, Round2Out)> =
+            at_least(self.nodes.post_many(&all, "/v1/dkg/round2", &r2in).await, n, "DKG round 2")?;
         let mut to: BTreeMap<u16, BTreeMap<u16, Sealed>> = BTreeMap::new();
         for (_, out) in r2 {
             for (recipient, sealed) in out.sealed {
@@ -270,11 +268,14 @@ impl Coordinator {
                 )
             })
             .collect();
-        let r3: Vec<(u16, Round3Out)> = at_least(self.nodes.post_each(&bodies, "/v1/dkg/round3").await, n, "DKG round 3")?;
+        let r3: Vec<(u16, Round3Out)> =
+            at_least(self.nodes.post_each(&bodies, "/v1/dkg/round3").await, n, "DKG round 3")?;
         let first = &r3[0].1;
         for (_, o) in &r3[1..] {
             ensure!(
-                o.ak == first.ak && o.ufvk == first.ufvk && o.address == first.address
+                o.ak == first.ak
+                    && o.ufvk == first.ufvk
+                    && o.address == first.address
                     && o.public_key_package == first.public_key_package,
                 "signers disagree on the vault keys"
             );
@@ -337,7 +338,15 @@ impl Coordinator {
     }
 
     /// The owner's payout destination, validated before any Base transaction burns zZEC.
-    pub async fn add_destination(&self, vault_id: B256, ua: &str, salt: [u8; 32], nonce: u64, deadline: u64, signature: Bytes) -> Result<B256> {
+    pub async fn add_destination(
+        &self,
+        vault_id: B256,
+        ua: &str,
+        salt: [u8; 32],
+        nonce: u64,
+        deadline: u64,
+        signature: Bytes,
+    ) -> Result<B256> {
         let r = Self::recipient_from_ua(ua, salt)?;
         let body = DestinationIn {
             recipient: Self::recipient_in(&r),
@@ -353,7 +362,16 @@ impl Coordinator {
 
     /// P5: the owner asks for a non-conforming deposit back.
     #[allow(clippy::too_many_arguments)]
-    pub async fn request_refund(&self, vault_id: B256, note_id: B256, ua: &str, salt: [u8; 32], nonce: u64, deadline: u64, signature: Bytes) -> Result<()> {
+    pub async fn request_refund(
+        &self,
+        vault_id: B256,
+        note_id: B256,
+        ua: &str,
+        salt: [u8; 32],
+        nonce: u64,
+        deadline: u64,
+        signature: Bytes,
+    ) -> Result<()> {
         let r = Self::recipient_from_ua(ua, salt)?;
         let body = RefundIn {
             note_id,
@@ -485,12 +503,21 @@ impl Coordinator {
             kind: SignKind::Payout { claim_ids: vec![] },
             pczt: pczt.serialize().map_err(|e| anyhow!("serialize PCZT: {e:?}"))?,
         };
-        let answers: Vec<Answer<CommitResponse>> = self.nodes.post_many(&self.nodes.indices(), "/v1/sign/commit", &req).await;
+        let answers: Vec<Answer<CommitResponse>> =
+            self.nodes.post_many(&self.nodes.indices(), "/v1/sign/commit", &req).await;
         let votes: Vec<DrainVote> = answers
             .into_iter()
             .map(|(index, a)| match a {
-                Ok(_) => DrainVote { index, signed: true, reason: None },
-                Err(e) => DrainVote { index, signed: false, reason: Some(format!("{e:#}")) },
+                Ok(_) => DrainVote {
+                    index,
+                    signed: true,
+                    reason: None,
+                },
+                Err(e) => DrainVote {
+                    index,
+                    signed: false,
+                    reason: Some(format!("{e:#}")),
+                },
             })
             .collect();
         let signed = votes.iter().filter(|v| v.signed).count();
@@ -549,7 +576,9 @@ impl Coordinator {
         while from <= safe {
             let to = (from + MAX_RANGE - 1).min(safe);
             for ev in events::fetch(&provider, self.cfg.registry, from, to).await? {
-                let Some(mut v) = store.vaults.get(&ev.vault_id).cloned() else { continue };
+                let Some(mut v) = store.vaults.get(&ev.vault_id).cloned() else {
+                    continue;
+                };
                 match ev.event {
                     RegistryEvent::VaultActivated { amount, .. } => {
                         v.status = VaultStatus::Active;
@@ -593,11 +622,7 @@ impl Coordinator {
             confirmations: self.cfg.confirmations,
         };
         let fvk = fvk_of(v)?;
-        self.zcash
-            .lock()
-            .await
-            .notes(&v.vault_id, &fvk, v.birthday, &rules, &mut v.decisions)
-            .await
+        self.zcash.lock().await.notes(&v.vault_id, &fvk, v.birthday, &rules, &mut v.decisions).await
     }
 
     async fn process(&self, id: &B256) -> Result<()> {
@@ -740,15 +765,16 @@ impl Coordinator {
     }
 
     /// Builds, proves, gets signed (3 of 5) and broadcasts the transaction for `plan`.
-    async fn execute(&self, v: &CoordVault, kind: SignKind, plan: &PayoutPlan, inputs: &[ReceivedNote], tip: u32) -> Result<()> {
+    async fn execute(
+        &self,
+        v: &CoordVault,
+        kind: SignKind,
+        plan: &PayoutPlan,
+        inputs: &[ReceivedNote],
+        tip: u32,
+    ) -> Result<()> {
         let fvk = fvk_of(v)?;
-        let anchor = self
-            .zcash
-            .lock()
-            .await
-            .scan(&v.vault_id)
-            .context("vault not scanned")?
-            .anchor();
+        let anchor = self.zcash.lock().await.scan(&v.vault_id).context("vault not scanned")?.anchor();
         let payments: Vec<Payment> = plan
             .payments
             .iter()

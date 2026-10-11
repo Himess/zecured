@@ -66,7 +66,9 @@ fn notes(fvk: &FullViewingKey, values: &[u64]) -> (Vec<ReceivedNote>, orchard::A
             };
             let mut rs = [0u8; 32];
             OsRng.fill_bytes(&mut rs);
-            let Some(rseed) = Option::from(RandomSeed::from_bytes(rs, &rho)) else { continue };
+            let Some(rseed) = Option::from(RandomSeed::from_bytes(rs, &rho)) else {
+                continue;
+            };
             if let Some(n) =
                 Option::from(Note::from_parts(recipient, NoteValue::from_raw(value), rho, rseed, NoteVersion::V3))
             {
@@ -244,10 +246,7 @@ fn expiry_outside_window_is_refused() {
     let pczt = build(&fvk, anchor, &[&ns[0]], &honest_payments(&p));
     let mut tight = expect();
     tight.max_expiry = TARGET + 5; // builder default expiry is target + 40
-    assert!(matches!(
-        verify_payout(&pczt, &fvk, &inputs(&[&ns[0]]), &p, &tight),
-        Err(VerifyError::BadExpiry(_))
-    ));
+    assert!(matches!(verify_payout(&pczt, &fvk, &inputs(&[&ns[0]]), &p, &tight), Err(VerifyError::BadExpiry(_))));
 }
 
 #[test]

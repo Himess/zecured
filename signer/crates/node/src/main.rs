@@ -59,7 +59,12 @@ async fn main() -> Result<()> {
         .with_env_filter(tracing_subscriber::EnvFilter::try_from_default_env().unwrap_or_else(|_| "info".into()))
         .init();
     match Cli::parse().cmd {
-        Cmd::Init { index, data, url, eth_key } => {
+        Cmd::Init {
+            index,
+            data,
+            url,
+            eth_key,
+        } => {
             let id = Identity::create(&data.join("identity.json"), index, eth_key.as_deref())?;
             println!("{}", serde_json::to_string_pretty(&id.public_info(&url))?);
             Ok(())

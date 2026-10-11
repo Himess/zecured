@@ -136,8 +136,8 @@ pub fn verify_payout(
     let mut outputs: Vec<FoundOutput> = vec![];
     let mut value_balance: i64 = 0;
     LowLevelSigner::new(pczt.clone()).sign_ironwood_with(|_, bundle, _| -> Result<(), VerifyError> {
-        value_balance = i64::try_from(*bundle.value_sum())
-            .map_err(|e| VerifyError::Action(0, format!("value sum: {e:?}")))?;
+        value_balance =
+            i64::try_from(*bundle.value_sum()).map_err(|e| VerifyError::Action(0, format!("value sum: {e:?}")))?;
         inspect(bundle, fvk, inputs, &mut spends, &mut outputs)
     })?;
 
@@ -162,11 +162,8 @@ pub fn verify_payout(
 
     // Outputs: the plan's payments + change, nothing else.
     let change_receiver = fvk.address_at(0u32, Scope::Internal).to_raw_address_bytes();
-    let mut wanted: Vec<([u8; 43], u64, Option<OutputPrivacy>)> = plan
-        .payments
-        .iter()
-        .map(|p| (p.receiver, p.value, Some(p.privacy)))
-        .collect();
+    let mut wanted: Vec<([u8; 43], u64, Option<OutputPrivacy>)> =
+        plan.payments.iter().map(|p| (p.receiver, p.value, Some(p.privacy))).collect();
     if plan.change > 0 {
         wanted.push((change_receiver, plan.change, None));
     }
@@ -202,9 +199,7 @@ pub fn verify_payout(
         });
     }
 
-    let sighash = Signer::new(pczt.clone())
-        .map_err(|e| VerifyError::Signer(format!("{e:?}")))?
-        .shielded_sighash();
+    let sighash = Signer::new(pczt.clone()).map_err(|e| VerifyError::Signer(format!("{e:?}")))?.shielded_sighash();
     Ok(Verified {
         sighash,
         spends: spends
@@ -222,11 +217,7 @@ fn inspect(
     outputs: &mut Vec<FoundOutput>,
 ) -> Result<(), VerifyError> {
     let version = *bundle.bundle_version();
-    let rks: Vec<[u8; 32]> = bundle
-        .actions()
-        .iter()
-        .map(|a| <[u8; 32]>::from(a.spend().rk()))
-        .collect();
+    let rks: Vec<[u8; 32]> = bundle.actions().iter().map(|a| <[u8; 32]>::from(a.spend().rk())).collect();
     let ovk_ext = fvk.to_ovk(Scope::External);
     let ovk_int = fvk.to_ovk(Scope::Internal);
     let err = |i: usize, e: &dyn std::fmt::Debug| VerifyError::Action(i, format!("{e:?}"));
@@ -265,12 +256,8 @@ fn inspect(
         let out_value = output.value().ok_or_else(|| err(i, &"missing output value"))?.inner();
         if out_value > 0 {
             let recipient = output.recipient().ok_or_else(|| err(i, &"missing recipient"))?;
-            let visible = |ovk| {
-                action
-                    .recover_output_with_ovk(ovk, version)
-                    .map(|r| r.is_some())
-                    .map_err(|e| err(i, &e))
-            };
+            let visible =
+                |ovk| action.recover_output_with_ovk(ovk, version).map(|r| r.is_some()).map_err(|e| err(i, &e));
             outputs.push(FoundOutput {
                 action: i,
                 receiver: recipient.to_raw_address_bytes(),

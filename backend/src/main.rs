@@ -37,7 +37,11 @@ struct Cli {
     #[arg(long, env = "COORDINATOR_PRIVATE_KEY", hide_env_values = true)]
     coordinator_key: String,
     /// Deployment file written by `contracts/script/DeployZecured.s.sol` (enables sponsorship).
-    #[arg(long, env = "ZECURED_DEPLOYMENTS", default_value = "contracts/deployments/base-sepolia.json")]
+    #[arg(
+        long,
+        env = "ZECURED_DEPLOYMENTS",
+        default_value = "contracts/deployments/base-sepolia.json"
+    )]
     deployments: PathBuf,
     #[arg(long, env = "BUNDLER_URL", hide_env_values = true, default_value = "")]
     bundler_url: String,
@@ -166,16 +170,8 @@ struct RefundBody {
 }
 
 async fn refund(State(c): App, Path(id): Path<B256>, Json(b): Json<RefundBody>) -> ApiResult {
-    c.request_refund(
-        id,
-        b.note_id,
-        &b.receiver,
-        salt(&b.salt)?,
-        num(&b.nonce)?,
-        num(&b.deadline)?,
-        b.signature,
-    )
-    .await?;
+    c.request_refund(id, b.note_id, &b.receiver, salt(&b.salt)?, num(&b.nonce)?, num(&b.deadline)?, b.signature)
+        .await?;
     Ok(Json(json!({ "accepted": true })))
 }
 
@@ -265,7 +261,10 @@ async fn mm_forward(mm: &MarketMaker, req: reqwest::RequestBuilder) -> ApiResult
     let status = resp.status();
     let v: serde_json::Value = resp.json().await.map_err(|_| anyhow!("market maker returned invalid JSON"))?;
     if !status.is_success() {
-        return Err(ApiError(StatusCode::BAD_GATEWAY, v["error"].as_str().unwrap_or("market maker refused").to_owned()));
+        return Err(ApiError(
+            StatusCode::BAD_GATEWAY,
+            v["error"].as_str().unwrap_or("market maker refused").to_owned(),
+        ));
     }
     Ok(Json(v))
 }
@@ -275,7 +274,10 @@ async fn close_quote(axum::Extension(mm): axum::Extension<MarketMaker>, Path(id)
     mm_forward(&mm, req).await
 }
 
-async fn close_submit(axum::Extension(mm): axum::Extension<MarketMaker>, Json(b): Json<serde_json::Value>) -> ApiResult {
+async fn close_submit(
+    axum::Extension(mm): axum::Extension<MarketMaker>,
+    Json(b): Json<serde_json::Value>,
+) -> ApiResult {
     let req = reqwest::Client::new().post(format!("{}/close", mm.0)).json(&b);
     mm_forward(&mm, req).await
 }
@@ -443,7 +445,11 @@ async fn main() -> Result<()> {
         .route("/admin/nodes/{index}/mode", post(admin_mode))
         .route("/admin/vaults/{id}/drain", post(admin_drain))
         .route("/admin/oracle", get(admin_get_oracle).post(admin_set_oracle))
-        .layer(axum::Extension(PublicConfig(Arc::new(public_config_json(&coordinator.cfg, &cli.deployments, sponsorship)))))
+        .layer(axum::Extension(PublicConfig(Arc::new(public_config_json(
+            &coordinator.cfg,
+            &cli.deployments,
+            sponsorship,
+        )))))
         .layer(axum::Extension(AdminToken(Arc::new(cli.admin_token.clone()))))
         .layer(axum::Extension(Oracle {
             rpc: coordinator.cfg.base_rpc_url.clone(),

@@ -146,13 +146,7 @@ pub fn decode(log: &Log, created_at: u64) -> Result<Option<VaultEvent>> {
             e.vaultId,
             RegistryEvent::Claims(vec![
                 claim(e.userClaimId, ClaimKind::CloseUser, e.userAmount, e.userCommitment, Some(e.mmClaimId)),
-                claim(
-                    e.mmClaimId,
-                    ClaimKind::CloseMarketMaker,
-                    e.mmAmount,
-                    e.mmCommitment,
-                    Some(e.userClaimId),
-                ),
+                claim(e.mmClaimId, ClaimKind::CloseMarketMaker, e.mmAmount, e.mmCommitment, Some(e.userClaimId)),
             ]),
         ),
         E::PayoutConfirmed(e) => (e.vaultId, RegistryEvent::PayoutConfirmed(e.claimIds)),
@@ -203,7 +197,9 @@ mod tests {
         };
         let got = decode(&rpc_log(ev.encode_log_data(), 10, 7), 1_000).unwrap().unwrap();
         assert_eq!(got.vault_id, B256::repeat_byte(1));
-        let RegistryEvent::Claims(claims) = got.event else { panic!() };
+        let RegistryEvent::Claims(claims) = got.event else {
+            panic!()
+        };
         assert_eq!(claims.len(), 2);
         assert_eq!(claims[0].kind, ClaimKind::CloseUser);
         assert_eq!(claims[0].partner, Some([3; 32]));

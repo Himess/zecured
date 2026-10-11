@@ -152,7 +152,8 @@ pub fn commit(
             value: n.value(),
         })
         .collect();
-    let verified = verify_payout(&pczt, &fvk, &expected, plan, &expectations).map_err(|e| anyhow!("PCZT refused: {e}"))?;
+    let verified =
+        verify_payout(&pczt, &fvk, &expected, plan, &expectations).map_err(|e| anyhow!("PCZT refused: {e}"))?;
     start_session(vault, req, verified, expected.iter().map(|e| e.nullifier).collect())
 }
 
@@ -171,11 +172,8 @@ fn start_session(
 ) -> Result<(Session, Vec<SigningCommitments>)> {
     let key_package: KeyPackage = serde_json::from_value(vault.key_package.clone())?;
     let mut rng = rand_core_06::OsRng;
-    let (nonces, commitments): (Vec<_>, Vec<_>) = verified
-        .spends
-        .iter()
-        .map(|_| threshold::commit(&key_package, &mut rng))
-        .unzip();
+    let (nonces, commitments): (Vec<_>, Vec<_>) =
+        verified.spends.iter().map(|_| threshold::commit(&key_package, &mut rng)).unzip();
     Ok((
         Session {
             vault_id: vault.vault_id,
@@ -191,10 +189,7 @@ fn start_session(
 
 /// Round 2: signature shares over this node's own sighash and randomizers.
 pub fn share(index: u16, vault: &VaultRecord, session: Session, req: &ShareRequest) -> Result<Vec<serde_json::Value>> {
-    ensure!(
-        req.commitments.len() == session.verified.spends.len(),
-        "one commitment set per spend expected"
-    );
+    ensure!(req.commitments.len() == session.verified.spends.len(), "one commitment set per spend expected");
     let key_package: KeyPackage = serde_json::from_value(vault.key_package.clone())?;
     let mut shares = Vec::with_capacity(req.commitments.len());
     for (k, set) in req.commitments.iter().enumerate() {
@@ -205,7 +200,8 @@ pub fn share(index: u16, vault: &VaultRecord, session: Session, req: &ShareReque
         let mine = parsed.get(&signer_id(index)?).context("our commitment is not in the signing set")?;
         ensure!(*mine == session.commitments[k], "our commitment was altered");
         let package = threshold::signing_package(parsed, &session.verified.sighash)?;
-        let share = threshold::sign_share(&package, &session.nonces[k], &key_package, &session.verified.spends[k].alpha)?;
+        let share =
+            threshold::sign_share(&package, &session.nonces[k], &key_package, &session.verified.spends[k].alpha)?;
         shares.push(serde_json::to_value(share)?);
     }
     Ok(shares)

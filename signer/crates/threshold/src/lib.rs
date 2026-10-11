@@ -51,14 +51,8 @@ impl VaultKeys {
 
 /// The group verifying key of `pkp` as Orchard `ak` bytes.
 pub fn ak_bytes(pkp: &PublicKeyPackage) -> Result<[u8; 32]> {
-    let bytes = pkp
-        .verifying_key()
-        .serialize()
-        .map_err(|e| anyhow!("serialize verifying key: {e}"))?;
-    let ak: [u8; 32] = bytes
-        .as_slice()
-        .try_into()
-        .context("verifying key is not 32 bytes")?;
+    let bytes = pkp.verifying_key().serialize().map_err(|e| anyhow!("serialize verifying key: {e}"))?;
+    let ak: [u8; 32] = bytes.as_slice().try_into().context("verifying key is not 32 bytes")?;
     // reddsa's post-DKG hook negates all shares when needed so that ak has ỹ = 0,
     // as Orchard requires (ZIP 2005 § 4.2.3). Check it rather than trust it.
     ensure!(pkp.has_even_y(), "group key does not have an even y-coordinate");
@@ -75,28 +69,22 @@ pub fn dkg_in_process<R: RngCore + CryptoRng>(mut rng: R) -> Result<VaultKeys> {
 
     // Part 1: every participant broadcasts a commitment package.
     let mut r1_secrets = BTreeMap::new();
-    let mut r1_received: BTreeMap<SignerId, BTreeMap<SignerId, dkg::round1::Package>> =
-        BTreeMap::new();
+    let mut r1_received: BTreeMap<SignerId, BTreeMap<SignerId, dkg::round1::Package>> = BTreeMap::new();
     for &id in &ids {
-        let (secret, package) = dkg::part1(id, MAX_SIGNERS, MIN_SIGNERS, &mut rng)
-            .map_err(|e| anyhow!("dkg part1: {e}"))?;
+        let (secret, package) =
+            dkg::part1(id, MAX_SIGNERS, MIN_SIGNERS, &mut rng).map_err(|e| anyhow!("dkg part1: {e}"))?;
         r1_secrets.insert(id, secret);
         for &other in ids.iter().filter(|&&o| o != id) {
-            r1_received
-                .entry(other)
-                .or_default()
-                .insert(id, package.clone());
+            r1_received.entry(other).or_default().insert(id, package.clone());
         }
     }
 
     // Part 2: every participant sends one private package to every other participant.
     let mut r2_secrets = BTreeMap::new();
-    let mut r2_received: BTreeMap<SignerId, BTreeMap<SignerId, dkg::round2::Package>> =
-        BTreeMap::new();
+    let mut r2_received: BTreeMap<SignerId, BTreeMap<SignerId, dkg::round2::Package>> = BTreeMap::new();
     for &id in &ids {
         let secret = r1_secrets.remove(&id).context("missing round-1 secret")?;
-        let (secret2, packages) =
-            dkg::part2(secret, &r1_received[&id]).map_err(|e| anyhow!("dkg part2: {e}"))?;
+        let (secret2, packages) = dkg::part2(secret, &r1_received[&id]).map_err(|e| anyhow!("dkg part2: {e}"))?;
         r2_secrets.insert(id, secret2);
         for (recipient, package) in packages {
             r2_received.entry(recipient).or_default().insert(id, package);
@@ -111,10 +99,7 @@ pub fn dkg_in_process<R: RngCore + CryptoRng>(mut rng: R) -> Result<VaultKeys> {
             .map_err(|e| anyhow!("dkg part3: {e}"))?;
         match &public_key_package {
             None => public_key_package = Some(pkp),
-            Some(existing) => ensure!(
-                existing == &pkp,
-                "participants disagree on the public key package"
-            ),
+            Some(existing) => ensure!(existing == &pkp, "participants disagree on the public key package"),
         }
         key_packages.insert(id, kp);
     }
@@ -126,10 +111,7 @@ pub fn dkg_in_process<R: RngCore + CryptoRng>(mut rng: R) -> Result<VaultKeys> {
 }
 
 /// Round 1 for one signer: fresh nonces (kept secret, used once) and their commitments.
-pub fn commit<R: RngCore + CryptoRng>(
-    key_package: &KeyPackage,
-    rng: &mut R,
-) -> (SigningNonces, SigningCommitments) {
+pub fn commit<R: RngCore + CryptoRng>(key_package: &KeyPackage, rng: &mut R) -> (SigningNonces, SigningCommitments) {
     round1::commit(key_package.signing_share(), rng)
 }
 
@@ -178,13 +160,8 @@ fn frost_rerandomized_sign(
     key_package: &KeyPackage,
     randomizer: Randomizer,
 ) -> Result<SignatureShare> {
-    reddsa_frost_rerandomized::sign::<frost::PallasBlake2b512>(
-        signing_package,
-        nonces,
-        key_package,
-        randomizer,
-    )
-    .map_err(|e| anyhow!("frost round 2: {e}"))
+    reddsa_frost_rerandomized::sign::<frost::PallasBlake2b512>(signing_package, nonces, key_package, randomizer)
+        .map_err(|e| anyhow!("frost round 2: {e}"))
 }
 
 /// Aggregates signature shares into the 64-byte RedPallas spend authorization signature
@@ -196,22 +173,13 @@ pub fn aggregate(
     alpha: &[u8; 32],
 ) -> Result<[u8; 64]> {
     if shares.len() < usize::from(MIN_SIGNERS) {
-        bail!(
-            "need {MIN_SIGNERS} signature shares, got {}",
-            shares.len()
-        );
+        bail!("need {MIN_SIGNERS} signature shares, got {}", shares.len());
     }
-    let params =
-        RandomizedParams::from_randomizer(public_key_package.verifying_key(), randomizer_from_alpha(alpha)?);
+    let params = RandomizedParams::from_randomizer(public_key_package.verifying_key(), randomizer_from_alpha(alpha)?);
     let signature = frost::rerandomized::aggregate(signing_package, shares, public_key_package, &params)
         .map_err(|e| anyhow!("frost aggregate: {e}"))?;
-    let bytes = signature
-        .serialize()
-        .map_err(|e| anyhow!("serialize signature: {e}"))?;
-    bytes
-        .as_slice()
-        .try_into()
-        .context("signature is not 64 bytes")
+    let bytes = signature.serialize().map_err(|e| anyhow!("serialize signature: {e}"))?;
+    bytes.as_slice().try_into().context("signature is not 64 bytes")
 }
 
 /// Runs both FROST rounds for `signers` inside one process and returns the aggregate
@@ -230,9 +198,7 @@ pub fn sign_in_process(
     let mut commitments = BTreeMap::new();
     for &i in signers {
         let id = signer_id(i)?;
-        let kp = key_packages
-            .get(&id)
-            .with_context(|| format!("no key package for signer {i}"))?;
+        let kp = key_packages.get(&id).with_context(|| format!("no key package for signer {i}"))?;
         let (n, c) = commit(kp, &mut rng);
         nonces.insert(id, n);
         commitments.insert(id, c);

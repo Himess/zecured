@@ -44,14 +44,12 @@ fn random_note(recipient: Address, value: u64) -> Note {
         let Some(rho) = Option::from(rho) else { continue };
         let mut rseed = [0u8; 32];
         OsRng.fill_bytes(&mut rseed);
-        let Some(rseed) = Option::from(RandomSeed::from_bytes(rseed, &rho)) else { continue };
-        if let Some(note) = Option::from(Note::from_parts(
-            recipient,
-            NoteValue::from_raw(value),
-            rho,
-            rseed,
-            NoteVersion::V3,
-        )) {
+        let Some(rseed) = Option::from(RandomSeed::from_bytes(rseed, &rho)) else {
+            continue;
+        };
+        if let Some(note) =
+            Option::from(Note::from_parts(recipient, NoteValue::from_raw(value), rho, rseed, NoteVersion::V3))
+        {
             return note;
         }
     }
@@ -78,9 +76,7 @@ fn new_vault() -> Vault {
     let keys = threshold::dkg_in_process(OsRng).unwrap();
     let mut sk = [0u8; 32];
     OsRng.fill_bytes(&mut sk);
-    let fvk = VaultSecret::from_bytes(sk)
-        .full_viewing_key(&keys.ak_bytes().unwrap())
-        .unwrap();
+    let fvk = VaultSecret::from_bytes(sk).full_viewing_key(&keys.ak_bytes().unwrap()).unwrap();
     Vault { keys, fvk }
 }
 
@@ -89,8 +85,7 @@ fn funded(vault: &Vault) -> (ReceivedNote, orchard::Anchor) {
     let recipient = vault_address(&vault.fvk);
     let note = random_note(recipient, NOTE_VALUE);
     let mut tree: CommitmentTree<MerkleHashOrchard, 32> = CommitmentTree::empty();
-    tree.append(MerkleHashOrchard::from_cmx(&note.commitment().into()))
-        .unwrap();
+    tree.append(MerkleHashOrchard::from_cmx(&note.commitment().into())).unwrap();
     let witness = IronwoodWitness::from_tree(tree.clone()).unwrap();
     let received = ReceivedNote {
         position: NotePosition {

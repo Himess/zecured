@@ -8,8 +8,10 @@ use std::{collections::BTreeMap, fs, path::PathBuf};
 use anyhow::{Context, Result};
 use clap::{Parser, Subcommand};
 use rand_core_06::{OsRng, RngCore};
+use reddsa::frost::redpallas::keys::{KeyPackage, PublicKeyPackage};
 use serde::{Deserialize, Serialize};
 use zcash_protocol::consensus::Network;
+use zcash_protocol::{TxId, consensus::BlockHeight};
 use zecured_threshold::{self as threshold, SignerId};
 use zecured_zcash_ops::{
     keys, lwd,
@@ -17,8 +19,6 @@ use zecured_zcash_ops::{
     spend::{self, OutputPrivacy, Payment},
     tx::{self, TxShape},
 };
-use reddsa::frost::redpallas::keys::{KeyPackage, PublicKeyPackage};
-use zcash_protocol::{TxId, consensus::BlockHeight};
 
 const NETWORK: Network = Network::TestNetwork;
 
@@ -98,15 +98,31 @@ async fn main() -> Result<()> {
         Cmd::Show => show(&load_vault(&cli.vault)?),
         Cmd::Scan => scan(&lwd_url(&cli.lwd)?, &load_vault(&cli.vault)?).await.map(|_| ()),
         Cmd::Txshape { txid } => txshape(&lwd_url(&cli.lwd)?, &txid).await,
-        Cmd::Spend { to, amount, third, third_amount, signers, dry_run } => {
-            spend(&lwd_url(&cli.lwd)?, &load_vault(&cli.vault)?, &to, amount, third.as_deref(), third_amount, &signers, dry_run).await
+        Cmd::Spend {
+            to,
+            amount,
+            third,
+            third_amount,
+            signers,
+            dry_run,
+        } => {
+            spend(
+                &lwd_url(&cli.lwd)?,
+                &load_vault(&cli.vault)?,
+                &to,
+                amount,
+                third.as_deref(),
+                third_amount,
+                &signers,
+                dry_run,
+            )
+            .await
         }
     }
 }
 
 fn lwd_url(lwd: &Option<String>) -> Result<String> {
-    lwd.clone()
-        .context("pass --lwd <url> or set LIGHTWALLETD_URL")
+    lwd.clone().context("pass --lwd <url> or set LIGHTWALLETD_URL")
 }
 
 async fn info(url: &str) -> Result<()> {
@@ -291,7 +307,12 @@ async fn spend(
     let pczt = spend::apply_signatures(pczt, &signatures)?;
     let tx = spend::extract(pczt)?;
     let shape = TxShape::of(&tx);
-    println!("extracted {:?} tx {}; {shape:?}; ironwood-only {}", tx.version(), tx.txid(), shape.is_ironwood_only());
+    println!(
+        "extracted {:?} tx {}; {shape:?}; ironwood-only {}",
+        tx.version(),
+        tx.txid(),
+        shape.is_ironwood_only()
+    );
     if dry_run {
         println!("dry run: not broadcasting");
         return Ok(());

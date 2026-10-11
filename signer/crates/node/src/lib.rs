@@ -23,16 +23,16 @@ use alloy::primitives::{B256, Bytes};
 use anyhow::{Context, Result, anyhow, bail, ensure};
 use serde::{Deserialize, Serialize};
 use tokio::sync::Mutex;
+use zcash_protocol::TxId;
 use zecured_base::{
-    DepositAttestation, Destination, PayoutConfirmation, RefundRequest, claim_ids_hash, recover_typed,
-    registry_domain, sign_typed,
+    DepositAttestation, Destination, PayoutConfirmation, RefundRequest, claim_ids_hash, recover_typed, registry_domain,
+    sign_typed,
 };
 use zecured_policy::{
     classify::Classification,
     derive::deposit_tag,
     ledger::{ClaimState, Recipient, commitment},
 };
-use zcash_protocol::TxId;
 
 use crate::{
     chain::ZcashView,
@@ -72,10 +72,7 @@ pub struct Node {
 }
 
 pub fn now() -> u64 {
-    SystemTime::now()
-        .duration_since(UNIX_EPOCH)
-        .map(|d| d.as_secs())
-        .unwrap_or(0)
+    SystemTime::now().duration_since(UNIX_EPOCH).map(|d| d.as_secs()).unwrap_or(0)
 }
 
 /// Base64 (standard alphabet) serde helpers for binary fields in the JSON API.
@@ -200,12 +197,7 @@ impl Node {
     }
 
     pub async fn dkg_round3(&self, input: dkg::Round3In) -> Result<dkg::Round3Out> {
-        let p = self
-            .pending_dkg
-            .lock()
-            .await
-            .remove(&input.vault_id)
-            .context("no DKG in progress for this vault")?;
+        let p = self.pending_dkg.lock().await.remove(&input.vault_id).context("no DKG in progress for this vault")?;
         let mut store = self.store.lock().await;
         dkg::round3(&self.cfg, &self.id.x25519, self.id.index, p, &input, &mut store)
     }
@@ -214,12 +206,7 @@ impl Node {
 
     pub async fn attest(&self, vault_id: B256) -> Result<AttestResponse> {
         let mut store = self.store.lock().await;
-        let notes = self
-            .zcash
-            .lock()
-            .await
-            .vault_notes(&mut store, &vault_id, self.cfg.confirmations)
-            .await?;
+        let notes = self.zcash.lock().await.vault_notes(&mut store, &vault_id, self.cfg.confirmations).await?;
         let mut v = store.vaults.get(&vault_id).context("unknown vault")?.clone();
         let note = notes.conforming.context("no conforming deposit (yet)")?;
         let nullifier = note.nullifier.to_bytes();
@@ -282,12 +269,7 @@ impl Node {
     pub async fn refund_request(&self, vault_id: B256, r: RefundIn) -> Result<()> {
         let recipient = parse_recipient(&r.recipient)?;
         let mut store = self.store.lock().await;
-        let notes = self
-            .zcash
-            .lock()
-            .await
-            .vault_notes(&mut store, &vault_id, self.cfg.confirmations)
-            .await?;
+        let notes = self.zcash.lock().await.vault_notes(&mut store, &vault_id, self.cfg.confirmations).await?;
         let mut v = store.vaults.get(&vault_id).context("unknown vault")?.clone();
         let msg = RefundRequest {
             vaultId: vault_id,
@@ -321,20 +303,12 @@ impl Node {
             let v = store.vaults.get(&req.vault_id).context("unknown vault")?;
             signing::commit_unchecked(v, &req)?
         } else {
-            let notes = self
-                .zcash
-                .lock()
-                .await
-                .vault_notes(&mut store, &req.vault_id, self.cfg.confirmations)
-                .await?;
+            let notes = self.zcash.lock().await.vault_notes(&mut store, &req.vault_id, self.cfg.confirmations).await?;
             let v = store.vaults.get(&req.vault_id).context("unknown vault")?;
             let (plan, inputs) = signing::expected_plan(&store, v, &notes, &req.kind, now())?;
             signing::commit(v, &plan, &inputs, notes.tip, &req)?
         };
-        let commitments = commitments
-            .iter()
-            .map(serde_json::to_value)
-            .collect::<Result<Vec<_>, _>>()?;
+        let commitments = commitments.iter().map(serde_json::to_value).collect::<Result<Vec<_>, _>>()?;
         self.sessions.lock().await.insert(req.session_id.clone(), session);
         Ok(CommitResponse {
             index: self.id.index,
@@ -343,12 +317,8 @@ impl Node {
     }
 
     pub async fn sign_share(&self, req: ShareRequest) -> Result<ShareResponse> {
-        let session = self
-            .sessions
-            .lock()
-            .await
-            .remove(&req.session_id)
-            .context("unknown or finished signing session")?;
+        let session =
+            self.sessions.lock().await.remove(&req.session_id).context("unknown or finished signing session")?;
         let mut store = self.store.lock().await;
         let mut v = store.vaults.get(&session.vault_id).context("unknown vault")?.clone();
         if let signing::SignKind::Payout { claim_ids } = &session.kind {

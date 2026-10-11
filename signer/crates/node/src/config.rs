@@ -24,9 +24,8 @@ pub struct NodeInfo {
 
 impl NodeInfo {
     pub fn x25519_public(&self) -> Result<PublicKey> {
-        let bytes: [u8; 32] = hex::decode(&self.x25519)?
-            .try_into()
-            .map_err(|_| anyhow!("x25519 key must be 32 bytes"))?;
+        let bytes: [u8; 32] =
+            hex::decode(&self.x25519)?.try_into().map_err(|_| anyhow!("x25519 key must be 32 bytes"))?;
         Ok(PublicKey::from(bytes))
     }
 }

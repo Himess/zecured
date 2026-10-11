@@ -175,8 +175,11 @@ impl Allowlist {
     }
 }
 
+/// One MultiSend entry: operation, target, value, calldata.
+type MultiSendEntry = (u8, Address, U256, Vec<u8>);
+
 /// MultiSend packing: operation (1) | to (20) | value (32) | data length (32) | data.
-fn unpack_multisend(mut packed: &[u8]) -> Result<Vec<(u8, Address, U256, Vec<u8>)>> {
+fn unpack_multisend(mut packed: &[u8]) -> Result<Vec<MultiSendEntry>> {
     const HEADER: usize = 1 + 20 + 32 + 32;
     let mut out = vec![];
     while !packed.is_empty() {
@@ -184,7 +187,8 @@ fn unpack_multisend(mut packed: &[u8]) -> Result<Vec<(u8, Address, U256, Vec<u8>
         let op = packed[0];
         let to = Address::from_slice(&packed[1..21]);
         let value = U256::from_be_slice(&packed[21..53]);
-        let len = usize::try_from(U256::from_be_slice(&packed[53..85])).map_err(|_| anyhow::anyhow!("length overflow"))?;
+        let len =
+            usize::try_from(U256::from_be_slice(&packed[53..85])).map_err(|_| anyhow::anyhow!("length overflow"))?;
         ensure!(packed.len() >= HEADER + len, "truncated multiSend data");
         out.push((op, to, value, packed[HEADER..HEADER + len].to_vec()));
         packed = &packed[HEADER + len..];
@@ -244,7 +248,11 @@ mod tests {
         executeUserOpCall {
             to: MULTI_SEND_CALL_ONLY,
             value: U256::ZERO,
-            data: multiSendCall { transactions: packed.into() }.abi_encode().into(),
+            data: multiSendCall {
+                transactions: packed.into(),
+            }
+            .abi_encode()
+            .into(),
             operation: OPERATION_DELEGATECALL,
         }
         .abi_encode()
@@ -265,12 +273,32 @@ mod tests {
         let l = list();
         let me = Address::repeat_byte(0x99);
         let calls = vec![
-            (l.morpho, setAuthorizationCall { authorized: l.registry, newIsAuthorized: true }.abi_encode()),
-            (l.morpho, setAuthorizationCall { authorized: l.adapter, newIsAuthorized: true }.abi_encode()),
             (
                 l.morpho,
-                borrowCall { marketParams: market(&l), assets: U256::from(1_000_000u64), shares: U256::ZERO, onBehalf: me, receiver: me }
-                    .abi_encode(),
+                setAuthorizationCall {
+                    authorized: l.registry,
+                    newIsAuthorized: true,
+                }
+                .abi_encode(),
+            ),
+            (
+                l.morpho,
+                setAuthorizationCall {
+                    authorized: l.adapter,
+                    newIsAuthorized: true,
+                }
+                .abi_encode(),
+            ),
+            (
+                l.morpho,
+                borrowCall {
+                    marketParams: market(&l),
+                    assets: U256::from(1_000_000u64),
+                    shares: U256::ZERO,
+                    onBehalf: me,
+                    receiver: me,
+                }
+                .abi_encode(),
             ),
         ];
         l.check(&op(me, batch(&calls))).unwrap();
@@ -281,13 +309,33 @@ mod tests {
         let l = list();
         let me = Address::repeat_byte(0x99);
         let calls = vec![
-            (l.usdc, approveCall { spender: l.morpho, amount: U256::MAX }.abi_encode()),
+            (
+                l.usdc,
+                approveCall {
+                    spender: l.morpho,
+                    amount: U256::MAX,
+                }
+                .abi_encode(),
+            ),
             (
                 l.morpho,
-                repayCall { marketParams: market(&l), assets: U256::ZERO, shares: U256::from(5u8), onBehalf: me, data: Bytes::new() }
-                    .abi_encode(),
+                repayCall {
+                    marketParams: market(&l),
+                    assets: U256::ZERO,
+                    shares: U256::from(5u8),
+                    onBehalf: me,
+                    data: Bytes::new(),
+                }
+                .abi_encode(),
             ),
-            (l.registry, requestReleaseCall { vaultId: B256::repeat_byte(1), destCommitment: B256::repeat_byte(2) }.abi_encode()),
+            (
+                l.registry,
+                requestReleaseCall {
+                    vaultId: B256::repeat_byte(1),
+                    destCommitment: B256::repeat_byte(2),
+                }
+                .abi_encode(),
+            ),
         ];
         l.check(&op(me, batch(&calls))).unwrap();
     }
@@ -304,7 +352,12 @@ mod tests {
             paymentReceiver: Address::ZERO,
         }
         .abi_encode();
-        let data = createProxyWithNonceCall { singleton: SAFE_SINGLETON, initializer: init.into(), saltNonce: U256::ZERO }.abi_encode();
+        let data = createProxyWithNonceCall {
+            singleton: SAFE_SINGLETON,
+            initializer: init.into(),
+            saltNonce: U256::ZERO,
+        }
+        .abi_encode();
         (Some(SAFE_PROXY_FACTORY), Some(data.into()))
     }
 
@@ -312,7 +365,15 @@ mod tests {
     fn only_the_apps_safe_configuration_is_deployed() {
         let l = list();
         let me = Address::repeat_byte(0x99);
-        let call = single(l.registry, requestPartialReleaseCall { vaultId: B256::repeat_byte(1), amount: 200_000, destCommitment: B256::repeat_byte(2) }.abi_encode());
+        let call = single(
+            l.registry,
+            requestPartialReleaseCall {
+                vaultId: B256::repeat_byte(1),
+                amount: 200_000,
+                destCommitment: B256::repeat_byte(2),
+            }
+            .abi_encode(),
+        );
         let mut op = op(me, call);
         (op.factory, op.factory_data) = deployment(Address::repeat_byte(0x01), SAFE_4337_MODULE);
         l.check(&op).unwrap();
@@ -326,32 +387,90 @@ mod tests {
         let me = Address::repeat_byte(0x99);
         let stranger = Address::repeat_byte(0xab);
         // authorizing anyone else
-        assert!(l.check(&op(me, single(l.morpho, setAuthorizationCall { authorized: stranger, newIsAuthorized: true }.abi_encode()))).is_err());
+        assert!(
+            l.check(&op(
+                me,
+                single(
+                    l.morpho,
+                    setAuthorizationCall {
+                        authorized: stranger,
+                        newIsAuthorized: true
+                    }
+                    .abi_encode()
+                )
+            ))
+            .is_err()
+        );
         // borrowing on behalf of someone else
-        let b = borrowCall { marketParams: market(&l), assets: U256::from(1u8), shares: U256::ZERO, onBehalf: stranger, receiver: me };
+        let b = borrowCall {
+            marketParams: market(&l),
+            assets: U256::from(1u8),
+            shares: U256::ZERO,
+            onBehalf: stranger,
+            receiver: me,
+        };
         assert!(l.check(&op(me, single(l.morpho, b.abi_encode()))).is_err());
         // another market
         let mut m = market(&l);
         m.lltv = U256::from(1u8);
-        let b = borrowCall { marketParams: m, assets: U256::from(1u8), shares: U256::ZERO, onBehalf: me, receiver: me };
+        let b = borrowCall {
+            marketParams: m,
+            assets: U256::from(1u8),
+            shares: U256::ZERO,
+            onBehalf: me,
+            receiver: me,
+        };
         assert!(l.check(&op(me, single(l.morpho, b.abi_encode()))).is_err());
         // approving a non-Morpho spender
-        assert!(l.check(&op(me, single(l.usdc, approveCall { spender: stranger, amount: U256::MAX }.abi_encode()))).is_err());
+        assert!(
+            l.check(&op(
+                me,
+                single(
+                    l.usdc,
+                    approveCall {
+                        spender: stranger,
+                        amount: U256::MAX
+                    }
+                    .abi_encode()
+                )
+            ))
+            .is_err()
+        );
         // arbitrary contract call
         assert!(l.check(&op(me, single(stranger, vec![1, 2, 3, 4]))).is_err());
         // ETH value
         let with_value = executeUserOpCall {
             to: l.usdc,
             value: U256::from(1u8),
-            data: transferCall { to: stranger, amount: U256::from(1u8) }.abi_encode().into(),
+            data: transferCall {
+                to: stranger,
+                amount: U256::from(1u8),
+            }
+            .abi_encode()
+            .into(),
             operation: OPERATION_CALL,
         };
         assert!(l.check(&op(me, with_value.abi_encode().into())).is_err());
         // delegatecall to something other than MultiSendCallOnly
-        let dc = executeUserOpCall { to: stranger, value: U256::ZERO, data: Bytes::new(), operation: OPERATION_DELEGATECALL };
+        let dc = executeUserOpCall {
+            to: stranger,
+            value: U256::ZERO,
+            data: Bytes::new(),
+            operation: OPERATION_DELEGATECALL,
+        };
         assert!(l.check(&op(me, dc.abi_encode().into())).is_err());
         // unknown factory
-        let mut deploy = op(me, single(l.usdc, transferCall { to: stranger, amount: U256::from(1u8) }.abi_encode()));
+        let mut deploy = op(
+            me,
+            single(
+                l.usdc,
+                transferCall {
+                    to: stranger,
+                    amount: U256::from(1u8),
+                }
+                .abi_encode(),
+            ),
+        );
         deploy.factory = Some(stranger);
         assert!(l.check(&deploy).is_err());
     }

@@ -42,9 +42,19 @@ const REQUEST_TTL_SECS: u64 = 600;
 struct Cli {
     #[arg(long, default_value = "data/wallet/wallet.json", global = true)]
     wallet: PathBuf,
-    #[arg(long, env = "LIGHTWALLETD_URL", default_value = "https://testnet.zec.rocks:443", global = true)]
+    #[arg(
+        long,
+        env = "LIGHTWALLETD_URL",
+        default_value = "https://testnet.zec.rocks:443",
+        global = true
+    )]
     lwd: String,
-    #[arg(long, env = "ZECURED_BACKEND", default_value = "http://127.0.0.1:8080", global = true)]
+    #[arg(
+        long,
+        env = "ZECURED_BACKEND",
+        default_value = "http://127.0.0.1:8080",
+        global = true
+    )]
     backend: String,
     #[command(subcommand)]
     cmd: Cmd,
@@ -271,15 +281,20 @@ async fn send(w: &Wallet, url: &str, to: &str, amount: u64) -> Result<String> {
         value: amount,
         privacy: OutputPrivacy::VaultOvk,
     }];
-    let unsigned = spend::build(&NETWORK, BlockHeight::from_u32(state.scanned_to + 1), &w.fvk, state.anchor(), &inputs, &payments)?;
+    let unsigned = spend::build(
+        &NETWORK,
+        BlockHeight::from_u32(state.scanned_to + 1),
+        &w.fvk,
+        state.anchor(),
+        &inputs,
+        &payments,
+    )?;
     let pk = tokio::task::spawn_blocking(spend::proving_key).await?;
     let pczt = spend::finalize_and_prove(unsigned.pczt, &pk)?;
     let mut signer = Signer::new(pczt).map_err(|e| anyhow!("signer: {e:?}"))?;
     let ask = SpendAuthorizingKey::from(&w.sk);
     for i in &unsigned.spend_action_indices {
-        signer
-            .sign_ironwood(rand_010::rng(), *i, &ask)
-            .map_err(|e| anyhow!("sign: {e:?}"))?;
+        signer.sign_ironwood(rand_010::rng(), *i, &ask).map_err(|e| anyhow!("sign: {e:?}"))?;
     }
     let tx = spend::extract(signer.finish())?;
     let mut client = lwd::connect(url).await?;
@@ -401,10 +416,8 @@ async fn loan(wallet: &Path, lwd_url: &str, backend: &str, cmd: LoanCmd) -> Resu
             println!("{}", serde_json::to_string_pretty(&r)?);
         }
         LoanCmd::Status { vault } => {
-            let v: serde_json::Value = reqwest::get(format!("{}/vaults/{vault}", backend.trim_end_matches('/')))
-                .await?
-                .json()
-                .await?;
+            let v: serde_json::Value =
+                reqwest::get(format!("{}/vaults/{vault}", backend.trim_end_matches('/'))).await?.json().await?;
             println!("{}", serde_json::to_string_pretty(&v)?);
         }
         LoanCmd::Deposit { vault, amount } => {
@@ -475,12 +488,17 @@ async fn loan(wallet: &Path, lwd_url: &str, backend: &str, cmd: LoanCmd) -> Resu
             let commitment = destination(wallet, backend, &vault, to).await?;
             base_test::partial_release(wallet, &vault, amount, commitment, &rpc).await?;
         }
-        LoanCmd::Close { vault, to, slippage_bps } => {
+        LoanCmd::Close {
+            vault,
+            to,
+            slippage_bps,
+        } => {
             let (l, owner, to) = owner_ctx(wallet, &vault, to)?;
-            let quote: serde_json::Value = reqwest::get(format!("{}/quotes/close/{vault}", backend.trim_end_matches('/')))
-                .await?
-                .json()
-                .await?;
+            let quote: serde_json::Value =
+                reqwest::get(format!("{}/quotes/close/{vault}", backend.trim_end_matches('/')))
+                    .await?
+                    .json()
+                    .await?;
             ensure!(quote.get("error").is_none(), "quote failed: {}", quote["error"]);
             let user_amount: u64 = quote["userAmount"].as_str().context("quote")?.parse()?;
             let min_user = user_amount.saturating_mul(10_000 - slippage_bps) / 10_000;
@@ -568,4 +586,3 @@ fn commitment(salt: &[u8; 32], receiver: &[u8; 43]) -> [u8; 32] {
     preimage.extend_from_slice(receiver);
     alloy::primitives::keccak256(preimage).0
 }
-

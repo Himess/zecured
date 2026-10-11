@@ -16,14 +16,9 @@ pub type LwdClient = CompactTxStreamerClient<Channel>;
 pub async fn connect(url: &str) -> Result<LwdClient> {
     let mut endpoint = Endpoint::from_shared(url.to_owned()).context("invalid server URL")?;
     if url.starts_with("https://") {
-        endpoint = endpoint
-            .tls_config(ClientTlsConfig::new().with_webpki_roots())
-            .context("TLS config")?;
+        endpoint = endpoint.tls_config(ClientTlsConfig::new().with_webpki_roots()).context("TLS config")?;
     }
-    let channel = endpoint
-        .connect()
-        .await
-        .with_context(|| format!("connect to light wallet server {url}"))?;
+    let channel = endpoint.connect().await.with_context(|| format!("connect to light wallet server {url}"))?;
     // Compact block ranges can be large; allow bigger messages than tonic's 4 MiB default.
     const MAX_MESSAGE_BYTES: usize = 64 * 1024 * 1024;
     Ok(CompactTxStreamerClient::new(channel).max_decoding_message_size(MAX_MESSAGE_BYTES))
@@ -31,11 +26,7 @@ pub async fn connect(url: &str) -> Result<LwdClient> {
 
 /// Server identity and chain tip as reported by the server.
 pub async fn lightd_info(client: &mut LwdClient) -> Result<service::LightdInfo> {
-    Ok(client
-        .get_lightd_info(Empty {})
-        .await
-        .map_err(|s| anyhow!("GetLightdInfo: {s}"))?
-        .into_inner())
+    Ok(client.get_lightd_info(Empty {}).await.map_err(|s| anyhow!("GetLightdInfo: {s}"))?.into_inner())
 }
 
 /// Height and hash of the latest block known to the server.

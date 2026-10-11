@@ -60,7 +60,8 @@ pub struct Deployment {
 
 impl Deployment {
     pub fn load() -> Result<Self> {
-        let path = std::env::var("ZECURED_DEPLOYMENTS").unwrap_or_else(|_| "contracts/deployments/base-sepolia.json".into());
+        let path =
+            std::env::var("ZECURED_DEPLOYMENTS").unwrap_or_else(|_| "contracts/deployments/base-sepolia.json".into());
         let raw: serde_json::Value =
             serde_json::from_slice(&std::fs::read(Path::new(&path)).with_context(|| format!("read {path}"))?)?;
         let c = |k: &str| -> Result<Address> { Ok(raw["contracts"][k].as_str().context(k.to_owned())?.parse()?) };

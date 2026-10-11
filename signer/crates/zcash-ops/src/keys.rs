@@ -48,10 +48,7 @@ pub const VAULT_ADDRESS_INDEX: u32 = 0;
 
 /// `PRF^expand_key(t)` = BLAKE2b-512("Zcash_ExpandSeed", key || t).
 fn prf_expand(key: &[u8; 32], t: &[&[u8]]) -> [u8; 64] {
-    let mut state = blake2b_simd::Params::new()
-        .hash_length(64)
-        .personal(PRF_EXPAND_PERSONALIZATION)
-        .to_state();
+    let mut state = blake2b_simd::Params::new().hash_length(64).personal(PRF_EXPAND_PERSONALIZATION).to_state();
     state.update(key);
     for part in t {
         state.update(part);
@@ -136,8 +133,7 @@ pub fn encode_ironwood_ua<P: Parameters>(params: &P, addr: orchard::Address) -> 
 
 /// Encodes the vault FVK as an Orchard-only UFVK (given to the borrower to verify the vault).
 pub fn encode_ufvk<P: Parameters>(params: &P, fvk: &FullViewingKey) -> Result<String> {
-    let ufvk = UnifiedFullViewingKey::from_orchard_fvk(fvk.clone())
-        .map_err(|e| anyhow!("build UFVK: {e:?}"))?;
+    let ufvk = UnifiedFullViewingKey::from_orchard_fvk(fvk.clone()).map_err(|e| anyhow!("build UFVK: {e:?}"))?;
     ufvk.encode(params).map_err(|e| anyhow!("encode UFVK: {e:?}"))
 }
 
@@ -147,9 +143,7 @@ pub fn encode_ufvk<P: Parameters>(params: &P, fvk: &FullViewingKey) -> Result<St
 pub fn ironwood_receiver<P: Parameters>(params: &P, encoded: &str) -> Result<orchard::Address> {
     let ua = UnifiedAddress::decode(params, encoded)
         .map_err(|e| anyhow!("not a unified address for this network: {e:?}"))?;
-    ua.orchard()
-        .copied()
-        .context("address has no Orchard-protocol (Ironwood) receiver")
+    ua.orchard().copied().context("address has no Orchard-protocol (Ironwood) receiver")
 }
 
 #[cfg(test)]
@@ -160,10 +154,7 @@ mod tests {
 
     /// Some 32-byte value that is a valid Orchard spending key.
     fn sample_sk() -> [u8; 32] {
-        (0u8..=255)
-            .map(|i| [i; 32])
-            .find(|b| bool::from(SpendingKey::from_bytes(*b).is_some()))
-            .unwrap()
+        (0u8..=255).map(|i| [i; 32]).find(|b| bool::from(SpendingKey::from_bytes(*b).is_some())).unwrap()
     }
 
     /// Our PRF^expand / ToBase / ToScalar plumbing must reproduce orchard's own legacy
@@ -240,8 +231,7 @@ mod tests {
             qk_context: String,
             vectors: Vec<V>,
         }
-        let file: File =
-            serde_json::from_str(include_str!("../tests/fixtures/zip2005_use_qsk.json")).unwrap();
+        let file: File = serde_json::from_str(include_str!("../tests/fixtures/zip2005_use_qsk.json")).unwrap();
         assert_eq!(file.qk_context, QK_CONTEXT);
         assert!(!file.vectors.is_empty());
         let b32 = |h: &str| -> [u8; 32] { hex::decode(h).unwrap().try_into().unwrap() };
@@ -254,12 +244,8 @@ mod tests {
             let raw = fvk.to_bytes();
             assert_eq!(hex::encode(&raw[64..]), v.rivk_ext);
             assert_eq!(hex::encode(raw), v.fvk);
-            assert_eq!(
-                hex::encode(vault_address(&fvk).to_raw_address_bytes()),
-                v.default_address_raw
-            );
+            assert_eq!(hex::encode(vault_address(&fvk).to_raw_address_bytes()), v.default_address_raw);
             assert_eq!(encode_ufvk(&Network::TestNetwork, &fvk).unwrap(), v.ufvk_testnet);
         }
     }
 }
-

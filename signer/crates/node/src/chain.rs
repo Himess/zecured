@@ -112,12 +112,7 @@ impl ZcashView {
             let state = ScanState::from_birthday(&mut client, fvk.clone(), birthday).await?;
             self.scans.insert(*vault_id, state);
         }
-        let scanned = self
-            .scans
-            .get_mut(vault_id)
-            .expect("inserted")
-            .scan_to(&mut client, tip)
-            .await;
+        let scanned = self.scans.get_mut(vault_id).expect("inserted").scan_to(&mut client, tip).await;
         if let Err(e) = scanned {
             // Reorg (or a broken stream): start over from the birthday; vault scans are short.
             tracing::warn!("rescanning vault after: {e:#}");
@@ -127,12 +122,8 @@ impl ZcashView {
         }
 
         // P1: classify external notes in chain order; persist new decisions.
-        let externals: Vec<ReceivedNote> = self.scans[vault_id]
-            .notes
-            .iter()
-            .filter(|n| n.scope == Scope::External)
-            .cloned()
-            .collect();
+        let externals: Vec<ReceivedNote> =
+            self.scans[vault_id].notes.iter().filter(|n| n.scope == Scope::External).cloned().collect();
         let mut deposits = Vec::with_capacity(externals.len());
         for n in &externals {
             let ironwood_only = self.ironwood_only(&n.txid).await?;
@@ -156,12 +147,8 @@ impl ZcashView {
         }
 
         let scan = &self.scans[vault_id];
-        let decision = |n: &ReceivedNote| {
-            decisions
-                .iter()
-                .find(|(p, _)| *p == to_policy_position(&n.position))
-                .map(|(_, c)| *c)
-        };
+        let decision =
+            |n: &ReceivedNote| decisions.iter().find(|(p, _)| *p == to_policy_position(&n.position)).map(|(_, c)| *c);
         let conforming = scan
             .notes
             .iter()
@@ -171,7 +158,8 @@ impl ZcashView {
             .unspent()
             .into_iter()
             .filter(|n| {
-                n.scope == Scope::Internal || (n.scope == Scope::External && decision(n) == Some(Classification::Conforming))
+                n.scope == Scope::Internal
+                    || (n.scope == Scope::External && decision(n) == Some(Classification::Conforming))
             })
             .cloned()
             .collect();
@@ -227,7 +215,12 @@ fn to_policy_position(p: &zecured_zcash_ops::scan::NotePosition) -> classify::No
 }
 
 /// Applies Registry events up to Base's safe head. Returns the number of events applied.
-pub async fn ingest_base(store: &mut Store, rpc_url: &str, registry: alloy::primitives::Address, from_block: u64) -> Result<usize> {
+pub async fn ingest_base(
+    store: &mut Store,
+    rpc_url: &str,
+    registry: alloy::primitives::Address,
+    from_block: u64,
+) -> Result<usize> {
     let provider = ProviderBuilder::new().connect_http(rpc_url.parse().context("Base RPC URL")?);
     let safe = events::safe_head(&provider).await?;
     let start = store.base_cursor.max(from_block.saturating_sub(1)) + 1;

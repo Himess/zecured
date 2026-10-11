@@ -88,15 +88,11 @@ pub struct VaultRecord {
 
 impl VaultRecord {
     pub fn sk_bytes(&self) -> Result<[u8; 32]> {
-        hex::decode(&self.sk)?
-            .try_into()
-            .map_err(|_| anyhow::anyhow!("stored sk is not 32 bytes"))
+        hex::decode(&self.sk)?.try_into().map_err(|_| anyhow::anyhow!("stored sk is not 32 bytes"))
     }
 
     pub fn ak_bytes(&self) -> Result<[u8; 32]> {
-        hex::decode(&self.ak)?
-            .try_into()
-            .map_err(|_| anyhow::anyhow!("stored ak is not 32 bytes"))
+        hex::decode(&self.ak)?.try_into().map_err(|_| anyhow::anyhow!("stored ak is not 32 bytes"))
     }
 
     /// Marks an owner nonce used; false if it was already used.
@@ -131,8 +127,8 @@ impl Store {
         for entry in fs::read_dir(dir.join("vaults"))? {
             let path = entry?.path();
             if path.extension().and_then(|e| e.to_str()) == Some("json") {
-                let v: VaultRecord = serde_json::from_slice(&fs::read(&path)?)
-                    .with_context(|| format!("parse {}", path.display()))?;
+                let v: VaultRecord =
+                    serde_json::from_slice(&fs::read(&path)?).with_context(|| format!("parse {}", path.display()))?;
                 vaults.insert(v.vault_id, v);
             }
         }
@@ -172,16 +168,11 @@ impl Store {
 
     pub fn set_base_cursor(&mut self, block: u64) -> Result<()> {
         self.base_cursor = block;
-        write_atomic(
-            &self.dir.join("meta.json"),
-            &serde_json::to_vec(&Meta { base_cursor: block })?,
-        )
+        write_atomic(&self.dir.join("meta.json"), &serde_json::to_vec(&Meta { base_cursor: block })?)
     }
 
     /// True if `account` or `owner` is already bound to a vault (I4, checked off-chain).
     pub fn is_bound(&self, account: Address, owner: Address) -> bool {
-        self.vaults
-            .values()
-            .any(|v| v.account == account || v.owner == owner)
+        self.vaults.values().any(|v| v.account == account || v.owner == owner)
     }
 }

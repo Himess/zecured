@@ -125,9 +125,7 @@ pub fn claim_id_of(vault_id: B256, sequence: u64) -> B256 {
 /// OpenZeppelin's `ECDSA.recover` accepts.
 pub fn sign_typed<T: SolStruct>(signer: &PrivateKeySigner, domain: &Eip712Domain, message: &T) -> Result<Bytes> {
     let digest = message.eip712_signing_hash(domain);
-    let sig = signer
-        .sign_hash_sync(&digest)
-        .map_err(|e| anyhow!("sign EIP-712 digest: {e}"))?;
+    let sig = signer.sign_hash_sync(&digest).map_err(|e| anyhow!("sign EIP-712 digest: {e}"))?;
     Ok(Bytes::from(sig.as_bytes().to_vec()))
 }
 
@@ -136,26 +134,18 @@ pub fn recover_typed<T: SolStruct>(domain: &Eip712Domain, message: &T, signature
     ensure!(signature.len() == 65, "signature must be 65 bytes");
     let sig = Signature::try_from(signature).context("malformed signature")?;
     let digest = message.eip712_signing_hash(domain);
-    sig.recover_address_from_prehash(&digest)
-        .context("cannot recover signer")
+    sig.recover_address_from_prehash(&digest).context("cannot recover signer")
 }
 
 /// Orders signatures by strictly increasing signer address, as the Registry requires.
 /// Fails on duplicate signers.
-pub fn order_signatures<T: SolStruct>(
-    domain: &Eip712Domain,
-    message: &T,
-    signatures: &[Bytes],
-) -> Result<Vec<Bytes>> {
+pub fn order_signatures<T: SolStruct>(domain: &Eip712Domain, message: &T, signatures: &[Bytes]) -> Result<Vec<Bytes>> {
     let mut with_signer = signatures
         .iter()
         .map(|s| Ok((recover_typed(domain, message, s)?, s.clone())))
         .collect::<Result<Vec<_>>>()?;
     with_signer.sort_by_key(|(a, _)| *a);
-    ensure!(
-        with_signer.windows(2).all(|w| w[0].0 < w[1].0),
-        "duplicate signer"
-    );
+    ensure!(with_signer.windows(2).all(|w| w[0].0 < w[1].0), "duplicate signer");
     Ok(with_signer.into_iter().map(|(_, s)| s).collect())
 }
 

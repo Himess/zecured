@@ -83,11 +83,7 @@ pub struct ScanState {
 
 impl ScanState {
     /// Starts scanning at `birthday`, from the server's Ironwood tree state at `birthday - 1`.
-    pub async fn from_birthday(
-        client: &mut LwdClient,
-        fvk: FullViewingKey,
-        birthday: u32,
-    ) -> Result<Self> {
+    pub async fn from_birthday(client: &mut LwdClient, fvk: FullViewingKey, birthday: u32) -> Result<Self> {
         let prior = birthday.checked_sub(1).context("birthday must be > 0")?;
         let tree_state = client
             .get_tree_state(BlockId {
@@ -97,9 +93,7 @@ impl ScanState {
             .await
             .map_err(|s| anyhow!("GetTreeState({prior}): {s}"))?
             .into_inner();
-        let tree = tree_state
-            .ironwood_tree()
-            .context("parse Ironwood tree state")?;
+        let tree = tree_state.ironwood_tree().context("parse Ironwood tree state")?;
         let ivks = [Scope::External, Scope::Internal]
             .map(|scope| (scope, PreparedIncomingViewingKey::new(&fvk.to_ivk(scope))));
         Ok(Self {
@@ -133,28 +127,16 @@ impl ScanState {
             .await
             .map_err(|s| anyhow!("GetBlockRange: {s}"))?
             .into_inner();
-        while let Some(block) = stream
-            .message()
-            .await
-            .map_err(|s| anyhow!("GetBlockRange stream: {s}"))?
-        {
+        while let Some(block) = stream.message().await.map_err(|s| anyhow!("GetBlockRange stream: {s}"))? {
             self.scan_block(&block)?;
         }
-        ensure!(
-            self.scanned_to == to,
-            "server returned blocks up to {} instead of {to}",
-            self.scanned_to
-        );
+        ensure!(self.scanned_to == to, "server returned blocks up to {} instead of {to}", self.scanned_to);
         Ok(())
     }
 
     fn scan_block(&mut self, block: &CompactBlock) -> Result<()> {
         let height = u32::try_from(block.height).context("block height")?;
-        ensure!(
-            height == self.scanned_to + 1,
-            "expected block {}, got {height}",
-            self.scanned_to + 1
-        );
+        ensure!(height == self.scanned_to + 1, "expected block {}, got {height}", self.scanned_to + 1);
         // A reorg replaced a block we already scanned: the caller must rescan.
         ensure!(
             self.last_hash.is_empty() || block.prev_hash == self.last_hash,
@@ -172,23 +154,16 @@ impl ScanState {
                 let cmx = action.cmx().map_err(|e| anyhow!("action cmx: {e:?}"))?;
                 let node = MerkleHashOrchard::from_cmx(&cmx);
                 for note in &mut self.notes {
-                    note.witness
-                        .append(node)
-                        .map_err(|_| anyhow!("note commitment tree is full"))?;
+                    note.witness.append(node).map_err(|_| anyhow!("note commitment tree is full"))?;
                 }
-                self.tree
-                    .append(node)
-                    .map_err(|_| anyhow!("note commitment tree is full"))?;
+                self.tree.append(node).map_err(|_| anyhow!("note commitment tree is full"))?;
 
-                let compact = CompactAction::try_from(action)
-                    .map_err(|e| anyhow!("compact action: {e:?}"))?;
+                let compact = CompactAction::try_from(action).map_err(|e| anyhow!("compact action: {e:?}"))?;
                 let domain = IronwoodDomain::for_compact_action(&compact);
                 for (scope, ivk) in &self.ivks {
-                    if let Some((note, recipient)) =
-                        try_compact_note_decryption(&domain, ivk, &compact)
-                    {
-                        let witness = IronwoodWitness::from_tree(self.tree.clone())
-                            .context("witness of an empty tree")?;
+                    if let Some((note, recipient)) = try_compact_note_decryption(&domain, ivk, &compact) {
+                        let witness =
+                            IronwoodWitness::from_tree(self.tree.clone()).context("witness of an empty tree")?;
                         self.notes.push(ReceivedNote {
                             position: NotePosition {
                                 height,
@@ -230,11 +205,7 @@ impl ScanState {
             .into_inner()
             .ironwood_tree()
             .context("parse server Ironwood tree")?;
-        ensure!(
-            server.root() == self.tree.root(),
-            "Ironwood tree root mismatch at height {}",
-            self.scanned_to
-        );
+        ensure!(server.root() == self.tree.root(), "Ironwood tree root mismatch at height {}", self.scanned_to);
         Ok(())
     }
 

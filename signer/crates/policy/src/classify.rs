@@ -171,10 +171,7 @@ mod tests {
     #[test]
     fn late_deposit_is_non_conforming() {
         let n = [note(1_001, 0, 0, AMOUNT, true)];
-        assert_eq!(
-            classes(2_000, &n),
-            vec![Classification::NonConforming(NonConformingReason::Late)]
-        );
+        assert_eq!(classes(2_000, &n), vec![Classification::NonConforming(NonConformingReason::Late)]);
     }
 
     #[test]

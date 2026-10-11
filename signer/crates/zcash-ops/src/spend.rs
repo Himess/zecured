@@ -149,12 +149,7 @@ pub fn build<P: Parameters + Clone>(
         .build_for_pczt(rand_010::rng(), &zip317::FeeRule::standard())
         .map_err(|e| anyhow!("build PCZT: {e}"))?;
     let spend_action_indices = (0..inputs.len())
-        .map(|i| {
-            built
-                .ironwood_meta
-                .spend_action_index(i)
-                .context("missing spend action index")
-        })
+        .map(|i| built.ironwood_meta.spend_action_index(i).context("missing spend action index"))
         .collect::<Result<Vec<_>>>()?;
     let pczt = Creator::build_from_parts(built.pczt_parts).context("PCZT creator")?;
     Ok(UnsignedSpend {
@@ -167,9 +162,7 @@ pub fn build<P: Parameters + Clone>(
 
 /// IO Finalizer + Prover: commits to the effects and creates the Halo 2 proof.
 pub fn finalize_and_prove(pczt: Pczt, pk: &ProvingKey) -> Result<Pczt> {
-    let pczt = IoFinalizer::new(pczt)
-        .finalize_io(rand_010::rng())
-        .map_err(|e| anyhow!("IO finalizer: {e:?}"))?;
+    let pczt = IoFinalizer::new(pczt).finalize_io(rand_010::rng()).map_err(|e| anyhow!("IO finalizer: {e:?}"))?;
     let pczt = Prover::new(pczt)
         .create_ironwood_proof(rand_010::rng(), pk)
         .map_err(|e| anyhow!("Ironwood prover: {e:?}"))?
@@ -191,10 +184,7 @@ pub struct SpendAuthRequest {
 }
 
 /// The shielded sighash and the per-spend randomizers of a finalized PCZT.
-pub fn signing_requests(
-    pczt: &Pczt,
-    spend_action_indices: &[usize],
-) -> Result<([u8; 32], Vec<SpendAuthRequest>)> {
+pub fn signing_requests(pczt: &Pczt, spend_action_indices: &[usize]) -> Result<([u8; 32], Vec<SpendAuthRequest>)> {
     // `alpha` is only exposed on the parsed bundle, which the low-level signer hands out.
     let mut requests = Vec::with_capacity(spend_action_indices.len());
     LowLevelSigner::new(pczt.clone())
@@ -210,13 +200,8 @@ pub fn signing_requests(
             Ok(())
         })
         .map_err(|e| anyhow!("parse Ironwood bundle: {e:?}"))?;
-    ensure!(
-        requests.len() == spend_action_indices.len(),
-        "a spend is missing its randomizer"
-    );
-    let sighash = Signer::new(pczt.clone())
-        .map_err(|e| anyhow!("signer: {e:?}"))?
-        .shielded_sighash();
+    ensure!(requests.len() == spend_action_indices.len(), "a spend is missing its randomizer");
+    let sighash = Signer::new(pczt.clone()).map_err(|e| anyhow!("signer: {e:?}"))?.shielded_sighash();
     Ok((sighash, requests))
 }
 
@@ -229,21 +214,19 @@ pub fn signing_requests_all(pczt: &Pczt) -> Result<([u8; 32], Vec<SpendAuthReque
         .sign_ironwood_with(|_, bundle, _| -> Result<(), OrchardParseError> {
             for (i, action) in bundle.actions().iter().enumerate() {
                 let spend = action.spend();
-                if spend.dummy_sk().is_none() {
-                    if let Some(alpha) = spend.alpha() {
-                        requests.push(SpendAuthRequest {
-                            action_index: i,
-                            alpha: alpha.to_repr(),
-                        });
-                    }
+                if spend.dummy_sk().is_none()
+                    && let Some(alpha) = spend.alpha()
+                {
+                    requests.push(SpendAuthRequest {
+                        action_index: i,
+                        alpha: alpha.to_repr(),
+                    });
                 }
             }
             Ok(())
         })
         .map_err(|e| anyhow!("parse Ironwood bundle: {e:?}"))?;
-    let sighash = Signer::new(pczt.clone())
-        .map_err(|e| anyhow!("signer: {e:?}"))?
-        .shielded_sighash();
+    let sighash = Signer::new(pczt.clone()).map_err(|e| anyhow!("signer: {e:?}"))?.shielded_sighash();
     Ok((sighash, requests))
 }
 
