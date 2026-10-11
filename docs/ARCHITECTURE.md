@@ -22,8 +22,11 @@ Ironwood pool. This document describes the system as built; interfaces are in
   signers cannot move funds; three colluding signers can (hackathon trust assumption, all
   five run by us).
 - Each signer is as honest as the chain data it reads: independent operators run their own
-  Zcash and Base sources ([OPERATORS.md](OPERATORS.md)); verifying deposits on Base itself is
-  the Tier 2 roadmap ([TIER2.md](TIER2.md)).
+  Zcash and Base sources ([OPERATORS.md](OPERATORS.md)).
+- Minting does not have to trust the signers (Tier 2, [TIER2.md](TIER2.md)): a deposit can be
+  activated on a RISC Zero proof that its note is in a Zcash block committed by a header the
+  on-chain relay verified, for the vault all five signers described when it opened. The
+  coordinator or the borrower proves; the Registry trusts only the proof.
 - The vault address and its viewing key are signed by all five signers when the vault opens;
   the app checks the signatures before showing the address.
 - The borrower gets the vault's viewing key and can check the vault independently.
@@ -38,7 +41,8 @@ Ironwood pool. This document describes the system as built; interfaces are in
    touches Base.
 2. **Deposit (P1).** The borrower pays the denomination from Ironwood notes. After N
    confirmations the signers classify the vault's notes and attest the conforming one;
-   `attestDeposit` mints zZEC straight into the account's Morpho position.
+   `attestDeposit` mints zZEC straight into the account's Morpho position. Or (Tier 2) a
+   deposit proof is submitted with `attestDepositWithProof`, with the same effect.
 3. **Borrow.** The account's first UserOp (sponsored) deploys it, authorizes the Registry and
    the Adapter on Morpho, and borrows.
 4. **Exit.** One of:
@@ -48,7 +52,9 @@ Ironwood pool. This document describes the system as built; interfaces are in
      transaction. No outside funds touch the account.
    - **Liquidation (P3):** a liquidator repays through the Adapter and receives the seized
      ZEC; the vault stays open for the borrower's remainder.
-5. **Refunds (P5).** Any non-conforming deposit can be refunded on the owner's signed request.
+5. **Refunds (P5).** Any non-conforming deposit can be refunded on the owner's signed request;
+   the conforming deposit of a vault that was never activated, once the signers cancelled the
+   vault on Base (D23).
 
 ## Signer policy
 
