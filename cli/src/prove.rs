@@ -8,18 +8,24 @@ use std::{
     io::Write,
     path::{Path, PathBuf},
     process::Command,
+    time::Duration,
 };
 
 use alloy::{
+    eips::BlockNumberOrTag,
     network::EthereumWallet,
-    primitives::{Address, B256, Bytes},
-    providers::ProviderBuilder,
+    primitives::{Address, B256, Bytes, U256},
+    providers::{Provider, ProviderBuilder},
     signers::local::PrivateKeySigner,
 };
 use anyhow::{Context, Result, ensure};
 use serde::Deserialize;
 use zcash_protocol::TxId;
-use zecured_base::{events::IZecuredRegistry, gas_with_headroom, relay::anchor_above};
+use zecured_base::{
+    events::{IZcashHeaderRelay, IZecuredRegistry},
+    gas_with_headroom,
+    relay::anchor_above,
+};
 use zecured_deposit_witness::{p2p, witness};
 use zecured_zcash_ops::lwd;
 
@@ -134,9 +140,41 @@ pub async fn prove(
     let r = call.gas(gas).send().await?.get_receipt().await?;
     ensure!(r.status(), "attestDepositWithProof reverted");
     println!(
-        "vault activated on a deposit proof{} (tx {})",
+        "deposit proof accepted{} (tx {}); the activation waits for the relay to move on (K3)",
         if mock { " (MOCK seal)" } else { "" },
         r.transaction_hash
     );
+
+    // K3: anyone may finalize once the Registry allows it; the borrower does not need the
+    // coordinator for that either.
+    let relay = IZcashHeaderRelay::new(registry.relay().call().await?, &p);
+    loop {
+        let pending = registry.pendingActivation(l.vault_id).call().await?;
+        if pending.account == Address::ZERO {
+            println!("the activation is no longer pending (finalized or dropped by someone else)");
+            return Ok(());
+        }
+        ensure!(
+            relay.isInBestChain(pending.anchor).call().await?,
+            "the proof's anchor left the relay's best chain: drop the pending activation and prove again"
+        );
+        let tip = relay.bestChainTip().call().await?;
+        let now = p
+            .get_block_by_number(BlockNumberOrTag::Latest)
+            .await?
+            .context("no latest Base block")?
+            .header
+            .timestamp;
+        if tip.height >= pending.readyHeight && U256::from(now) >= pending.readyTime {
+            break;
+        }
+        eprintln!("relay at {} of {}; waiting", tip.height, pending.readyHeight);
+        tokio::time::sleep(Duration::from_secs(30)).await;
+    }
+    let call = registry.finalizeActivation(l.vault_id);
+    let gas = gas_with_headroom(call.estimate_gas().await.context("estimate finalizeActivation")?);
+    let r = call.gas(gas).send().await?.get_receipt().await?;
+    ensure!(r.status(), "finalizeActivation reverted");
+    println!("vault activated on its deposit proof (tx {})", r.transaction_hash);
     Ok(())
 }

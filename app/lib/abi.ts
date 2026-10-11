@@ -23,6 +23,7 @@ export const registryEventsAbi = [
       { name: "vaultId", type: "bytes32", indexed: true },
       { name: "account", type: "address", indexed: true },
       { name: "amount", type: "uint64", indexed: false },
+      { name: "depositTag", type: "bytes32", indexed: false },
     ],
   },
   {

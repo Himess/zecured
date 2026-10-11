@@ -16,15 +16,16 @@ use std::{
 };
 
 use alloy::{
+    eips::BlockNumberOrTag,
     network::EthereumWallet,
     primitives::{Address, B256, Bytes},
-    providers::ProviderBuilder,
+    providers::{Provider, ProviderBuilder},
 };
 use anyhow::{Context, Result, ensure};
 use serde::Deserialize;
 use tracing::{debug, info, warn};
 use zcash_protocol::TxId;
-use zecured_base::events::IZecuredRegistry;
+use zecured_base::events::{IZcashHeaderRelay, IZecuredRegistry};
 use zecured_deposit_witness::{p2p, witness};
 use zecured_zcash_ops::lwd;
 
@@ -228,6 +229,11 @@ impl Coordinator {
             let _ = fs::remove_file(seal_path);
             return Ok(());
         }
+        if registry.pendingActivation(*id).call().await.context("Registry.pendingActivation")?.account != Address::ZERO {
+            // K3: a proof (ours, or the borrower's own) already waits for finalization.
+            let _ = fs::remove_file(seal_path);
+            return self.mark_proof_pending(id).await;
+        }
         ensure!(registry.depositImageId().call().await? == s.image_id, "the Registry expects another deposit guest");
         let v = self.vault(id).await?;
         ensure!(v.opened_signatures.len() == 5, "the vault has no VaultOpened signatures (opened before C-4)");
@@ -261,7 +267,88 @@ impl Coordinator {
         })
         .await?;
         let _ = fs::remove_file(seal_path);
-        info!(vault = %short(id), "deposit proof accepted on Base");
+        info!(vault = %short(id), "deposit proof accepted on Base; activation pending (K3)");
+        Ok(())
+    }
+
+    async fn mark_proof_pending(&self, id: &B256) -> Result<()> {
+        self.update_vault(id, |cur| {
+            if cur.status == VaultStatus::AwaitingDeposit {
+                cur.status = VaultStatus::DepositSeen;
+            }
+        })
+        .await
+    }
+
+    /// K3: once the Registry allows it, activates a vault whose deposit proof is pending; drops
+    /// the pending activation instead if its anchor left the relay's best chain, and proves the
+    /// deposit again against the chain that won. Anyone may do either: the Registry checks
+    /// everything, so this is only a convenience.
+    pub(crate) async fn finalize_pending(&self, id: &B256) -> Result<()> {
+        let provider = ProviderBuilder::new()
+            .wallet(EthereumWallet::from(self.gas.clone()))
+            .connect_http(self.cfg.base_rpc_url.parse()?);
+        let registry = IZecuredRegistry::new(self.cfg.registry, &provider);
+        let pending = registry.pendingActivation(*id).call().await.context("Registry.pendingActivation")?;
+        if pending.account == Address::ZERO {
+            // Finalized (its VaultActivated will move the vault on) or dropped by someone else.
+            if self.proves_deposits() && registry.vault(*id).call().await.context("Registry.vault")?.status == 0 {
+                self.update_vault(id, |cur| {
+                    if cur.status == VaultStatus::DepositSeen {
+                        cur.status = VaultStatus::AwaitingDeposit;
+                    }
+                })
+                .await?;
+            }
+            return Ok(());
+        }
+        let relay = IZcashHeaderRelay::new(registry.relay().call().await.context("Registry.relay")?, &provider);
+        if !relay.isInBestChain(pending.anchor).call().await.context("relay.isInBestChain")? {
+            let call = registry.dropPendingActivation(*id);
+            let gas = zecured_base::gas_with_headroom(call.estimate_gas().await.context("estimate dropPendingActivation")?);
+            let receipt = call
+                .gas(gas)
+                .send()
+                .await
+                .context("send dropPendingActivation")?
+                .with_timeout(Some(RECEIPT_TIMEOUT))
+                .get_receipt()
+                .await
+                .context("dropPendingActivation receipt")?;
+            ensure!(receipt.status(), "dropPendingActivation reverted");
+            warn!(vault = %short(id), "pending activation dropped: its anchor left the relay's best chain");
+            return self
+                .update_vault(id, |cur| {
+                    if cur.status == VaultStatus::DepositSeen {
+                        cur.status = VaultStatus::AwaitingDeposit;
+                    }
+                })
+                .await;
+        }
+        let tip = relay.bestChainTip().call().await.context("relay.bestChainTip")?;
+        let now = provider
+            .get_block_by_number(BlockNumberOrTag::Latest)
+            .await
+            .context("latest Base block")?
+            .context("no latest Base block")?
+            .header
+            .timestamp;
+        if tip.height < pending.readyHeight || alloy::primitives::U256::from(now) < pending.readyTime {
+            return Ok(());
+        }
+        let call = registry.finalizeActivation(*id);
+        let gas = zecured_base::gas_with_headroom(call.estimate_gas().await.context("estimate finalizeActivation")?);
+        let receipt = call
+            .gas(gas)
+            .send()
+            .await
+            .context("send finalizeActivation")?
+            .with_timeout(Some(RECEIPT_TIMEOUT))
+            .get_receipt()
+            .await
+            .context("finalizeActivation receipt")?;
+        ensure!(receipt.status(), "finalizeActivation reverted");
+        info!(vault = %short(id), "vault activated on its deposit proof");
         Ok(())
     }
 }

@@ -353,6 +353,7 @@ pub fn round3(
         confirmed: vec![],
         last_event: None,
         cancelled: false,
+        activated_tag: None,
     })?;
     Ok(out)
 }

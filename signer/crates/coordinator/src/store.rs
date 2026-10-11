@@ -22,7 +22,8 @@ use crate::error::PublicError;
 pub enum VaultStatus {
     /// Waiting for the Ironwood deposit.
     AwaitingDeposit,
-    /// Conforming deposit found; attestation submitted to Base.
+    /// Conforming deposit found; attestation submitted to Base, or a deposit proof accepted
+    /// and waiting for `finalizeActivation` (K3).
     DepositSeen,
     /// zZEC minted into the account's Morpho position.
     Active,
@@ -120,6 +121,10 @@ pub struct CoordVault {
     /// over: the owner may cancel the vault to get it back (D23, L-8).
     #[serde(default)]
     pub cancellable: Option<NoteView>,
+    /// K2-a: the deposit tag of the `VaultActivated` event (the note that backs the vault):
+    /// payouts are planned from the same lineage root as the signers'.
+    #[serde(default)]
+    pub activated_tag: Option<[u8; 32]>,
 }
 
 impl CoordVault {
@@ -264,6 +269,7 @@ pub(crate) mod tests {
             non_conforming: vec![],
             opened_signatures: vec![],
             cancellable: None,
+            activated_tag: None,
         }
     }
 

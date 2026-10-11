@@ -188,15 +188,32 @@ struct Mm {
     /// Raw Ironwood receiver of `zaddr`, to check the commitments the backend returns (M-11).
     receiver: [u8; 43],
     margin_bps: u16,
-    /// Quotes given, by vault: the debt quoted and the quote's expiry (unix seconds). A close
-    /// repays at most the quoted debt plus `REPAY_SLACK_BPS` (contracts review L-2: the
-    /// borrower may borrow more after signing).
-    quotes: std::sync::Mutex<std::collections::HashMap<B256, (u128, u64)>>,
+    /// Quotes given, by vault. A close repays at most the quoted debt plus `REPAY_SLACK_BPS`
+    /// (contracts review L-2: the borrower may borrow more after signing) and takes at least the
+    /// quoted ZEC minus `PRICE_SLACK_BPS` (Y7: the price may rise before the close lands).
+    quotes: std::sync::Mutex<std::collections::HashMap<B256, Quote>>,
+}
+
+#[derive(Clone, Copy, Debug)]
+struct Quote {
+    debt: u128,
+    mm_amount: u64,
+    /// Unix seconds.
+    expires_at: u64,
 }
 
 /// Interest that may accrue between a quote and the close transaction (10 minutes at most),
 /// in basis points of the quoted debt.
 const REPAY_SLACK_BPS: u128 = 10;
+/// How far the ZEC price may rise between a quote and the close before the market maker
+/// refuses it (Y7), in basis points of the quoted ZEC.
+const PRICE_SLACK_BPS: u64 = 100;
+
+/// Y7: the fewest zatoshi the market maker accepts for a quote's USDC.
+fn min_mm_amount(quoted: u64) -> u64 {
+    // At most 2^64 * 10^4 < 2^128: no overflow in u128.
+    u64::try_from(u128::from(quoted) * u128::from(10_000 - PRICE_SLACK_BPS) / 10_000).unwrap_or(u64::MAX)
+}
 
 /// Smallest borrower share of a close the market maker takes on (H-3).
 ///
@@ -317,10 +334,14 @@ async fn quote(
     let user_amount = v.outstanding.checked_sub(mm_amount).ok_or(ApiError::UNDERWATER)?;
     check_user_amount(user_amount)?;
     let expires_at = zecured_now() + 600;
-    mm.quotes
-        .lock()
-        .map_err(|_| anyhow!("quote book poisoned"))?
-        .insert(vault_id, (pos.debt, expires_at));
+    mm.quotes.lock().map_err(|_| anyhow!("quote book poisoned"))?.insert(
+        vault_id,
+        Quote {
+            debt: pos.debt,
+            mm_amount,
+            expires_at,
+        },
+    );
     Ok(Json(json!({
         "executor": mm.key.address(),
         "marginBps": mm.margin_bps,
@@ -404,15 +425,16 @@ async fn close(
     // Repay at most what we quoted for this vault (plus interest since), never what the borrower
     // may have borrowed after signing.
     let quoted = mm.quotes.lock().map_err(|_| anyhow!("quote book poisoned"))?.get(&r.vault_id).copied();
-    let Some((quoted_debt, expires_at)) = quoted else {
+    let Some(quote) = quoted else {
         return Err(ApiError::QUOTE_MISMATCH);
     };
-    if zecured_now() > expires_at {
+    if zecured_now() > quote.expires_at {
         return Err(ApiError::QUOTE_MISMATCH);
     }
-    let max_repay = U256::from(quoted_debt) * U256::from(10_000 + REPAY_SLACK_BPS) / U256::from(10_000u32);
+    let max_repay = U256::from(quote.debt) * U256::from(10_000 + REPAY_SLACK_BPS) / U256::from(10_000u32);
     let adapter = ISettlementAdapter::new(mm.d.adapter, &p);
-    let call = adapter.closeWithCollateral(req, b.signature.clone(), mm_commitment, max_repay);
+    let call =
+        adapter.closeWithCollateral(req, b.signature.clone(), mm_commitment, max_repay, min_mm_amount(quote.mm_amount));
     if let Err(e) = call.call().await {
         debug!("close would revert: {e}");
         return Err(ApiError::CLOSE_REJECTED);
@@ -447,6 +469,14 @@ mod tests {
         assert_eq!(check_user_amount(10_000), Err(ApiError::USER_AMOUNT_TOO_SMALL));
         assert_eq!(check_user_amount(15_000), Err(ApiError::USER_AMOUNT_TOO_SMALL));
         assert_eq!(check_user_amount(15_001), Ok(()));
+    }
+
+    /// Y7: the close takes at least the quoted ZEC minus 1 %.
+    #[test]
+    fn the_zec_floor_allows_a_one_percent_price_rise() {
+        assert_eq!(min_mm_amount(3_800_000), 3_762_000);
+        assert_eq!(min_mm_amount(0), 0);
+        assert_eq!(min_mm_amount(u64::MAX), 18_262_276_632_972_456_098); // floor((2^64 - 1) * 0.99)
     }
 
     #[test]

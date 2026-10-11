@@ -56,7 +56,7 @@ use zecured_base::{
 };
 use zecured_node::{
     AttestResponse, ConfirmIn, ConfirmResponse, DestinationIn, RecipientIn, RefundIn,
-    chain::{VaultNotes, ZcashView, to_policy_position},
+    chain::{BaseView, VaultNotes, ZcashView, to_policy_position},
     config::NetworkConfig,
     dkg::{Round1Out, Round2In, Round2Out, Round3In, Round3Out, Sealed, VaultOpen},
     now,
@@ -316,6 +316,7 @@ fn finish_open(
         non_conforming: vec![],
         opened_signatures: signatures.clone(),
         cancellable: None,
+        activated_tag: None,
     };
     let response = OpenVaultResponse {
         vault_id: vault.vault_id,
@@ -333,11 +334,14 @@ fn finish_open(
 /// after a crash (vault files are saved before the cursor) changes nothing.
 fn apply_event(v: &mut CoordVault, event: RegistryEvent) {
     match event {
-        RegistryEvent::VaultActivated { amount, .. } => {
+        RegistryEvent::VaultActivated {
+            amount, deposit_tag, ..
+        } => {
             // Once only: re-applying it after claims would reset `outstanding`.
             if !matches!(v.status, VaultStatus::Active | VaultStatus::Closed) && v.claims.is_empty() {
                 v.status = VaultStatus::Active;
                 v.outstanding = amount;
+                v.activated_tag = Some(deposit_tag.0);
             }
         }
         RegistryEvent::Claims(claims) => {
@@ -815,8 +819,12 @@ impl Coordinator {
             confirmations: self.cfg.confirmations,
         };
         let fvk = fvk_of(v)?;
-        let cancelled = v.status == VaultStatus::Cancelled;
-        self.zcash.lock().await.notes(&v.vault_id, &fvk, v.birthday, &rules, decisions, cancelled).await
+        let base = BaseView {
+            ufvk: &v.ufvk,
+            cancelled: v.status == VaultStatus::Cancelled,
+            activated_tag: v.activated_tag,
+        };
+        self.zcash.lock().await.notes(&v.vault_id, &fvk, v.birthday, &rules, decisions, base).await
     }
 
     fn idle_scan_is_due(&self, id: &B256) -> bool {
@@ -902,7 +910,9 @@ impl Coordinator {
                     .await?;
                 }
             }
-            VaultStatus::DepositSeen | VaultStatus::Expired | VaultStatus::Cancelled => {}
+            // K3: a deposit proof waits on Base until the relay has moved on.
+            VaultStatus::DepositSeen => self.finalize_pending(id).await?,
+            VaultStatus::Expired | VaultStatus::Cancelled => {}
             VaultStatus::Active | VaultStatus::Closed => {
                 if self.pay_next(&v, &notes).await? {
                     return Ok(());
@@ -1418,6 +1428,7 @@ mod tests {
         let activated = RegistryEvent::VaultActivated {
             account: v.account,
             amount: 1_000_000,
+            deposit_tag: B256::repeat_byte(0x7a),
         };
         apply_event(&mut v, activated.clone());
         apply_event(&mut v, RegistryEvent::Claims(vec![claim(1, 400_000)]));

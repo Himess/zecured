@@ -226,6 +226,7 @@ async fn a_confirmation_can_be_given_again() {
             }],
             last_event: None,
             cancelled: false,
+            activated_tag: None,
         })
         .unwrap();
 

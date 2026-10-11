@@ -172,7 +172,7 @@ function fakeChain(opts: { failLogsAfter?: number; deployed?: boolean } = {}): {
             return [
               log(
                 encodeEventTopics({ abi: [activated], eventName: "VaultActivated", args: { vaultId: VAULT, account: ACCOUNT } }) as Hex[],
-                encodeAbiParameters([{ type: "uint64" }], [1_000_000n]),
+                encodeAbiParameters([{ type: "uint64" }, { type: "bytes32" }], [1_000_000n, `0x${"7a".repeat(32)}`]),
                 LATEST - 10n,
                 1,
               ),
@@ -249,7 +249,7 @@ describe("readRecentRegistryEvents", () => {
     expect(events.map((e) => e.name)).toEqual(["ReleaseRequested", "VaultActivated"]);
     expect(events[0]!.vaultId).toBe(VAULT);
     expect(events[0]!.fields).toMatchObject({ amount: "1000000", destCommitment: `0x${"cd".repeat(32)}` });
-    expect(events[1]!.fields).toMatchObject({ account: ACCOUNT, amount: "1000000" });
+    expect(events[1]!.fields).toMatchObject({ account: ACCOUNT, amount: "1000000", depositTag: `0x${"7a".repeat(32)}` });
   });
 
   it("keeps what it has when a later chunk fails, and fails if the first one does", async () => {

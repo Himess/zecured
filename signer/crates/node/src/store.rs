@@ -137,6 +137,10 @@ pub struct VaultRecord {
     /// so its conforming deposit is refundable.
     #[serde(default)]
     pub cancelled: bool,
+    /// K2-a: the deposit tag of the `VaultActivated` event: the note that backs the vault and
+    /// heads its lineage.
+    #[serde(default)]
+    pub activated_tag: Option<[u8; 32]>,
 }
 
 impl VaultRecord {

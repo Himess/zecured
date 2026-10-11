@@ -5,7 +5,8 @@
 //! reads the Registry's own storage with `eth_call` and accepts the event only if that state
 //! proves it:
 //! - `VaultActivated`: the vault exists from the event's block on, for that account, and did
-//!   not exist before it;
+//!   not exist before it, and the event's deposit tag is used (K2-a: the tag names the note that
+//!   backs the vault, which no signer may refund);
 //! - claim events: every claim exists from the event's block on, for that vault, with that
 //!   kind, amount and commitment, and did not exist before it;
 //! - `PayoutConfirmed`: every claim, of that vault, is paid from the event's block on and was
@@ -82,6 +83,7 @@ pub struct BlockInfo {
 pub trait RegistryReader {
     fn vault_at(&self, vault_id: B256, block: u64) -> impl Future<Output = Result<VaultState>> + Send;
     fn claim_at(&self, claim_id: B256, block: u64) -> impl Future<Output = Result<ClaimState>> + Send;
+    fn tag_used_at(&self, deposit_tag: B256, block: u64) -> impl Future<Output = Result<bool>> + Send;
     fn block(&self, number: u64) -> impl Future<Output = Result<BlockInfo>> + Send;
 }
 
@@ -122,6 +124,15 @@ impl<P: Provider> RegistryReader for ProviderReader<'_, P> {
         })
     }
 
+    async fn tag_used_at(&self, deposit_tag: B256, block: u64) -> Result<bool> {
+        IZecuredRegistry::new(self.registry, self.provider)
+            .depositTagUsed(deposit_tag)
+            .call()
+            .block(BlockId::number(block))
+            .await
+            .with_context(|| format!("Registry.depositTagUsed at block {block}"))
+    }
+
     async fn block(&self, number: u64) -> Result<BlockInfo> {
         let b = self
             .provider
@@ -151,6 +162,7 @@ pub struct Evidence {
     pub block: BlockInfo,
     pub vaults: Vec<VaultState>,
     pub claims: Vec<ClaimState>,
+    pub tags: Vec<bool>,
 }
 
 /// The outcome of checking an event on one provider.
@@ -170,6 +182,7 @@ pub async fn check_event<R: RegistryReader>(reader: &R, ev: &VaultEvent, at: At)
         block,
         vaults: vec![],
         claims: vec![],
+        tags: vec![],
     };
     if ev.block_hash.is_some_and(|h| h != block.hash) || block.timestamp != ev.timestamp {
         return Ok(Check::Contradicted("block hash or timestamp differs from the log's".into()));
@@ -181,7 +194,11 @@ pub async fn check_event<R: RegistryReader>(reader: &R, ev: &VaultEvent, at: At)
 
     let mut problems: Vec<String> = vec![];
     match &ev.event {
-        RegistryEvent::VaultActivated { account, amount } => {
+        RegistryEvent::VaultActivated {
+            account,
+            amount,
+            deposit_tag,
+        } => {
             let now = reader.vault_at(ev.vault_id, after).await?;
             evidence.vaults.push(now);
             // Active or Closed (a cancelled vault was never activated).
@@ -190,6 +207,13 @@ pub async fn check_event<R: RegistryReader>(reader: &R, ev: &VaultEvent, at: At)
                 || now.outstanding > *amount
             {
                 problems.push("no such vault activation in the Registry".into());
+            }
+            // Tags are never released once a vault is activated (only a dropped pending
+            // activation frees one, and that vault was never activated).
+            let used = reader.tag_used_at(*deposit_tag, after).await?;
+            evidence.tags.push(used);
+            if !used {
+                problems.push("the activation's deposit tag is unused in the Registry".into());
             }
             if let Some(b) = before {
                 let prev = reader.vault_at(ev.vault_id, b).await?;
@@ -312,6 +336,7 @@ mod tests {
     const ACCOUNT: Address = Address::repeat_byte(2);
     const CLAIM: B256 = B256::repeat_byte(3);
     const COMMITMENT: [u8; 32] = [4; 32];
+    const TAG: B256 = B256::repeat_byte(0x7a);
 
     /// A Registry whose history is a list of state changes by block.
     #[derive(Clone, Default)]
@@ -319,6 +344,8 @@ mod tests {
         /// (from block, state)
         vault: Vec<(u64, VaultState)>,
         claim: Vec<(u64, ClaimState)>,
+        /// (from block, used) of the vault's deposit tag; every other tag is unused.
+        tag: Vec<(u64, bool)>,
         /// Blocks below this have no state any more (not an archive node).
         pruned_below: u64,
         /// Hash reported for every block.
@@ -366,6 +393,11 @@ mod tests {
             Ok(latest(&self.claim, block, none))
         }
 
+        async fn tag_used_at(&self, deposit_tag: B256, block: u64) -> Result<bool> {
+            self.ok(block)?;
+            Ok(deposit_tag == TAG && latest(&self.tag, block, false))
+        }
+
         async fn block(&self, number: u64) -> Result<BlockInfo> {
             if self.down {
                 return Err(anyhow!("connection refused"));
@@ -409,6 +441,7 @@ mod tests {
                 ),
             ],
             claim: vec![(100, claim_state(CLAIM_PENDING)), (200, claim_state(CLAIM_PAID))],
+            tag: vec![(50, true)],
             hash: B256::repeat_byte(9),
             ..Default::default()
         }
@@ -453,6 +486,7 @@ mod tests {
             RegistryEvent::VaultActivated {
                 account: ACCOUNT,
                 amount: 1_000_000,
+                deposit_tag: TAG,
             },
         );
         for ev in [
@@ -485,6 +519,7 @@ mod tests {
                 RegistryEvent::VaultActivated {
                     account: Address::repeat_byte(8),
                     amount: 1_000_000,
+                    deposit_tag: TAG,
                 },
             ),
             event(
@@ -492,6 +527,17 @@ mod tests {
                 RegistryEvent::VaultActivated {
                     account: ACCOUNT,
                     amount: 1_000_000,
+                    deposit_tag: TAG,
+                },
+            ),
+            // K2-a: a real activation reported with another note's tag (which would make the
+            // signers treat that note as the lineage head and the real one as refundable).
+            event(
+                50,
+                RegistryEvent::VaultActivated {
+                    account: ACCOUNT,
+                    amount: 1_000_000,
+                    deposit_tag: B256::repeat_byte(0x7b),
                 },
             ),
             // The log's block is not the provider's block.

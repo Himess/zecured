@@ -26,7 +26,9 @@ sol! {
             bytes32 depositTag;
         }
 
-        event VaultActivated(bytes32 indexed vaultId, address indexed account, uint64 amount);
+        event VaultActivated(bytes32 indexed vaultId, address indexed account, uint64 amount, bytes32 depositTag);
+        event ActivationPending(bytes32 indexed vaultId, address indexed account, uint64 amount, bytes32 depositTag, uint256 readyHeight, uint256 readyTime);
+        event PendingActivationDropped(bytes32 indexed vaultId);
         event ReleaseRequested(bytes32 indexed vaultId, bytes32 indexed claimId, uint64 amount, bytes32 destCommitment);
         event LiquidationRelease(bytes32 indexed vaultId, bytes32 indexed claimId, uint64 amount, bytes32 recipientCommitment);
         event CloseRelease(bytes32 indexed vaultId, bytes32 userClaimId, bytes32 mmClaimId, uint64 userAmount, uint64 mmAmount, bytes32 userCommitment, bytes32 mmCommitment);
@@ -35,6 +37,13 @@ sol! {
 
         function attestDeposit(DepositAttestation att, bytes[] sigs) external;
         function attestDepositWithProof(bytes journal, bytes seal, bytes[] openedSigs) external;
+        function finalizeActivation(bytes32 vaultId) external;
+        function dropPendingActivation(bytes32 vaultId) external;
+        function pendingActivation(bytes32 vaultId) external view returns (address account, uint64 amount, bytes32 depositTag, bytes32 anchor, uint256 readyHeight, uint256 readyTime);
+        function mintMode() external view returns (uint8);
+        function depositSealSelector() external view returns (bytes4);
+        function finalizeDepth() external view returns (uint64);
+        function finalizeDelay() external view returns (uint64);
         function cancelVault(bytes32 vaultId, bytes[] sigs) external;
         function depositTagUsed(bytes32 depositTag) external view returns (bool);
         function relay() external view returns (address);
@@ -52,6 +61,7 @@ sol! {
     /// prover needs it: an anchor header must be on its best chain under enough work.
     #[sol(rpc)]
     interface IZcashHeaderRelay {
+        function isInBestChain(bytes32 blockHash) external view returns (bool);
         function bestChainTip() external view returns (bytes32 blockHash, uint256 height, uint256 chainWork);
         function bestBlockHashAt(uint256 height) external view returns (bytes32);
         function confirmationWork(bytes32 blockHash) external view returns (uint256);
@@ -61,8 +71,14 @@ sol! {
 /// A Registry event, reduced to what the signer network needs.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum RegistryEvent {
-    /// A deposit attestation was accepted: zZEC minted into the account's position.
-    VaultActivated { account: Address, amount: u64 },
+    /// A deposit attestation or a finalized deposit proof activated the vault: zZEC minted into
+    /// the account's position. `deposit_tag` names the note that backs it, the head of the
+    /// vault's lineage (K2-a): it is never refundable.
+    VaultActivated {
+        account: Address,
+        amount: u64,
+        deposit_tag: B256,
+    },
     /// zZEC was burned: these claims must be paid on Zcash (one per recipient).
     Claims(Vec<Claim>),
     /// Claims were confirmed as paid on Base.
@@ -136,7 +152,11 @@ pub fn registry_logs(logs: Vec<Log>, registry: Address) -> Vec<Log> {
     logs.into_iter().filter(|l| l.inner.address == registry && !l.removed).collect()
 }
 
-/// Decodes one Registry log. Unknown logs are ignored.
+/// `MintMode.ProofOnly` (K1).
+pub const MINT_MODE_PROOF_ONLY: u8 = 1;
+
+/// Decodes one Registry log. Unknown logs, and the pending-activation logs (K3: nothing is minted
+/// and nothing changes for the signers until `VaultActivated`), are ignored.
 pub fn decode(log: &Log, created_at: u64) -> Result<Option<VaultEvent>> {
     use IZecuredRegistry::IZecuredRegistryEvents as E;
     let Ok(decoded) = E::decode_log(&log.inner) else {
@@ -161,8 +181,10 @@ pub fn decode(log: &Log, created_at: u64) -> Result<Option<VaultEvent>> {
             RegistryEvent::VaultActivated {
                 account: e.account,
                 amount: e.amount,
+                deposit_tag: e.depositTag,
             },
         ),
+        E::ActivationPending(_) | E::PendingActivationDropped(_) => return Ok(None),
         E::ReleaseRequested(e) => (
             e.vaultId,
             RegistryEvent::Claims(vec![claim(e.claimId, ClaimKind::Release, e.amount, e.destCommitment, None)]),
@@ -272,6 +294,42 @@ mod tests {
         assert_eq!(got.vault_id, B256::repeat_byte(6));
         assert_eq!(got.event, RegistryEvent::VaultCancelled);
         assert_eq!((got.block, got.log_index), (12, 3));
+    }
+
+    #[test]
+    fn vault_activated_carries_the_deposit_tag() {
+        let ev = IZecuredRegistry::VaultActivated {
+            vaultId: B256::repeat_byte(1),
+            account: Address::repeat_byte(2),
+            amount: 1_000_000,
+            depositTag: B256::repeat_byte(3),
+        };
+        let got = decode(&rpc_log(ev.encode_log_data(), 5, 1), 50).unwrap().unwrap();
+        assert_eq!(
+            got.event,
+            RegistryEvent::VaultActivated {
+                account: Address::repeat_byte(2),
+                amount: 1_000_000,
+                deposit_tag: B256::repeat_byte(3),
+            }
+        );
+    }
+
+    #[test]
+    fn pending_activation_logs_are_not_vault_events() {
+        let pending = IZecuredRegistry::ActivationPending {
+            vaultId: B256::repeat_byte(1),
+            account: Address::repeat_byte(2),
+            amount: 1_000_000,
+            depositTag: B256::repeat_byte(3),
+            readyHeight: U256::from(10),
+            readyTime: U256::from(20),
+        };
+        assert!(decode(&rpc_log(pending.encode_log_data(), 5, 1), 50).unwrap().is_none());
+        let dropped = IZecuredRegistry::PendingActivationDropped {
+            vaultId: B256::repeat_byte(1),
+        };
+        assert!(decode(&rpc_log(dropped.encode_log_data(), 5, 2), 50).unwrap().is_none());
     }
 
     #[test]

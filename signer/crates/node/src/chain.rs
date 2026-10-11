@@ -24,7 +24,7 @@ use zecured_base::{
 };
 use zecured_policy::{
     classify::{self, Classification, DepositNote, DepositRules, NotePosition},
-    derive::note_id,
+    derive::{deposit_tag, note_id},
     ledger::{self, ClaimState, VaultNote},
 };
 use zecured_zcash_ops::{
@@ -41,6 +41,79 @@ use crate::store::{Store, VaultRecord};
 pub const BASE_CONNECT_TIMEOUT: Duration = Duration::from_secs(10);
 /// Time allowed for one Base RPC request (M-7).
 pub const BASE_REQUEST_TIMEOUT: Duration = Duration::from_secs(30);
+
+/// What Base says about a vault, for sorting its notes (D23, K2-a).
+#[derive(Clone, Copy, Debug)]
+pub struct BaseView<'a> {
+    /// The vault's viewing key string: deposit tags are keyed by it (D24).
+    pub ufvk: &'a str,
+    /// `VaultCancelled` seen: never activated, never will be.
+    pub cancelled: bool,
+    /// The deposit tag of `VaultActivated`, once seen: the note that backs the vault.
+    pub activated_tag: Option<[u8; 32]>,
+}
+
+/// One scanned note, as far as sorting the vault's notes is concerned.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct NoteFacts {
+    pub height: u32,
+    pub value: u64,
+    /// Received at the vault's published address (a deposit), not its internal one.
+    pub external: bool,
+    /// D24 deposit tag of the note.
+    pub tag: [u8; 32],
+    /// P1 decision, once made.
+    pub decision: Option<Classification>,
+}
+
+/// The note that roots a vault's lineage (K2-a).
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Root {
+    /// This scanned note.
+    Note(usize),
+    /// None: no conforming deposit decided yet, or the vault was cancelled (nothing minted).
+    None,
+    /// Base activated the vault with a note this node cannot see: its Zcash data is wrong or
+    /// incomplete, and no refund is safe until someone looks into it.
+    Missing,
+}
+
+/// K2-a: the root of the vault's lineage. Once Base activated the vault, the note it activated
+/// it with (named by its deposit tag), whatever P1 decided: a deposit proof needs no signer, and
+/// P1 rests on the light wallet server's answers. Before that, P1's conforming deposit.
+pub fn lineage_root(notes: &[NoteFacts], base: &BaseView<'_>) -> Root {
+    if base.cancelled {
+        return Root::None;
+    }
+    let found = match base.activated_tag {
+        Some(tag) => match notes.iter().position(|n| n.external && n.tag == tag) {
+            Some(i) => Some(i),
+            None => return Root::Missing,
+        },
+        None => notes.iter().position(|n| n.external && n.decision == Some(Classification::Conforming)),
+    };
+    found.map_or(Root::None, Root::Note)
+}
+
+/// P5 / D23 / K2: whether an unspent deposit outside the lineage may be refunded.
+pub fn refundable(n: &NoteFacts, base: &BaseView<'_>, root: Root, rules: &DepositRules, tip: u32) -> bool {
+    if root == Root::Missing || !n.external {
+        return false;
+    }
+    let classified = match n.decision {
+        Some(Classification::NonConforming(_)) => true,
+        // P1's conforming deposit, once the vault is cancelled (D23) or activated with
+        // another note (K2-a). Before either, a proof may still activate the vault with it.
+        Some(Classification::Conforming) => base.cancelled || base.activated_tag.is_some(),
+        // Not classified yet (too few confirmations).
+        _ => false,
+    };
+    // K2: a note of the vault's amount could back a mint. Refund it only once it is buried
+    // twice as deep as a deposit must be, so that no reorg brings back a chain where it was
+    // the vault's first deposit.
+    classified
+        && (n.value != rules.amount || classify::confirmations(n.height, tip) >= rules.confirmations.saturating_mul(2))
+}
 
 /// The vault's notes, sorted into the two lineages (see `zecured_policy::ledger`).
 pub struct VaultNotes {
@@ -160,7 +233,13 @@ impl ZcashView {
             confirmations,
         };
         let fvk = vault_fvk(v)?;
-        self.notes(&v.vault_id, &fvk, v.birthday, &rules, &mut v.decisions, v.cancelled).await
+        let ufvk = v.ufvk.clone();
+        let base = BaseView {
+            ufvk: &ufvk,
+            cancelled: v.cancelled,
+            activated_tag: v.activated_tag,
+        };
+        self.notes(&v.vault_id, &fvk, v.birthday, &rules, &mut v.decisions, base).await
     }
 
     /// Scans a vault up to the current tip, extends its persisted P1 `decisions` and sorts
@@ -170,8 +249,9 @@ impl ZcashView {
     /// transactions returned to its internal address (H-2, [`ledger::lineage_members`]);
     /// [`VaultNotes::retain_planned_change`] then keeps only the planned change.
     ///
-    /// A `cancelled` vault (D23) has no lineage: it was never activated, so nothing was minted
-    /// against its conforming deposit, which is refundable like a non-conforming one.
+    /// A cancelled vault (D23) has no lineage: it was never activated, so nothing was minted
+    /// against its conforming deposit, which is refundable like a non-conforming one. An
+    /// activated vault's lineage starts at the note Base activated it with ([`lineage_root`]).
     pub async fn notes(
         &mut self,
         vault_id: &B256,
@@ -179,7 +259,7 @@ impl ZcashView {
         birthday: u32,
         rules: &DepositRules,
         decisions: &mut Vec<(classify::NotePosition, Classification)>,
-        cancelled: bool,
+        base: BaseView<'_>,
     ) -> Result<VaultNotes> {
         let tip = self.tip().await?;
         // tonic clients are cheap handles over one connection; clone to scan while `self`
@@ -234,9 +314,27 @@ impl ZcashView {
             .find(|n| n.scope == Scope::External && decision(n) == Some(Classification::Conforming))
             .cloned();
 
-        // H-2: the lineage follows the vault's own spends from the conforming deposit.
+        // H-2: the lineage follows the vault's own spends from its root (K2-a).
         let mut ordered: Vec<&ReceivedNote> = scan.notes.iter().collect();
         ordered.sort_by_key(|n| n.position);
+        let facts: Vec<NoteFacts> = ordered
+            .iter()
+            .map(|n| NoteFacts {
+                height: n.position.height,
+                value: n.value(),
+                external: n.scope == Scope::External,
+                tag: deposit_tag(base.ufvk, &ExtractedNoteCommitment::from(n.note.commitment()).to_bytes()),
+                decision: decision(n),
+            })
+            .collect();
+        let root = lineage_root(&facts, &base);
+        if root == Root::Missing {
+            // No heights or note data: only the vault id, which is public on Base.
+            tracing::error!(
+                vault = %vault_id,
+                "Base activated this vault with a note this node cannot see: refunds halted (K2-a)"
+            );
+        }
         let refs: Vec<VaultNote> = ordered
             .iter()
             .map(|n| VaultNote {
@@ -247,8 +345,11 @@ impl ZcashView {
                 spent_in: n.spent_in.map(|t| *t.as_ref()),
             })
             .collect();
-        let root = conforming.as_ref().filter(|_| !cancelled).map(|n| n.nullifier.to_bytes());
-        let members = ledger::lineage_members(root.as_ref(), &refs);
+        let root_nullifier = match root {
+            Root::Note(i) => Some(refs[i].nullifier),
+            Root::None | Root::Missing => None,
+        };
+        let members = ledger::lineage_members(root_nullifier.as_ref(), &refs);
 
         let mut notes = VaultNotes {
             tip,
@@ -258,7 +359,7 @@ impl ZcashView {
             ignored: vec![],
             unspent: vec![],
         };
-        for (n, in_lineage) in ordered.into_iter().zip(members) {
+        for ((n, f), in_lineage) in ordered.into_iter().zip(&facts).zip(members) {
             if n.spent_at.is_some() {
                 continue;
             }
@@ -266,15 +367,10 @@ impl ZcashView {
             if in_lineage {
                 notes.lineage.push(n.clone());
             } else if n.scope == Scope::External {
-                let refundable = match decision(n) {
-                    Some(Classification::NonConforming(_)) => true,
-                    Some(Classification::Conforming) => cancelled,
-                    _ => false,
-                };
-                if refundable {
+                if refundable(f, &base, root, rules, tip) {
                     notes.non_conforming.push((note_id(&vault_id.0, &to_policy_position(&n.position)), n.clone()));
                 }
-                // Otherwise not classified yet (too few confirmations).
+                // Otherwise not refundable yet: not classified, not deep enough, or halted.
             } else {
                 notes.ignored.push(n.clone());
             }
@@ -394,13 +490,19 @@ pub fn apply(store: &mut Store, ev: &VaultEvent) -> Result<bool> {
         return Ok(false);
     }
     match &ev.event {
-        RegistryEvent::VaultActivated { account, amount } => {
+        RegistryEvent::VaultActivated {
+            account,
+            amount,
+            deposit_tag,
+        } => {
             ensure!(*account == v.account && *amount == v.amount, "activation does not match the vault");
             ensure!(!v.cancelled, "activation of a cancelled vault");
             // M-9: activation sets `outstanding` once; later claims only lower it.
             if !v.activated {
                 v.activated = true;
                 v.outstanding = *amount;
+                // K2-a: the note Base minted against heads the lineage and is never refunded.
+                v.activated_tag = Some(deposit_tag.0);
             }
         }
         RegistryEvent::Claims(claims) => {
@@ -483,6 +585,7 @@ mod tests {
             confirmed: vec![],
             last_event: None,
             cancelled: false,
+            activated_tag: None,
         })
         .unwrap();
         (s, dir)
@@ -521,6 +624,8 @@ mod tests {
         )
     }
 
+    const ACTIVATED_TAG: [u8; 32] = [0x7a; 32];
+
     fn activation(block: u64) -> VaultEvent {
         event(
             block,
@@ -528,8 +633,115 @@ mod tests {
             RegistryEvent::VaultActivated {
                 account: ACCOUNT,
                 amount: 1_000_000,
+                deposit_tag: B256::from(ACTIVATED_TAG),
             },
         )
+    }
+
+    #[test]
+    fn activation_records_the_note_that_backs_the_vault() {
+        let (mut store, dir) = store();
+        assert_eq!(apply_all(&mut store, &[activation(10)]), 1);
+        assert_eq!(store.vaults[&VAULT].activated_tag, Some(ACTIVATED_TAG));
+        std::fs::remove_dir_all(&dir).unwrap();
+    }
+
+    // ----- K2-a: the lineage root and what is refundable -----
+
+    const RULES: DepositRules = DepositRules {
+        amount: 1_000_000,
+        expiry_height: 388,
+        confirmations: 10,
+    };
+
+    fn deposit(height: u32, value: u64, tag: u8, decision: Option<Classification>) -> NoteFacts {
+        NoteFacts {
+            height,
+            value,
+            external: true,
+            tag: [tag; 32],
+            decision,
+        }
+    }
+
+    const SECOND: Option<Classification> =
+        Some(Classification::NonConforming(classify::NonConformingReason::SecondPayment));
+    const CONFORMING: Option<Classification> = Some(Classification::Conforming);
+
+    fn base(cancelled: bool, activated_tag: Option<u8>) -> BaseView<'static> {
+        BaseView {
+            ufvk: "",
+            cancelled,
+            activated_tag: activated_tag.map(|t| [t; 32]),
+        }
+    }
+
+    #[test]
+    fn the_lineage_starts_at_the_note_base_activated_the_vault_with() {
+        // P1 decided the first note conforms; the Registry minted against the second (a deposit
+        // proof needs no signer, and P1 may have been fed bad data).
+        let notes = [deposit(200, 1_000_000, 1, CONFORMING), deposit(210, 1_000_000, 2, SECOND)];
+        assert_eq!(lineage_root(&notes, &base(false, None)), Root::Note(0), "before activation: P1");
+        assert_eq!(lineage_root(&notes, &base(false, Some(2))), Root::Note(1), "after: the activated note");
+        assert_eq!(lineage_root(&notes, &base(false, Some(1))), Root::Note(0));
+        // Base activated the vault with a note this node cannot see.
+        assert_eq!(lineage_root(&notes, &base(false, Some(9))), Root::Missing);
+        // Cancelled: nothing was minted.
+        assert_eq!(lineage_root(&notes, &base(true, None)), Root::None);
+        // Only deposits (external notes) can root it.
+        let internal = NoteFacts {
+            external: false,
+            ..deposit(200, 1_000_000, 2, None)
+        };
+        assert_eq!(lineage_root(&[internal], &base(false, Some(2))), Root::Missing);
+        assert_eq!(lineage_root(&[], &base(false, None)), Root::None);
+    }
+
+    #[test]
+    fn the_note_that_backs_the_vault_is_never_refundable() {
+        let tip = 300;
+        let notes = [deposit(200, 1_000_000, 1, CONFORMING), deposit(210, 1_000_000, 2, SECOND)];
+        // Activated with the second note: it roots the lineage (never offered for refund), and
+        // P1's "conforming" first note is now an extra payment, refundable once deep enough.
+        let b = base(false, Some(2));
+        let root = lineage_root(&notes, &b);
+        assert_eq!(root, Root::Note(1));
+        assert!(refundable(&notes[0], &b, root, &RULES, tip));
+        // Before activation, P1's conforming note is not refundable (a proof may still use it),
+        // and neither is a second payment of the vault's amount that is not yet 2N deep.
+        let none = base(false, None);
+        let root = lineage_root(&notes, &none);
+        assert!(!refundable(&notes[0], &none, root, &RULES, tip));
+        assert!(refundable(&notes[1], &none, root, &RULES, tip), "91 confirmations >= 2N");
+        assert!(!refundable(&notes[1], &none, root, &RULES, 210 + 18), "19 < 2N = 20");
+        assert!(refundable(&notes[1], &none, root, &RULES, 210 + 19), "20 = 2N");
+    }
+
+    #[test]
+    fn refunds_halt_while_the_activated_note_is_missing() {
+        let notes = [deposit(200, 1_000_000, 1, CONFORMING), deposit(210, 300_000, 2, SECOND)];
+        let b = base(false, Some(9));
+        let root = lineage_root(&notes, &b);
+        assert_eq!(root, Root::Missing);
+        for n in &notes {
+            assert!(!refundable(n, &b, root, &RULES, 1_000));
+        }
+    }
+
+    #[test]
+    fn other_amounts_refund_at_the_deposit_depth_and_unclassified_notes_never() {
+        let none = base(false, None);
+        let wrong_amount = deposit(290, 300_000, 3, SECOND);
+        let root = lineage_root(&[wrong_amount], &none);
+        assert!(refundable(&wrong_amount, &none, root, &RULES, 300), "cannot back a mint: no 2N wait");
+        let pending = deposit(295, 300_000, 3, Some(Classification::Pending));
+        assert!(!refundable(&pending, &none, root, &RULES, 1_000));
+        let unknown = deposit(295, 300_000, 3, None);
+        assert!(!refundable(&unknown, &none, root, &RULES, 1_000));
+        // D23: the conforming deposit of a cancelled vault.
+        let conforming = deposit(200, 1_000_000, 1, CONFORMING);
+        let cancelled = base(true, None);
+        assert!(refundable(&conforming, &cancelled, lineage_root(&[conforming], &cancelled), &RULES, 300));
     }
 
     /// M-9: a crash between saving a vault and saving the cursor re-applies the chunk; the

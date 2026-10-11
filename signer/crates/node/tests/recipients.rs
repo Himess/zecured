@@ -80,6 +80,7 @@ fn vault(owner: Address) -> (VaultRecord, FullViewingKey) {
         confirmed: vec![],
         last_event: None,
         cancelled: false,
+        activated_tag: None,
     };
     (record, fvk)
 }
