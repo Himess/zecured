@@ -35,6 +35,7 @@ use zecured_zcash_ops::{
 };
 
 mod base_test;
+mod prove;
 
 const NETWORK: Network = Network::TestNetwork;
 const ZATS_PER_ZEC: f64 = 100_000_000.0;
@@ -132,6 +133,26 @@ enum LoanCmd {
     /// Fetch the vault's viewing key (UFVK) to verify it independently; refused unless it is
     /// the key the signers signed when the vault opened.
     ViewingKey { vault: B256 },
+    /// Tier 2: prove the deposit on this machine and activate the vault with the proof, without
+    /// any signer attestation (TEST ONLY submission: the owner EOA pays the Base gas).
+    Prove {
+        vault: B256,
+        /// The zkVM host, `tier2/target/release/zecured-tier2-host`.
+        #[arg(long, default_value = "tier2/target/release/zecured-tier2-host")]
+        host: PathBuf,
+        /// MOCK seal, for a Registry deployed with MockRiscZeroVerifier (local fork only).
+        #[arg(long)]
+        mock: bool,
+        #[arg(long, default_value = "data/tier2/headers_nu7.json")]
+        headers: PathBuf,
+        #[arg(long, default_value = "data/tier2/summaries.json")]
+        summaries: PathBuf,
+        /// The deposit transaction (default: the one `loan deposit` sent).
+        #[arg(long)]
+        txid: Option<String>,
+        #[arg(long, env = "BASE_SEPOLIA_RPC_URL", default_value = "https://sepolia.base.org")]
+        rpc: String,
+    },
     /// TEST ONLY (the app uses a gasless smart account): borrow USDC with the owner EOA as
     /// the account, after authorizing the Registry and the Adapter on Morpho.
     Borrow {
@@ -196,6 +217,15 @@ struct LoanFile {
     /// (C-4); `None` for loans opened before the signers signed vaults.
     #[serde(default)]
     ufvk_hash: Option<B256>,
+    /// The vault's expiry height and the five signers' `VaultOpened` signatures (by node
+    /// index), kept for a Tier 2 deposit proof (`loan prove`).
+    #[serde(default)]
+    expiry_height: Option<u32>,
+    #[serde(default)]
+    opened_signatures: Vec<(u16, Bytes)>,
+    /// The deposit transaction sent by `loan deposit`.
+    #[serde(default)]
+    deposit_txid: Option<String>,
 }
 
 struct Wallet {
@@ -404,6 +434,31 @@ fn check_viewing_key(ufvk: &str, expected: Option<B256>) -> Result<bool> {
     Ok(true)
 }
 
+/// The vault's viewing key from the backend (owner-signed `ViewKeyRequest`), refused unless it
+/// is the key every signer signed when the vault opened; `false` for loans opened before that.
+async fn viewing_key(wallet: &Path, backend: &str, vault: &B256) -> Result<(String, bool)> {
+    let (mut l, owner, _) = owner_ctx(wallet, vault, Some(String::new()))?;
+    let nonce = l.next_nonce;
+    let deadline = now() + REQUEST_TTL_SECS;
+    let msg = ViewKeyRequest {
+        vaultId: *vault,
+        nonce,
+        deadline,
+    };
+    let sig = sign_typed(&owner, &registry_domain(l.chain_id, l.registry), &msg)?;
+    let r = post(
+        backend,
+        &format!("/vaults/{vault}/viewing-key"),
+        json!({ "nonce": nonce.to_string(), "deadline": deadline.to_string(), "signature": sig }),
+    )
+    .await?;
+    l.next_nonce += 1;
+    write_json(&loan_path(wallet, vault), &l)?;
+    let ufvk = r["ufvk"].as_str().context("the backend returned no viewing key")?.to_owned();
+    let checked = check_viewing_key(&ufvk, l.ufvk_hash)?;
+    Ok((ufvk, checked))
+}
+
 /// `zcash:` payment URI for `amount` zatoshis (ZIP 321), built here from the checked address.
 fn zip321_uri(address: &str, amount: u64) -> String {
     let zats = 100_000_000;
@@ -590,6 +645,9 @@ async fn loan(wallet: &Path, lwd_url: &str, backend: &str, cmd: LoanCmd) -> Resu
                     chain_id: net.chain_id,
                     next_nonce: 1,
                     ufvk_hash: Some(v.ufvk_hash),
+                    expiry_height: Some(v.expiry_height),
+                    opened_signatures: v.signatures.clone(),
+                    deposit_txid: None,
                 },
             )?;
             eprintln!("vault address signed by all {SIGNERS} signers of the network config (checked here)");
@@ -603,13 +661,16 @@ async fn loan(wallet: &Path, lwd_url: &str, backend: &str, cmd: LoanCmd) -> Resu
             println!("{}", serde_json::to_string_pretty(&v)?);
         }
         LoanCmd::Deposit { vault, amount } => {
-            let l: LoanFile = read_secret_json(&loan_path(wallet, &vault))?;
+            let mut l: LoanFile = read_secret_json(&loan_path(wallet, &vault))?;
             let w = load_wallet(wallet)?;
             let amount = match amount {
                 Some(a) => zats(a)?,
                 None => l.amount,
             };
-            println!("broadcast {}", send(&w, lwd_url, &l.address, amount).await?);
+            let txid = send(&w, lwd_url, &l.address, amount).await?;
+            l.deposit_txid = Some(txid.clone());
+            write_json(&loan_path(wallet, &vault), &l)?;
+            println!("broadcast {txid}");
         }
         LoanCmd::Destination { vault, to } => {
             let c = destination(wallet, backend, &vault, to).await?;
@@ -641,31 +702,44 @@ async fn loan(wallet: &Path, lwd_url: &str, backend: &str, cmd: LoanCmd) -> Resu
             println!("{}", serde_json::to_string_pretty(&r)?);
         }
         LoanCmd::ViewingKey { vault } => {
-            let (mut l, owner, _) = owner_ctx(wallet, &vault, Some(String::new()))?;
-            let nonce = l.next_nonce;
-            let deadline = now() + REQUEST_TTL_SECS;
-            let msg = ViewKeyRequest {
-                vaultId: vault,
-                nonce,
-                deadline,
-            };
-            let sig = sign_typed(&owner, &registry_domain(l.chain_id, l.registry), &msg)?;
-            let r = post(
-                backend,
-                &format!("/vaults/{vault}/viewing-key"),
-                json!({ "nonce": nonce.to_string(), "deadline": deadline.to_string(), "signature": sig }),
-            )
-            .await?;
-            l.next_nonce += 1;
-            write_json(&loan_path(wallet, &vault), &l)?;
-            let ufvk = r["ufvk"].as_str().context("the backend returned no viewing key")?;
-            if !check_viewing_key(ufvk, l.ufvk_hash)? {
+            let (ufvk, checked) = viewing_key(wallet, backend, &vault).await?;
+            if !checked {
                 eprintln!(
                     "note: this loan was opened before the signers signed vault keys, so this key could not be \
                      checked against them"
                 );
             }
             println!("{ufvk}");
+        }
+        LoanCmd::Prove {
+            vault,
+            host,
+            mock,
+            headers,
+            summaries,
+            txid,
+            rpc,
+        } => {
+            let (ufvk, checked) = viewing_key(wallet, backend, &vault).await?;
+            ensure!(checked, "a deposit proof needs the viewing key the signers signed (C-4)");
+            let l: LoanFile = read_secret_json(&loan_path(wallet, &vault))?;
+            let txid = txid.or(l.deposit_txid.clone()).context("no deposit txid: pass --txid")?;
+            prove::prove(
+                &l,
+                &ufvk,
+                &network_params()?,
+                &prove::Paths {
+                    host,
+                    headers,
+                    summaries,
+                    work: wallet.with_file_name(format!("proof-{}", hex::encode(&vault[..8]))),
+                },
+                mock,
+                &txid,
+                lwd_url,
+                &rpc,
+            )
+            .await?;
         }
         LoanCmd::Borrow { vault, usdc, rpc } => base_test::borrow(wallet, &vault, usdc, &rpc).await?,
         LoanCmd::RepayRelease { vault, to, rpc } => {

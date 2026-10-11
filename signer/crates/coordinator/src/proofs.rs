@@ -17,21 +17,18 @@ use std::{
 
 use alloy::{
     network::EthereumWallet,
-    primitives::{Address, B256, Bytes, U256},
+    primitives::{Address, B256, Bytes},
     providers::ProviderBuilder,
 };
 use anyhow::{Context, Result, ensure};
 use serde::Deserialize;
 use tracing::{debug, info, warn};
 use zcash_protocol::TxId;
-use zecured_base::events::{IZcashHeaderRelay, IZecuredRegistry};
+use zecured_base::events::IZecuredRegistry;
 use zecured_deposit_witness::{p2p, witness};
 use zecured_zcash_ops::lwd;
 
 use crate::{Coordinator, RECEIPT_TIMEOUT, error::scrubbed, short, store::VaultStatus};
-
-/// How far below the relay's tip an anchor is looked for.
-const MAX_ANCHOR_DEPTH: u64 = 200;
 
 /// Where and how deposit proofs are made.
 #[derive(Clone, Debug)]
@@ -212,24 +209,9 @@ impl Coordinator {
         Ok(())
     }
 
-    /// The highest best-chain height above `deposit_height` with the Registry's
-    /// `minConfirmationWork` on top of it in the relay.
     async fn anchor_above(&self, deposit_height: u32) -> Result<Option<u32>> {
         let provider = ProviderBuilder::new().connect_http(self.cfg.base_rpc_url.parse()?);
-        let registry = IZecuredRegistry::new(self.cfg.registry, &provider);
-        let relay = IZcashHeaderRelay::new(registry.relay().call().await.context("Registry.relay")?, &provider);
-        let min: U256 = registry.minConfirmationWork().call().await?;
-        let tip = relay.bestChainTip().call().await.context("relay tip")?;
-        let tip_height = u64::try_from(tip.height)?;
-        let mut h = tip_height.saturating_sub(1);
-        while h > u64::from(deposit_height) && tip_height - h <= MAX_ANCHOR_DEPTH {
-            let hash = relay.bestBlockHashAt(U256::from(h)).call().await?;
-            if relay.confirmationWork(hash).call().await? >= min {
-                return Ok(Some(u32::try_from(h)?));
-            }
-            h -= 1;
-        }
-        Ok(None)
+        zecured_base::relay::anchor_above(&provider, self.cfg.registry, deposit_height).await
     }
 
     /// Submits a finished proof with the five signers' `VaultOpened` signatures, sorted by
