@@ -821,6 +821,7 @@ impl Coordinator {
         let fvk = fvk_of(v)?;
         let base = BaseView {
             ufvk: &v.ufvk,
+            address: &v.address,
             cancelled: v.status == VaultStatus::Cancelled,
             activated_tag: v.activated_tag,
         };

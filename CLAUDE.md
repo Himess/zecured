@@ -27,6 +27,8 @@ Deadline: 2026-10-28 23:59 UTC. Gates: 10-13 (Spike A go/no-go), 10-20 (v0.1), 1
   appear only as keccak256(salt32 || raw Ironwood receiver bytes); salts stay off-chain.
 - Validate the Ironwood receiver before any Base transaction that burns zZEC.
 - Never log user addresses, viewing keys, salts or IPs.
+- One exception, for tests only (review S20): tier2/statement/tests/fixtures/TEST-ONLY_* holds
+  the viewing key and deposit witness of a disposable test vault, never a demo or judge vault.
 - Every mock is labelled MOCK in code and listed in README "What is real and what is a mock".
 
 ## Rules of the hackathon

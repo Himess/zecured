@@ -25,6 +25,8 @@ zecured-zcash-ops = { path = "../zcash-ops" }
 zecured-threshold = { path = "../threshold" }
 zecured-policy = { path = "../policy" }
 zecured-base = { path = "../base-client" }
+# K2-c: P1 applies the deposit statement's own predicates (tier2/ workspace).
+zecured-deposit-statement = { path = "../../../tier2/statement" }
 orchard.workspace = true
 pczt.workspace = true
 reddsa.workspace = true

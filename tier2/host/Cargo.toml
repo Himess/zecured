@@ -8,6 +8,7 @@ publish = false
 [dependencies]
 zecured-tier2-methods = { path = "../methods" }
 zecured-deposit-statement = { path = "../statement" }
+zecured-deposit-k4 = { path = "../k4" }
 risc0-zkvm = "=3.0.6"
 anyhow = "1"
 bincode = "1"

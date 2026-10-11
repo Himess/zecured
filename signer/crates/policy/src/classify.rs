@@ -29,9 +29,14 @@ pub struct NotePosition {
 pub struct DepositNote {
     pub position: NotePosition,
     pub value: u64,
-    /// The full transaction moves value only inside the Ironwood pool (no transparent,
-    /// Sapling or Orchard-pool parts), as checked on the full transaction.
+    /// The full transaction is a deposit transaction: v6 of the NU7 epoch, value moving only
+    /// inside the Ironwood pool (no transparent, Sapling or Orchard-pool parts), outputs
+    /// enabled. Checked on the full transaction with the deposit statement's own function
+    /// (K2-c), so that P1 and a Tier 2 proof agree.
     pub ironwood_only: bool,
+    /// The note pays exactly the vault's published receiver, not another diversified address
+    /// of the vault (K2-c: the deposit statement accepts nothing else).
+    pub to_vault_receiver: bool,
 }
 
 /// The vault parameters fixed when it was opened.
@@ -56,6 +61,8 @@ pub enum NonConformingReason {
     Late,
     /// The deposit transaction touches the transparent, Sapling or Orchard pool.
     PoolCrossing,
+    /// The note pays another diversified address of the vault, not its published one.
+    WrongReceiver,
 }
 
 /// The classification of one deposit note.
@@ -77,7 +84,9 @@ pub fn confirmations(height: u32, tip: u32) -> u32 {
 /// Classifies `notes` (any order) and returns them in P1 order with their classification.
 pub fn classify(rules: &DepositRules, tip: u32, notes: &[DepositNote]) -> Vec<(DepositNote, Classification)> {
     let mut ordered: Vec<DepositNote> = notes.to_vec();
-    ordered.sort_by_key(|n| n.position);
+    // The whole note breaks ties: positions are unique on a real chain, but a lying data source
+    // must not make the outcome depend on the order it listed the notes in.
+    ordered.sort_by_key(|n| (n.position, n.value, n.ironwood_only, n.to_vault_receiver));
 
     let mut have_conforming = false;
     let mut pending = false;
@@ -93,6 +102,8 @@ pub fn classify(rules: &DepositRules, tip: u32, notes: &[DepositNote]) -> Vec<(D
             Classification::NonConforming(NonConformingReason::SecondPayment)
         } else if !note.ironwood_only {
             Classification::NonConforming(NonConformingReason::PoolCrossing)
+        } else if !note.to_vault_receiver {
+            Classification::NonConforming(NonConformingReason::WrongReceiver)
         } else if note.value != rules.amount {
             Classification::NonConforming(NonConformingReason::WrongAmount)
         } else if note.position.height > rules.expiry_height {
@@ -126,6 +137,7 @@ mod tests {
             },
             value,
             ironwood_only,
+            to_vault_receiver: true,
         }
     }
 
@@ -225,5 +237,31 @@ mod tests {
         let got = classes(5_000, &n);
         assert_eq!(got.iter().filter(|c| **c == Classification::Conforming).count(), 1);
         assert!(got.iter().all(|c| *c != Classification::Pending));
+    }
+
+    /// K2-c: a note to another diversified address of the vault is never conforming (the
+    /// deposit statement could not prove it), and the next note can be.
+    #[test]
+    fn a_note_to_another_vault_address_is_non_conforming() {
+        let elsewhere = DepositNote {
+            to_vault_receiver: false,
+            ..note(900, 0, 0, AMOUNT, true)
+        };
+        let n = [elsewhere, note(905, 0, 0, AMOUNT, true)];
+        assert_eq!(
+            classes(1_000, &n),
+            vec![Classification::NonConforming(NonConformingReason::WrongReceiver), Classification::Conforming]
+        );
+    }
+
+    /// RQ-10: the outcome does not depend on the order a data source lists the notes in, even
+    /// with a (forged) duplicate position.
+    #[test]
+    fn duplicate_positions_are_classified_the_same_in_any_input_order() {
+        let a = note(900, 0, 0, AMOUNT, true);
+        let b = note(900, 0, 0, AMOUNT - 1, true);
+        let one = classify(&RULES, 1_000, &[a.clone(), b.clone()]);
+        let other = classify(&RULES, 1_000, &[b, a]);
+        assert_eq!(one, other);
     }
 }

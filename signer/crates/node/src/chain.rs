@@ -31,7 +31,7 @@ use zecured_zcash_ops::{
     keys::VaultSecret,
     lwd::{self, LwdClient},
     scan::{ReceivedNote, ScanState},
-    tx::{self, TxShape},
+    tx,
     witness,
 };
 
@@ -47,6 +47,8 @@ pub const BASE_REQUEST_TIMEOUT: Duration = Duration::from_secs(30);
 pub struct BaseView<'a> {
     /// The vault's viewing key string: deposit tags are keyed by it (D24).
     pub ufvk: &'a str,
+    /// The vault's published unified address: a deposit must pay exactly its receiver (K2-c).
+    pub address: &'a str,
     /// `VaultCancelled` seen: never activated, never will be.
     pub cancelled: bool,
     /// The deposit tag of `VaultActivated`, once seen: the note that backs the vault.
@@ -233,9 +235,10 @@ impl ZcashView {
             confirmations,
         };
         let fvk = vault_fvk(v)?;
-        let ufvk = v.ufvk.clone();
+        let (ufvk, address) = (v.ufvk.clone(), v.address.clone());
         let base = BaseView {
             ufvk: &ufvk,
+            address: &address,
             cancelled: v.cancelled,
             activated_tag: v.activated_tag,
         };
@@ -283,6 +286,9 @@ impl ZcashView {
         // P1: classify external notes in chain order; persist new decisions.
         let externals: Vec<ReceivedNote> =
             self.scans[vault_id].notes.iter().filter(|n| n.scope == Scope::External).cloned().collect();
+        // K2-c: the deposit statement's own reading of the vault's address. A vault whose
+        // address it rejects can receive no conforming deposit.
+        let receiver = zecured_deposit_statement::vault_receiver(base.address).ok();
         let mut deposits = Vec::with_capacity(externals.len());
         for n in &externals {
             let ironwood_only = self.ironwood_only(&n.txid).await?;
@@ -290,6 +296,7 @@ impl ZcashView {
                 position: to_policy_position(&n.position),
                 value: n.value(),
                 ironwood_only,
+                to_vault_receiver: receiver == Some(n.recipient.to_raw_address_bytes()),
             });
         }
         let decided = classify::classify(rules, tip, &deposits);
@@ -389,7 +396,8 @@ impl ZcashView {
             return Ok(*b);
         }
         let (t, _) = tx::fetch(self.client().await?, &Network::TestNetwork, txid).await?;
-        let flag = TxShape::of(&t).is_ironwood_only();
+        // K2-c: exactly the deposit statement's D5 (v6, NU7, Ironwood only, outputs enabled).
+        let flag = zecured_deposit_statement::check_deposit_transaction(&t).is_ok();
         self.shapes.insert(key, flag);
         Ok(flag)
     }
@@ -671,6 +679,7 @@ mod tests {
     fn base(cancelled: bool, activated_tag: Option<u8>) -> BaseView<'static> {
         BaseView {
             ufvk: "",
+            address: "",
             cancelled,
             activated_tag: activated_tag.map(|t| [t; 32]),
         }

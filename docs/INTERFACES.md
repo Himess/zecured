@@ -104,9 +104,11 @@ VaultOpened(bytes32 vaultId,address owner,address account,uint64 amount,uint32 e
   Registry or Morpho → SettlementAdapter **while that receiver has armed a one-shot transient
   expectation** with `expectFromMorpho(uint256 maxAmount)` (callable by Registry and Adapter
   only; the expected recipient is `msg.sender`; EIP-1153 transient storage; consumed by the
-  transfer; armed right before the Morpho call that moves zZEC). The Registry burns zZEC held
-  by the Adapter directly. Everything else reverts (Morpho surfaces it as "transfer reverted").
-  No account ever holds zZEC (I2).
+  transfer; armed right before the Morpho call that moves zZEC) and closed right after it with
+  `settleExpectation() returns (uint256 received)` (Y5: reverts unless a transfer consumed it,
+  clears the expectation in every case, returns the amount the guard let through; no
+  `balanceOf` accounting). The Registry burns zZEC held by the Adapter directly. Everything
+  else reverts (Morpho surfaces it as "transfer reverted"). No account ever holds zZEC (I2).
 
 ### 3.2 `ZecuredRegistry`
 
@@ -114,9 +116,12 @@ VaultOpened(bytes32 vaultId,address owner,address account,uint64 amount,uint32 e
 enum VaultStatus { None, Active, Closed, Cancelled }
 enum ClaimKind   { Release, Liquidation, CloseUser, CloseMarketMaker }
 enum ClaimStatus { None, Pending, Paid }
+enum MintMode    { SignerAttested, ProofOnly }                                                                     // K1, immutable
 
-function attestDeposit(DepositAttestation calldata att, bytes[] calldata sigs) external;
-function attestDepositWithProof(bytes calldata journal, bytes calldata seal, bytes[] calldata openedSigs) external;  // Tier 2
+function attestDeposit(DepositAttestation calldata att, bytes[] calldata sigs) external;                            // not in ProofOnly
+function attestDepositWithProof(bytes calldata journal, bytes calldata seal, bytes[] calldata openedSigs) external;  // Tier 2: pends
+function finalizeActivation(bytes32 vaultId) external;                                                              // K3: mints
+function dropPendingActivation(bytes32 vaultId) external;                                                           // K3
 function cancelVault(bytes32 vaultId, bytes[] calldata sigs) external;                                              // L-8
 function requestRelease(bytes32 vaultId, bytes32 destCommitment) external returns (bytes32 claimId);
 function requestPartialRelease(bytes32 vaultId, uint64 amount, bytes32 destCommitment) external returns (bytes32 claimId);
@@ -130,8 +135,13 @@ function vault(bytes32 vaultId) external view returns (address account, uint64 o
 function claim(bytes32 claimId) external view returns (bytes32 vaultId, ClaimKind kind, uint64 amount, bytes32 commitment, ClaimStatus status);
 function marketParams() external view returns (MarketParams memory);
 function signers() external view returns (address[5] memory);
+function pendingActivation(bytes32 vaultId) external view returns (address account, uint64 amount, bytes32 depositTag,
+    bytes32 anchor, uint256 readyHeight, uint256 readyTime);
 
-event VaultActivated(bytes32 indexed vaultId, address indexed account, uint64 amount);
+event VaultActivated(bytes32 indexed vaultId, address indexed account, uint64 amount, bytes32 depositTag);
+event ActivationPending(bytes32 indexed vaultId, address indexed account, uint64 amount, bytes32 depositTag,
+                        uint256 readyHeight, uint256 readyTime);
+event PendingActivationDropped(bytes32 indexed vaultId);
 event ReleaseRequested(bytes32 indexed vaultId, bytes32 indexed claimId, uint64 amount, bytes32 destCommitment);
 event LiquidationRelease(bytes32 indexed vaultId, bytes32 indexed claimId, uint64 amount, bytes32 recipientCommitment);
 event CloseRelease(bytes32 indexed vaultId, bytes32 userClaimId, bytes32 mmClaimId, uint64 userAmount, uint64 mmAmount,
@@ -142,15 +152,26 @@ event VaultCancelled(bytes32 indexed vaultId);
 
 - `attestDeposit` registers the vault (`outstanding = amount`, `Active`), mints zZEC to itself
   and calls `Morpho.supplyCollateral(market, amount, onBehalf = account, "")` (I1, I4, I5).
-- `attestDepositWithProof` (Tier 2, D22) has the same effects, on a proof instead of an
-  attestation. `journal = abi.encode(bytes32 tipHash, bytes32 vaultId, address account, uint64
-  amount, bytes32 depositTag, bytes32 vaultOpenedHash)` (exactly 192 bytes); it requires
-  `relay.isInBestChain(tipHash)` and `relay.confirmationWork(tipHash) >= minConfirmationWork`,
-  the five signers' signatures (sorted) over the `VaultOpened` digest of `vaultOpenedHash`, and
-  `verifier.verify(seal, depositImageId, sha256(journal))`. Disabled (reverts) when the
+  Reverts with `MintRequiresProof` in `ProofOnly` mode (K1, D25; the Base Sepolia deployment).
+- `attestDepositWithProof` (Tier 2, D22) accepts a proof instead of an attestation.
+  `journal = abi.encode(bytes32 tipHash, bytes32 vaultId, address account, uint64 amount,
+  bytes32 depositTag, bytes32 vaultOpenedHash)` (exactly 192 bytes); the seal must start with
+  `depositSealSelector` (Y1); it requires `relay.isInBestChain(tipHash)` and
+  `relay.confirmationWork(tipHash) >= minConfirmationWork`, the five signers' signatures
+  (sorted) over the `VaultOpened` digest of `vaultOpenedHash`, and `verifier.verify(seal,
+  depositImageId, sha256(journal))`. It then **reserves** the vault id, the tag and the account
+  and emits `ActivationPending` with `readyHeight = relay tip height + finalizeDepth` and
+  `readyTime = block.timestamp + finalizeDelay` (K3, D26). Disabled (reverts) when the
   deployment has no verifier. Anyone may relay.
+- `finalizeActivation` (anyone): the relay's tip height `>= readyHeight`, `block.timestamp >=
+  readyTime`, and the anchor still on the best chain under `minConfirmationWork`; then the same
+  effects as `attestDeposit`, emitting `VaultActivated`.
+- `dropPendingActivation` (anyone): only once the anchor is off the relay's best chain; frees the
+  vault id, the tag and the account (nothing was minted).
+- `VaultActivated.depositTag` names the note that backs the vault: the signers root its lineage
+  there and never refund it (K2-a, D27).
 - `cancelVault` (D23): 3 signer signatures over `VaultCancellation(vaultId)`; only a vault that
-  is still `None`; it becomes `Cancelled` and can never be activated.
+  is still `None` with no pending proof; it becomes `Cancelled` and can never be activated.
 - `requestRelease`: caller must be the vault's account; withdraws `outstanding` from Morpho on
   behalf of the account to the Registry (reverts while debt remains), burns it,
   `outstanding = 0`, `Closed`.
@@ -169,7 +190,8 @@ event VaultCancelled(bytes32 indexed vaultId);
 ```solidity
 function liquidate(address borrower, uint256 seizedAssets, uint256 repaidShares, bytes32 liquidatorCommitment)
     external returns (uint256 seized, uint256 repaid);
-function closeWithCollateral(CloseRequest calldata req, bytes calldata userSig, bytes32 mmCommitment, uint256 maxRepayAssets) external;
+function closeWithCollateral(CloseRequest calldata req, bytes calldata userSig, bytes32 mmCommitment, uint256 maxRepayAssets,
+    uint64 minMmAmount) external;
 function invalidateNonce(uint256 nonce) external;                 // msg.sender = account
 function nonceUsed(address account, uint256 nonce) external view returns (bool);
 
@@ -189,6 +211,7 @@ event NonceInvalidated(address indexed account, uint256 nonce);
   repays all borrow shares (USDC pulled from the executor in `onMorphoRepay`), at most `maxRepayAssets` (chosen
   by the executor: the borrower may borrow more after signing; D21),
   `mmAmount = ceil(repaidAssets * (10_000 + marginBps) * 1e36 / (10_000 * price))`,
+  `mmAmount >= minMmAmount` (Y7: chosen by the executor, the price may rise after it quoted),
   `userAmount = outstanding - mmAmount >= minUserAmount`, withdraws `outstanding` to itself,
   `Registry.recordClose` (I8).
 

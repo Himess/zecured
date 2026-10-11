@@ -7,16 +7,19 @@
 //! account, amount, expiry height and the hashes of its address and viewing key), the proof
 //! shows:
 //!
-//! 1. A v6 transaction with only an Ironwood bundle (no transparent, Sapling or Orchard parts:
-//!    the deposit rule D5) is in some block B: its txid is under B's header `merkleRoot`.
+//! 1. A v6 transaction of the NU7 epoch with only an Ironwood bundle, outputs enabled (no
+//!    transparent, Sapling or Orchard bundle, even an empty one: the deposit rule D5, applied
+//!    by the signers' P1 through the same [`check_deposit_transaction`]) is in some block B:
+//!    its txid is under B's header `merkleRoot`.
 //! 2. B is in the chain history committed to by a later header T: B's ZIP 221 history-tree
 //!    leaf (block hash and height) is in the tree whose root, with T's auth data root, hashes to
 //!    T's `hashBlockCommitments`. Only T is public, never B: the deposit's block stays hidden
 //!    among the epoch's blocks. B's height is at most the vault's expiry height.
-//! 3. One of the transaction's Ironwood actions creates a note of the vault's amount to the
-//!    vault's address: the opened note matches the action's note commitment, and the action's
-//!    ciphertext decrypts to that note under the ephemeral key, so the vault (which holds the
-//!    matching incoming viewing key) can find and spend it.
+//! 3. One of the transaction's Ironwood actions creates a V3 (ZIP 2005) note of the vault's
+//!    amount to the vault's published receiver (P1 applies the same [`vault_receiver`]): the
+//!    opened note matches the action's note commitment, and the action's ciphertext decrypts to
+//!    that note under the ephemeral key, so the vault (which holds the matching incoming
+//!    viewing key) can find and spend it.
 //! 4. The deposit tag is a PRF of the note commitment under a key derived from the vault's
 //!    viewing key: unique per note, and unlinkable to the note by anyone without that key.
 //!
@@ -39,7 +42,7 @@ use tiny_keccak::{Hasher, Keccak};
 use zcash_address::unified::{self, Container, Encoding, Receiver};
 use zcash_history::{NodeDataV3, V3, Version};
 use zcash_note_encryption::{Domain, try_output_recovery_with_pkd_esk};
-use zcash_primitives::transaction::Transaction;
+use zcash_primitives::transaction::{Authorized, Transaction, TransactionData, TxVersion};
 use zcash_protocol::consensus::{BranchId, NetworkType};
 
 /// NU7 consensus branch ID: the epoch whose history tree the proof walks.
@@ -165,7 +168,11 @@ pub fn vault_opened_hash(
 #[derive(Debug, PartialEq, Eq)]
 pub enum Error {
     Transaction,
+    /// Not a v6 transaction of the NU7 epoch (O5).
+    NotNu7V6,
     NotIronwoodOnly,
+    /// The Ironwood bundle does not enable outputs (O5).
+    OutputsDisabled,
     NoSuchAction,
     TxidNotInBlock,
     Header,
@@ -176,6 +183,8 @@ pub enum Error {
     Note,
     NoteCommitmentMismatch,
     NotDecryptable,
+    /// The note plaintext is not a V3 (ZIP 2005) Ironwood note (O5).
+    NoteVersion,
     Address,
     WrongRecipient,
 }
@@ -231,39 +240,93 @@ pub fn block_commitments(history_root: &[u8; 32], auth_data_root: &[u8; 32]) -> 
     blake2b_256(b"ZcashBlockCommit", &[], &[history_root, auth_data_root, &[0u8; 32]])
 }
 
-fn node(bytes: &[u8]) -> Result<NodeDataV3, Error> {
-    <V3 as Version>::from_bytes(NU7_BRANCH_ID, bytes).map_err(|_| Error::HistoryPath)
-}
-
-/// Checks the witness and returns the public output, or why it fails.
-pub fn verify(w: &Witness) -> Result<Journal, Error> {
-    // 1. The transaction: v6, Ironwood only (D5), and its txid under block B's merkleRoot.
-    let branch = BranchId::try_from(NU7_BRANCH_ID).map_err(|_| Error::Transaction)?;
-    let tx = Transaction::read(&w.tx[..], branch).map_err(|_| Error::Transaction)?;
+/// D5, strictly (O5, K2-c): a v6 transaction of the NU7 epoch whose only bundle is an Ironwood
+/// one with outputs enabled; no transparent, Sapling or Orchard-pool bundle, even an empty one.
+/// The deposit statement and the signers' P1 apply this same function.
+pub fn check_deposit_transaction(tx: &TransactionData<Authorized>) -> Result<(), Error> {
+    if !matches!(tx.version(), TxVersion::V6) || tx.consensus_branch_id() != BranchId::Nu7 {
+        return Err(Error::NotNu7V6);
+    }
     if tx.transparent_bundle().is_some() || tx.sapling_bundle().is_some() || tx.orchard_bundle().is_some() {
         return Err(Error::NotIronwoodOnly);
     }
     let bundle = tx.ironwood_bundle().ok_or(Error::NotIronwoodOnly)?;
-    let action = bundle.actions().get(w.action_index as usize).ok_or(Error::NoSuchAction)?;
-    if w.block_header.len() != HEADER_LENGTH || w.tip_header.len() != HEADER_LENGTH {
+    if !bundle.flags().outputs_enabled() {
+        return Err(Error::OutputsDisabled);
+    }
+    Ok(())
+}
+
+/// The vault's published receiver (K2-c): its unified address must be a Testnet address whose
+/// only receiver is an Orchard-protocol one (the address format Ironwood notes use). A deposit
+/// must pay exactly this receiver, not another diversified address of the vault. The deposit
+/// statement and the signers' P1 apply this same function.
+pub fn vault_receiver(address: &str) -> Result<[u8; 43], Error> {
+    let (network, _, ua) = unified::Address::decode(address).map_err(|_| Error::Address)?;
+    if network != NetworkType::Test {
+        return Err(Error::Address);
+    }
+    match ua.items().as_slice() {
+        [Receiver::Orchard(r)] => Ok(*r),
+        _ => Err(Error::WrongRecipient),
+    }
+}
+
+fn node(bytes: &[u8]) -> Result<NodeDataV3, Error> {
+    <V3 as Version>::from_bytes(NU7_BRANCH_ID, bytes).map_err(|_| Error::HistoryPath)
+}
+
+/// Where a transaction is: its block B and B's place in the chain history a later header T
+/// commits to. Shared by every statement about a mined transaction (the deposit statement here;
+/// Tier 3's violation statements prove a spend's inclusion the same way).
+#[derive(Clone, Copy, Debug)]
+pub struct Inclusion<'a> {
+    /// The transaction's position in block B and the SHA-256d Merkle path from its txid.
+    pub tx_index: u32,
+    pub txid_path: &'a [[u8; 32]],
+    /// Block B's header.
+    pub block_header: &'a [u8],
+    /// B's history-tree leaf (ZIP 221 V3), its path to a peak, all peaks (oldest first) and
+    /// which peak the path reaches.
+    pub leaf: &'a [u8],
+    pub mmr_path: &'a [MmrStep],
+    pub peaks: &'a [Vec<u8>],
+    pub peak_index: u32,
+    /// Header T and its block's auth data root (ZIP 244).
+    pub tip_header: &'a [u8],
+    pub tip_auth_data_root: &'a [u8; 32],
+}
+
+/// What [`check_inclusion`] establishes.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct Included {
+    /// Block B's height (hidden: only T is public).
+    pub block_height: u64,
+    /// SHA-256d of header T, internal byte order (as the relay stores it).
+    pub tip_hash: [u8; 32],
+}
+
+/// Proves that `txid` is in a block B that is a leaf of the NU7-epoch chain history committed to
+/// by header T: the txid's Merkle path reaches B's `merkleRoot`, B's ZIP 221 leaf (B alone) is
+/// on a path to one of the peaks, and the peaks with T's auth data root hash to T's
+/// `hashBlockCommitments`.
+pub fn check_inclusion(txid: &[u8; 32], i: &Inclusion<'_>) -> Result<Included, Error> {
+    if i.block_header.len() != HEADER_LENGTH || i.tip_header.len() != HEADER_LENGTH {
         return Err(Error::Header);
     }
-    let merkle_root: [u8; 32] = w.block_header[36..68].try_into().expect("32 bytes");
-    if txid_path_root(*tx.txid().as_ref(), w.tx_index, &w.txid_path) != merkle_root {
+    let merkle_root: [u8; 32] = i.block_header[36..68].try_into().expect("32 bytes");
+    if txid_path_root(*txid, i.tx_index, i.txid_path) != merkle_root {
         return Err(Error::TxidNotInBlock);
     }
 
-    // 2. Block B is a leaf of the history committed to by header T.
-    let leaf = node(&w.leaf)?;
+    let leaf = node(i.leaf)?;
     let v1 = &leaf.v2.v1;
-    if v1.subtree_commitment != sha256d(&w.block_header) || v1.start_height != v1.end_height {
+    if v1.subtree_commitment != sha256d(i.block_header) || v1.start_height != v1.end_height {
         return Err(Error::LeafIsNotTheBlock);
     }
-    if v1.end_height > u64::from(w.expiry_height) {
-        return Err(Error::BlockAfterExpiry);
-    }
+    let block_height = v1.end_height;
     let mut acc = leaf;
-    for step in &w.mmr_path {
+    for step in i.mmr_path {
         let sibling = node(&step.sibling)?;
         acc = if step.sibling_is_left {
             V3::combine(&sibling, &acc)
@@ -271,18 +334,53 @@ pub fn verify(w: &Witness) -> Result<Journal, Error> {
             V3::combine(&acc, &sibling)
         };
     }
-    let peak = w.peaks.get(w.peak_index as usize).ok_or(Error::HistoryPath)?;
+    let peak = i.peaks.get(i.peak_index as usize).ok_or(Error::HistoryPath)?;
     if V3::to_bytes(&acc) != *peak {
         return Err(Error::HistoryPath);
     }
-    let mut peaks = w.peaks.iter();
+    let mut peaks = i.peaks.iter();
     let mut root = node(peaks.next().ok_or(Error::HistoryPath)?)?;
     for p in peaks {
         root = V3::combine(&root, &node(p)?);
     }
-    let tip_commitments: [u8; 32] = w.tip_header[68..100].try_into().expect("32 bytes");
-    if block_commitments(&V3::hash(&root), &w.tip_auth_data_root) != tip_commitments {
+    let tip_commitments: [u8; 32] = i.tip_header[68..100].try_into().expect("32 bytes");
+    if block_commitments(&V3::hash(&root), i.tip_auth_data_root) != tip_commitments {
         return Err(Error::HistoryNotCommitted);
+    }
+    Ok(Included {
+        block_height,
+        tip_hash: sha256d(i.tip_header),
+    })
+}
+
+/// Checks the witness and returns the public output, or why it fails.
+pub fn verify(w: &Witness) -> Result<Journal, Error> {
+    // 1. The transaction: v6 of the NU7 epoch, Ironwood only with outputs enabled (D5, O5).
+    //    (v5 and v6 transactions carry their own branch ID; the one passed to `read` only matters
+    //    for older versions.)
+    let tx = Transaction::read(&w.tx[..], BranchId::Nu7).map_err(|_| Error::Transaction)?;
+    check_deposit_transaction(&tx)?;
+    let bundle = tx.ironwood_bundle().ok_or(Error::NotIronwoodOnly)?;
+    let action = bundle.actions().get(w.action_index as usize).ok_or(Error::NoSuchAction)?;
+
+    // 2. It is in block B, a leaf of the history committed to by header T, at or below the
+    //    vault's expiry height.
+    let included = check_inclusion(
+        tx.txid().as_ref(),
+        &Inclusion {
+            tx_index: w.tx_index,
+            txid_path: &w.txid_path,
+            block_header: &w.block_header,
+            leaf: &w.leaf,
+            mmr_path: &w.mmr_path,
+            peaks: &w.peaks,
+            peak_index: w.peak_index,
+            tip_header: &w.tip_header,
+            tip_auth_data_root: &w.tip_auth_data_root,
+        },
+    )?;
+    if included.block_height > u64::from(w.expiry_height) {
+        return Err(Error::BlockAfterExpiry);
     }
 
     // 3. The note. Recovering the action's ciphertext with the ephemeral secret derived from the
@@ -316,21 +414,19 @@ pub fn verify(w: &Witness) -> Result<Journal, Error> {
     {
         return Err(Error::NoteCommitmentMismatch);
     }
-
-    // 4. The recipient is the vault's (Ironwood-only, testnet) address.
-    let (network, _, ua) = unified::Address::decode(&w.vault_address).map_err(|_| Error::Address)?;
-    if network != NetworkType::Test {
-        return Err(Error::Address);
+    if recovered.version() != NoteVersion::V3 {
+        return Err(Error::NoteVersion);
     }
-    match ua.items().as_slice() {
-        [Receiver::Orchard(r)] if *r == note.recipient().to_raw_address_bytes() => {}
-        _ => return Err(Error::WrongRecipient),
+
+    // 4. The recipient is the vault's published (Ironwood-only, Testnet) receiver.
+    if vault_receiver(&w.vault_address)? != note.recipient().to_raw_address_bytes() {
+        return Err(Error::WrongRecipient);
     }
 
     // The deposit's note commitment, as recovery checked it.
     let cmx = action.cmx().to_bytes();
     Ok(Journal {
-        tip_hash: sha256d(&w.tip_header),
+        tip_hash: included.tip_hash,
         vault_id: w.vault_id,
         account: w.account,
         amount: w.note_value,

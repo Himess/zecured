@@ -3,7 +3,7 @@
 # (methods/guest) has its own workspace and is built by risc0-build for the zkVM target.
 [workspace]
 resolver = "2"
-members = ["host", "methods"]
+members = ["host", "methods", "k4"]
 
 [workspace.package]
 edition = "2024"

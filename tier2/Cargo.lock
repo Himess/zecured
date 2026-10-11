@@ -4362,12 +4362,24 @@ dependencies = [
 ]
 
 [[package]]
+name = "zecured-deposit-k4"
+version = "0.1.0"
+dependencies = [
+ "orchard",
+ "zcash_address",
+ "zcash_history",
+ "zcash_protocol",
+ "zecured-deposit-statement",
+]
+
+[[package]]
 name = "zecured-deposit-statement"
 version = "0.1.0"
 dependencies = [
  "blake2b_simd",
  "orchard",
  "serde",
+ "serde_json",
  "sha2 0.10.9",
  "tiny-keccak",
  "zcash_address",
@@ -4375,6 +4387,7 @@ dependencies = [
  "zcash_note_encryption",
  "zcash_primitives",
  "zcash_protocol",
+ "zecured-deposit-k4",
 ]
 
 [[package]]
@@ -4387,6 +4400,7 @@ dependencies = [
  "risc0-zkvm",
  "serde_json",
  "sha2 0.10.9",
+ "zecured-deposit-k4",
  "zecured-deposit-statement",
  "zecured-tier2-methods",
 ]
