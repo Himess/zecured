@@ -12,7 +12,8 @@ import {IZZEC} from "./interfaces/IZZEC.sol";
 ///         - burn: by the Registry, from the Registry or the SettlementAdapter;
 ///         - Registry -> Morpho: only when Morpho pulls it (`supplyCollateral`);
 ///         - Morpho -> Registry / Adapter: only while that receiver armed a one-shot expectation with
-///           `expectFromMorpho(maxAmount)` (EIP-1153 transient storage, consumed by the transfer);
+///           `expectFromMorpho(maxAmount)` (EIP-1153 transient storage, consumed by the transfer), which the receiver
+///           then closes with `settleExpectation` (Y5);
 ///         - everything else reverts. Morpho reports a refused transfer as "transfer reverted", which is what blocks
 ///           an account withdrawing its own collateral, a direct `Morpho.liquidate` and a zZEC flash loan.
 /// @dev Wiring: Registry and Adapter addresses are immutable and are predicted before deployment (CREATE addresses
@@ -29,6 +30,9 @@ contract ZZEC is ERC20, IZZEC {
     ///      flight at once, and each arms immediately before its Morpho call.
     address private transient _expectedRecipient;
     uint256 private transient _expectedMax;
+    /// @dev The receipt of the transfer that consumed the expectation, until `settleExpectation`.
+    address private transient _receivedBy;
+    uint256 private transient _received;
 
     constructor(address registry_, address adapter_, address morpho_) ERC20("Zecured ZEC Receipt", "zZEC") {
         if (registry_ == address(0) || adapter_ == address(0) || morpho_ == address(0)) revert ZeroAddress();
@@ -59,6 +63,19 @@ contract ZZEC is ERC20, IZZEC {
         if (msg.sender != registry && msg.sender != adapter) revert OnlyRegistryOrAdapter(msg.sender);
         _expectedRecipient = msg.sender;
         _expectedMax = maxAmount;
+        _receivedBy = address(0);
+        _received = 0;
+    }
+
+    /// @inheritdoc IZZEC
+    function settleExpectation() external returns (uint256 received) {
+        if (msg.sender != registry && msg.sender != adapter) revert OnlyRegistryOrAdapter(msg.sender);
+        if (_receivedBy != msg.sender) revert ExpectationNotConsumed(msg.sender);
+        received = _received;
+        _expectedRecipient = address(0);
+        _expectedMax = 0;
+        _receivedBy = address(0);
+        _received = 0;
     }
 
     /// @inheritdoc IZZEC
@@ -80,6 +97,8 @@ contract ZZEC is ERC20, IZZEC {
             if (to != _expectedRecipient || value > _expectedMax) revert UnexpectedTransferFromMorpho(to, value);
             _expectedRecipient = address(0);
             _expectedMax = 0;
+            _receivedBy = to;
+            _received = value;
         } else if (from != registry || to != morpho || msg.sender != morpho) {
             // Into Morpho: only the Registry's zZEC, only pulled by Morpho itself (supplyCollateral).
             revert TransferNotAllowed(from, to);

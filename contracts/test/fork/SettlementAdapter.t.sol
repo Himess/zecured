@@ -60,7 +60,7 @@ contract SettlementAdapterTest is ZecuredFixture {
 
     function _close(CloseRequest memory req, bytes memory sig) internal {
         vm.prank(req.executor);
-        adapter.closeWithCollateral(req, sig, MM_COMMITMENT, type(uint256).max);
+        adapter.closeWithCollateral(req, sig, MM_COMMITMENT, type(uint256).max, 0);
     }
 
     // ================================================================== liquidate
@@ -392,7 +392,7 @@ contract SettlementAdapterTest is ZecuredFixture {
         for (uint256 i; i < callers.length; ++i) {
             vm.prank(callers[i]);
             vm.expectRevert(abi.encodeWithSelector(ISettlementAdapter.NotExecutor.selector, callers[i], marketMaker));
-            adapter.closeWithCollateral(req, sig, MM_COMMITMENT, type(uint256).max);
+            adapter.closeWithCollateral(req, sig, MM_COMMITMENT, type(uint256).max, 0);
         }
     }
 
@@ -403,7 +403,7 @@ contract SettlementAdapterTest is ZecuredFixture {
         vm.warp(uint256(req.deadline) + 1);
         vm.prank(marketMaker);
         vm.expectRevert(abi.encodeWithSelector(ISettlementAdapter.RequestExpired.selector, req.deadline));
-        adapter.closeWithCollateral(req, sig, MM_COMMITMENT, type(uint256).max);
+        adapter.closeWithCollateral(req, sig, MM_COMMITMENT, type(uint256).max, 0);
         // block.timestamp == deadline is still valid.
         vm.warp(req.deadline);
         _fundAndApproveAdapter(marketMaker, MORPHO.expectedBorrowAssets(params, account));
@@ -419,7 +419,7 @@ contract SettlementAdapterTest is ZecuredFixture {
         _close(req, sig);
         vm.prank(marketMaker);
         vm.expectRevert(abi.encodeWithSelector(ISettlementAdapter.NonceAlreadyUsed.selector, account, 7));
-        adapter.closeWithCollateral(req, sig, MM_COMMITMENT, type(uint256).max);
+        adapter.closeWithCollateral(req, sig, MM_COMMITMENT, type(uint256).max, 0);
     }
 
     function test_close_revertsOnAnInvalidatedNonce() public {
@@ -433,7 +433,7 @@ contract SettlementAdapterTest is ZecuredFixture {
         assertTrue(adapter.nonceUsed(account, 9));
         vm.prank(marketMaker);
         vm.expectRevert(abi.encodeWithSelector(ISettlementAdapter.NonceAlreadyUsed.selector, account, 9));
-        adapter.closeWithCollateral(req, sig, MM_COMMITMENT, type(uint256).max);
+        adapter.closeWithCollateral(req, sig, MM_COMMITMENT, type(uint256).max, 0);
         assertGt(_position(account).collateral, 0, "nothing withdrawn");
     }
 
@@ -443,7 +443,7 @@ contract SettlementAdapterTest is ZecuredFixture {
         bytes memory sig = _signClose(accountKey, req);
         vm.prank(marketMaker);
         vm.expectRevert(abi.encodeWithSelector(ISettlementAdapter.MarginTooHigh.selector, 501, 500));
-        adapter.closeWithCollateral(req, sig, MM_COMMITMENT, type(uint256).max);
+        adapter.closeWithCollateral(req, sig, MM_COMMITMENT, type(uint256).max, 0);
     }
 
     function test_close_revertsOnZeroCommitments() public {
@@ -452,13 +452,13 @@ contract SettlementAdapterTest is ZecuredFixture {
         bytes memory sig = _signClose(accountKey, req);
         vm.prank(marketMaker);
         vm.expectRevert(ISettlementAdapter.ZeroCommitment.selector);
-        adapter.closeWithCollateral(req, sig, bytes32(0), type(uint256).max);
+        adapter.closeWithCollateral(req, sig, bytes32(0), type(uint256).max, 0);
 
         req.userCommitment = bytes32(0);
         sig = _signClose(accountKey, req);
         vm.prank(marketMaker);
         vm.expectRevert(ISettlementAdapter.ZeroCommitment.selector);
-        adapter.closeWithCollateral(req, sig, MM_COMMITMENT, type(uint256).max);
+        adapter.closeWithCollateral(req, sig, MM_COMMITMENT, type(uint256).max, 0);
     }
 
     function test_close_revertsWhenTheVaultIsNotTheAccounts() public {
@@ -471,20 +471,20 @@ contract SettlementAdapterTest is ZecuredFixture {
         bytes memory sig = _signClose(accountKey, req);
         vm.prank(marketMaker);
         vm.expectRevert(abi.encodeWithSelector(ISettlementAdapter.VaultAccountMismatch.selector, otherVault, account));
-        adapter.closeWithCollateral(req, sig, MM_COMMITMENT, type(uint256).max);
+        adapter.closeWithCollateral(req, sig, MM_COMMITMENT, type(uint256).max, 0);
 
         // A request for a vault id of zero / an account without a vault.
         req = _closeRequest(bytes32(0), stranger, 100, 0, 1);
         vm.prank(marketMaker);
         vm.expectRevert(abi.encodeWithSelector(ISettlementAdapter.VaultAccountMismatch.selector, bytes32(0), stranger));
-        adapter.closeWithCollateral(req, "", MM_COMMITMENT, type(uint256).max);
+        adapter.closeWithCollateral(req, "", MM_COMMITMENT, type(uint256).max, 0);
 
         // The other account signs for the first account's vault: the vault binding fails before the signature.
         req = _closeRequest(vaultId, other, 100, 0, 1);
         sig = _signClose(otherKey, req);
         vm.prank(marketMaker);
         vm.expectRevert(abi.encodeWithSelector(ISettlementAdapter.VaultAccountMismatch.selector, vaultId, other));
-        adapter.closeWithCollateral(req, sig, MM_COMMITMENT, type(uint256).max);
+        adapter.closeWithCollateral(req, sig, MM_COMMITMENT, type(uint256).max, 0);
     }
 
     function test_close_revertsForAClosedVault() public {
@@ -496,7 +496,7 @@ contract SettlementAdapterTest is ZecuredFixture {
         bytes memory sig = _signClose(accountKey, req);
         vm.prank(marketMaker);
         vm.expectRevert(abi.encodeWithSelector(ISettlementAdapter.VaultNotActive.selector, vaultId));
-        adapter.closeWithCollateral(req, sig, MM_COMMITMENT, type(uint256).max);
+        adapter.closeWithCollateral(req, sig, MM_COMMITMENT, type(uint256).max, 0);
     }
 
     function test_close_revertsOnAnInvalidSignature() public {
@@ -508,23 +508,23 @@ contract SettlementAdapterTest is ZecuredFixture {
         bytes memory sig = _signClose(strangerKey, req);
         vm.prank(marketMaker);
         vm.expectRevert(ISettlementAdapter.InvalidUserSignature.selector);
-        adapter.closeWithCollateral(req, sig, MM_COMMITMENT, type(uint256).max);
+        adapter.closeWithCollateral(req, sig, MM_COMMITMENT, type(uint256).max, 0);
 
         // Signed by the account, but for different terms (the executor raises minUserAmount... or lowers it).
         sig = _signClose(accountKey, req);
         req.minUserAmount = 1;
         vm.prank(marketMaker);
         vm.expectRevert(ISettlementAdapter.InvalidUserSignature.selector);
-        adapter.closeWithCollateral(req, sig, MM_COMMITMENT, type(uint256).max);
+        adapter.closeWithCollateral(req, sig, MM_COMMITMENT, type(uint256).max, 0);
 
         // Empty and garbage signatures.
         req.minUserAmount = 0;
         vm.prank(marketMaker);
         vm.expectRevert(ISettlementAdapter.InvalidUserSignature.selector);
-        adapter.closeWithCollateral(req, "", MM_COMMITMENT, type(uint256).max);
+        adapter.closeWithCollateral(req, "", MM_COMMITMENT, type(uint256).max, 0);
         vm.prank(marketMaker);
         vm.expectRevert(ISettlementAdapter.InvalidUserSignature.selector);
-        adapter.closeWithCollateral(req, new bytes(65), MM_COMMITMENT, type(uint256).max);
+        adapter.closeWithCollateral(req, new bytes(65), MM_COMMITMENT, type(uint256).max, 0);
     }
 
     function test_close_revertsWithoutDebt() public {
@@ -534,7 +534,7 @@ contract SettlementAdapterTest is ZecuredFixture {
         bytes memory sig = _signClose(accountKey, req);
         vm.prank(marketMaker);
         vm.expectRevert(abi.encodeWithSelector(ISettlementAdapter.NoDebt.selector, account));
-        adapter.closeWithCollateral(req, sig, MM_COMMITMENT, type(uint256).max);
+        adapter.closeWithCollateral(req, sig, MM_COMMITMENT, type(uint256).max, 0);
     }
 
     function test_close_revertsBelowTheUsersMinimum() public {
@@ -548,7 +548,7 @@ contract SettlementAdapterTest is ZecuredFixture {
         vm.expectRevert(
             abi.encodeWithSelector(ISettlementAdapter.UserAmountBelowMinimum.selector, userAmount, userAmount + 1)
         );
-        adapter.closeWithCollateral(req, sig, MM_COMMITMENT, type(uint256).max);
+        adapter.closeWithCollateral(req, sig, MM_COMMITMENT, type(uint256).max, 0);
 
         // A price drop after signing shrinks the user's part below the signed minimum.
         req = _closeRequest(vaultId, account, 100, uint64(userAmount), 2);
@@ -556,7 +556,7 @@ contract SettlementAdapterTest is ZecuredFixture {
         oracle.setPrice(39e34);
         vm.prank(marketMaker);
         vm.expectPartialRevert(ISettlementAdapter.UserAmountBelowMinimum.selector);
-        adapter.closeWithCollateral(req, sig, MM_COMMITMENT, type(uint256).max);
+        adapter.closeWithCollateral(req, sig, MM_COMMITMENT, type(uint256).max, 0);
     }
 
     function test_close_revertsWhenDebtPlusMarginExceedsTheCollateral() public {
@@ -569,7 +569,7 @@ contract SettlementAdapterTest is ZecuredFixture {
         uint256 mmAmount = _expectedMmAmount(debt, 100); // 1,212,000 zat > 1,000,000
         vm.prank(marketMaker);
         vm.expectRevert(abi.encodeWithSelector(ISettlementAdapter.CloseExceedsCollateral.selector, mmAmount, VAULT_001));
-        adapter.closeWithCollateral(req, sig, MM_COMMITMENT, type(uint256).max);
+        adapter.closeWithCollateral(req, sig, MM_COMMITMENT, type(uint256).max, 0);
     }
 
     /// Without the account's Morpho authorization of the Adapter, the close reverts atomically (the repay too).
@@ -585,7 +585,7 @@ contract SettlementAdapterTest is ZecuredFixture {
         bytes memory sig = _signClose(accountKey, req);
         vm.prank(marketMaker);
         vm.expectRevert(bytes("unauthorized"));
-        adapter.closeWithCollateral(req, sig, MM_COMMITMENT, type(uint256).max);
+        adapter.closeWithCollateral(req, sig, MM_COMMITMENT, type(uint256).max, 0);
         assertEq(_position(account).borrowShares, sharesBefore, "repay rolled back");
         assertEq(usdc.balanceOf(marketMaker), 1 * USDC);
         assertFalse(adapter.nonceUsed(account, 1), "nonce not consumed");
@@ -602,7 +602,7 @@ contract SettlementAdapterTest is ZecuredFixture {
         vm.expectRevert(
             abi.encodeWithSelector(IERC20Errors.ERC20InsufficientAllowance.selector, address(adapter), debt - 1, debt)
         );
-        adapter.closeWithCollateral(req, sig, MM_COMMITMENT, type(uint256).max);
+        adapter.closeWithCollateral(req, sig, MM_COMMITMENT, type(uint256).max, 0);
     }
 
     // ================================================================== defensive checks (unreachable with real Morpho)
@@ -610,14 +610,15 @@ contract SettlementAdapterTest is ZecuredFixture {
     /// The Adapter checks that Morpho delivered exactly the reported zZEC. Forced by mocking zZEC.balanceOf(adapter).
     function test_liquidateAndClose_revertWhenTheReceivedAmountDiffers() public {
         (bytes32 vaultId,) = _openLoan(account, VAULT_005, 4_000);
-        vm.mockCall(address(zzec), abi.encodeCall(zzec.balanceOf, (address(adapter))), abi.encode(uint256(0)));
+        // Y5: the amount comes from the guard's receipt, never from a balance difference.
+        vm.mockCall(address(zzec), abi.encodeCall(zzec.settleExpectation, ()), abi.encode(uint256(0)));
 
         CloseRequest memory req = _closeRequest(vaultId, account, 100, 0, 1);
         bytes memory sig = _signClose(accountKey, req);
         _fundAndApproveAdapter(marketMaker, 1 * USDC);
         vm.prank(marketMaker);
         vm.expectRevert(abi.encodeWithSelector(ISettlementAdapter.UnexpectedCollateralReceived.selector, 0, VAULT_005));
-        adapter.closeWithCollateral(req, sig, MM_COMMITMENT, type(uint256).max);
+        adapter.closeWithCollateral(req, sig, MM_COMMITMENT, type(uint256).max, 0);
 
         oracle.setPrice(PRICE_25_50);
         _fundAndApproveAdapter(liquidator, 1 * USDC);
@@ -635,7 +636,7 @@ contract SettlementAdapterTest is ZecuredFixture {
         vm.mockCall(address(oracle), abi.encodeCall(oracle.price, ()), abi.encode(uint256(0)));
         vm.prank(marketMaker);
         vm.expectRevert(ISettlementAdapter.ZeroPrice.selector);
-        adapter.closeWithCollateral(req, sig, MM_COMMITMENT, type(uint256).max);
+        adapter.closeWithCollateral(req, sig, MM_COMMITMENT, type(uint256).max, 0);
     }
 
     // ================================================================== callbacks and nonces

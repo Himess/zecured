@@ -98,7 +98,7 @@ contract SafeErc1271Test is ZecuredFixture {
         uint256 debt = MORPHO.expectedBorrowAssets(params, address(safe));
         _fundAndApproveAdapter(marketMaker, debt);
         vm.prank(marketMaker);
-        adapter.closeWithCollateral(req, sig, MM_COMMITMENT, type(uint256).max);
+        adapter.closeWithCollateral(req, sig, MM_COMMITMENT, type(uint256).max, 0);
 
         (,, uint64 userAmount,,) = registry.claim(registry.claimIdOf(vaultId, 0));
         (,, uint64 mmAmount,,) = registry.claim(registry.claimIdOf(vaultId, 1));
@@ -134,7 +134,7 @@ contract SafeErc1271Test is ZecuredFixture {
         for (uint256 i; i < wrong.length; ++i) {
             vm.prank(marketMaker);
             vm.expectRevert(ISettlementAdapter.InvalidUserSignature.selector);
-            adapter.closeWithCollateral(req, wrong[i], MM_COMMITMENT, type(uint256).max);
+            adapter.closeWithCollateral(req, wrong[i], MM_COMMITMENT, type(uint256).max, 0);
         }
 
         // A field changed after signing.
@@ -142,12 +142,12 @@ contract SafeErc1271Test is ZecuredFixture {
         req.marginBps = 101;
         vm.prank(marketMaker);
         vm.expectRevert(ISettlementAdapter.InvalidUserSignature.selector);
-        adapter.closeWithCollateral(req, sig, MM_COMMITMENT, type(uint256).max);
+        adapter.closeWithCollateral(req, sig, MM_COMMITMENT, type(uint256).max, 0);
 
         // The request exactly as signed goes through.
         req.marginBps = 100;
         vm.prank(marketMaker);
-        adapter.closeWithCollateral(req, sig, MM_COMMITMENT, type(uint256).max);
+        adapter.closeWithCollateral(req, sig, MM_COMMITMENT, type(uint256).max, 0);
         _assertClaim(
             registry.claimIdOf(vaultId, 1),
             vaultId,

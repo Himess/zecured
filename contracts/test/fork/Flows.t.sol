@@ -102,7 +102,7 @@ contract FlowsTest is ZecuredFixture {
         uint256 supplyBefore = zzec.totalSupply();
 
         vm.prank(marketMaker);
-        adapter.closeWithCollateral(req, sig, MM_COMMITMENT, type(uint256).max);
+        adapter.closeWithCollateral(req, sig, MM_COMMITMENT, type(uint256).max, 0);
 
         bytes32 userClaimId = registry.claimIdOf(vaultId, 0);
         bytes32 mmClaimId = registry.claimIdOf(vaultId, 1);
@@ -182,7 +182,7 @@ contract FlowsTest is ZecuredFixture {
         bytes memory sig = _signClose(accountKey, req);
         _fundAndApproveAdapter(marketMaker, debt);
         vm.prank(marketMaker);
-        adapter.closeWithCollateral(req, sig, MM_COMMITMENT, type(uint256).max);
+        adapter.closeWithCollateral(req, sig, MM_COMMITMENT, type(uint256).max, 0);
 
         (,, uint64 userAmount,,) = registry.claim(registry.claimIdOf(vaultId, 1));
         (,, uint64 mmAmount,,) = registry.claim(registry.claimIdOf(vaultId, 2));
@@ -288,7 +288,7 @@ contract FlowsTest is ZecuredFixture {
         bytes memory sig = _signClose(accountKey, req);
         _fundAndApproveAdapter(marketMaker, debt);
         vm.prank(marketMaker);
-        adapter.closeWithCollateral(req, sig, MM_COMMITMENT, type(uint256).max);
+        adapter.closeWithCollateral(req, sig, MM_COMMITMENT, type(uint256).max, 0);
 
         (,, uint64 userAmount,,) = registry.claim(registry.claimIdOf(vaultId, 2));
         (,, uint64 mmAmount,,) = registry.claim(registry.claimIdOf(vaultId, 3));

@@ -319,7 +319,7 @@ contract ZecuredRegistryTest is ZecuredFixture {
         assertEq(account.code.length, 0, "counterfactual account: no code, no transaction yet");
 
         vm.expectEmit(address(registry));
-        emit IZecuredRegistry.VaultActivated(att.vaultId, account, VAULT_005);
+        emit IZecuredRegistry.VaultActivated(att.vaultId, account, VAULT_005, att.depositTag);
         vm.expectEmit(address(MORPHO));
         emit EventsLib.SupplyCollateral(marketId, address(registry), account, VAULT_005);
         vm.prank(stranger); // anyone may relay
@@ -626,7 +626,8 @@ contract ZecuredRegistryTest is ZecuredFixture {
         bytes32 vaultId = _attest(account, VAULT_005);
         vm.prank(account);
         MORPHO.setAuthorization(address(registry), true);
-        vm.mockCall(address(zzec), abi.encodeCall(zzec.balanceOf, (address(registry))), abi.encode(uint256(0)));
+        // Y5: the amount comes from the guard's receipt, never from a balance difference.
+        vm.mockCall(address(zzec), abi.encodeCall(zzec.settleExpectation, ()), abi.encode(uint256(0)));
         vm.prank(account);
         vm.expectRevert(abi.encodeWithSelector(IZecuredRegistry.UnexpectedCollateralReceived.selector, 0, VAULT_005));
         registry.requestRelease(vaultId, RELEASE_COMMITMENT);

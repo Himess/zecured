@@ -66,6 +66,26 @@
             "name": "minConfirmationWork",
             "type": "uint256",
             "internalType": "uint256"
+          },
+          {
+            "name": "mintMode",
+            "type": "uint8",
+            "internalType": "enum MintMode"
+          },
+          {
+            "name": "sealSelector",
+            "type": "bytes4",
+            "internalType": "bytes4"
+          },
+          {
+            "name": "finalizeDepth",
+            "type": "uint64",
+            "internalType": "uint64"
+          },
+          {
+            "name": "finalizeDelay",
+            "type": "uint64",
+            "internalType": "uint64"
           }
         ]
       }
@@ -351,6 +371,19 @@
   },
   {
     "type": "function",
+    "name": "depositSealSelector",
+    "inputs": [],
+    "outputs": [
+      {
+        "name": "",
+        "type": "bytes4",
+        "internalType": "bytes4"
+      }
+    ],
+    "stateMutability": "view"
+  },
+  {
+    "type": "function",
     "name": "depositTagUsed",
     "inputs": [
       {
@@ -396,6 +429,19 @@
   },
   {
     "type": "function",
+    "name": "dropPendingActivation",
+    "inputs": [
+      {
+        "name": "vaultId",
+        "type": "bytes32",
+        "internalType": "bytes32"
+      }
+    ],
+    "outputs": [],
+    "stateMutability": "nonpayable"
+  },
+  {
+    "type": "function",
     "name": "eip712Domain",
     "inputs": [],
     "outputs": [
@@ -433,6 +479,45 @@
         "name": "extensions",
         "type": "uint256[]",
         "internalType": "uint256[]"
+      }
+    ],
+    "stateMutability": "view"
+  },
+  {
+    "type": "function",
+    "name": "finalizeActivation",
+    "inputs": [
+      {
+        "name": "vaultId",
+        "type": "bytes32",
+        "internalType": "bytes32"
+      }
+    ],
+    "outputs": [],
+    "stateMutability": "nonpayable"
+  },
+  {
+    "type": "function",
+    "name": "finalizeDelay",
+    "inputs": [],
+    "outputs": [
+      {
+        "name": "",
+        "type": "uint64",
+        "internalType": "uint64"
+      }
+    ],
+    "stateMutability": "view"
+  },
+  {
+    "type": "function",
+    "name": "finalizeDepth",
+    "inputs": [],
+    "outputs": [
+      {
+        "name": "",
+        "type": "uint64",
+        "internalType": "uint64"
       }
     ],
     "stateMutability": "view"
@@ -589,6 +674,19 @@
   },
   {
     "type": "function",
+    "name": "mintMode",
+    "inputs": [],
+    "outputs": [
+      {
+        "name": "",
+        "type": "uint8",
+        "internalType": "enum MintMode"
+      }
+    ],
+    "stateMutability": "view"
+  },
+  {
+    "type": "function",
     "name": "morpho",
     "inputs": [],
     "outputs": [
@@ -596,6 +694,50 @@
         "name": "",
         "type": "address",
         "internalType": "contract IMorpho"
+      }
+    ],
+    "stateMutability": "view"
+  },
+  {
+    "type": "function",
+    "name": "pendingActivation",
+    "inputs": [
+      {
+        "name": "vaultId",
+        "type": "bytes32",
+        "internalType": "bytes32"
+      }
+    ],
+    "outputs": [
+      {
+        "name": "account",
+        "type": "address",
+        "internalType": "address"
+      },
+      {
+        "name": "amount",
+        "type": "uint64",
+        "internalType": "uint64"
+      },
+      {
+        "name": "depositTag",
+        "type": "bytes32",
+        "internalType": "bytes32"
+      },
+      {
+        "name": "anchor",
+        "type": "bytes32",
+        "internalType": "bytes32"
+      },
+      {
+        "name": "readyHeight",
+        "type": "uint256",
+        "internalType": "uint256"
+      },
+      {
+        "name": "readyTime",
+        "type": "uint256",
+        "internalType": "uint256"
       }
     ],
     "stateMutability": "view"
@@ -815,6 +957,49 @@
   },
   {
     "type": "event",
+    "name": "ActivationPending",
+    "inputs": [
+      {
+        "name": "vaultId",
+        "type": "bytes32",
+        "indexed": true,
+        "internalType": "bytes32"
+      },
+      {
+        "name": "account",
+        "type": "address",
+        "indexed": true,
+        "internalType": "address"
+      },
+      {
+        "name": "amount",
+        "type": "uint64",
+        "indexed": false,
+        "internalType": "uint64"
+      },
+      {
+        "name": "depositTag",
+        "type": "bytes32",
+        "indexed": false,
+        "internalType": "bytes32"
+      },
+      {
+        "name": "readyHeight",
+        "type": "uint256",
+        "indexed": false,
+        "internalType": "uint256"
+      },
+      {
+        "name": "readyTime",
+        "type": "uint256",
+        "indexed": false,
+        "internalType": "uint256"
+      }
+    ],
+    "anonymous": false
+  },
+  {
+    "type": "event",
     "name": "CloseRelease",
     "inputs": [
       {
@@ -920,6 +1105,19 @@
   },
   {
     "type": "event",
+    "name": "PendingActivationDropped",
+    "inputs": [
+      {
+        "name": "vaultId",
+        "type": "bytes32",
+        "indexed": true,
+        "internalType": "bytes32"
+      }
+    ],
+    "anonymous": false
+  },
+  {
+    "type": "event",
     "name": "ReleaseRequested",
     "inputs": [
       {
@@ -970,6 +1168,12 @@
         "type": "uint64",
         "indexed": false,
         "internalType": "uint64"
+      },
+      {
+        "name": "depositTag",
+        "type": "bytes32",
+        "indexed": false,
+        "internalType": "bytes32"
       }
     ],
     "anonymous": false
@@ -1005,6 +1209,38 @@
   },
   {
     "type": "error",
+    "name": "ActivationIsPending",
+    "inputs": [
+      {
+        "name": "vaultId",
+        "type": "bytes32",
+        "internalType": "bytes32"
+      }
+    ]
+  },
+  {
+    "type": "error",
+    "name": "ActivationNotReady",
+    "inputs": [
+      {
+        "name": "vaultId",
+        "type": "bytes32",
+        "internalType": "bytes32"
+      },
+      {
+        "name": "readyHeight",
+        "type": "uint256",
+        "internalType": "uint256"
+      },
+      {
+        "name": "readyTime",
+        "type": "uint256",
+        "internalType": "uint256"
+      }
+    ]
+  },
+  {
+    "type": "error",
     "name": "AnchorNotConfirmed",
     "inputs": [
       {
@@ -1016,6 +1252,17 @@
         "name": "confirmationWork",
         "type": "uint256",
         "internalType": "uint256"
+      }
+    ]
+  },
+  {
+    "type": "error",
+    "name": "AnchorStillOnBestChain",
+    "inputs": [
+      {
+        "name": "vaultId",
+        "type": "bytes32",
+        "internalType": "bytes32"
       }
     ]
   },
@@ -1186,8 +1433,24 @@
   },
   {
     "type": "error",
+    "name": "MintRequiresProof",
+    "inputs": []
+  },
+  {
+    "type": "error",
     "name": "NoClaims",
     "inputs": []
+  },
+  {
+    "type": "error",
+    "name": "NoPendingActivation",
+    "inputs": [
+      {
+        "name": "vaultId",
+        "type": "bytes32",
+        "internalType": "bytes32"
+      }
+    ]
   },
   {
     "type": "error",
@@ -1336,6 +1599,17 @@
         "name": "expected",
         "type": "uint256",
         "internalType": "uint256"
+      }
+    ]
+  },
+  {
+    "type": "error",
+    "name": "UnexpectedSealSelector",
+    "inputs": [
+      {
+        "name": "selector",
+        "type": "bytes4",
+        "internalType": "bytes4"
       }
     ]
   },

@@ -23,6 +23,8 @@ interface IZZEC is IERC20 {
     error UnexpectedTransferFromMorpho(address to, uint256 value);
     /// @notice Any other transfer (zZEC is not transferable).
     error TransferNotAllowed(address from, address to);
+    /// @notice `settleExpectation` found no transfer out of Morpho to the caller since it armed its expectation.
+    error ExpectationNotConsumed(address caller);
 
     /// @notice The ZecuredRegistry: sole minter and burner.
     function registry() external view returns (address);
@@ -41,8 +43,14 @@ interface IZZEC is IERC20 {
 
     /// @notice Arms a one-shot expectation: the next zZEC transfer out of Morpho may go to `msg.sender`, for at most
     ///         `maxAmount`. Registry and Adapter only. EIP-1153 transient storage: consumed by that transfer and gone
-    ///         at the end of the transaction. Arm it right before the Morpho call that moves zZEC.
+    ///         at the end of the transaction. Arm it right before the Morpho call that moves zZEC, and settle it right
+    ///         after.
     function expectFromMorpho(uint256 maxAmount) external;
+
+    /// @notice Y5: closes the caller's armed expectation. Reverts unless a transfer out of Morpho to the caller
+    ///         consumed it; clears the expectation and the receipt in every case, and returns the amount transferred.
+    ///         Registry and Adapter only.
+    function settleExpectation() external returns (uint256 received);
 
     /// @notice The currently armed expectation (zero values when none). For monitoring and tests.
     function pendingExpectation() external view returns (address recipient, uint256 maxAmount);

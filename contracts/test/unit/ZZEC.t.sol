@@ -269,6 +269,65 @@ contract ZZECTest is Test {
         _run(_arm(adapter, 100), _morphoTransfer(registry, 1));
     }
 
+    // ------------------------------------------------------------------ Y5: settling an expectation
+
+    function _settle(address receiver) internal view returns (OneTx.Call memory) {
+        return _call(receiver, abi.encodeCall(IZZEC.settleExpectation, ()));
+    }
+
+    function test_settle_returnsTheTransferredAmountAndClearsEverything() public {
+        _supplyToMorpho(100);
+        OneTx.Call[] memory calls = new OneTx.Call[](5);
+        calls[0] = _arm(adapter, 100);
+        calls[1] = _morphoTransfer(adapter, 30);
+        calls[2] = _settle(adapter);
+        calls[3] = _call(address(this), abi.encodeCall(IZZEC.pendingExpectation, ()));
+        calls[4] = _morphoTransfer(adapter, 1); // nothing armed any more
+        vm.expectRevert(abi.encodeWithSelector(IZZEC.UnexpectedTransferFromMorpho.selector, adapter, 1));
+        oneTx.run(calls);
+
+        // Without the last call: the receipt is the guard's own record of the transfer.
+        OneTx.Call[] memory first4 = new OneTx.Call[](4);
+        for (uint256 i; i < 4; ++i) {
+            first4[i] = calls[i];
+        }
+        bytes[] memory results = oneTx.run(first4);
+        assertEq(abi.decode(results[2], (uint256)), 30, "settled amount = transferred amount");
+        (address recipient, uint256 maxAmount) = abi.decode(results[3], (address, uint256));
+        assertEq(recipient, address(0));
+        assertEq(maxAmount, 0);
+    }
+
+    function test_settle_revertsWhenMorphoTransferredNothing() public {
+        // Armed, but the Morpho call did not move zZEC: the caller's transaction must fail, which also discards
+        // the expectation.
+        vm.expectRevert(abi.encodeWithSelector(IZZEC.ExpectationNotConsumed.selector, registry));
+        _run(_arm(registry, 100), _settle(registry));
+    }
+
+    function test_settle_onlyByTheReceiverOfTheTransfer() public {
+        _supplyToMorpho(100);
+        vm.expectRevert(abi.encodeWithSelector(IZZEC.ExpectationNotConsumed.selector, registry));
+        _run(_arm(adapter, 100), _morphoTransfer(adapter, 100), _settle(registry));
+        // A second settle finds nothing.
+        OneTx.Call[] memory calls = new OneTx.Call[](4);
+        calls[0] = _arm(adapter, 100);
+        calls[1] = _morphoTransfer(adapter, 100);
+        calls[2] = _settle(adapter);
+        calls[3] = _settle(adapter);
+        vm.expectRevert(abi.encodeWithSelector(IZZEC.ExpectationNotConsumed.selector, adapter));
+        oneTx.run(calls);
+    }
+
+    function test_settle_onlyRegistryOrAdapter() public {
+        address[3] memory callers = [morpho, account, stranger];
+        for (uint256 i; i < callers.length; ++i) {
+            vm.prank(callers[i]);
+            vm.expectRevert(abi.encodeWithSelector(IZZEC.OnlyRegistryOrAdapter.selector, callers[i]));
+            zzec.settleExpectation();
+        }
+    }
+
     function test_expectFromMorpho_onlyRegistryOrAdapter() public {
         address[3] memory callers = [morpho, account, stranger];
         for (uint256 i; i < callers.length; ++i) {

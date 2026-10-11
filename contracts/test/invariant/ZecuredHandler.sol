@@ -40,7 +40,9 @@ contract ZecuredHandler is Test {
     // ------------------------------------------------------------------ ghost state
 
     bytes32[] public vaultIds;
+    bytes32[] public cancelledIds;
     mapping(bytes32 vaultId => uint64) public attested;
+    mapping(bytes32 vaultId => bytes32) public tagOf;
     mapping(bytes32 vaultId => uint256) public accountIndexOf;
     uint256 public nextAccount;
     uint256 internal nextNonce;
@@ -75,6 +77,10 @@ contract ZecuredHandler is Test {
 
     function vaultCount() external view returns (uint256) {
         return vaultIds.length;
+    }
+
+    function cancelledCount() external view returns (uint256) {
+        return cancelledIds.length;
     }
 
     // ------------------------------------------------------------------ helpers
@@ -147,8 +153,17 @@ contract ZecuredHandler is Test {
         registry.attestDeposit(att, _threeSigs(registry.hashDepositAttestation(att), signerSeed));
         vaultIds.push(att.vaultId);
         attested[att.vaultId] = amount;
+        tagOf[att.vaultId] = att.depositTag;
         accountIndexOf[att.vaultId] = index;
         calls["attest"]++;
+    }
+
+    /// L-8: 3 of 5 signers cancel a vault that was never activated (its deposit becomes refundable off-chain).
+    function cancel(uint256 signerSeed) external {
+        bytes32 vaultId = keccak256(abi.encode("zecured.inv.cancelled", cancelledIds.length));
+        registry.cancelVault(vaultId, _threeSigs(registry.hashVaultCancellation(vaultId), signerSeed));
+        cancelledIds.push(vaultId);
+        calls["cancel"]++;
     }
 
     function borrow(uint256 vaultSeed, uint256 ltvBps) external {
@@ -335,7 +350,7 @@ contract ZecuredHandler is Test {
         uint256 supplyBefore = zzec.totalSupply();
 
         vm.prank(marketMaker);
-        try adapter.closeWithCollateral(req, sig, keccak256("zecured.inv.marketMaker"), type(uint256).max) {
+        try adapter.closeWithCollateral(req, sig, keccak256("zecured.inv.marketMaker"), type(uint256).max, 0) {
             calls["close"]++;
             (,, uint64 userAmount,,) = registry.claim(registry.claimIdOf(vaultId, claimsBefore));
             (,, uint64 mmAmount,,) = registry.claim(registry.claimIdOf(vaultId, claimsBefore + 1));
@@ -445,6 +460,29 @@ contract ZecuredHandler is Test {
         calls["attack: weak attestation"]++;
     }
 
+    /// I14: a cancelled vault is never activated (even by a valid 3-of-5 attestation), and an activated vault is never
+    /// cancelled (even by valid signatures).
+    function attackCancellation(uint256 seed, uint256 signerSeed) external {
+        if (seed % 2 == 0 && cancelledIds.length != 0) {
+            bytes32 vaultId = cancelledIds[seed % cancelledIds.length];
+            DepositAttestation memory att = DepositAttestation({
+                vaultId: vaultId,
+                account: stranger,
+                amount: 1_000_000,
+                depositTag: keccak256(abi.encode("zecured.inv.cancelledTag", seed))
+            });
+            try registry.attestDeposit(att, _threeSigs(registry.hashDepositAttestation(att), signerSeed)) {
+                attackSucceeded = true;
+            } catch {}
+        } else if (vaultIds.length != 0) {
+            bytes32 vaultId = vaultIds[seed % vaultIds.length];
+            try registry.cancelVault(vaultId, _threeSigs(registry.hashVaultCancellation(vaultId), signerSeed)) {
+                attackSucceeded = true;
+            } catch {}
+        }
+        calls["attack: cancellation"]++;
+    }
+
     /// I8: a valid signed request executed by someone else, or after its deadline, never withdraws collateral.
     function attackCloseRequest(uint256 vaultSeed, bool expired) external {
         (bool found, bytes32 vaultId, address account) = _vault(vaultSeed);
@@ -468,7 +506,7 @@ contract ZecuredHandler is Test {
             caller = marketMaker;
         }
         vm.prank(caller);
-        try adapter.closeWithCollateral(req, sig, keccak256("zecured.inv.marketMaker"), type(uint256).max) {
+        try adapter.closeWithCollateral(req, sig, keccak256("zecured.inv.marketMaker"), type(uint256).max, 0) {
             attackSucceeded = true;
         } catch {}
         calls["attack: close request"]++;

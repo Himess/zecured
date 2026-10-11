@@ -104,7 +104,6 @@ contract SettlementAdapter is ISettlementAdapter, EIP712, ReentrancyGuardTransie
             if (repaidShares > borrowShares) repaidShares = borrowShares;
         }
 
-        uint256 balanceBefore = zzec.balanceOf(address(this));
         _op = OP_LIQUIDATE;
         _payer = msg.sender;
         // Morpho transfers the seized zZEC BEFORE calling onMorphoLiquidate, so the expectation is armed here, with
@@ -115,7 +114,8 @@ contract SettlementAdapter is ISettlementAdapter, EIP712, ReentrancyGuardTransie
         _op = OP_NONE;
         _payer = address(0);
 
-        uint256 received = zzec.balanceOf(address(this)) - balanceBefore;
+        // Y5: the guard's own receipt of the transfer, never a balance difference; the expectation is cleared.
+        uint256 received = zzec.settleExpectation();
         if (received != seized) revert UnexpectedCollateralReceived(received, seized);
         // D11 dust guard: at least MIN_SEIZE, or the vault's whole remaining outstanding. Any remainder is allowed (it
         // stays with the borrower). `seized <= outstanding` is enforced by the zZEC expectation and the Registry (I9).
@@ -146,7 +146,8 @@ contract SettlementAdapter is ISettlementAdapter, EIP712, ReentrancyGuardTransie
         CloseRequest calldata req,
         bytes calldata userSig,
         bytes32 mmCommitment,
-        uint256 maxRepayAssets
+        uint256 maxRepayAssets,
+        uint64 minMmAmount
     ) external nonReentrant {
         uint64 outstanding = _checkCloseRequest(req, userSig, mmCommitment);
         _nonceUsed[req.account][req.nonce] = true;
@@ -154,6 +155,7 @@ contract SettlementAdapter is ISettlementAdapter, EIP712, ReentrancyGuardTransie
         // 1. Repay all debt with the executor's USDC (at most `maxRepayAssets`: the borrower may have borrowed more
         //    since signing); split the collateral between market maker and borrower.
         (uint64 mmAmount, uint64 userAmount) = _repayAndSplit(req, outstanding, maxRepayAssets);
+        if (mmAmount < minMmAmount) revert MarketMakerAmountBelowMinimum(mmAmount, minMmAmount);
 
         // 2. Withdraw the whole outstanding to this Adapter (account's Morpho authorization; zZEC guard armed).
         _withdrawCollateralToSelf(req.account, outstanding);
@@ -236,13 +238,12 @@ contract SettlementAdapter is ISettlementAdapter, EIP712, ReentrancyGuardTransie
         if (userAmount < req.minUserAmount) revert UserAmountBelowMinimum(userAmount, req.minUserAmount);
     }
 
-    /// @dev Withdraws `amount` of `account`'s collateral to this Adapter. The zZEC expectation is armed immediately
-    ///      before the Morpho call, and the received amount is checked afterwards.
+    /// @dev Withdraws `amount` of `account`'s collateral to this Adapter. Y5: the zZEC expectation is armed immediately
+    ///      before the Morpho call and settled right after (consumed, cleared, amount from the guard's receipt).
     function _withdrawCollateralToSelf(address account, uint64 amount) internal {
-        uint256 balanceBefore = zzec.balanceOf(address(this));
         zzec.expectFromMorpho(amount);
         morpho.withdrawCollateral(_marketParams(), amount, account, address(this));
-        uint256 received = zzec.balanceOf(address(this)) - balanceBefore;
+        uint256 received = zzec.settleExpectation();
         if (received != amount) revert UnexpectedCollateralReceived(received, amount);
     }
 

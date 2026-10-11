@@ -1,7 +1,9 @@
 // SPDX-License-Identifier: MIT
 pragma solidity 0.8.28;
 
+import {Math} from "@openzeppelin/contracts/utils/math/Math.sol";
 import {IMorpho} from "morpho-blue/src/interfaces/IMorpho.sol";
+import {ORACLE_PRICE_SCALE} from "morpho-blue/src/libraries/ConstantsLib.sol";
 import {MorphoBalancesLib} from "morpho-blue/src/libraries/periphery/MorphoBalancesLib.sol";
 import {ISettlementAdapter} from "../../src/interfaces/ISettlementAdapter.sol";
 import {VaultStatus} from "../../src/interfaces/IZecuredRegistry.sol";
@@ -78,12 +80,47 @@ contract ReviewRegressionsTest is ZecuredFixture {
         uint256 debt = MORPHO.expectedBorrowAssets(params, account);
         vm.prank(marketMaker);
         vm.expectRevert(abi.encodeWithSelector(ISettlementAdapter.RepayAboveMaximum.selector, debt, cap));
-        adapter.closeWithCollateral(req, sig, MM_COMMITMENT, cap);
+        adapter.closeWithCollateral(req, sig, MM_COMMITMENT, cap, 0);
         assertEq(uint8(_status(vaultId)), uint8(VaultStatus.Active), "nothing closed");
 
         // With a cap covering the actual debt the same request still executes.
         vm.prank(marketMaker);
-        adapter.closeWithCollateral(req, sig, MM_COMMITMENT, debt);
+        adapter.closeWithCollateral(req, sig, MM_COMMITMENT, debt, 0);
+        assertEq(uint8(_status(vaultId)), uint8(VaultStatus.Closed));
+    }
+
+    /// Y7: the price can rise between the market maker's quote and its transaction, shrinking the zatoshi its USDC buys;
+    /// its own floor `minMmAmount` bounds that.
+    function test_closeRespectsTheExecutorsZecFloor() public {
+        (address account, uint256 key) = makeAddrAndKey("review.y7.account");
+        bytes32 vaultId = _attest(account, VAULT_005);
+        _authorizeBoth(account);
+        _borrow(account, 200_000);
+        CloseRequest memory req = _closeRequest(vaultId, account, 100, 0, 8);
+        bytes memory sig = _signClose(key, req);
+        usdc.mint(marketMaker, 10_000_000);
+        vm.prank(marketMaker);
+        usdc.approve(address(adapter), type(uint256).max);
+
+        // The quote at $40: debt * (1 + 1 %) / price, rounded up (the Adapter's formula).
+        uint256 debt = MORPHO.expectedBorrowAssets(params, account);
+        uint64 quotedMm = uint64(Math.mulDiv(debt * 10_100, ORACLE_PRICE_SCALE, 10_000 * PRICE_40, Math.Rounding.Ceil));
+        oracle.setPrice(PRICE_40 * 11 / 10); // +10 % before the market maker's transaction lands
+        uint256 debtNow = MORPHO.expectedBorrowAssets(params, account);
+        uint64 mmNow = uint64(
+            Math.mulDiv(debtNow * 10_100, ORACLE_PRICE_SCALE, 10_000 * (PRICE_40 * 11 / 10), Math.Rounding.Ceil)
+        );
+        assertLt(mmNow, quotedMm);
+        vm.prank(marketMaker);
+        vm.expectRevert(
+            abi.encodeWithSelector(ISettlementAdapter.MarketMakerAmountBelowMinimum.selector, mmNow, quotedMm)
+        );
+        adapter.closeWithCollateral(req, sig, MM_COMMITMENT, type(uint256).max, quotedMm);
+        assertEq(uint8(_status(vaultId)), uint8(VaultStatus.Active), "nothing closed");
+
+        // A floor the actual share meets: the same request executes.
+        vm.prank(marketMaker);
+        adapter.closeWithCollateral(req, sig, MM_COMMITMENT, type(uint256).max, mmNow);
         assertEq(uint8(_status(vaultId)), uint8(VaultStatus.Closed));
     }
 

@@ -42,6 +42,9 @@ interface ISettlementAdapter is IMorphoLiquidateCallback, IMorphoRepayCallback {
     error UserAmountBelowMinimum(uint256 userAmount, uint64 minUserAmount);
     /// @notice The debt the executor would repay exceeds the cap it passed to `closeWithCollateral`.
     error RepayAboveMaximum(uint256 repaidAssets, uint256 maxRepayAssets);
+    /// @notice Y7: the market maker's share is below the floor it passed to `closeWithCollateral` (the price moved
+    ///         against it since it quoted).
+    error MarketMakerAmountBelowMinimum(uint64 mmAmount, uint64 minMmAmount);
     error OnlyMorpho();
     /// @notice A Morpho callback arrived outside the matching Adapter operation.
     error UnexpectedCallback();
@@ -61,11 +64,16 @@ interface ISettlementAdapter is IMorphoLiquidateCallback, IMorphoRepayCallback {
     /// @notice Executes a signed CloseRequest: repays all of the account's debt with USDC pulled from the executor
     ///         (`msg.sender`) inside `onMorphoRepay`, withdraws the whole outstanding collateral to this Adapter and
     ///         records the close (market maker claim + borrower claim) in the Registry.
+    /// @param maxRepayAssets The most USDC the executor accepts to repay (the borrower may have borrowed more since
+    ///        signing).
+    /// @param minMmAmount Y7: the fewest zatoshi the executor accepts for that USDC (the price may have risen since it
+    ///        quoted).
     function closeWithCollateral(
         CloseRequest calldata req,
         bytes calldata userSig,
         bytes32 mmCommitment,
-        uint256 maxRepayAssets
+        uint256 maxRepayAssets,
+        uint64 minMmAmount
     ) external;
 
     /// @notice Cancels a CloseRequest nonce of `msg.sender` (the account). Idempotent: it never reverts, also for a

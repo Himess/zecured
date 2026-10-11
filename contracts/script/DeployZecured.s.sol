@@ -10,7 +10,7 @@ import {MockZecOracle} from "../src/mocks/MockZecOracle.sol";
 import {ZZEC} from "../src/ZZEC.sol";
 import {ZecuredRegistry} from "../src/ZecuredRegistry.sol";
 import {SettlementAdapter} from "../src/SettlementAdapter.sol";
-import {DepositProofConfig} from "../src/interfaces/IZecuredRegistry.sol";
+import {DepositProofConfig, MintMode} from "../src/interfaces/IZecuredRegistry.sol";
 import {IRiscZeroVerifier} from "../src/interfaces/IRiscZeroVerifier.sol";
 import {MockRiscZeroVerifier} from "../src/mocks/MockRiscZeroVerifier.sol";
 import {IZcashHeaderRelay} from "../src/relay/IZcashHeaderRelay.sol";
@@ -38,11 +38,24 @@ import {IZcashHeaderRelay} from "../src/relay/IZcashHeaderRelay.sol";
 ///        RISC0_VERIFIER_MOCK   with DEPOSIT_IMAGE_ID: true deploys MockRiscZeroVerifier instead (MOCK, accepts
 ///                              unproven journals); only allowed with DEPLOYMENT_NAME=anvil
 ///        MIN_CONFIRMATION_WORK with DEPOSIT_IMAGE_ID: relay work required on top of a proof's anchor header (default
-///                              1,000,000: two to three NU7 Testnet blocks, which average ~490,000 each)
+///                              3,500,000: about ten normal NU7 Testnet blocks, which carry 364,000 to 402,000 each
+///                              around height 4,488,500); at least 1,000,000 outside the local fork
+///        MINT_MODE             with DEPOSIT_IMAGE_ID: proof-only (default, K1) or signer-attested; outside the local
+///                              fork, signer-attested also needs ALLOW_SIGNER_MINT=true
+///        DEPOSIT_SEAL_SELECTOR with DEPOSIT_IMAGE_ID and a real verifier: the seal selector the Registry pins (Y1;
+///                              default RISC Zero's Groth16 v3.0 selector 0x73c457ba, which the router must know); the
+///                              MOCK verifier always pins its own 0xffffffff
+///        FINALIZE_DEPTH        with DEPOSIT_IMAGE_ID: relay headers to wait for after a proof (K3; default 6)
+///        FINALIZE_DELAY        with DEPOSIT_IMAGE_ID: seconds to wait after a proof (K3; default 150, six 25 s blocks)
 ///      Dry run (simulation only, sends nothing):
 ///        forge script script/DeployZecured.s.sol --rpc-url https://sepolia.base.org
 ///      Real deployment (only once the deployer is funded):
 ///        forge script script/DeployZecured.s.sol --rpc-url base_sepolia --broadcast
+/// @dev The part of RISC Zero's RiscZeroVerifierRouter this script reads.
+interface IRiscZeroVerifierRouter {
+    function getVerifier(bytes4 selector) external view returns (address);
+}
+
 contract DeployZecured is Script {
     using MarketParamsLib for MarketParams;
 
@@ -53,7 +66,12 @@ contract DeployZecured is Script {
     string internal constant OUT_DIR = "deployments";
     /// RISC Zero verifier router on Base Sepolia (docs/TIER2.md § 5).
     address internal constant RISC0_ROUTER = 0x0b144E07A0826182B6b59788c34b32Bfa86Fb711;
-    uint256 internal constant DEFAULT_MIN_CONFIRMATION_WORK = 1_000_000;
+    uint256 internal constant DEFAULT_MIN_CONFIRMATION_WORK = 3_500_000;
+    uint256 internal constant FLOOR_MIN_CONFIRMATION_WORK = 1_000_000;
+    /// RISC Zero Groth16 verifier v3.0 selector (verifier parameters digest prefix) behind the router.
+    bytes4 internal constant GROTH16_SELECTOR = 0x73c457ba;
+    uint64 internal constant DEFAULT_FINALIZE_DEPTH = 6;
+    uint64 internal constant DEFAULT_FINALIZE_DELAY = 150;
 
     struct Deployment {
         address deployer;
@@ -141,29 +159,68 @@ contract DeployZecured is Script {
     /// Tier 2 configuration (before the core contracts: a MOCK verifier would shift their predicted addresses).
     function _depositProofs(Deployment memory d) internal {
         bytes32 imageId = vm.envOr("DEPOSIT_IMAGE_ID", bytes32(0));
-        if (imageId == bytes32(0)) return; // proofs disabled
+        bool localFork = keccak256(bytes(vm.envOr("DEPLOYMENT_NAME", string("")))) == keccak256("anvil");
+        if (imageId == bytes32(0)) {
+            // Signer attestations only: the weakest mint path, never by accident outside the local fork (K1).
+            require(
+                localFork || vm.envOr("ALLOW_SIGNER_MINT", false),
+                "DeployZecured: no DEPOSIT_IMAGE_ID: signer-attested minting needs ALLOW_SIGNER_MINT=true"
+            );
+            return;
+        }
         address relay = vm.envAddress("ZCASH_RELAY");
         require(relay.code.length > 0, "DeployZecured: ZCASH_RELAY has no code");
         (bytes32 tip,,) = IZcashHeaderRelay(relay).bestChainTip();
         require(tip != bytes32(0), "DeployZecured: ZCASH_RELAY is not a header relay");
         address verifier;
+        bytes4 selector;
         if (vm.envOr("RISC0_VERIFIER_MOCK", false)) {
-            require(
-                keccak256(bytes(vm.envOr("DEPLOYMENT_NAME", string("")))) == keccak256("anvil"),
-                "DeployZecured: the MOCK verifier is for the local fork only (DEPLOYMENT_NAME=anvil)"
-            );
+            require(localFork, "DeployZecured: the MOCK verifier is for the local fork only (DEPLOYMENT_NAME=anvil)");
             verifier = address(new MockRiscZeroVerifier());
             d.verifierIsMock = true;
+            selector = MockRiscZeroVerifier(verifier).SELECTOR();
         } else {
             verifier = vm.envOr("RISC0_VERIFIER", RISC0_ROUTER);
             require(verifier.code.length > 0, "DeployZecured: RISC0_VERIFIER has no code");
+            bytes memory raw = vm.envOr("DEPOSIT_SEAL_SELECTOR", abi.encodePacked(GROTH16_SELECTOR));
+            require(raw.length == 4, "DeployZecured: DEPOSIT_SEAL_SELECTOR must be 4 bytes");
+            // forge-lint: disable-next-line(unsafe-typecast)
+            selector = bytes4(raw); // checked: exactly four bytes
+            // Y1: the router must route the pinned selector to a verifier now (it reverts for unknown or removed ones).
+            if (verifier == RISC0_ROUTER) {
+                require(
+                    IRiscZeroVerifierRouter(verifier).getVerifier(selector) != address(0),
+                    "DeployZecured: the router has no verifier for DEPOSIT_SEAL_SELECTOR"
+                );
+            }
         }
+        MintMode mode = _mintMode(localFork);
+        uint256 minWork = vm.envOr("MIN_CONFIRMATION_WORK", DEFAULT_MIN_CONFIRMATION_WORK);
+        require(
+            localFork || minWork >= FLOOR_MIN_CONFIRMATION_WORK, "DeployZecured: MIN_CONFIRMATION_WORK below the floor"
+        );
         d.proofs = DepositProofConfig({
             verifier: IRiscZeroVerifier(verifier),
             imageId: imageId,
             relay: IZcashHeaderRelay(relay),
-            minConfirmationWork: vm.envOr("MIN_CONFIRMATION_WORK", DEFAULT_MIN_CONFIRMATION_WORK)
+            minConfirmationWork: minWork,
+            mintMode: mode,
+            sealSelector: selector,
+            finalizeDepth: uint64(vm.envOr("FINALIZE_DEPTH", uint256(DEFAULT_FINALIZE_DEPTH))),
+            finalizeDelay: uint64(vm.envOr("FINALIZE_DELAY", uint256(DEFAULT_FINALIZE_DELAY)))
         });
+    }
+
+    /// K1: proof-only unless signer attestations are asked for explicitly (and allowed outside the local fork).
+    function _mintMode(bool localFork) internal view returns (MintMode) {
+        bytes32 mode = keccak256(bytes(vm.envOr("MINT_MODE", string("proof-only"))));
+        if (mode == keccak256("proof-only")) return MintMode.ProofOnly;
+        require(mode == keccak256("signer-attested"), "DeployZecured: MINT_MODE is proof-only or signer-attested");
+        require(
+            localFork || vm.envOr("ALLOW_SIGNER_MINT", false),
+            "DeployZecured: MINT_MODE=signer-attested needs ALLOW_SIGNER_MINT=true"
+        );
+        return MintMode.SignerAttested;
     }
 
     function _seedLender(Deployment memory d) internal {
@@ -198,11 +255,15 @@ contract DeployZecured is Script {
         console.logBytes32(Id.unwrap(d.marketId));
         console.log("demo lender supply (MockUSDC units):", d.lenderSeed);
         if (address(d.proofs.verifier) == address(0)) {
-            console.log("deposit proofs: disabled");
+            console.log("deposit proofs: disabled; mint mode: signer-attested");
         } else {
             console.log("deposit proofs: verifier", address(d.proofs.verifier), d.verifierIsMock ? "(MOCK)" : "");
             console.log("deposit proofs: relay", address(d.proofs.relay));
             console.log("deposit proofs: min confirmation work", d.proofs.minConfirmationWork);
+            console.log(
+                "mint mode:", d.proofs.mintMode == MintMode.ProofOnly ? "proof-only (K1)" : "signer-attested and proofs"
+            );
+            console.log("finalize depth / delay (s):", d.proofs.finalizeDepth, d.proofs.finalizeDelay);
         }
     }
 
@@ -235,6 +296,12 @@ contract DeployZecured is Script {
         vm.serializeBool(proofs, "verifierIsMock", d.verifierIsMock);
         vm.serializeBytes32(proofs, "imageId", d.proofs.imageId);
         vm.serializeAddress(proofs, "relay", address(d.proofs.relay));
+        vm.serializeString(
+            proofs, "mintMode", d.proofs.mintMode == MintMode.ProofOnly ? "proof-only" : "signer-attested"
+        );
+        vm.serializeBytes(proofs, "sealSelector", abi.encodePacked(d.proofs.sealSelector));
+        vm.serializeUint(proofs, "finalizeDepth", d.proofs.finalizeDepth);
+        vm.serializeUint(proofs, "finalizeDelay", d.proofs.finalizeDelay);
         proofs = vm.serializeString(proofs, "minConfirmationWork", vm.toString(d.proofs.minConfirmationWork));
 
         address[] memory signerList = new address[](5);

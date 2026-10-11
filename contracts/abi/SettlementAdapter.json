@@ -101,6 +101,11 @@
         "name": "maxRepayAssets",
         "type": "uint256",
         "internalType": "uint256"
+      },
+      {
+        "name": "minMmAmount",
+        "type": "uint64",
+        "internalType": "uint64"
       }
     ],
     "outputs": [],
@@ -487,6 +492,22 @@
         "name": "maxMarginBps",
         "type": "uint16",
         "internalType": "uint16"
+      }
+    ]
+  },
+  {
+    "type": "error",
+    "name": "MarketMakerAmountBelowMinimum",
+    "inputs": [
+      {
+        "name": "mmAmount",
+        "type": "uint64",
+        "internalType": "uint64"
+      },
+      {
+        "name": "minMmAmount",
+        "type": "uint64",
+        "internalType": "uint64"
       }
     ]
   },

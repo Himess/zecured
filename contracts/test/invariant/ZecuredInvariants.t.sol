@@ -6,8 +6,9 @@ import {VaultStatus} from "../../src/interfaces/IZecuredRegistry.sol";
 import {ZecuredFixture} from "../utils/ZecuredFixture.sol";
 import {ZecuredHandler} from "./ZecuredHandler.sol";
 
-/// @notice Handler-based invariant tests of CLAUDE.md I1, I2, I3 (on-chain part), I4, I5, I6, I7, I8 and I9 against the
-///         real Morpho Blue on a Base Sepolia fork. Runs/depth: [profile.default.invariant] in foundry.toml.
+/// @notice Handler-based invariant tests of CLAUDE.md I1, I2, I3 (on-chain part), I4 to I9 and the review's I11 to I14
+///         (I13 on-chain part) against the real Morpho Blue on a Base Sepolia fork. Runs/depth:
+///         [profile.default.invariant] in foundry.toml.
 contract ZecuredInvariantsTest is ZecuredFixture {
     ZecuredHandler internal handler;
 
@@ -17,7 +18,7 @@ contract ZecuredInvariantsTest is ZecuredFixture {
         usdc.transferOwnership(address(handler)); // MOCK mint for the handler's actors
         oracle.transferOwnership(address(handler)); // MOCK price moves
 
-        bytes4[] memory selectors = new bytes4[](17);
+        bytes4[] memory selectors = new bytes4[](19);
         selectors[0] = ZecuredHandler.attest.selector;
         selectors[1] = ZecuredHandler.attest.selector; // weighted: vaults first
         selectors[2] = ZecuredHandler.borrow.selector;
@@ -35,6 +36,8 @@ contract ZecuredInvariantsTest is ZecuredFixture {
         selectors[14] = ZecuredHandler.attackCloseRequest.selector;
         selectors[15] = ZecuredHandler.partialRelease.selector;
         selectors[16] = ZecuredHandler.attackPartialRelease.selector;
+        selectors[17] = ZecuredHandler.cancel.selector;
+        selectors[18] = ZecuredHandler.attackCancellation.selector;
         targetSelector(FuzzSelector({addr: address(handler), selectors: selectors}));
         targetContract(address(handler));
         // The handler pranks its own actors, so the caller does not matter. A fixed caller matters on a fork: every
@@ -68,10 +71,10 @@ contract ZecuredInvariantsTest is ZecuredFixture {
         assertEq(recipient, address(0), "expectation left armed");
     }
 
-    /// I3 (Base side) and I9: every vault's attested amount is exactly its outstanding plus its claims (nothing left
-    /// Morpho without a burn and a claim), outstanding never exceeds the attested amount, and Morpho's collateral for
-    /// the account always equals the outstanding.
-    function invariant_I3_I9_burnsAreClaimedAndCollateralMatches() public view {
+    /// I3 (Base side), I9, I11 and I12: every vault's attested amount is exactly its outstanding plus its claims
+    /// (I11 conservation: nothing left Morpho without a burn and a claim), outstanding never exceeds the attested amount
+    /// (I9), and Morpho's collateral for the account always equals the outstanding (I12).
+    function invariant_I3_I9_I11_I12_burnsAreClaimedAndCollateralMatches() public view {
         for (uint256 i; i < handler.vaultCount(); ++i) {
             bytes32 vaultId = handler.vaultIds(i);
             (address account, uint64 outstanding,) = registry.vault(vaultId);
@@ -81,9 +84,9 @@ contract ZecuredInvariantsTest is ZecuredFixture {
                 assertEq(claimVault, vaultId, "claim of another vault");
                 claimed += amount;
             }
-            assertEq(claimed + outstanding, handler.attested(vaultId), "I3: attested == outstanding + claims");
+            assertEq(claimed + outstanding, handler.attested(vaultId), "I11: attested == outstanding + claims");
             assertLe(outstanding, handler.attested(vaultId), "I9");
-            assertEq(_position(account).collateral, outstanding, "I9: Morpho collateral == outstanding");
+            assertEq(_position(account).collateral, outstanding, "I12: Morpho collateral == outstanding");
         }
         assertFalse(handler.i9Violated(), "I9 / D11 violated by a liquidation");
     }
@@ -108,15 +111,40 @@ contract ZecuredInvariantsTest is ZecuredFixture {
         }
     }
 
-    /// I2 / I6 / I8: no attack ever succeeded (account self-withdrawal, direct Morpho liquidation, zZEC flash loan,
+    /// I13 (Base side): the note that backs an activated vault keeps its deposit tag marked used for good; this is
+    /// what every signer checks, on two providers, before refunding a note of the vault's amount (K2).
+    function invariant_I13_activatedTagsStayUsed() public view {
+        for (uint256 i; i < handler.vaultCount(); ++i) {
+            assertTrue(registry.depositTagUsed(handler.tagOf(handler.vaultIds(i))), "I13");
+        }
+    }
+
+    /// I14: Cancelled <=> never activated. A cancelled vault has no account, outstanding or claim; an activated vault
+    /// is never cancelled.
+    function invariant_I14_cancelledIffNeverActivated() public view {
+        for (uint256 i; i < handler.cancelledCount(); ++i) {
+            bytes32 vaultId = handler.cancelledIds(i);
+            (address account, uint64 outstanding, VaultStatus status) = registry.vault(vaultId);
+            assertEq(uint8(status), uint8(VaultStatus.Cancelled), "I14: cancelled");
+            assertEq(account, address(0), "I14: cancelled vault with an account");
+            assertEq(outstanding, 0, "I14: cancelled vault with outstanding");
+            assertEq(registry.claimCount(vaultId), 0, "I14: cancelled vault with claims");
+        }
+        for (uint256 i; i < handler.vaultCount(); ++i) {
+            (,, VaultStatus status) = registry.vault(handler.vaultIds(i));
+            assertTrue(status != VaultStatus.Cancelled, "I14: activated vault cancelled");
+        }
+    }
+
+    /// I2 / I6 / I8 / I14: no attack ever succeeded (account self-withdrawal, direct Morpho liquidation, zZEC flash loan,
     /// attestation with < 3 distinct signers, close request executed by a stranger or after its deadline, partial
-    /// release by anyone but the account).
+    /// release by anyone but the account, activation of a cancelled vault, cancellation of an activated one).
     function invariant_attacksAlwaysFail() public view {
         assertFalse(handler.attackSucceeded(), "an attack succeeded");
     }
 
     function afterInvariant() external view {
-        string[19] memory names = [
+        string[21] memory names = [
             "attest",
             "borrow",
             "repay",
@@ -135,7 +163,9 @@ contract ZecuredInvariantsTest is ZecuredFixture {
             "attack: flash loan",
             "attack: weak attestation",
             "attack: close request",
-            "attack: partial release"
+            "attack: partial release",
+            "cancel",
+            "attack: cancellation"
         ];
         for (uint256 i; i < names.length; ++i) {
             console.log(names[i], handler.calls(names[i]));

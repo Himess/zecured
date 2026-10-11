@@ -17,16 +17,19 @@ import {
     VaultStatus,
     ClaimKind,
     ClaimStatus,
-    DepositProofConfig
+    DepositProofConfig,
+    MintMode
 } from "./interfaces/IZecuredRegistry.sol";
 import {ZecuredEIP712, DepositAttestation} from "./libraries/ZecuredEIP712.sol";
 
 /// @title ZecuredRegistry
 /// @notice Book-keeping for Zecured vaults on Base (docs/INTERFACES.md § 3.2):
 ///         - `attestDeposit`: a 3-of-5 signer attestation activates a vault, mints its zZEC and supplies it straight
-///           into the account's Morpho position (I1, I4, I5, I6);
-///         - `attestDepositWithProof` (Tier 2): the same, on a RISC Zero proof that the deposit is in a Zcash block
-///           committed by a relay-verified header, for the vault all five signers described when it opened;
+///           into the account's Morpho position (I1, I4, I5, I6); disabled in `ProofOnly` mode (K1);
+///         - `attestDepositWithProof` (Tier 2): a RISC Zero proof that the deposit is in a Zcash block committed by a
+///           relay-verified header, for the vault all five signers described when it opened, makes the activation
+///           pending; `finalizeActivation` activates the vault once the relay has moved on and the proof's anchor is
+///           still on its best chain, and `dropPendingActivation` discards it otherwise (K3);
 ///         - `cancelVault` (L-8): 3 of 5 signers retire a vault that was never activated before refunding its deposit;
 ///         - `requestRelease`: the account itself withdraws and burns its whole outstanding once the debt is repaid;
 ///         - `requestPartialRelease` (D14): the account withdraws and burns part of its outstanding, debt or not, as
@@ -71,6 +74,14 @@ contract ZecuredRegistry is IZecuredRegistry, EIP712 {
     IZcashHeaderRelay public immutable relay;
     /// @inheritdoc IZecuredRegistry
     uint256 public immutable minConfirmationWork;
+    /// @inheritdoc IZecuredRegistry
+    MintMode public immutable mintMode;
+    /// @inheritdoc IZecuredRegistry
+    bytes4 public immutable depositSealSelector;
+    /// @inheritdoc IZecuredRegistry
+    uint64 public immutable finalizeDepth;
+    /// @inheritdoc IZecuredRegistry
+    uint64 public immutable finalizeDelay;
 
     // MarketParams cannot be an immutable struct: its fields are stored one by one (collateral token = zzec).
     address private immutable _loanToken;
@@ -110,9 +121,20 @@ contract ZecuredRegistry is IZecuredRegistry, EIP712 {
         ClaimStatus status;
     }
 
+    /// @dev K3: a deposit proof waiting for the relay to move on. Its vault id, tag and account are reserved.
+    struct PendingActivation {
+        address account;
+        uint64 amount;
+        bytes32 depositTag;
+        bytes32 anchor; // the journal's tipHash
+        uint256 readyHeight;
+        uint256 readyTime;
+    }
+
     mapping(bytes32 vaultId => Vault) private _vaults;
     mapping(address account => bytes32 vaultId) private _vaultOf;
     mapping(bytes32 claimId => Claim) private _claims;
+    mapping(bytes32 vaultId => PendingActivation) private _pending;
     /// @inheritdoc IZecuredRegistry
     mapping(bytes32 depositTag => bool used) public depositTagUsed;
 
@@ -130,8 +152,8 @@ contract ZecuredRegistry is IZecuredRegistry, EIP712 {
     /// @param irm_ Interest rate model of the market (must be enabled on Morpho).
     /// @param lltv_ Liquidation LTV of the market (must be enabled on Morpho).
     /// @param signers_ The 5 signer addresses, strictly increasing.
-    /// @param proofs_ Tier 2 deposit proofs: verifier, guest image id, header relay and minimum confirmation work; all
-    ///        zero to disable them.
+    /// @param proofs_ Tier 2 deposit proofs: verifier, guest image id, header relay, minimum confirmation work, mint mode
+    ///        (K1), seal selector (Y1) and finalization depth and delay (K3); all zero (`SignerAttested`) to disable them.
     /// @dev Creates the zZEC market on Morpho unless it already exists (market creation is permissionless, so someone
     ///      may have created it between the zZEC deployment and this one).
     constructor(
@@ -157,11 +179,7 @@ contract ZecuredRegistry is IZecuredRegistry, EIP712 {
             if (signers_[i] <= previous) revert InvalidSignerSet(); // strictly increasing => distinct and non-zero
             previous = signers_[i];
         }
-        bool proofsEnabled = address(proofs_.verifier) != address(0);
-        if (
-            proofsEnabled != (address(proofs_.relay) != address(0)) || proofsEnabled != (proofs_.imageId != bytes32(0))
-                || (!proofsEnabled && proofs_.minConfirmationWork != 0)
-        ) revert InvalidDepositProofConfig();
+        _checkDepositProofConfig(proofs_);
 
         morpho = morpho_;
         zzec = zzec_;
@@ -179,6 +197,10 @@ contract ZecuredRegistry is IZecuredRegistry, EIP712 {
         depositImageId = proofs_.imageId;
         relay = proofs_.relay;
         minConfirmationWork = proofs_.minConfirmationWork;
+        mintMode = proofs_.mintMode;
+        depositSealSelector = proofs_.sealSelector;
+        finalizeDepth = proofs_.finalizeDepth;
+        finalizeDelay = proofs_.finalizeDelay;
 
         MarketParams memory params = MarketParams({
             loanToken: loanToken_, collateralToken: address(zzec_), oracle: oracle_, irm: irm_, lltv: lltv_
@@ -192,20 +214,23 @@ contract ZecuredRegistry is IZecuredRegistry, EIP712 {
 
     /// @inheritdoc IZecuredRegistry
     function attestDeposit(DepositAttestation calldata att, bytes[] calldata sigs) external {
+        if (mintMode == MintMode.ProofOnly) revert MintRequiresProof();
         _checkNewVault(att.vaultId, att.account, att.amount, att.depositTag);
         _verifySignerSignatures(_hashTypedDataV4(ZecuredEIP712.hashDepositAttestation(att)), sigs, THRESHOLD);
         _activate(att.vaultId, att.account, att.amount, att.depositTag);
     }
 
     /// @inheritdoc IZecuredRegistry
-    /// @dev What the proof itself establishes is in tier2/statement/src/lib.rs. The Registry adds: the anchor header is
-    ///      on the relay's best chain with enough work on top (so is the deposit's block, which precedes it); all five
-    ///      signers described the vault (id, owner, account, amount, expiry, address and viewing-key hashes) in the
-    ///      `VaultOpened` whose struct hash the proof computed, which binds the proven note to this vault and account
-    ///      without the address hash ever reaching Base; the vault, tag and account are unused (I4, I5).
+    /// @dev What the proof itself establishes is in tier2/statement/src/lib.rs. The Registry adds: the seal is for the
+    ///      pinned verifier (Y1); the anchor header is on the relay's best chain with enough work on top (so is the
+    ///      deposit's block, which precedes it); all five signers described the vault (id, owner, account, amount,
+    ///      expiry, address and viewing-key hashes) in the `VaultOpened` whose struct hash the proof computed, which
+    ///      binds the proven note to this vault and account without the address hash ever reaching Base; the vault, tag
+    ///      and account are unused (I4, I5). The vault is only activated later, by `finalizeActivation` (K3).
     function attestDepositWithProof(bytes calldata journal, bytes calldata seal, bytes[] calldata openedSigs) external {
         if (address(depositVerifier) == address(0)) revert DepositProofsDisabled();
         if (journal.length != JOURNAL_LENGTH) revert InvalidJournalLength(journal.length);
+        _checkSealSelector(seal);
         // A struct of static fields decodes like the flat tuple; abi.decode rejects dirty address / uint64 words.
         DepositJournal memory j = abi.decode(journal, (DepositJournal));
         _checkNewVault(j.vaultId, j.account, j.amount, j.depositTag);
@@ -215,7 +240,34 @@ contract ZecuredRegistry is IZecuredRegistry, EIP712 {
         _verifySignerSignatures(_hashTypedDataV4(j.vaultOpenedHash), openedSigs, SIGNER_COUNT);
         depositVerifier.verify(seal, depositImageId, sha256(journal));
 
-        _activate(j.vaultId, j.account, j.amount, j.depositTag);
+        _pend(j);
+    }
+
+    /// @inheritdoc IZecuredRegistry
+    function finalizeActivation(bytes32 vaultId) external {
+        PendingActivation memory p = _pending[vaultId];
+        if (p.account == address(0)) revert NoPendingActivation(vaultId);
+        (, uint256 height,) = relay.bestChainTip();
+        if (height < p.readyHeight || block.timestamp < p.readyTime) {
+            revert ActivationNotReady(vaultId, p.readyHeight, p.readyTime);
+        }
+        // Still on the best chain, and confirmation work only grows while it stays there.
+        _checkAnchor(p.anchor);
+        delete _pending[vaultId];
+        // The vault is still None: cancelVault and both mint paths refuse a vault with a pending activation.
+        _activate(vaultId, p.account, p.amount, p.depositTag);
+    }
+
+    /// @inheritdoc IZecuredRegistry
+    function dropPendingActivation(bytes32 vaultId) external {
+        PendingActivation memory p = _pending[vaultId];
+        if (p.account == address(0)) revert NoPendingActivation(vaultId);
+        if (relay.isInBestChain(p.anchor)) revert AnchorStillOnBestChain(vaultId);
+        delete _pending[vaultId];
+        // Nothing was minted: the note may be proven again against the chain that won.
+        depositTagUsed[p.depositTag] = false;
+        delete _vaultOf[p.account];
+        emit PendingActivationDropped(vaultId);
     }
 
     /// @inheritdoc IZecuredRegistry
@@ -223,6 +275,7 @@ contract ZecuredRegistry is IZecuredRegistry, EIP712 {
         if (vaultId == bytes32(0)) revert ZeroVaultId();
         Vault storage v = _vaults[vaultId];
         if (v.status != VaultStatus.None) revert VaultIdUsed(vaultId);
+        if (_pending[vaultId].account != address(0)) revert ActivationIsPending(vaultId);
         _verifySignerSignatures(_hashTypedDataV4(ZecuredEIP712.hashVaultCancellation(vaultId)), sigs, THRESHOLD);
         v.status = VaultStatus.Cancelled;
         emit VaultCancelled(vaultId);
@@ -412,15 +465,77 @@ contract ZecuredRegistry is IZecuredRegistry, EIP712 {
         return _domainSeparatorV4();
     }
 
+    /// @inheritdoc IZecuredRegistry
+    function pendingActivation(bytes32 vaultId)
+        external
+        view
+        returns (
+            address account,
+            uint64 amount,
+            bytes32 depositTag,
+            bytes32 anchor,
+            uint256 readyHeight,
+            uint256 readyTime
+        )
+    {
+        PendingActivation storage p = _pending[vaultId];
+        return (p.account, p.amount, p.depositTag, p.anchor, p.readyHeight, p.readyTime);
+    }
+
     // ------------------------------------------------------------------ internal
 
-    /// @dev I4, I5: a new vault id (never activated nor cancelled), an unused tag and an account without a vault.
+    /// @dev Proofs disabled: everything zero and `SignerAttested` (nothing could mint in `ProofOnly`). Enabled: a relay,
+    ///      an image id, a seal selector and a finalization depth of at least one header.
+    function _checkDepositProofConfig(DepositProofConfig memory c) internal pure {
+        if (address(c.verifier) == address(0)) {
+            if (
+                address(c.relay) != address(0) || c.imageId != bytes32(0) || c.minConfirmationWork != 0
+                    || c.mintMode != MintMode.SignerAttested || c.sealSelector != bytes4(0) || c.finalizeDepth != 0
+                    || c.finalizeDelay != 0
+            ) revert InvalidDepositProofConfig();
+        } else if (
+            address(c.relay) == address(0) || c.imageId == bytes32(0) || c.sealSelector == bytes4(0)
+                || c.finalizeDepth == 0
+        ) {
+            revert InvalidDepositProofConfig();
+        }
+    }
+
+    /// @dev Y1: the router dispatches on the seal's first four bytes; requiring the pinned selector fixes the verifier
+    ///      (a selector, once used, cannot be pointed at another verifier) while keeping the router's emergency stop.
+    function _checkSealSelector(bytes calldata seal) internal view {
+        bytes4 selector = seal.length >= 4 ? bytes4(seal[:4]) : bytes4(0);
+        if (selector != depositSealSelector) revert UnexpectedSealSelector(selector);
+    }
+
+    /// @dev K3: reserves the vault id, tag and account of a proven deposit until `finalizeActivation` or
+    ///      `dropPendingActivation`.
+    function _pend(DepositJournal memory j) internal {
+        depositTagUsed[j.depositTag] = true;
+        _vaultOf[j.account] = j.vaultId;
+        (, uint256 height,) = relay.bestChainTip();
+        uint256 readyHeight = height + finalizeDepth;
+        uint256 readyTime = block.timestamp + finalizeDelay;
+        _pending[j.vaultId] = PendingActivation({
+            account: j.account,
+            amount: j.amount,
+            depositTag: j.depositTag,
+            anchor: j.tipHash,
+            readyHeight: readyHeight,
+            readyTime: readyTime
+        });
+        emit ActivationPending(j.vaultId, j.account, j.amount, j.depositTag, readyHeight, readyTime);
+    }
+
+    /// @dev I4, I5: a new vault id (never activated nor cancelled, no pending proof), an unused tag and an account
+    ///      without a vault.
     function _checkNewVault(bytes32 vaultId, address account, uint64 amount, bytes32 depositTag) internal view {
         if (vaultId == bytes32(0)) revert ZeroVaultId();
         if (account == address(0)) revert ZeroAccount();
         if (amount == 0) revert ZeroAmount();
         if (depositTag == bytes32(0)) revert ZeroDepositTag();
         if (_vaults[vaultId].status != VaultStatus.None) revert VaultIdUsed(vaultId);
+        if (_pending[vaultId].account != address(0)) revert ActivationIsPending(vaultId);
         if (depositTagUsed[depositTag]) revert DepositTagUsed(depositTag);
         bytes32 existing = _vaultOf[account];
         if (existing != bytes32(0)) revert AccountHasVault(account, existing);
@@ -438,7 +553,7 @@ contract ZecuredRegistry is IZecuredRegistry, EIP712 {
         depositTagUsed[depositTag] = true;
         _vaultOf[account] = vaultId;
         _vaults[vaultId] = Vault({account: account, outstanding: amount, status: VaultStatus.Active, claimCount: 0});
-        emit VaultActivated(vaultId, account, amount);
+        emit VaultActivated(vaultId, account, amount, depositTag);
 
         // The Registry holds the zZEC only within this call: Morpho pulls exactly `amount` from it.
         zzec.mint(address(this), amount);
@@ -447,13 +562,13 @@ contract ZecuredRegistry is IZecuredRegistry, EIP712 {
     }
 
     /// @dev Withdraws `amount` of `account`'s collateral to the Registry, using the account's Morpho authorization of
-    ///      the Registry. The zZEC expectation is armed immediately before the Morpho call (the guard then admits exactly
-    ///      this transfer) and the received amount is checked afterwards.
+    ///      the Registry. Y5: arm the zZEC expectation immediately before the Morpho call (the guard then admits exactly
+    ///      this transfer), then settle it, which requires the transfer to have consumed it, clears it whatever
+    ///      happened, and reports the amount the guard let through.
     function _withdrawToRegistry(address account, uint64 amount) internal {
-        uint256 balanceBefore = zzec.balanceOf(address(this));
         zzec.expectFromMorpho(amount);
         morpho.withdrawCollateral(_marketParams(), amount, account, address(this));
-        uint256 received = zzec.balanceOf(address(this)) - balanceBefore;
+        uint256 received = zzec.settleExpectation();
         if (received != amount) revert UnexpectedCollateralReceived(received, amount);
     }
 

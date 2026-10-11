@@ -17,17 +17,36 @@ enum VaultStatus {
     Cancelled
 }
 
+/// @notice K1: which path may activate vaults. Fixed at deployment.
+/// - `SignerAttested`: a 3-of-5 signer attestation (`attestDeposit`), and deposit proofs if a verifier is configured.
+/// - `ProofOnly`: deposit proofs only; `attestDeposit` reverts, so no set of signers can mint unbacked zZEC.
+enum MintMode {
+    SignerAttested,
+    ProofOnly
+}
+
 /// @notice Tier 2 deposit proofs (docs/TIER2.md). A zero `verifier` disables `attestDepositWithProof`.
 /// @param verifier RISC Zero verifier (the router on Base Sepolia; a MOCK on a local fork).
 /// @param imageId Image id of the deposit guest (tier2/methods/guest): which program the proof is about.
 /// @param relay Zcash header relay; a proof's anchor header must be on its best chain.
 /// @param minConfirmationWork Work the relay must have on top of the anchor header (work, not blocks: Testnet
 ///        minimum-difficulty blocks are nearly free).
+/// @param mintMode K1: `ProofOnly` needs a verifier.
+/// @param sealSelector Y1: the first four bytes every seal must start with, which pins the router's verifier (the
+///        Groth16 selector on Base Sepolia; the MOCK's on a local fork). The router's owner can add verifiers under
+///        new selectors but cannot change the verifier behind an existing one.
+/// @param finalizeDepth K3: headers the relay's best chain must gain after a proof before its vault can be activated.
+/// @param finalizeDelay K3: seconds that must pass after a proof before its vault can be activated, so that honest
+///        feeders can replace a branch fed while they lagged.
 struct DepositProofConfig {
     IRiscZeroVerifier verifier;
     bytes32 imageId;
     IZcashHeaderRelay relay;
     uint256 minConfirmationWork;
+    MintMode mintMode;
+    bytes4 sealSelector;
+    uint64 finalizeDepth;
+    uint64 finalizeDelay;
 }
 
 /// @notice What a claim pays out on Zcash.
@@ -50,7 +69,22 @@ enum ClaimStatus {
 interface IZecuredRegistry {
     // ------------------------------------------------------------------ events (docs/INTERFACES.md § 3.2)
 
-    event VaultActivated(bytes32 indexed vaultId, address indexed account, uint64 amount);
+    /// @notice K2-a: `depositTag` names the note that backs the vault (the head of its lineage), so that no signer
+    ///         ever refunds it.
+    event VaultActivated(bytes32 indexed vaultId, address indexed account, uint64 amount, bytes32 depositTag);
+    /// @notice K3: a deposit proof was accepted; the vault can be activated by `finalizeActivation` once the relay has
+    ///         reached `readyHeight`, `readyTime` has passed, and the proof's anchor is still on the best chain.
+    event ActivationPending(
+        bytes32 indexed vaultId,
+        address indexed account,
+        uint64 amount,
+        bytes32 depositTag,
+        uint256 readyHeight,
+        uint256 readyTime
+    );
+    /// @notice K3: the anchor of a pending activation left the relay's best chain; the vault, tag and account are free
+    ///         again.
+    event PendingActivationDropped(bytes32 indexed vaultId);
     event ReleaseRequested(bytes32 indexed vaultId, bytes32 indexed claimId, uint64 amount, bytes32 destCommitment);
     event LiquidationRelease(
         bytes32 indexed vaultId, bytes32 indexed claimId, uint64 amount, bytes32 recipientCommitment
@@ -129,27 +163,52 @@ interface IZecuredRegistry {
     /// @notice The proof's anchor header is not on the relay's best chain, or has less than `minConfirmationWork`
     ///         on top of it.
     error AnchorNotConfirmed(bytes32 tipHash, uint256 confirmationWork);
+    /// @notice K1: this deployment mints on deposit proofs only.
+    error MintRequiresProof();
+    /// @notice Y1: the seal does not start with `depositSealSelector`.
+    error UnexpectedSealSelector(bytes4 selector);
+    /// @notice K3: a proof for this vault is waiting for `finalizeActivation`.
+    error ActivationIsPending(bytes32 vaultId);
+    /// @notice K3: no proof for this vault is waiting.
+    error NoPendingActivation(bytes32 vaultId);
+    /// @notice K3: the relay has not reached `readyHeight`, or `readyTime` has not passed yet.
+    error ActivationNotReady(bytes32 vaultId, uint256 readyHeight, uint256 readyTime);
+    /// @notice K3: only a pending activation whose anchor left the best chain can be dropped.
+    error AnchorStillOnBestChain(bytes32 vaultId);
 
     // ------------------------------------------------------------------ state-changing (docs/INTERFACES.md § 3.2)
 
     /// @notice Registers the vault (outstanding = amount, Active), mints the zZEC to the Registry and supplies it to
     ///         Morpho on behalf of `att.account`. Anyone may relay; needs >= 3 signer signatures (sorted, distinct).
+    ///         Reverts with `MintRequiresProof` in `ProofOnly` mode (K1).
     function attestDeposit(DepositAttestation calldata att, bytes[] calldata sigs) external;
 
-    /// @notice Tier 2: activates a vault on a zero-knowledge proof of its deposit instead of a signer attestation, with
-    ///         the same effects as `attestDeposit`. Anyone may relay.
+    /// @notice Tier 2: accepts a zero-knowledge proof of a vault's deposit instead of a signer attestation. The vault,
+    ///         tag and account are reserved at once; the vault is activated (same effects as `attestDeposit`) by
+    ///         `finalizeActivation` once the relay has gained `finalizeDepth` headers and `finalizeDelay` seconds have
+    ///         passed (K3). Anyone may relay.
     /// @param journal abi.encode(bytes32 tipHash, bytes32 vaultId, address account, uint64 amount, bytes32 depositTag,
     ///        bytes32 vaultOpenedHash): the deposit's block is committed by header `tipHash`, which must be on the
     ///        relay's best chain with `minConfirmationWork` on top; the note pays `amount` to the vault described by
     ///        the `VaultOpened` whose struct hash is `vaultOpenedHash`, in an Ironwood-only transaction at or below
     ///        that vault's expiry height; `depositTag` is the note's tag (docs/TIER2.md, tier2/statement).
-    /// @param seal RISC Zero proof that the deposit guest (`depositImageId`) produced `journal`.
+    /// @param seal RISC Zero proof that the deposit guest (`depositImageId`) produced `journal`; it must start with
+    ///        `depositSealSelector` (Y1).
     /// @param openedSigs Signatures of all five signers over that `VaultOpened` (Registry domain), sorted by signer.
     function attestDepositWithProof(bytes calldata journal, bytes calldata seal, bytes[] calldata openedSigs) external;
 
+    /// @notice K3: activates a vault whose deposit proof is pending, once the relay's best chain has reached the
+    ///         pending activation's `readyHeight`, its `readyTime` has passed, and the proof's anchor is still on the
+    ///         best chain with `minConfirmationWork` on top. Anyone may call.
+    function finalizeActivation(bytes32 vaultId) external;
+
+    /// @notice K3: drops a pending activation whose anchor is no longer on the relay's best chain (a proof against a
+    ///         branch that lost), freeing the vault, its tag and its account. Anyone may call.
+    function dropPendingActivation(bytes32 vaultId) external;
+
     /// @notice L-8: marks a vault that was never activated as `Cancelled`, so that neither an attestation nor a proof
     ///         can activate it any more; only then may the signers refund its deposit. Anyone may relay; needs >= 3
-    ///         signer signatures over VaultCancellation(vaultId).
+    ///         signer signatures over VaultCancellation(vaultId). Reverts while a proof for the vault is pending.
     function cancelVault(bytes32 vaultId, bytes[] calldata sigs) external;
 
     /// @notice Vault account only. Withdraws the whole outstanding from Morpho to the Registry (reverts while debt
@@ -226,4 +285,21 @@ interface IZecuredRegistry {
     function depositImageId() external view returns (bytes32);
     function relay() external view returns (IZcashHeaderRelay);
     function minConfirmationWork() external view returns (uint256);
+    function mintMode() external view returns (MintMode);
+    function depositSealSelector() external view returns (bytes4);
+    function finalizeDepth() external view returns (uint64);
+    function finalizeDelay() external view returns (uint64);
+    /// @notice K3: the pending activation of `vaultId` (zero account: none). `anchor` is the proof's anchor header,
+    ///         a later block than the deposit's.
+    function pendingActivation(bytes32 vaultId)
+        external
+        view
+        returns (
+            address account,
+            uint64 amount,
+            bytes32 depositTag,
+            bytes32 anchor,
+            uint256 readyHeight,
+            uint256 readyTime
+        );
 }
