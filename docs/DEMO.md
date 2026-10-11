@@ -22,6 +22,7 @@
 | Liquidation | Drop the oracle price → the bot liquidates → the rest stays yours | Liquidation claim paid, remaining collateral released |
 | Threshold | Switch two signers to "compromised" → sweep attempt → 2 sign, 3 refuse | Votes on the control panel; nothing moves |
 | Verify | Owner-signed viewing-key request → scan the vault yourself | UFVK and the vault's notes |
+| Tier 2 (optional) | The same deposit activated on a zero-knowledge proof instead of signer signatures: the relay's verified header, the proof's journal, `attestDepositWithProof` | The Base transaction; the journal holds no Zcash data but a later header |
 
 ## Two-minute video
 

@@ -93,11 +93,19 @@ nodes' stores freezes the affected vaults; three leaked stores are enough to ste
   survives a restart (the node still recognizes and confirms the transaction it signed).
 - **Downtime:** any two nodes may be down; payouts and attestations continue with the other three.
   A node that was down catches up from Base events and its own scan.
+- **Cancellations (D23):** a node signs `VaultCancellation` only for the owner's refund request of
+  a conforming deposit, only past the vault's deposit window, and only while the Registry (on
+  every Base provider it is configured with) has not activated the vault. The deposit becomes
+  refundable when the node applies the checked `VaultCancelled` event.
+- **Deposit proofs (Tier 2):** a node needs nothing for them; it applies the resulting
+  `VaultActivated` like any other. Proving (the coordinator, or the borrower's CLI) and feeding
+  the header relay (`scripts/relay-feed.sh`, anyone) are separate, permissionless jobs.
 
 ## Not yet supported
 
 - Changing the signer set: the Registry's five signers are immutable, and FROST shares of
   existing vaults cannot be re-shared to a new party yet. Replacing an operator means a new
   deployment for new vaults.
-- Bonds and slashing for misbehaving operators, and Base-side verification of deposits (a Zcash
-  header relay with deposit proofs) are on the roadmap ([TIER2.md](TIER2.md)).
+- Bonds and slashing for misbehaving operators are on the roadmap ([TIER2.md](TIER2.md) § 9).
+  Base-side verification of deposits is implemented (Tier 2) and verified with a MOCK verifier
+  on the local fork until Groth16 seals are produced.
