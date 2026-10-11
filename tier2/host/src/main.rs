@@ -1,61 +1,61 @@
-//! Runs the deposit probe guest in the zkVM executor (no proof) and compares its outputs with
-//! the same computations done natively.
+//! Runs the Tier 2 deposit guest on a witness built by `build-witness`.
 //!
-//!   cargo run -p zecured-tier2-host --release -- ../data/tier2/tx_61a4fdc0.json
+//!   zecured-tier2-host execute <witness.json>          # zkVM executor: cycles and journal
+//!   zecured-tier2-host prove <witness.json> <out.bin>  # local succinct proof (receipt)
+//!
+//! Proving happens on this machine: the witness (with the vault's viewing key) never leaves it.
+//! Only the receipt, which reveals nothing but the journal, would go to a Groth16 wrapper.
 
-use anyhow::{Context, Result, ensure};
-use orchard::{
-    keys::{FullViewingKey, Scope, SpendingKey},
-    note::{ExtractedNoteCommitment, Note, NoteVersion, RandomSeed, Rho},
-    value::NoteValue,
-};
-use risc0_zkvm::{ExecutorEnv, default_executor};
-use zcash_primitives::transaction::Transaction;
-use zcash_protocol::consensus::BranchId;
+use anyhow::{Context, Result, bail, ensure};
+use risc0_zkvm::{ExecutorEnv, ProverOpts, default_executor, default_prover};
+use zecured_deposit_statement::{Witness, verify};
 use zecured_tier2_methods::{DEPOSIT_ELF, DEPOSIT_ID};
 
-const NU7_BRANCH_ID: u32 = 0x77190AD9;
-
-fn main() -> Result<()> {
-    let path = std::env::args().nth(1).context("usage: zecured-tier2-host <tx.json>")?;
-    let json: serde_json::Value = serde_json::from_slice(&std::fs::read(&path)?)?;
-    let raw = hex::decode(json["raw"].as_str().context("raw")?)?;
-
-    let tx = Transaction::read(&raw[..], BranchId::try_from(NU7_BRANCH_ID).map_err(anyhow::Error::msg)?)?;
-    let sk = (0u8..=255).find_map(|i| Option::<SpendingKey>::from(SpendingKey::from_bytes([i; 32]))).unwrap();
-    let recipient = FullViewingKey::from(&sk).address_at(0u32, Scope::External);
-    let (value, rho, rseed) = (1_000_000u64, [1u8; 32], [2u8; 32]);
-    let rho_v = Option::<Rho>::from(Rho::from_bytes(&rho)).context("rho")?;
-    let note = Option::<Note>::from(Note::from_parts(
-        recipient,
-        NoteValue::from_raw(value),
-        rho_v,
-        Option::<RandomSeed>::from(RandomSeed::from_bytes(rseed, &rho_v)).context("rseed")?,
-        NoteVersion::V3,
-    ))
-    .context("note")?;
-    let cmx = ExtractedNoteCommitment::from(note.commitment()).to_bytes();
-
-    let env = ExecutorEnv::builder()
-        .write(&raw)?
-        .write(&NU7_BRANCH_ID)?
-        .write(&(recipient.to_raw_address_bytes().to_vec(), value, rho, rseed))?
-        .build()?;
-    let started = std::time::Instant::now();
-    let session = default_executor().execute(env, DEPOSIT_ELF)?;
-    let (g_txid, g_cmx, _node_hash, c_tx, c_note, c_hist): ([u8; 32], [u8; 32], [u8; 32], u64, u64, u64) =
-        session.journal.decode()?;
-    ensure!(g_txid == *tx.txid().as_ref(), "txid differs");
-    ensure!(g_cmx == cmx, "note commitment differs");
-    println!("image id {}", hex::encode(bytemuck_id(DEPOSIT_ID)));
-    println!("executed in {:.1?}: {} cycles, {} segments", started.elapsed(), session.cycles(), session.segments.len());
-    println!("  parse + txid of a {}-byte v6 transaction: {c_tx} cycles", raw.len());
-    println!("  Ironwood note commitment (NoteCommit, Sinsemilla): {c_note} cycles");
-    println!("  one history-tree node hash (BLAKE2b): {c_hist} cycles");
-    println!("outputs match the native computation");
-    Ok(())
+fn image_id_hex() -> String {
+    hex::encode(DEPOSIT_ID.iter().flat_map(|w| w.to_le_bytes()).collect::<Vec<u8>>())
 }
 
-fn bytemuck_id(id: [u32; 8]) -> Vec<u8> {
-    id.iter().flat_map(|w| w.to_le_bytes()).collect()
+fn main() -> Result<()> {
+    let args: Vec<String> = std::env::args().collect();
+    let (cmd, path) = (args.get(1).context("command")?, args.get(2).context("witness path")?);
+    let witness: Witness = serde_json::from_slice(&std::fs::read(path)?)?;
+    let expected = verify(&witness).map_err(|e| anyhow::anyhow!("statement refuses the witness natively: {e:?}"))?;
+    let expected_journal = expected.abi_encode();
+    println!("image id {}", image_id_hex());
+
+    match cmd.as_str() {
+        "execute" => {
+            let frame = bincode::serialize(&witness)?;
+            let env = ExecutorEnv::builder().write_frame(&frame).build()?;
+            let started = std::time::Instant::now();
+            let session = default_executor().execute(env, DEPOSIT_ELF)?;
+            ensure!(session.journal.bytes == expected_journal, "journal differs from the native computation");
+            println!(
+                "executed in {:.1?}: {} cycles, {} segments; journal matches the native computation",
+                started.elapsed(),
+                session.cycles(),
+                session.segments.len()
+            );
+        }
+        "prove" => {
+            let out = args.get(3).context("receipt output path")?;
+            // Segments of 2^18 cycles keep memory around 3 GB on an 8 GB machine.
+            let frame = bincode::serialize(&witness)?;
+            let env = ExecutorEnv::builder().write_frame(&frame).segment_limit_po2(18).build()?;
+            let started = std::time::Instant::now();
+            let info = default_prover().prove_with_opts(env, DEPOSIT_ELF, &ProverOpts::succinct())?;
+            info.receipt.verify(DEPOSIT_ID)?;
+            ensure!(info.receipt.journal.bytes == expected_journal, "journal differs");
+            std::fs::write(out, bincode::serialize(&info.receipt)?)?;
+            println!(
+                "succinct receipt for {} cycles ({} segments) in {:.1?}, verified, written to {out}",
+                info.stats.total_cycles,
+                info.stats.segments,
+                started.elapsed()
+            );
+        }
+        other => bail!("unknown command {other}"),
+    }
+    println!("journal {}", hex::encode(&expected_journal));
+    Ok(())
 }

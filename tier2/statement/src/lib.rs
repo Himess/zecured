@@ -29,7 +29,7 @@
 
 use orchard::{
     Address, Note,
-    note::{ExtractedNoteCommitment, NoteVersion, RandomSeed, Rho},
+    note::{NoteVersion, RandomSeed, Rho},
     note_encryption::IronwoodDomain,
     value::NoteValue,
 };
@@ -285,7 +285,12 @@ pub fn verify(w: &Witness) -> Result<Journal, Error> {
         return Err(Error::HistoryNotCommitted);
     }
 
-    // 3. The note: opened against the action's commitment, and decryptable.
+    // 3. The note. Recovering the action's ciphertext with the ephemeral secret derived from the
+    //    witness note (and its pk_d) checks that the plaintext is a note whose commitment is the
+    //    action's cmx and whose ephemeral key is the action's (ZIP 212): the action creates that
+    //    note, and an incoming viewing key for its recipient decrypts it. The recovered note is
+    //    then compared field by field with the witness note (`Note`'s `PartialEq` would compute
+    //    both commitments again; each costs ~4.8 M zkVM cycles).
     let recipient: [u8; 43] = w.note_recipient.clone().try_into().map_err(|_| Error::Note)?;
     let recipient = Option::<Address>::from(Address::from_raw_address_bytes(&recipient)).ok_or(Error::Note)?;
     // An action's output note has rho = the nullifier spent by the same action.
@@ -299,16 +304,16 @@ pub fn verify(w: &Witness) -> Result<Journal, Error> {
         NoteVersion::V3,
     ))
     .ok_or(Error::Note)?;
-    let cmx = ExtractedNoteCommitment::from(note.commitment());
-    if cmx != *action.cmx() {
-        return Err(Error::NoteCommitmentMismatch);
-    }
     let domain = IronwoodDomain::for_action(action);
     let esk = IronwoodDomain::derive_esk(&note).ok_or(Error::NotDecryptable)?;
     let pk_d = IronwoodDomain::get_pk_d(&note);
-    match try_output_recovery_with_pkd_esk(&domain, pk_d, esk, action) {
-        Some((n, _, _)) if n == note => {}
-        _ => return Err(Error::NotDecryptable),
+    let (recovered, _, _) = try_output_recovery_with_pkd_esk(&domain, pk_d, esk, action).ok_or(Error::NotDecryptable)?;
+    if recovered.recipient().to_raw_address_bytes() != note.recipient().to_raw_address_bytes()
+        || recovered.value() != note.value()
+        || recovered.rseed().as_bytes() != note.rseed().as_bytes()
+        || recovered.rho().to_bytes() != note.rho().to_bytes()
+    {
+        return Err(Error::NoteCommitmentMismatch);
     }
 
     // 4. The recipient is the vault's (Ironwood-only, testnet) address.
@@ -321,7 +326,8 @@ pub fn verify(w: &Witness) -> Result<Journal, Error> {
         _ => return Err(Error::WrongRecipient),
     }
 
-    let cmx = cmx.to_bytes();
+    // The deposit's note commitment, as recovery checked it.
+    let cmx = action.cmx().to_bytes();
     Ok(Journal {
         tip_hash: sha256d(&w.tip_header),
         vault_id: w.vault_id,

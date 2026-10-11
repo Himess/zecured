@@ -9,12 +9,8 @@ publish = false
 
 [dependencies]
 risc0-zkvm = { version = "=3.0.6", default-features = false, features = ["std"] }
-orchard = { version = "0.16", default-features = false, features = ["std"] }
-zcash_primitives = { version = "=0.31.0-pre.1", default-features = false }
-zcash_protocol = "=0.11.0-pre.0"
-zcash_history = "0.6"
-blake2b_simd = { version = "1", default-features = false }
-sha2 = "0.10"
+zecured-deposit-statement = { path = "../../statement" }
+bincode = "1"
 
 [profile.release]
 lto = true
