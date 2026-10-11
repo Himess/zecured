@@ -40,9 +40,16 @@ enum Cmd {
         config: PathBuf,
         #[arg(long, default_value = "127.0.0.1:9101")]
         bind: String,
-        /// Token for the demo control panel (mode switch).
+        /// Token for the demo control panel (mode switch). Never set it on a production node.
         #[arg(long, env = "DEMO_ADMIN_TOKEN")]
         admin_token: Option<String>,
+        /// This operator's own light wallet server, instead of the network config's: a node
+        /// should not depend on the same Zcash data source as the coordinator.
+        #[arg(long, env = "NODE_LIGHTWALLETD_URL")]
+        lightwalletd_url: Option<String>,
+        /// This operator's own Base RPC, instead of the network config's.
+        #[arg(long, env = "NODE_BASE_RPC_URL", hide_env_values = true)]
+        base_rpc_url: Option<String>,
     },
 }
 
@@ -57,8 +64,21 @@ async fn main() -> Result<()> {
             println!("{}", serde_json::to_string_pretty(&id.public_info(&url))?);
             Ok(())
         }
-        Cmd::Run { data, config, bind, admin_token } => {
-            let cfg = NetworkConfig::load(&config)?;
+        Cmd::Run {
+            data,
+            config,
+            bind,
+            admin_token,
+            lightwalletd_url,
+            base_rpc_url,
+        } => {
+            let mut cfg = NetworkConfig::load(&config)?;
+            if let Some(url) = lightwalletd_url.filter(|u| !u.is_empty()) {
+                cfg.lightwalletd_url = url;
+            }
+            if let Some(url) = base_rpc_url.filter(|u| !u.is_empty()) {
+                cfg.base_rpc_url = url;
+            }
             let id = Identity::load(&data.join("identity.json"))?;
             let index = id.index;
             let node = Arc::new(Node::open(cfg, id, &data, admin_token.filter(|t| !t.is_empty()))?);
