@@ -335,7 +335,7 @@ contract ZecuredHandler is Test {
         uint256 supplyBefore = zzec.totalSupply();
 
         vm.prank(marketMaker);
-        try adapter.closeWithCollateral(req, sig, keccak256("zecured.inv.marketMaker")) {
+        try adapter.closeWithCollateral(req, sig, keccak256("zecured.inv.marketMaker"), type(uint256).max) {
             calls["close"]++;
             (,, uint64 userAmount,,) = registry.claim(registry.claimIdOf(vaultId, claimsBefore));
             (,, uint64 mmAmount,,) = registry.claim(registry.claimIdOf(vaultId, claimsBefore + 1));
@@ -468,7 +468,7 @@ contract ZecuredHandler is Test {
             caller = marketMaker;
         }
         vm.prank(caller);
-        try adapter.closeWithCollateral(req, sig, keccak256("zecured.inv.marketMaker")) {
+        try adapter.closeWithCollateral(req, sig, keccak256("zecured.inv.marketMaker"), type(uint256).max) {
             attackSucceeded = true;
         } catch {}
         calls["attack: close request"]++;

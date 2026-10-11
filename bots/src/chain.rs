@@ -55,7 +55,7 @@ sol! {
     #[sol(rpc)]
     interface ISettlementAdapter {
         function liquidate(address borrower, uint256 seizedAssets, uint256 repaidShares, bytes32 liquidatorCommitment) external returns (uint256 seized, uint256 repaid);
-        function closeWithCollateral(CloseRequest req, bytes userSig, bytes32 mmCommitment) external;
+        function closeWithCollateral(CloseRequest req, bytes userSig, bytes32 mmCommitment, uint256 maxRepayAssets) external;
     }
 
     #[sol(rpc)]

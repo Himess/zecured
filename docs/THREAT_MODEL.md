@@ -82,7 +82,8 @@ review and their status are in [SECURITY_REVIEW.md](SECURITY_REVIEW.md).
   (the witness mechanism is in place); the structural fix is verifying deposits on Base itself
   ([TIER2.md](TIER2.md)).
 - The backend host holds the coordinator key, the demo token and the MOCK oracle key (one
-  operator during the hackathon).
+  operator during the hackathon). Whoever holds the MOCK oracle key can crash the price and
+  liquidate every vault: a real deployment needs a real oracle.
 - Testnet's low volume shrinks the anonymity set.
 
 ## Intentionally public

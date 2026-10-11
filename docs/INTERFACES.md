@@ -150,7 +150,7 @@ event PayoutConfirmed(bytes32 indexed vaultId, bytes32[] claimIds);
 ```solidity
 function liquidate(address borrower, uint256 seizedAssets, uint256 repaidShares, bytes32 liquidatorCommitment)
     external returns (uint256 seized, uint256 repaid);
-function closeWithCollateral(CloseRequest calldata req, bytes calldata userSig, bytes32 mmCommitment) external;
+function closeWithCollateral(CloseRequest calldata req, bytes calldata userSig, bytes32 mmCommitment, uint256 maxRepayAssets) external;
 function invalidateNonce(uint256 nonce) external;                 // msg.sender = account
 function nonceUsed(address account, uint256 nonce) external view returns (bool);
 
@@ -161,12 +161,14 @@ event NonceInvalidated(address indexed account, uint256 nonce);
 ```
 
 - `liquidate`: exactly one of `seizedAssets`/`repaidShares` non-zero (`repaidShares` capped at
-  the borrower's shares read in the same call); seized ≥ `MIN_SEIZE` = 100,000 zat (0.001 ZEC)
-  or seized = the vault's entire remaining `outstanding` (dust guard, D11); USDC pulled from `msg.sender` inside
+  the borrower's shares read in the same call); seized ≥ `MIN_SEIZE` = 100,000 zat (0.001 ZEC),
+  or seized = the vault's entire remaining `outstanding`, or the liquidation clears all the borrower's debt (dust
+  guard, D11); USDC pulled from `msg.sender` inside
   `onMorphoLiquidate`; seized zZEC → `Registry.recordLiquidation`.
 - `closeWithCollateral`: `msg.sender == req.executor`, `block.timestamp <= req.deadline`, nonce
   unused and not invalidated, `marginBps <= MAX_MARGIN_BPS`, ERC-1271 valid on `req.account`;
-  repays all borrow shares (USDC pulled from the executor in `onMorphoRepay`),
+  repays all borrow shares (USDC pulled from the executor in `onMorphoRepay`), at most `maxRepayAssets` (chosen
+  by the executor: the borrower may borrow more after signing; D21),
   `mmAmount = ceil(repaidAssets * (10_000 + marginBps) * 1e36 / (10_000 * price))`,
   `userAmount = outstanding - mmAmount >= minUserAmount`, withdraws `outstanding` to itself,
   `Registry.recordClose` (I8).

@@ -69,6 +69,27 @@ sources for availability, not for authorization.
 | I-8 | Info | Documents overstated some guarantees | **Fixed.** [THREAT_MODEL.md](THREAT_MODEL.md) and [ARCHITECTURE.md](ARCHITECTURE.md) updated |
 | I-9 | Info | Re-randomized FROST signing as used | Sound |
 
+## Contracts
+
+A separate review of `ZZEC`, `ZecuredRegistry`, `SettlementAdapter` and the Tier 2 header relay, with
+proof-of-concept tests and a deeper invariant campaign (128 runs × 100 calls). No critical or high-severity issue
+was found in the production contracts.
+
+| ID | Severity | Finding | Status |
+|---|---|---|---|
+| R-1 | Medium | Relay: a reorganisation deleted every orphaned height, so a long, light attacker branch on a stale tip could push the honest reorganisation above the transaction gas limit and freeze the relay | **Fixed.** Orphaned heights are no longer cleared; every read is bounded by the tip height. Reorganising back from 3,400 orphaned heights now costs the same as from 8 |
+| L-1 | Low | A position at D14's 100,000 zat floor could not be liquidated between LLTV and ~89 % LTV | **Fixed.** A seizure below the D11 floor is accepted when it clears the borrower's whole debt |
+| L-2 | Low | A signed close request did not bound the debt the market maker repays (the borrower could borrow more after signing) | **Fixed.** `closeWithCollateral` takes the executor's `maxRepayAssets`; the market maker caps it at its quote plus 10 bps |
+| I-1 | Info | Relay `confirmations` is nearly free to inflate on Testnet | **Documented.** Consumers must use `confirmationWork` |
+| I-2 | Info | A batch of headers failed when one was already known | **Fixed.** Known headers are skipped |
+| I-3 | Info | The MOCK oracle's owner can crash the price and liquidate every vault | **Documented** in [THREAT_MODEL.md](THREAT_MODEL.md) (testnet mock) |
+| I-4 | Info | `VaultOpened` was not yet documented | **Fixed** (INTERFACES § 2.5, golden vector in Rust and the app) |
+
+Checked and found sound: the zZEC transfer guard (I2), supply and claim accounting (I1, I3, I7, I9), signature
+threshold and malleability (I6), close-request binding and ERC-1271 (I8), Morpho callbacks and reentrancy, the
+Morpho authorization surface (no path borrows or withdraws loan assets), D14's LTV rounding, liquidation share caps,
+close arithmetic, event privacy, and the relay's consensus rules.
+
 ## Remaining risks
 
 - **Data sources (C-1, C-2).** A node is as honest as the chain data it reads. Independent

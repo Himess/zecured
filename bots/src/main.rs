@@ -188,7 +188,15 @@ struct Mm {
     /// Raw Ironwood receiver of `zaddr`, to check the commitments the backend returns (M-11).
     receiver: [u8; 43],
     margin_bps: u16,
+    /// Quotes given, by vault: the debt quoted and the quote's expiry (unix seconds). A close
+    /// repays at most the quoted debt plus `REPAY_SLACK_BPS` (contracts review L-2: the
+    /// borrower may borrow more after signing).
+    quotes: std::sync::Mutex<std::collections::HashMap<B256, (u128, u64)>>,
 }
+
+/// Interest that may accrue between a quote and the close transaction (10 minutes at most),
+/// in basis points of the quoted debt.
+const REPAY_SLACK_BPS: u128 = 10;
 
 /// Smallest borrower share of a close the market maker takes on (H-3).
 ///
@@ -273,6 +281,7 @@ async fn market_maker(
         zaddr,
         receiver,
         margin_bps,
+        quotes: Default::default(),
     });
     let app = Router::new().route("/quote/{vault_id}", get(quote)).route("/close", post(close)).with_state(mm);
     info!(%bind, "market maker listening");
@@ -307,13 +316,18 @@ async fn quote(
     let mm_amount = u64::try_from(mm_amount).map_err(|_| anyhow!("amount overflow"))?;
     let user_amount = v.outstanding.checked_sub(mm_amount).ok_or(ApiError::UNDERWATER)?;
     check_user_amount(user_amount)?;
+    let expires_at = zecured_now() + 600;
+    mm.quotes
+        .lock()
+        .map_err(|_| anyhow!("quote book poisoned"))?
+        .insert(vault_id, (pos.debt, expires_at));
     Ok(Json(json!({
         "executor": mm.key.address(),
         "marginBps": mm.margin_bps,
         "repayAssets": pos.debt.to_string(),
         "mmAmount": mm_amount.to_string(),
         "userAmount": user_amount.to_string(),
-        "expiresAt": zecured_now() + 600,
+        "expiresAt": expires_at,
     })))
 }
 
@@ -387,8 +401,18 @@ async fn close(
     let p = ProviderBuilder::new()
         .wallet(EthereumWallet::from(mm.key.clone()))
         .connect_http(mm.rpc.parse().map_err(anyhow::Error::from)?);
+    // Repay at most what we quoted for this vault (plus interest since), never what the borrower
+    // may have borrowed after signing.
+    let quoted = mm.quotes.lock().map_err(|_| anyhow!("quote book poisoned"))?.get(&r.vault_id).copied();
+    let Some((quoted_debt, expires_at)) = quoted else {
+        return Err(ApiError::QUOTE_MISMATCH);
+    };
+    if zecured_now() > expires_at {
+        return Err(ApiError::QUOTE_MISMATCH);
+    }
+    let max_repay = U256::from(quoted_debt) * U256::from(10_000 + REPAY_SLACK_BPS) / U256::from(10_000u32);
     let adapter = ISettlementAdapter::new(mm.d.adapter, &p);
-    let call = adapter.closeWithCollateral(req, b.signature.clone(), mm_commitment);
+    let call = adapter.closeWithCollateral(req, b.signature.clone(), mm_commitment, max_repay);
     if let Err(e) = call.call().await {
         debug!("close would revert: {e}");
         return Err(ApiError::CLOSE_REJECTED);

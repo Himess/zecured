@@ -51,7 +51,7 @@ txids) and how to reproduce every run: [docs/TESTING.md](docs/TESTING.md).
 
 | Path | What |
 |---|---|
-| `contracts/` | Solidity + Foundry: `ZZEC`, `ZecuredRegistry`, `SettlementAdapter`, mocks, and the Tier 2 Zcash header relay (`src/relay/`); 222 tests |
+| `contracts/` | Solidity + Foundry: `ZZEC`, `ZecuredRegistry`, `SettlementAdapter`, mocks, and the Tier 2 Zcash header relay (`src/relay/`); 228 tests |
 | `signer/crates/zcash-ops` | Ironwood scanning, PCZT build/prove/sign/extract, ZIP 2005 vault keys |
 | `signer/crates/threshold` | FROST DKG and re-randomized signing |
 | `signer/crates/policy` | P1 classification, payout ledger (I10), PCZT verification against the plan |

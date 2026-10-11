@@ -119,7 +119,12 @@ contract SettlementAdapter is ISettlementAdapter, EIP712, ReentrancyGuardTransie
         if (received != seized) revert UnexpectedCollateralReceived(received, seized);
         // D11 dust guard: at least MIN_SEIZE, or the vault's whole remaining outstanding. Any remainder is allowed (it
         // stays with the borrower). `seized <= outstanding` is enforced by the zZEC expectation and the Registry (I9).
-        if (seized < MIN_SEIZE && seized != outstanding) revert SeizeBelowMinimum(seized, MIN_SEIZE);
+        // A smaller seizure is also allowed when it clears the borrower's whole debt: otherwise a small position (for
+        // example the floor a partial release leaves) could not be liquidated at all between LLTV and the LTV at which
+        // repaying everything seizes MIN_SEIZE (contracts review L-1).
+        if (seized < MIN_SEIZE && seized != outstanding && morpho.position(marketId, borrower).borrowShares != 0) {
+            revert SeizeBelowMinimum(seized, MIN_SEIZE);
+        }
 
         // seized <= outstanding (a uint64): the checked cast cannot fail.
         registry.recordLiquidation(vaultId, SafeCast.toUint64(seized), liquidatorCommitment);
@@ -137,15 +142,18 @@ contract SettlementAdapter is ISettlementAdapter, EIP712, ReentrancyGuardTransie
     // ------------------------------------------------------------------ close from collateral
 
     /// @inheritdoc ISettlementAdapter
-    function closeWithCollateral(CloseRequest calldata req, bytes calldata userSig, bytes32 mmCommitment)
-        external
-        nonReentrant
-    {
+    function closeWithCollateral(
+        CloseRequest calldata req,
+        bytes calldata userSig,
+        bytes32 mmCommitment,
+        uint256 maxRepayAssets
+    ) external nonReentrant {
         uint64 outstanding = _checkCloseRequest(req, userSig, mmCommitment);
         _nonceUsed[req.account][req.nonce] = true;
 
-        // 1. Repay all debt with the executor's USDC; split the collateral between market maker and borrower.
-        (uint64 mmAmount, uint64 userAmount) = _repayAndSplit(req, outstanding);
+        // 1. Repay all debt with the executor's USDC (at most `maxRepayAssets`: the borrower may have borrowed more
+        //    since signing); split the collateral between market maker and borrower.
+        (uint64 mmAmount, uint64 userAmount) = _repayAndSplit(req, outstanding, maxRepayAssets);
 
         // 2. Withdraw the whole outstanding to this Adapter (account's Morpho authorization; zZEC guard armed).
         _withdrawCollateralToSelf(req.account, outstanding);
@@ -214,11 +222,12 @@ contract SettlementAdapter is ISettlementAdapter, EIP712, ReentrancyGuardTransie
     /// @dev Repays all of the account's borrow shares (read in this call) with USDC pulled from the executor inside
     ///      onMorphoRepay, then splits `outstanding`: the market maker gets the repaid debt plus margin in zatoshi
     ///      (rounded up), the borrower the rest, which must be at least `req.minUserAmount`.
-    function _repayAndSplit(CloseRequest calldata req, uint64 outstanding)
+    function _repayAndSplit(CloseRequest calldata req, uint64 outstanding, uint256 maxRepayAssets)
         internal
         returns (uint64 mmAmount, uint64 userAmount)
     {
         uint256 repaidAssets = _repayAllDebt(req.account);
+        if (repaidAssets > maxRepayAssets) revert RepayAboveMaximum(repaidAssets, maxRepayAssets);
         uint256 mm = _marketMakerAmount(repaidAssets, req.marginBps);
         if (mm > outstanding) revert CloseExceedsCollateral(mm, outstanding);
         // Both parts are <= outstanding (a uint64): the checked cast cannot fail.

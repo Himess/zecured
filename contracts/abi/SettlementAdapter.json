@@ -96,6 +96,11 @@
         "name": "mmCommitment",
         "type": "bytes32",
         "internalType": "bytes32"
+      },
+      {
+        "name": "maxRepayAssets",
+        "type": "uint256",
+        "internalType": "uint256"
       }
     ],
     "outputs": [],
@@ -548,6 +553,22 @@
     "type": "error",
     "name": "ReentrancyGuardReentrantCall",
     "inputs": []
+  },
+  {
+    "type": "error",
+    "name": "RepayAboveMaximum",
+    "inputs": [
+      {
+        "name": "repaidAssets",
+        "type": "uint256",
+        "internalType": "uint256"
+      },
+      {
+        "name": "maxRepayAssets",
+        "type": "uint256",
+        "internalType": "uint256"
+      }
+    ]
   },
   {
     "type": "error",

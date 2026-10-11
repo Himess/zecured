@@ -40,6 +40,8 @@ interface ISettlementAdapter is IMorphoLiquidateCallback, IMorphoRepayCallback {
     /// @notice The market maker's share (debt + margin, in ZEC) exceeds the vault's collateral.
     error CloseExceedsCollateral(uint256 mmAmount, uint64 outstanding);
     error UserAmountBelowMinimum(uint256 userAmount, uint64 minUserAmount);
+    /// @notice The debt the executor would repay exceeds the cap it passed to `closeWithCollateral`.
+    error RepayAboveMaximum(uint256 repaidAssets, uint256 maxRepayAssets);
     error OnlyMorpho();
     /// @notice A Morpho callback arrived outside the matching Adapter operation.
     error UnexpectedCallback();
@@ -59,7 +61,12 @@ interface ISettlementAdapter is IMorphoLiquidateCallback, IMorphoRepayCallback {
     /// @notice Executes a signed CloseRequest: repays all of the account's debt with USDC pulled from the executor
     ///         (`msg.sender`) inside `onMorphoRepay`, withdraws the whole outstanding collateral to this Adapter and
     ///         records the close (market maker claim + borrower claim) in the Registry.
-    function closeWithCollateral(CloseRequest calldata req, bytes calldata userSig, bytes32 mmCommitment) external;
+    function closeWithCollateral(
+        CloseRequest calldata req,
+        bytes calldata userSig,
+        bytes32 mmCommitment,
+        uint256 maxRepayAssets
+    ) external;
 
     /// @notice Cancels a CloseRequest nonce of `msg.sender` (the account). Idempotent: it never reverts, also for a
     ///         nonce that is already used or invalidated, and emits `NonceInvalidated` on every call.
