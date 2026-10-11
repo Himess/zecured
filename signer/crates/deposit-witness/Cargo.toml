@@ -9,6 +9,10 @@ publish = false
 
 [dependencies]
 zecured-zcash-ops = { path = "../zcash-ops" }
+# The statement the zkVM guest proves (tier2/ workspace); checked natively here.
+zecured-deposit-statement = { path = "../../../tier2/statement" }
+zcash_keys.workspace = true
+zcash_note_encryption.workspace = true
 zcash_history = "0.6"
 primitive-types = { version = "0.12", default-features = false }
 sapling = { package = "sapling-crypto", version = "0.9", default-features = false }
@@ -29,3 +33,11 @@ clap.workspace = true
 [[bin]]
 name = "history-root"
 path = "src/bin/history_root.rs"
+
+[[bin]]
+name = "dump-tx"
+path = "src/bin/dump_tx.rs"
+
+[[bin]]
+name = "build-witness"
+path = "src/bin/build_witness.rs"

@@ -49,7 +49,7 @@ impl Header {
 }
 
 /// What a history-tree leaf records about one block.
-#[derive(Clone, Debug, PartialEq, Eq)]
+#[derive(Clone, Debug, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub struct BlockSummary {
     pub height: u32,
     /// Internal byte order.
@@ -188,4 +188,21 @@ mod tests {
         let right = blake2b_256(b"ZcashAuthDatHash", &[&[3u8; 32], &[0u8; 32]]);
         assert_eq!(three, blake2b_256(b"ZcashAuthDatHash", &[&left, &right]));
     }
+}
+
+/// The SHA-256d Merkle path (siblings, bottom-up) of the transaction at `index` in a block.
+pub fn txid_merkle_path(txids: &[[u8; 32]], index: usize) -> Result<Vec<[u8; 32]>> {
+    ensure!(index < txids.len(), "no transaction {index}");
+    let mut level = txids.to_vec();
+    let mut i = index;
+    let mut path = vec![];
+    while level.len() > 1 {
+        if level.len() % 2 == 1 {
+            level.push(*level.last().expect("non-empty"));
+        }
+        path.push(level[i ^ 1]);
+        level = level.chunks(2).map(|p| sha256d(&[p[0], p[1]].concat())).collect();
+        i /= 2;
+    }
+    Ok(path)
 }

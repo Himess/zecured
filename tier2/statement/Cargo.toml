@@ -1,0 +1,21 @@
+[package]
+name = "zecured-deposit-statement"
+description = "Tier 2: the statement a Zecured deposit proof proves, shared by the zkVM guest and the host"
+version = "0.1.0"
+edition = "2024"
+license = "MIT"
+publish = false
+
+# Explicit versions (no workspace inheritance): the zkVM guest builds this crate in its own
+# workspace.
+[dependencies]
+orchard = { version = "0.16", default-features = false, features = ["std"] }
+zcash_primitives = { version = "=0.31.0-pre.1", default-features = false }
+zcash_protocol = "=0.11.0-pre.0"
+zcash_address = "=0.14.0-pre.1"
+zcash_note_encryption = "0.5"
+zcash_history = "0.6"
+blake2b_simd = { version = "1", default-features = false }
+sha2 = "0.10"
+tiny-keccak = { version = "2", features = ["keccak"] }
+serde = { version = "1", features = ["derive"] }
