@@ -1,9 +1,18 @@
-# Tier 2: trust-minimized deposit proofs (docs/TIER2.md). A separate workspace so the main
-# build never compiles the zkVM toolchain's crates.
+# Tier 2: trust-minimized deposit proofs (docs/TIER2.md), RISC Zero zkVM.
+# A separate workspace so the main build never compiles the zkVM crates. The guest
+# (methods/guest) has its own workspace and is built by risc0-build for the zkVM target.
 [workspace]
 resolver = "2"
-members = ["host"]
+members = ["host", "methods"]
 
 [workspace.package]
 edition = "2024"
 license = "MIT"
+
+# The zkVM host and the guest are unusably slow without optimization.
+[profile.dev]
+opt-level = 3
+
+[profile.release]
+debug = 1
+lto = true

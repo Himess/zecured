@@ -1,0 +1,16 @@
+[package]
+name = "zecured-tier2-host"
+version = "0.1.0"
+edition.workspace = true
+license.workspace = true
+publish = false
+
+[dependencies]
+zecured-tier2-methods = { path = "../methods" }
+risc0-zkvm = "=3.0.6"
+orchard = { version = "0.16", default-features = false, features = ["std"] }
+zcash_primitives = { version = "=0.31.0-pre.1", default-features = false }
+zcash_protocol = "=0.11.0-pre.0"
+anyhow = "1"
+hex = "0.4"
+serde_json = "1"
