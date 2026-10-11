@@ -116,6 +116,15 @@ once its deposit window is over; each node checks that the Registry has not acti
 and signs the cancellation; the coordinator submits it; the deposit becomes refundable only when the nodes apply the
 checked `VaultCancelled` event. This also closes security review finding L-8 for Tier 1.
 
+**Why refunds stay safe while anyone can prove.** The signers refund non-conforming notes (P5) without asking
+Base, and a proof can be made for any note that meets the statement, spent or not. This is safe because every note
+the statement accepts also meets the signers' P1 rules (same amount, same expiry rule, and D5 at least as strictly:
+the statement refuses a transaction that merely carries an empty transparent, Sapling or Orchard bundle, P1 counts
+inputs, outputs and actions). So whenever a vault can be minted against, it holds a note P1 classifies as conforming,
+the first one in chain order, and that note is never refunded unless the vault is cancelled, which makes it
+unmintable first. A mint on a later qualifying note (P1's "second payment") leaves the books unchanged in value: the
+conforming note backs the vault and the later one is refundable.
+
 ## 6. Measurements on real Testnet data
 
 | What | Result |
