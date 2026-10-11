@@ -39,7 +39,7 @@ review and their status are in [SECURITY_REVIEW.md](SECURITY_REVIEW.md).
 | L6 | The return address published on Base | Off-chain owner-signed destination; Base only sees a salted commitment | node `destination`, `ledger::commitment` |
 | L7 | Deshielding the returned amount right away | Warning and guidance in the app | app |
 | L8 | Reusing a vault | A fresh vault (fresh FROST key) per loan; one account ↔ one vault | DKG per vault; Registry I4 |
-| L9 | Linking `depositTag` to the note's nullifier | Keyed tag (key derived from the vault secret) | `policy/src/derive.rs` |
+| L9 | Linking `depositTag` to the deposit note | Keyed tag: BLAKE2b keyed with a hash of the vault's viewing key over the note commitment (D24); only holders of the viewing key can compute it | `policy/src/derive.rs`, `tier2/statement` |
 | L10 | Our backend and the app's host see client IPs | Nothing is logged; vault ids stay in the URL fragment, so the app's host never sees them; Tor support is roadmap | `backend/`, app routes |
 | L11 | Liquidator / market maker addresses | Revealed off-chain only; Base sees salted commitments; a fresh salt per operation | `bots/`, coordinator |
 | L12 | Bridges or NEAR Intents in the ZEC flow | None: ZEC never leaves Zcash | design |
@@ -52,6 +52,7 @@ review and their status are in [SECURITY_REVIEW.md](SECURITY_REVIEW.md).
 | L19 | Unsalted address hashes on Base | `keccak256(salt32 ‖ receiver43)`; salts only with the signers | `ledger::commitment`, contracts |
 | L20 | Registering the vault on Base just before the deposit | Vaults are opened off-chain; the first Base trace is the attested deposit | coordinator, Registry |
 | L21 | The light wallet server learns which transactions the signers look up (deposits, payouts) | Each signer can use its own server; roadmap: every signer on its own full node | node config ([OPERATORS.md](OPERATORS.md)) |
+| L22 | A Tier 2 deposit proof revealing the deposit or the vault's address on Base | The journal holds the anchor header (a later block, not the deposit's), vault id, account, amount, tag and the `VaultOpened` struct hash; the deposit's block, transaction, note and the address hash stay inside the proof (D22). Base learns only that the deposit precedes the anchor | `tier2/statement`, `ZecuredRegistry.attestDepositWithProof` |
 
 ## Attacks on the signer network
 
@@ -68,9 +69,10 @@ review and their status are in [SECURITY_REVIEW.md](SECURITY_REVIEW.md).
 | Burning vault value into fees through an unaccounted spend | Refused: the bundle's value balance must equal the plan's fee exactly | `policy/src/verify.rs` |
 | Coordinator reads DKG secrets | Round-2 packages and `sk` contributions are sealed node-to-node (X25519 + ChaCha20-Poly1305); `sk` is agreed by commit-reveal | `node/src/envelope.rs`, `node/src/dkg.rs` |
 | Forged owner requests | Each request is an EIP-712 signature checked against the owner key recorded at opening, with one-time nonces and deadlines | node P0 |
-| A deposit minted twice, or a refunded deposit also minted | P1 marks exactly one conforming note; decisions are final; the Registry rejects reused vault ids and tags | `policy/src/classify.rs`, Registry I5 |
+| A deposit minted twice, or a refunded deposit also minted | P1 marks exactly one conforming note; decisions are final; the Registry rejects reused vault ids and tags, and one note has one tag on both minting paths (D24); the conforming deposit is refunded only after `cancelVault` made the vault unmintable (D23) | `policy/src/classify.rs`, Registry I5, node `cancel` |
+| Three signers attesting a deposit that does not exist, or honest signers fooled by a lying data source | Tier 2: a deposit can be minted on a proof instead, which needs no signer and no light wallet server; the signers only vouch for the vault key, and all five must (D22) | `tier2/`, `ZecuredRegistry.attestDepositWithProof` |
 | zZEC escaping its vault (transfers, flash loans, direct liquidation) | zZEC moves only Registry ↔ Morpho ↔ Adapter under a one-shot transient expectation | `contracts/src/ZZEC.sol`, invariant I2 |
-| Three colluding signers | Can steal: this is the hackathon trust assumption. Roadmap: independent operators, bonds, slashing, Base-side verification of Zcash deposits | — |
+| Three colluding signers | Can steal vault funds: this is the hackathon trust assumption for payouts. Minting no longer needs them (Tier 2). Roadmap: independent operators, bonds, slashing | — |
 
 ## Known limitations (hackathon)
 
@@ -79,8 +81,9 @@ review and their status are in [SECURITY_REVIEW.md](SECURITY_REVIEW.md).
 - The price oracle and USDC are mocks.
 - Only one public light wallet server runs NU7 software today, so every node reads Zcash from it:
   a server that lies about a deposit could get it attested. Independent operators run their own
-  (the witness mechanism is in place); the structural fix is verifying deposits on Base itself
-  ([TIER2.md](TIER2.md)).
+  (the witness mechanism is in place); the structural fix, minting on a deposit proof verified on
+  Base ([TIER2.md](TIER2.md)), runs on the local fork with a MOCK verifier until Groth16 seals can be
+  produced (x86 machine with Docker).
 - The backend host holds the coordinator key, the demo token and the MOCK oracle key (one
   operator during the hackathon). Whoever holds the MOCK oracle key can crash the price and
   liquidate every vault: a real deployment needs a real oracle.
@@ -101,7 +104,7 @@ review and their status are in [SECURITY_REVIEW.md](SECURITY_REVIEW.md).
 - [ ] Third-party outputs `ovk = None`
 - [ ] No smart account ever received ETH; outside USDC only in the warned repay-with-USDC path
 - [ ] No account ever held zZEC (token transfers on the explorer)
-- [ ] No Base event or calldata with a Zcash txid, note commitment or address; every recipient commitment salted
+- [ ] No Base event or calldata with a Zcash txid, note commitment or address (or an unsalted hash of one); every recipient commitment salted
 - [ ] No Base transaction about a vault before its deposit
 - [ ] Demo control panel authenticated; `setPrice` owner-only
 - [ ] Browser network tab: no third-party RPC / bundler / paymaster calls

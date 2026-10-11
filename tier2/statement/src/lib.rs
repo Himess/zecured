@@ -307,7 +307,8 @@ pub fn verify(w: &Witness) -> Result<Journal, Error> {
     let domain = IronwoodDomain::for_action(action);
     let esk = IronwoodDomain::derive_esk(&note).ok_or(Error::NotDecryptable)?;
     let pk_d = IronwoodDomain::get_pk_d(&note);
-    let (recovered, _, _) = try_output_recovery_with_pkd_esk(&domain, pk_d, esk, action).ok_or(Error::NotDecryptable)?;
+    let (recovered, _, _) =
+        try_output_recovery_with_pkd_esk(&domain, pk_d, esk, action).ok_or(Error::NotDecryptable)?;
     if recovered.recipient().to_raw_address_bytes() != note.recipient().to_raw_address_bytes()
         || recovered.value() != note.value()
         || recovered.rseed().as_bytes() != note.rseed().as_bytes()

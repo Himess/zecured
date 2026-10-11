@@ -1,220 +1,193 @@
-# Tier 2: proving deposits on Base without trusting the signers
+# Tier 2: minting zZEC on a proof of the deposit
 
-Status: design, plus a first building block (the header relay in `contracts/src/relay/`). Nothing here is wired into
-the Registry. "Verified" below means checked against a primary source (ZIP text, Zebra or librustzcash source, or
-live chain data); "inferred" means reasoned from those sources but not yet tested end to end.
+Status (2026-10-11): **implemented and run on real Testnet data, verified on-chain with a MOCK verifier.** The
+statement, the RISC Zero guest, the witness builder, the Registry entry point, the header relay and the refund path
+for unminted deposits are in the repository with tests. A real deposit's proof was produced locally as a RISC Zero
+succinct (STARK) receipt. Not done yet: the Groth16 wrap that Base can verify (needs an x86 machine with Docker) and
+a deployment on Base Sepolia (needs the relay fed with headers there). "Verified" below means checked against a
+primary source (ZIP text, Zebra or librustzcash source, live chain data); "estimate" marks numbers not measured here.
 
-## 1. Where we are and what changes
+## 1. What changes
 
-Today (Tier 1) a deposit becomes zZEC when 3 of 5 signers sign a `DepositAttestation(vaultId, account, amount,
-depositTag)` and `ZecuredRegistry.attestDeposit` checks the signatures. Two trust assumptions sit inside that step:
+In Tier 1 a deposit becomes zZEC when 3 of 5 signers sign a `DepositAttestation` and `attestDeposit` checks the
+signatures. Two trust assumptions sit in that step:
 
 - **The signers.** Three colluding signers can attest a deposit that does not exist and mint unbacked zZEC.
-- **Their data source.** All five read the chain through the same light wallet server (`testnet.zec.rocks`, the only
-  public NU7 endpoint; THREAT_MODEL "Known limitations"). A lying server could make honest signers attest a fake
-  deposit.
+- **Their data source.** A lying light wallet server can make honest signers attest a fake deposit (all five read
+  the same public NU7 server today; D17 lets each use its own sources).
 
-Tier 2 replaces the attestation with a proof checked on Base: zZEC is minted only if a note of the right value,
-addressed to the vault, is committed in a Zcash block that is on the proof-of-work-verified best chain and buried
-deeply enough. The payout side (FROST signers releasing ZEC) is unchanged; see § 6.
+With `attestDepositWithProof`, zZEC is minted only on a zero-knowledge proof that a note of the vault's amount,
+addressed to the vault, is in a Zcash block committed by a header the on-chain relay verified, under enough work.
+Nobody has to trust the prover: anyone may build and submit the proof. The payout side (3-of-5 FROST signers
+releasing ZEC) is unchanged; see § 7.
 
-## 2. The statement
+| | Tier 1 (`attestDeposit`) | Tier 2 (`attestDepositWithProof`) |
+|---|---|---|
+| Who vouches for the deposit | 3 of 5 signers | the proof, checked on Base |
+| What the signers still vouch for | the deposit | the vault key: all five sign `VaultOpened` at the end of the DKG (D20); one honest signer can refuse a key it did not help create |
+| Data source trusted for minting | the signers' light wallet servers | none (the relay checks proof of work itself) |
+| Signers online to mint | yes (3 of 5) | no |
+| Visible on Base | vault id, account, amount, tag | the same, plus the anchor header hash and the `VaultOpened` struct hash |
 
-A deposit proof for vault V convinces the Registry of:
+Both paths coexist (dual mode). A deployment without a verifier rejects proofs; a proof-only deployment would drop
+`attestDeposit`.
 
-> There is an Ironwood note *n* = (d, pk_d, v, ρ, ψ, rcm) with v = the vault's denomination, addressed to vault V's
-> Orchard-protocol receiver, whose commitment cmx is a leaf of the Ironwood note commitment tree whose root
-> rt is the final Ironwood tree root of some block m; block m is committed by the header H, H is on the relay's best
-> chain with enough work on top of it, and t = Tag(n, V).
+## 2. The statement (`tier2/statement`)
 
-| | Values |
+The same Rust function, `verify(&Witness) -> Result<Journal, Error>`, runs natively (to build and check witnesses)
+and inside the RISC Zero zkVM (the guest proves it accepted the private witness and commits the journal).
+
+**Private witness:** the deposit transaction (v6 bytes), the index of its Ironwood action, the note (43-byte
+recipient, value, rseed), the transaction's position and SHA-256d path in its block B, B's header, B's ZIP 221
+history-tree leaf with its path and all peaks, a later header T with its block's auth data root, and the vault as
+the signers described it in `VaultOpened` (id, owner, account, unified address and full viewing key strings, expiry
+height).
+
+**Relations checked:**
+
+1. **Deposit rule D5.** The transaction parses as v6 under the NU7 branch id and has an Ironwood bundle and no
+   transparent, Sapling or Orchard parts. Its txid (ZIP 244, computed from the bytes) is under B's `merkleRoot`.
+2. **B is in the history committed by T.** The leaf's `subtree_commitment` is SHA-256d(B's header) and it covers a
+   single height ≤ the vault's expiry height; the path hashes the leaf up to one of the peaks; the left fold of the
+   peaks is the history tree's root node, and BLAKE2b("ZcashBlockCommit", V3 hash of that node ‖ T's auth data root ‖
+   [0]^32) equals T's `hashBlockCommitments`. Only T is public: B stays hidden among the epoch's blocks (23,534 at
+   the anchor below).
+3. **The note.** Recovering the action's ciphertext with the ephemeral secret derived from the witness note (ZIP 212)
+   and the note's pk_d succeeds, which means the plaintext is a note whose commitment is the action's cmx and whose
+   ephemeral key is the action's: the action creates that note and an incoming viewing key for its recipient
+   decrypts it. The recovered note equals the witness note field by field.
+4. **The recipient is the vault.** The vault's unified address is a Testnet address whose only receiver is the
+   note's (Orchard-protocol) receiver (D4).
+
+**Public output (journal, 192 bytes):** `abi.encode(bytes32 tipHash, bytes32 vaultId, address account, uint64 amount,
+bytes32 depositTag, bytes32 vaultOpenedHash)`, where `vaultOpenedHash` is the EIP-712 struct hash of
+`VaultOpened(vaultId, owner, account, amount, expiryHeight, keccak256(address), keccak256(ufvk))` computed inside the
+proof, with `amount` = the note's value.
+
+**Why the transaction's inclusion path and not the note commitment tree.** The first design (kept in git history)
+proved cmx in the Ironwood note commitment tree against a root from B's history leaf: 32 Sinsemilla Merkle hashes,
+about 3,300 Pallas point additions. The inclusion path costs SHA-256d (accelerated in RISC Zero) and the ZIP 244
+txid, and it also proves the shape of the whole transaction (D5), which the tree path cannot.
+
+**Why the struct hash and not the address hash.** `keccak256(address)` on Base would let anyone who knows the vault's
+address, for example an exchange that paid into it, find the vault, its account and its loan. The struct hash also
+depends on the viewing key, which only the owner and the signers know.
+
+## 3. On Base
+
+`ZecuredRegistry.attestDepositWithProof(journal, seal, openedSigs)` (D22) checks, in this order:
+
+1. the vault id, tag and account are unused (I4, I5) and nothing is zero;
+2. `relay.isInBestChain(tipHash)` and `relay.confirmationWork(tipHash) >= minConfirmationWork`; the deposit's block
+   precedes T, so it is at least as deeply buried;
+3. all five signers' signatures (sorted) over the Registry-domain digest of `vaultOpenedHash`;
+4. `verifier.verify(seal, depositImageId, sha256(journal))`;
+
+then mints and supplies exactly as `attestDeposit`. The verifier is RISC Zero's router on Base Sepolia
+(`0x0b144e07a0826182b6b59788c34b32bfa86fb711`: `verify(bytes,bytes32,bytes32)` present, Groth16 v3.0.0 selector
+`0x73c457ba` active, checked on-chain); `MockRiscZeroVerifier` (MOCK) stands in on the local fork, and the deploy
+script refuses it anywhere else.
+
+**Confirmations are measured in work.** Testnet minimum-difficulty blocks add 32 units of work against ~490,000 for
+an average post-NU7 block (500 blocks to 4,488,603), so a block count would be cheap to inflate. The default
+`minConfirmationWork` is 1,000,000: two to three normal blocks.
+
+**Tests** (`contracts/test/fork/DepositProofs.t.sol`, 26 tests): the journal of the real deposit below, anchored to
+header 4,488,560, which the real relay verifies on-chain (Equihash, difficulty, time, linkage; fixture cross-checked
+with CipherScan) together with 11 more headers for the work on top; refusals for an unknown anchor, too little work,
+four signatures, a duplicate or foreign signature, a seal for another journal or image, journals of the wrong length
+or with a dirty address word, a reused vault, tag or account; cancellation; the `VaultOpened` golden vector.
+Gas: **266,300** without the verifier call (MOCK); RISC Zero's Groth16 verification adds roughly 2.8 × 10^5
+(estimate, not measured here).
+
+## 4. The deposit tag (D24)
+
+`depositTag = BLAKE2b-256(key = BLAKE2b-256("Zecured_TagKey__", UFVK string), personal "Zecured_DepTag__", cmx)`.
+Signer attestations use the same definition, so a note has one tag on both paths and can never mint twice. The
+depositor can compute it (it has the viewing key), the public cannot link it to the note without the viewing key
+(L9). The cmx is unique per note; the UFVK string is fixed by the signed `VaultOpened`.
+
+## 5. Unminted deposits: cancellation (D23, L-8)
+
+A proof needs no signer, so the signers may refund the conforming deposit of a vault that was never activated only
+after `cancelVault` (3 of 5 signers over `VaultCancellation(vaultId)`) has made the vault `Cancelled`: from then on
+neither an attestation nor a proof can activate it. The owner asks with an ordinary `RefundRequest` for that deposit
+once its deposit window is over; each node checks that the Registry has not activated the vault, records the refund
+and signs the cancellation; the coordinator submits it; the deposit becomes refundable only when the nodes apply the
+checked `VaultCancelled` event. This also closes security review finding L-8 for Tier 1.
+
+## 6. Measurements on real Testnet data
+
+| What | Result |
 |---|---|
-| **Public inputs** | header hash H (or its `hashBlockCommitments`); vault key commitment K (§ 5); denomination v; deposit tag t |
-| **Private witness** | the note (d, pk_d, v, ρ, ψ, rcm, or rseed); its tree position and 32 Merkle siblings; the vault's full viewing key (ak, nk, rivk); the history-tree (MMR) leaf of block m, its path and peaks; H's `hashChainHistoryRoot` and `hashAuthDataRoot` |
+| History tree | `hashBlockCommitments` of header 4,488,543 recomputed from public data (23,517 V3 leaves, 4,465,026 .. 4,488,542; compact blocks and tree states from lightwalletd, headers over P2P): **matches the header** (`history-root`) |
+| Witness | vault 9 of the local-fork runs: 0.01 TAZ at 4,488,543 (transaction 1 of 2), anchor T = 4,488,560, leaf 23,517 of 23,534, path of 5 nodes to peak 7 of 11; ~5 min to build the first time (per-block summaries are cached), 8 s afterwards |
+| Native check | `verify` accepts; the `VaultOpened` struct hash matches an independent computation with `cast` |
+| zkVM execution | journal identical to the native computation; **20.2 M cycles** (21 segments of 2^20) |
+| Where the cycles go | Sinsemilla note commitments ~56 % (three: the witness note's validity check and two inside recovery), scalar multiplications, hash-to-curve, BLAKE2b ~7 %, SHA-256 ~1 % |
+| Optimizations so far | Pallas field multiplication and inversion through RISC Zero's 256-bit modular-multiplication accelerator (vendored `pasta_curves`, `ZECURED_PATCH.md`): ~3× fewer cycles; three redundant note commitments removed (the first run took 36.2 M cycles); witness read as one frame |
+| Local proving | a 22.1 M-cycle probe of the same code: succinct receipt in 108 min on this Apple M2 with 8 GB (CPU only, r0vm has no Metal backend, heavy swapping); the real deposit's proof: see `docs/TESTING.md` |
+| On-chain | 266,300 gas with the MOCK verifier (§ 3) |
 
-Relations checked inside the proof:
+## 7. What still needs trust
 
-1. **Note commitment.** cm = NoteCommit^Orchard_rcm(g_d, pk_d, v, ρ, ψ), cmx = Extract_P(cm). ZIP 2005 leaves
-   NoteCommit^Orchard and DeriveNullifier unchanged for Ironwood notes; it only changes how rcm is derived from rseed
-   (lead byte `0x03`, `pre_rcm` over g_d, pk_d, v, ρ, ψ; ZIP 2005 § "Changes to the Protocol Specification"). The
-   circuit can take rcm as witness, as the Orchard action circuit does. (Verified, ZIP 2005.)
-2. **Merkle path.** cmx is at the given position of a depth-32 tree with root rt, using MerkleCRH^Orchard (Sinsemilla).
-   The Ironwood tree is a second Orchard-shaped tree: ZIP 258 caps it at 2^MerkleDepth^Orchard leaves, the `orchard`
-   crate (0.16, vendored `616a669`) has no Ironwood-specific tree code, and Zebra stores its root as an
-   `orchard::tree::Root`. (Verified in sources; the empty-leaf value being the Orchard one is inferred.)
-3. **Recipient is the vault.** ivk = Commit^ivk_rivk(Extract_P(ak), nk), g_d = DiversifyHash(d), pk_d = [ivk] g_d,
-   and K = Hash(ak, nk, rivk). Only the full viewing key is needed, not any spending key.
-4. **Anchor is committed by H.** rt equals `hashLatestIronwoodRoot` of the MMR leaf of block m; that leaf is in the MMR
-   whose root is `hashChainHistoryRoot`; and H's `hashBlockCommitments` = BLAKE2b-256("ZcashBlockCommit",
-   hashChainHistoryRoot ‖ hashAuthDataRoot ‖ [0]^32). See § 3.
-5. **Tag.** t = Tag(n, V) as in § 4.
+- **Payouts.** Releasing ZEC still needs 3 of 5 FROST signers, who can collude to steal a vault. Tier 2 stops unbacked
+  minting and lying data sources, not theft.
+- **The vault key.** All five signers vouch that the address and viewing key in `VaultOpened` are those of the DKG
+  they ran. A vault key controlled by one party could otherwise back a mint that party later spends away.
+- **The relay**: its checkpoint (hash, height, 113 context entries) is trusted constructor input; someone must
+  submit headers (anyone can: `scripts/relay-feed.sh`); ~6.3 × 10^5 gas per header.
+- **RISC Zero**: the soundness of its proof system and the router's governance (its owner can add or remove verifier
+  versions; an e-stop wrapper can disable one). The Registry pins the guest image id.
+- **Testnet** proof of work is weak; `minConfirmationWork` is a parameter, not a guarantee.
 
-The Registry then checks: `relay.isInBestChain(H)` and `relay.confirmationWork(H)` ≥ W_min (§ 6); K is the attested
-key of `vaultId` (§ 5); t and `vaultId` are unused (I5); then it mints exactly as `attestDeposit` does today.
+## 8. Remaining work
 
-**Confirmations.** The note is in the tree of block m, and m precedes H, so whatever burial the Registry requires of
-H holds at least as strongly for the note's block. Any Ironwood note, even one created before NU7, can be proven
-against a post-NU7 anchor: the Ironwood tree is cumulative since NU6.3.
+1. **Groth16 seal.** `risc0-groth16` 3.0.5 proves only with Docker on x86 (or CUDA). The plan keeps the witness on the
+   depositor's machine: build the succinct receipt and its `identity_p254` form locally, send only that seal to the
+   x86 machine for the Groth16 step, and submit the result. RISC Zero documents its receipts as zero-knowledge proofs
+   (`risc0-zkvm` 3.0.6 `Receipt`).
+2. **Base Sepolia**: deploy a relay from a recent checkpoint (`script/DeployRelay.s.sol`), keep it fed, redeploy the
+   Registry with the router, the image id and the relay.
+3. **Prover UX**: a CLI command that builds the witness (headers over P2P, compact blocks, the vault's viewing key
+   from `ViewKeyRequest`) and proves; optionally the coordinator as a convenience prover (it already knows the
+   viewing key; it cannot forge a proof).
+4. **Fewer cycles**: one note commitment instead of three (own ZIP 212 recovery), Pallas point operations through
+   RISC Zero's elliptic-curve accelerator instead of field operations, fixed constants precomputed.
 
-## 3. How the Ironwood root reaches Base
+## 9. Tier 3 directions
 
-This is the crux, and the answer is positive: **since NU6.3, every block header commits to the Ironwood tree root of
-every earlier block of the same network-upgrade epoch.**
+Vault keys derived from a long-lived signer group key by a public tweak (no per-vault `VaultOpened`); bonded signers
+slashable on Base for a payout without a matching burn, once Zcash spends can be proven through the same relay; a
+finality gadget such as Crosslink for confirmations.
 
-**Verified:**
+## Appendix: how the history root reaches Base (verified)
 
 - ZIP 221 defines the chain history tree, a Merkle mountain range (MMR) with one leaf per block. Each node carries
-  metadata and is hashed with BLAKE2b-256, personalization `"ZcashHistory" ‖ le32(CONSENSUS_BRANCH_ID)`. The header
-  of block B_n commits to the MMR over B_x .. B_{n−1}, where x is the most recent upgrade's activation height
-  (ZIP 221 § "Tree Node specification", § "Block header semantics").
+  metadata and is hashed with BLAKE2b-256, personalization `"ZcashHistory" ‖ le32(CONSENSUS_BRANCH_ID)`. The header of
+  block B_n commits to the MMR over B_x .. B_{n−1}, where x is the most recent upgrade's activation height.
 - ZIP 244 § "Block Header Changes": since NU5, `hashBlockCommitments` = BLAKE2b-256 with personalization
   `"ZcashBlockCommit"` over hashLightClientRoot (= hashChainHistoryRoot) ‖ hashAuthDataRoot ‖ [0u8; 32].
-- ZIP 258 § "Changes to ZIP 221" (NU6.3) adds three fields to every node: `hashEarliestIronwoodRoot`,
-  `hashLatestIronwoodRoot` (for a leaf: "the note commitment root of the final Ironwood treestate" of that block) and
-  `nIronwoodTxCount`. It states that `hashBlockCommitments` "is unaffected beyond this". Nodes are 277–317 bytes.
-- NU7 changes nothing here: none of the ZIPs it deploys (ZIP 259: 207 rev. 2, 214 rev. 3, 218, 235, 237, 2003,
-  2008) mentions the history tree or `hashBlockCommitments`, and Zebra uses the same `V3` trees for NU7.
-- Implementation: `zcash_history` 0.5.0 (2026-07-09) adds `V3` node data with the Ironwood fields
-  (`MAX_NODE_DATA_SIZE` = 317; librustzcash `3c76c2d`). Zebra v7.0.0-rc.0 (`6d1e414d6f`) builds `V3`
-  ("IronwoodOnward") trees for NU6.3 and NU7 (`zebra-chain/src/history_tree.rs`), fills the leaf from the block's
-  final Ironwood root (`primitives/zcash_history.rs`), starts a new tree at each upgrade's activation block, and
-  validates `hashBlockCommitments` from the previous block's history root and the block's auth data root
-  (`zebra-state/src/service/check.rs`, `block_commitment_is_valid_for_chain_history`).
-- Data availability: the light wallet protocol returns Ironwood tree states (`TreeState.ironwoodTree`, field 7;
-  `ShieldedProtocol.ironwood = 2` for subtree roots). `GetTreeState` on `testnet.zec.rocks` returns a 322-byte
-  Ironwood frontier at height 4,488,000.
+- ZIP 258 § "Changes to ZIP 221" (NU6.3) adds `hashEarliestIronwoodRoot`, `hashLatestIronwoodRoot` and
+  `nIronwoodTxCount` to every node (`V3`, 277–317 bytes) and leaves `hashBlockCommitments` otherwise unchanged.
+- NU7 changes nothing here (none of the ZIPs it deploys mentions the history tree); the NU7 epoch's tree starts at
+  4,465,026 with branch id `0x77190AD9`. Zebra v7.0.0-rc.0 (`6d1e414d6f`) builds `V3` trees for NU6.3 and NU7 and
+  validates `hashBlockCommitments` against them (`zebra-state/src/service/check.rs`).
+- `zcash_history` 0.6.0 implements `V3`; `signer/crates/deposit-witness/src/mmr.rs` builds paths and peaks and is
+  tested against `zcash_history::Tree` for 1 to 40 leaves.
+- The light wallet protocol serves Ironwood tree states (`TreeState.ironwoodTree`); with all four pool types requested
+  a compact block lists every transaction, which the txid Merkle path needs.
 
-**Inferred, not yet tested:**
+## Appendix: choice of proof system
 
-- I have not recomputed a real `hashBlockCommitments` from chain data. That needs, for every block of the epoch, its
-  hash, time, nBits, the three tree roots and three transaction counts, plus the block's `hashAuthDataRoot`
-  (ZIP 244 auth digests of all its transactions). All of it is public (full blocks, or compact blocks plus tree
-  states). This is the first task of phase 2 (§ 7), and it must be checked against real Testnet headers.
-- The NU7 epoch MMR starts at 4,465,026 and uses NU7's branch ID `0x77190AD9` in the personalization. The
-  activation block itself commits to the NU6.3 epoch's tree. An anchor therefore needs m ≥ 4,465,026 for headers in
-  the NU7 epoch.
-
-**Two ways to check relation 4:**
-
-| | (A) On Base, in Solidity | (B) Inside the proof |
-|---|---|---|
-| What goes on chain | MMR leaf, siblings, peaks (≈ 300 bytes each, ~log2(blocks since NU7) + peaks ≈ 20–40 nodes) | nothing extra; H is a public input |
-| Cost | BLAKE2b-256 via the 0x09 precompile (~5 compressions per node) plus 6–12 KB calldata: roughly 1.5–2.5 × 10^5 gas (estimate) | ~200 BLAKE2b compressions in the zkVM (small next to Sinsemilla) |
-| Privacy | reveals the anchor block m (not the note) | reveals only H |
-
-(B) is simpler and more private, and is the recommended path with a zkVM. (A) fits a Halo2 circuit, where BLAKE2b
-is costly. It can be shared: an "anchor registry" stores verified roots that many deposits reuse.
-
-## 4. The deposit tag
-
-Requirements: **unique per note** (one note cannot mint twice), **deterministic** (the prover cannot pick another
-tag for the same note), **unlinkable** to anything visible on Zcash, and computable by whoever proves.
-
-| Candidate | Unique | Unlinkable | Notes |
-|---|---|---|---|
-| nf (the note's nullifier) | yes | **no** | When the vault spends the note, nf appears on Zcash and links the Base mint to the payout transaction |
-| BLAKE2b(nf) | yes | **no** | Anyone can hash published nullifiers |
-| Today: BLAKE2b keyed by H(vault `sk`) over nf (`policy/src/derive.rs`) | yes | yes | `sk` is shared by the signers only; the depositor cannot compute it |
-| **BLAKE2b keyed by H(nk) over nf** (recommended) | yes | yes | nk is in the vault's full viewing key, which the borrower receives (ARCHITECTURE "Trust model") |
-| H(vaultId) | per vault | yes | Works only with one deposit per vault and one vault per key; no protection if keys are reused |
-
-Why the recommended tag works:
-
-- Uniqueness: nf is unique per note (DeriveNullifier over the unique ρ; ρ is itself the nullifier spent in the same
-  action). nk is fixed by the vault's address, because a different (ak, nk, rivk) with the same ivk would break the
-  binding of Commit^ivk. Deriving nf in the proof adds a Poseidon hash and one fixed-base scalar multiplication. Using
-  ρ instead of nf is equally unique and cheaper.
-- What it reveals: to the public, nothing (a PRF output under nk). The signers and the borrower know nk and can link
-  t to the note, but they already see the vault's notes. If a borrower leaks the UFVK, the tag becomes linkable,
-  but so does the vault's whole history.
-
-## 5. Who proves, and with what
-
-**The depositor proves.** The depositor built the note, so it knows the plaintext (or rseed) and simply opens the
-commitment. **No trial decryption is needed**: an IVK only serves to find notes, and the depositor already has the
-note. The vault's full viewing key is needed for relation 3 and the tag. The signers do not need to be online to
-mint, and cannot block a mint.
-
-**Binding the vault key.** A proof against a key the depositor controls would mint zZEC for ZEC the depositor can
-spend back. So K = Hash(ak, nk, rivk) must be attested once, at vault opening, by the signers ("we ran the DKG for
-this vault; this is its key"). The attestation is presented with the first deposit, so nothing touches Base earlier
-(L20), and the borrower can check it against the vault UFVK. This is a smaller trust assumption than today's: signers
-vouch for a key, not for a deposit.
-
-**Proof systems:**
-
-| | RISC Zero zkVM | SP1 zkVM | Halo2 with Orchard gadgets |
-|---|---|---|---|
-| Statement written as | Rust, reusing `orchard` / `pasta_curves` / `sinsemilla` and a BLAKE2b crate | same | a circuit, reusing the audited Sinsemilla, ECC and Poseidon chips |
-| Verified on Base Sepolia by | `RiscZeroVerifierRouter` `0x0b144e07a0826182b6b59788c34b32bfa86fb711`: on-chain check at block 47,973,492 shows selector `0x73c457ba` (Groth16 v3.0.0) routed to its e-stop wrapper `0x724d375B5b622e15f0E64e9Deb76a4cB17877797`, `0xbb001d44` (v2.2.0) to `0x7BE0Ca3734bB4B0aC66dD05714D25476bd658a9F` | `SP1VerifierGateway` (Groth16) `0x397A5f7f3dBd538f23DE225B51f532c34448dA9B` (code present) | no EVM verifier: Pasta-curve IPA proofs would need recursion into a BN254 SNARK |
-| Verification gas | ≈ 2.3–2.5 × 10^5 (Groth16, 4 pairings at EIP-1108 prices plus input handling; estimate, not measured) | similar | n/a |
-| Proving | heaviest: Pallas arithmetic in software | similar | fast (comparable to an Orchard action) |
-
-**Size of the computation (estimate, not measured; see § 8).** The Merkle path is 32 MerkleCRH hashes. Each hashes
-520 bits as 52 Sinsemilla chunks, i.e. 104 incomplete point additions, so about 3,300 additions in all. NoteCommit
-adds about 220 and Commit^ivk about 100, plus three 255-bit scalar multiplications (rcm, rivk, ivk) and one
-hash-to-curve for g_d. In projective coordinates that is on the order of 5 × 10^4 Pallas base-field
-multiplications. RISC Zero has no Pasta accelerator, so each multiplication costs hundreds of RISC-V cycles (8 × 32-bit
-limbs): **order 10^7 cycles**, plus ~10^6 for BLAKE2b in option (B). Patching the field arithmetic onto RISC Zero's
-256-bit modular-multiplication accelerator could cut this several-fold. At that size proving takes minutes on a
-laptop CPU and much less on a GPU or proving network, plus a fixed cost for the Groth16 wrap. These figures must be
-replaced by measurements before any commitment.
-
-## 6. What still needs trust or stays out of scope
-
-- **Payouts.** Releasing ZEC still needs 3 of 5 FROST signers, who can collude to steal a vault. Tier 2 only stops
-  them from minting unbacked zZEC, and stops a lying data source from fooling honest signers.
-- **Vault key attestation** (§ 5): signers vouch that K is a vault key they hold.
-- **The relay**: its checkpoint is trusted; it needs someone to submit headers (anyone can); ~6.3 × 10^5 gas per
-  header (contracts/src/relay/README.md) at 3,456 headers a day. Batching headers in a zkVM proof (Equihash + retarget
-  for N headers in one receipt) would amortise this.
-- **Testnet minimum-difficulty blocks** cost almost nothing (work 32 vs ~380,000 for a normal block), so on Testnet
-  "N confirmations" must be measured in work (`confirmationWork`), and W_min should be a multiple of the work of a
-  normal block. Mainnet has no such rule, but the usual majority-hash-power assumption remains.
-- **Policy rules outside the minimal statement.** P1 also requires an Ironwood-only deposit transaction (D5), a height
-  ≤ the vault's expiry height and "first conforming note" ordering. Proving D5 needs the deposit transaction itself
-  (ZIP 244 txid, path to `hashMerkleRoot`); the first-note rule needs the vault's full note history. In Tier 2 these
-  could stay app or wallet policy, with non-conforming notes still refunded under P5 by the signers.
-- **Base-side privacy.** Unchanged and not worse: no Zcash transaction id, note commitment or address reaches Base.
-  Option (A) would reveal an anchor block. The mint timing (L5) is unchanged.
-- **Tier 3 directions:** vault keys derived from a long-lived signer group key by a public tweak (no per-vault
-  attestation); bonded signers slashable on Base for a payout without a matching burn, once Zcash spends can be proven
-  through the same relay; a finality gadget such as Crosslink for confirmations.
-
-## 7. Phased plan
-
-| Phase | Deposits | What it removes |
-|---|---|---|
-| 0 (today) | 3-of-5 attestation; signers read one light wallet server | — |
-| 1 (this repository) | unchanged on Base. Relay deployed and fed by a relayer; each signer cross-checks that a deposit's block is on the relay's best chain, off-chain only (putting the block on Base would leak it, L4) | trust in a single data source |
-| 2 | recompute `hashBlockCommitments` of real Testnet blocks from public data (MMR library + test vectors); specify K, its attestation, and the tag; write the zkVM guest; measure cycles and proving time; build a prover for the CLI and the app | — (preparation) |
-| 3 | Registry accepts `proveDeposit(vaultId, account, proof)` alongside `attestDeposit`; the paymaster allowlist adds the selector | signers as deposit attesters (dual mode) |
-| 4 | proof-only deposits; `attestDeposit` removed; P5 refunds unchanged | signer trust for minting |
-| 5 (Tier 3) | payouts: bonds and slashing, derived vault keys | trust in signers for custody, partially |
-
-## 8. Optional measurement: not done
-
-A RISC Zero executor run of a Sinsemilla Merkle path was planned. The toolchain is not actually present on the
-build machine: `~/.cargo/bin/r0vm` and `~/.cargo/bin/cargo-risczero` are dangling symlinks into a missing
-`~/.risc0` (a v2.1.0 install from June 2025), and `rzup` is absent. Installing it means downloading binaries, which
-this task excluded, so no cycle counts were measured. The § 5 figures are analytical. Phase 2 starts with this
-measurement.
+RISC Zero 3.0.6 after comparing, for this statement on an 8 GB Apple M2: SP1 v6.9.0 (no Pallas precompile, local
+proving needs more memory, its network sees the guest's stdin), OpenVM (16 GB proving key), and a Halo2 circuit
+reusing Orchard's gadgets (fast to prove, but no EVM verifier for Pasta curves without a further wrapping SNARK).
+RISC Zero proves locally in 2^18-cycle segments within 8 GB, has a 256-bit modular-multiplication accelerator that
+speeds up Pallas arithmetic, and has a verifier router deployed on Base Sepolia.
 
 ## References
 
-Vendored sources (`docs/ref/VENDORED.md`): zcash/zips `3af03aa` (2026-10-08); zcash/librustzcash `3c76c2d`;
-zcash/orchard `616a669`.
-
-- ZIP 221 (FlyClient, chain history MMR), ZIP 244 (§ Block Header Changes), ZIP 258 (NU6.3 deployment, § Changes to
-  ZIP 221), ZIP 259 (NU7 deployment), ZIP 218 (25 s spacing), ZIP 2005 (Ironwood quantum recoverability),
-  ZIP 229 (v6 transactions), ZIP 326 (NU6.3 wallets).
-- Zebra v7.0.0-rc.0, commit `6d1e414d6f55e4180d0e47baaa934bf97d5b4fec`: `zebra-chain/src/history_tree.rs`,
-  `zebra-chain/src/primitives/zcash_history.rs`, `zebra-chain/src/block/commitment.rs`,
-  `zebra-state/src/service/check.rs`.
-- librustzcash `zcash_history` 0.5.0 (`src/node_data.rs`, CHANGELOG), `zcash_client_backend/lightwallet-protocol/
-  walletrpc/service.proto` (`TreeState.ironwoodTree`).
-- RISC Zero: `risc0/risc0-ethereum` `contracts/deployment.toml` (main, last changed in `85c59d5c5fb5`, 2026-04-29),
-  checked on chain with `cast call` against `https://sepolia.base.org`.
-- Succinct: `succinctlabs/sp1-contracts` `contracts/deployments/84532.json` (main).
-- This repository: `contracts/src/relay/README.md`, `signer/crates/policy/src/derive.rs`, docs/ARCHITECTURE.md,
-  docs/THREAT_MODEL.md.
+Vendored sources (`docs/ref/VENDORED.md`): zcash/zips `3af03aa`; zcash/librustzcash `3c76c2d`; zcash/orchard
+`616a669`. ZIP 212, 221, 244, 258, 259, 2005; Zebra v7.0.0-rc.0 `6d1e414d6f`; RISC Zero `risc0-zkvm` 3.0.6,
+`risc0-groth16` 3.0.5, `risc0-ethereum` deployment for Base Sepolia (checked on-chain with `cast`).
