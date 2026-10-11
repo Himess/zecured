@@ -7424,6 +7424,7 @@ dependencies = [
  "incrementalmerkletree",
  "orchard",
  "primitive-types",
+ "rand_core 0.6.4",
  "sapling-crypto",
  "serde",
  "serde_json",
