@@ -24,7 +24,7 @@ the signers. Salts are never logged.
 
 | Domain | name | version | chainId | verifyingContract | Used for |
 |---|---|---|---|---|---|
-| Registry | `ZecuredRegistry` | `1` | 84532 | ZecuredRegistry | `DepositAttestation`, `PayoutConfirmation`, `VaultOpened` (off-chain), and all off-chain owner requests (`OpenVault`, `Destination`, `RefundRequest`, `ViewKeyRequest`) |
+| Registry | `ZecuredRegistry` | `1` | 84532 | ZecuredRegistry | `DepositAttestation`, `PayoutConfirmation`, `VaultCancellation`, `VaultOpened` (checked off-chain by the owner and on-chain by `attestDepositWithProof`), and all off-chain owner requests (`OpenVault`, `Destination`, `RefundRequest`, `ViewKeyRequest`) |
 | Adapter | `ZecuredSettlementAdapter` | `1` | 84532 | SettlementAdapter | `CloseRequest` |
 
 Every request kind has its own type, so a signature for one kind never verifies as another.
@@ -34,11 +34,15 @@ Every request kind has its own type, so a signature for one kind never verifies 
 ```
 DepositAttestation(bytes32 vaultId,address account,uint64 amount,bytes32 depositTag)
 PayoutConfirmation(bytes32 vaultId,bytes32 claimIdsHash)
+VaultCancellation(bytes32 vaultId)
 ```
 
-- `depositTag`: keyed tag of the conforming note (`BLAKE2b-256(key = vault tag key, personal =
-  "Zecured_DepTag", note nullifier)`); unlinkable to any Zcash data without the vault secret.
+- `depositTag` (D24): keyed tag of the conforming note, `BLAKE2b-256(key = BLAKE2b-256(personal
+  = "Zecured_TagKey__", UFVK string), personal = "Zecured_DepTag__", cmx)`, the same value a
+  Tier 2 deposit proof computes; unlinkable to any Zcash data without the vault's viewing key.
   No expiry; the Registry rejects a reused `vaultId` or `depositTag` (I5).
+- `VaultCancellation` (D23, L-8): signed before the signers refund the conforming deposit of a
+  vault that was never activated; `cancelVault` makes the vault `Cancelled` for good.
 - `claimIdsHash = keccak256(abi.encodePacked(claimIds))`.
 - Signatures are passed as `bytes[]`, ordered by **strictly increasing signer address**; at
   least 3 distinct signers of the 5-member set (I6).
@@ -77,7 +81,10 @@ VaultOpened(bytes32 vaultId,address owner,address account,uint64 amount,uint32 e
 - Each node signs it with its attestation key when it completes the vault's DKG (round 3),
   from values it derived or checked itself: the `OpenVault` it verified (`owner`, `account`,
   `amount`), the expiry height it checked against its own Zcash tip, and the vault's address and
-  UFVK as it derived them. Never submitted to Base.
+  UFVK as it derived them.
+- Never submitted to Base as such: a Tier 2 deposit proof computes its EIP-712 struct hash
+  inside the proof, and `attestDepositWithProof` checks all five signatures against that hash
+  (D22), so `addressHash` and `ufvkHash` never appear on Base.
 - `addressHash = keccak256(UTF-8 bytes of the vault's unified address)` and `ufvkHash =
   keccak256(UTF-8 bytes of its UFVK)`, each string exactly as the owner receives it (`POST
   /vaults`, `POST /vaults/:id/viewing-key`).
@@ -104,11 +111,13 @@ VaultOpened(bytes32 vaultId,address owner,address account,uint64 amount,uint32 e
 ### 3.2 `ZecuredRegistry`
 
 ```solidity
-enum VaultStatus { None, Active, Closed }
+enum VaultStatus { None, Active, Closed, Cancelled }
 enum ClaimKind   { Release, Liquidation, CloseUser, CloseMarketMaker }
 enum ClaimStatus { None, Pending, Paid }
 
 function attestDeposit(DepositAttestation calldata att, bytes[] calldata sigs) external;
+function attestDepositWithProof(bytes calldata journal, bytes calldata seal, bytes[] calldata openedSigs) external;  // Tier 2
+function cancelVault(bytes32 vaultId, bytes[] calldata sigs) external;                                              // L-8
 function requestRelease(bytes32 vaultId, bytes32 destCommitment) external returns (bytes32 claimId);
 function requestPartialRelease(bytes32 vaultId, uint64 amount, bytes32 destCommitment) external returns (bytes32 claimId);
 function recordLiquidation(bytes32 vaultId, uint64 seized, bytes32 liquidatorCommitment) external returns (bytes32 claimId);   // adapter only
@@ -128,10 +137,20 @@ event LiquidationRelease(bytes32 indexed vaultId, bytes32 indexed claimId, uint6
 event CloseRelease(bytes32 indexed vaultId, bytes32 userClaimId, bytes32 mmClaimId, uint64 userAmount, uint64 mmAmount,
                    bytes32 userCommitment, bytes32 mmCommitment);
 event PayoutConfirmed(bytes32 indexed vaultId, bytes32[] claimIds);
+event VaultCancelled(bytes32 indexed vaultId);
 ```
 
 - `attestDeposit` registers the vault (`outstanding = amount`, `Active`), mints zZEC to itself
   and calls `Morpho.supplyCollateral(market, amount, onBehalf = account, "")` (I1, I4, I5).
+- `attestDepositWithProof` (Tier 2, D22) has the same effects, on a proof instead of an
+  attestation. `journal = abi.encode(bytes32 tipHash, bytes32 vaultId, address account, uint64
+  amount, bytes32 depositTag, bytes32 vaultOpenedHash)` (exactly 192 bytes); it requires
+  `relay.isInBestChain(tipHash)` and `relay.confirmationWork(tipHash) >= minConfirmationWork`,
+  the five signers' signatures (sorted) over the `VaultOpened` digest of `vaultOpenedHash`, and
+  `verifier.verify(seal, depositImageId, sha256(journal))`. Disabled (reverts) when the
+  deployment has no verifier. Anyone may relay.
+- `cancelVault` (D23): 3 signer signatures over `VaultCancellation(vaultId)`; only a vault that
+  is still `None`; it becomes `Cancelled` and can never be activated.
 - `requestRelease`: caller must be the vault's account; withdraws `outstanding` from Morpho on
   behalf of the account to the Registry (reverts while debt remains), burns it,
   `outstanding = 0`, `Closed`.

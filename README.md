@@ -46,18 +46,21 @@ txids) and how to reproduce every run: [docs/TESTING.md](docs/TESTING.md).
 | ZZEC / ZecuredRegistry / SettlementAdapter contracts | |
 | Liquidation, close from collateral, refunds of non-conforming deposits | |
 | Own RPC / bundler / paymaster proxy with a sponsorship allowlist | |
+| Tier 2 deposit statement on real Testnet data, run in the RISC Zero zkVM; Zcash header relay with on-chain Equihash | RISC Zero verifier on the local fork (`MockRiscZeroVerifier`, accepts unproven journals) until Groth16 seals are produced on an x86 machine; Base Sepolia uses the real verifier router |
 
 ## Repository layout
 
 | Path | What |
 |---|---|
-| `contracts/` | Solidity + Foundry: `ZZEC`, `ZecuredRegistry`, `SettlementAdapter`, mocks, and the Tier 2 Zcash header relay (`src/relay/`); 228 tests |
+| `contracts/` | Solidity + Foundry: `ZZEC`, `ZecuredRegistry` (attestations, Tier 2 deposit proofs, cancellation), `SettlementAdapter`, mocks, and the Zcash header relay (`src/relay/`); 253 tests |
 | `signer/crates/zcash-ops` | Ironwood scanning, PCZT build/prove/sign/extract, ZIP 2005 vault keys |
 | `signer/crates/threshold` | FROST DKG and re-randomized signing |
 | `signer/crates/policy` | P1 classification, payout ledger (I10), PCZT verification against the plan |
 | `signer/crates/node` | A signer node: DKG, owner-request checks, policy-gated signing |
 | `signer/crates/coordinator` | Keyless orchestrator: DKG relay, attestations, payouts, confirmations |
 | `signer/crates/base-client` | EIP-712 (cross-checked with Solidity), Registry events |
+| `signer/crates/deposit-witness` | Tier 2: the ZIP 221 history tree (V3, Ironwood) from public chain data, and the witness of a deposit proof |
+| `tier2/` | Tier 2: the deposit statement (`statement/`), the RISC Zero guest and host (separate Cargo workspace) |
 | `backend/` | Public API + privacy proxy (RPC, bundler, paymaster allowlist) |
 | `bots/` | Liquidator and market maker |
 | `cli/` | `zecured-wallet`: Ironwood CLI wallet and borrower actions |

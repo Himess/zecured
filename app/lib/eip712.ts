@@ -3,7 +3,8 @@
  * against that file and against the Solidity golden vectors).
  *
  * - Registry domain ("ZecuredRegistry", "1", 84532, Registry): DepositAttestation,
- *   PayoutConfirmation, VaultOpened (signed by the signer nodes, checked by the app: lib/signers.ts)
+ *   PayoutConfirmation, VaultCancellation, VaultOpened (signed by the signer nodes; the app checks
+ *   VaultOpened: lib/signers.ts)
  *   and every off-chain owner request (OpenVault, Destination, RefundRequest, ViewKeyRequest).
  * - Adapter domain ("ZecuredSettlementAdapter", "1", 84532, Adapter): CloseRequest, which the
  *   owner signs *through the Safe* (ERC-1271, SafeMessage wrapping; see docs/spikes/SPIKE_C.md).
@@ -44,6 +45,7 @@ export const types = {
     { name: "vaultId", type: "bytes32" },
     { name: "claimIdsHash", type: "bytes32" },
   ],
+  VaultCancellation: [{ name: "vaultId", type: "bytes32" }],
   // § 2.3 — signed by the per-loan owner key, verified off-chain by every signer node
   OpenVault: [
     { name: "owner", type: "address" },

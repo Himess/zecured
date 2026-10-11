@@ -182,7 +182,7 @@ export const registryAbi = [
 ] as const;
 
 /** Registry `VaultStatus` enum. */
-export const ONCHAIN_VAULT_STATUS = ["None", "Active", "Closed"] as const;
+export const ONCHAIN_VAULT_STATUS = ["None", "Active", "Closed", "Cancelled"] as const;
 
 export const adapterAbi = [
   {

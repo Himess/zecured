@@ -3,14 +3,31 @@ pragma solidity 0.8.28;
 
 import {IMorpho, MarketParams, Id} from "morpho-blue/src/interfaces/IMorpho.sol";
 import {IZZEC} from "./IZZEC.sol";
+import {IRiscZeroVerifier} from "./IRiscZeroVerifier.sol";
+import {IZcashHeaderRelay} from "../relay/IZcashHeaderRelay.sol";
 import {DepositAttestation} from "../libraries/ZecuredEIP712.sol";
 
-/// @notice Vault status on Base. Vaults are opened off-chain, so Base only knows `Active` (from `attestDeposit`) and
-///         `Closed` (outstanding reached 0).
+/// @notice Vault status on Base. Vaults are opened off-chain, so Base only knows `Active` (from `attestDeposit` or
+///         `attestDepositWithProof`), `Closed` (outstanding reached 0) and `Cancelled` (never activated, and now never
+///         will be: the signers may refund its deposit, L-8).
 enum VaultStatus {
     None,
     Active,
-    Closed
+    Closed,
+    Cancelled
+}
+
+/// @notice Tier 2 deposit proofs (docs/TIER2.md). A zero `verifier` disables `attestDepositWithProof`.
+/// @param verifier RISC Zero verifier (the router on Base Sepolia; a MOCK on a local fork).
+/// @param imageId Image id of the deposit guest (tier2/methods/guest): which program the proof is about.
+/// @param relay Zcash header relay; a proof's anchor header must be on its best chain.
+/// @param minConfirmationWork Work the relay must have on top of the anchor header (work, not blocks: Testnet
+///        minimum-difficulty blocks are nearly free).
+struct DepositProofConfig {
+    IRiscZeroVerifier verifier;
+    bytes32 imageId;
+    IZcashHeaderRelay relay;
+    uint256 minConfirmationWork;
 }
 
 /// @notice What a claim pays out on Zcash.
@@ -48,6 +65,8 @@ interface IZecuredRegistry {
         bytes32 mmCommitment
     );
     event PayoutConfirmed(bytes32 indexed vaultId, bytes32[] claimIds);
+    /// @notice The signers cancelled a vault that was never activated (L-8).
+    event VaultCancelled(bytes32 indexed vaultId);
 
     // ------------------------------------------------------------------ errors
 
@@ -101,12 +120,37 @@ interface IZecuredRegistry {
     /// @notice The claim belongs to another vault.
     error ClaimVaultMismatch(bytes32 claimId, bytes32 vaultId);
     error ClaimAlreadyPaid(bytes32 claimId);
+    /// @notice The deposit proof configuration is inconsistent (a verifier without relay or image id, or the reverse).
+    error InvalidDepositProofConfig();
+    /// @notice This deployment has no deposit proof verifier.
+    error DepositProofsDisabled();
+    /// @notice A deposit proof journal must be exactly `JOURNAL_LENGTH` bytes.
+    error InvalidJournalLength(uint256 length);
+    /// @notice The proof's anchor header is not on the relay's best chain, or has less than `minConfirmationWork`
+    ///         on top of it.
+    error AnchorNotConfirmed(bytes32 tipHash, uint256 confirmationWork);
 
     // ------------------------------------------------------------------ state-changing (docs/INTERFACES.md § 3.2)
 
     /// @notice Registers the vault (outstanding = amount, Active), mints the zZEC to the Registry and supplies it to
     ///         Morpho on behalf of `att.account`. Anyone may relay; needs >= 3 signer signatures (sorted, distinct).
     function attestDeposit(DepositAttestation calldata att, bytes[] calldata sigs) external;
+
+    /// @notice Tier 2: activates a vault on a zero-knowledge proof of its deposit instead of a signer attestation, with
+    ///         the same effects as `attestDeposit`. Anyone may relay.
+    /// @param journal abi.encode(bytes32 tipHash, bytes32 vaultId, address account, uint64 amount, bytes32 depositTag,
+    ///        bytes32 vaultOpenedHash): the deposit's block is committed by header `tipHash`, which must be on the
+    ///        relay's best chain with `minConfirmationWork` on top; the note pays `amount` to the vault described by
+    ///        the `VaultOpened` whose struct hash is `vaultOpenedHash`, in an Ironwood-only transaction at or below
+    ///        that vault's expiry height; `depositTag` is the note's tag (docs/TIER2.md, tier2/statement).
+    /// @param seal RISC Zero proof that the deposit guest (`depositImageId`) produced `journal`.
+    /// @param openedSigs Signatures of all five signers over that `VaultOpened` (Registry domain), sorted by signer.
+    function attestDepositWithProof(bytes calldata journal, bytes calldata seal, bytes[] calldata openedSigs) external;
+
+    /// @notice L-8: marks a vault that was never activated as `Cancelled`, so that neither an attestation nor a proof
+    ///         can activate it any more; only then may the signers refund its deposit. Anyone may relay; needs >= 3
+    ///         signer signatures over VaultCancellation(vaultId).
+    function cancelVault(bytes32 vaultId, bytes[] calldata sigs) external;
 
     /// @notice Vault account only. Withdraws the whole outstanding from Morpho to the Registry (reverts while debt
     ///         remains), burns it, closes the vault and creates a Release claim.
@@ -171,6 +215,15 @@ interface IZecuredRegistry {
     function hashDepositAttestation(DepositAttestation calldata att) external view returns (bytes32);
     /// @notice The EIP-712 digest (Registry domain) the signers sign to confirm `claimIds` of `vaultId`.
     function hashPayoutConfirmation(bytes32 vaultId, bytes32[] calldata claimIds) external view returns (bytes32);
+    /// @notice The EIP-712 digest (Registry domain) the signers sign to cancel `vaultId`.
+    function hashVaultCancellation(bytes32 vaultId) external view returns (bytes32);
     /// @notice The Registry's EIP-712 domain separator.
     function domainSeparator() external view returns (bytes32);
+    /// @notice Length of a deposit proof journal (six ABI words).
+    function JOURNAL_LENGTH() external view returns (uint256);
+    /// @notice Tier 2 configuration (zero verifier: proofs disabled).
+    function depositVerifier() external view returns (IRiscZeroVerifier);
+    function depositImageId() external view returns (bytes32);
+    function relay() external view returns (IZcashHeaderRelay);
+    function minConfirmationWork() external view returns (uint256);
 }

@@ -41,9 +41,49 @@
         "name": "signers_",
         "type": "address[5]",
         "internalType": "address[5]"
+      },
+      {
+        "name": "proofs_",
+        "type": "tuple",
+        "internalType": "struct DepositProofConfig",
+        "components": [
+          {
+            "name": "verifier",
+            "type": "address",
+            "internalType": "contract IRiscZeroVerifier"
+          },
+          {
+            "name": "imageId",
+            "type": "bytes32",
+            "internalType": "bytes32"
+          },
+          {
+            "name": "relay",
+            "type": "address",
+            "internalType": "contract IZcashHeaderRelay"
+          },
+          {
+            "name": "minConfirmationWork",
+            "type": "uint256",
+            "internalType": "uint256"
+          }
+        ]
       }
     ],
     "stateMutability": "nonpayable"
+  },
+  {
+    "type": "function",
+    "name": "JOURNAL_LENGTH",
+    "inputs": [],
+    "outputs": [
+      {
+        "name": "",
+        "type": "uint256",
+        "internalType": "uint256"
+      }
+    ],
+    "stateMutability": "view"
   },
   {
     "type": "function",
@@ -140,6 +180,47 @@
             "internalType": "bytes32"
           }
         ]
+      },
+      {
+        "name": "sigs",
+        "type": "bytes[]",
+        "internalType": "bytes[]"
+      }
+    ],
+    "outputs": [],
+    "stateMutability": "nonpayable"
+  },
+  {
+    "type": "function",
+    "name": "attestDepositWithProof",
+    "inputs": [
+      {
+        "name": "journal",
+        "type": "bytes",
+        "internalType": "bytes"
+      },
+      {
+        "name": "seal",
+        "type": "bytes",
+        "internalType": "bytes"
+      },
+      {
+        "name": "openedSigs",
+        "type": "bytes[]",
+        "internalType": "bytes[]"
+      }
+    ],
+    "outputs": [],
+    "stateMutability": "nonpayable"
+  },
+  {
+    "type": "function",
+    "name": "cancelVault",
+    "inputs": [
+      {
+        "name": "vaultId",
+        "type": "bytes32",
+        "internalType": "bytes32"
       },
       {
         "name": "sigs",
@@ -257,6 +338,19 @@
   },
   {
     "type": "function",
+    "name": "depositImageId",
+    "inputs": [],
+    "outputs": [
+      {
+        "name": "",
+        "type": "bytes32",
+        "internalType": "bytes32"
+      }
+    ],
+    "stateMutability": "view"
+  },
+  {
+    "type": "function",
     "name": "depositTagUsed",
     "inputs": [
       {
@@ -270,6 +364,19 @@
         "name": "used",
         "type": "bool",
         "internalType": "bool"
+      }
+    ],
+    "stateMutability": "view"
+  },
+  {
+    "type": "function",
+    "name": "depositVerifier",
+    "inputs": [],
+    "outputs": [
+      {
+        "name": "",
+        "type": "address",
+        "internalType": "contract IRiscZeroVerifier"
       }
     ],
     "stateMutability": "view"
@@ -397,6 +504,25 @@
   },
   {
     "type": "function",
+    "name": "hashVaultCancellation",
+    "inputs": [
+      {
+        "name": "vaultId",
+        "type": "bytes32",
+        "internalType": "bytes32"
+      }
+    ],
+    "outputs": [
+      {
+        "name": "",
+        "type": "bytes32",
+        "internalType": "bytes32"
+      }
+    ],
+    "stateMutability": "view"
+  },
+  {
+    "type": "function",
     "name": "marketId",
     "inputs": [],
     "outputs": [
@@ -444,6 +570,19 @@
             "internalType": "uint256"
           }
         ]
+      }
+    ],
+    "stateMutability": "view"
+  },
+  {
+    "type": "function",
+    "name": "minConfirmationWork",
+    "inputs": [],
+    "outputs": [
+      {
+        "name": "",
+        "type": "uint256",
+        "internalType": "uint256"
       }
     ],
     "stateMutability": "view"
@@ -533,6 +672,19 @@
       }
     ],
     "stateMutability": "nonpayable"
+  },
+  {
+    "type": "function",
+    "name": "relay",
+    "inputs": [],
+    "outputs": [
+      {
+        "name": "",
+        "type": "address",
+        "internalType": "contract IZcashHeaderRelay"
+      }
+    ],
+    "stateMutability": "view"
   },
   {
     "type": "function",
@@ -823,6 +975,19 @@
     "anonymous": false
   },
   {
+    "type": "event",
+    "name": "VaultCancelled",
+    "inputs": [
+      {
+        "name": "vaultId",
+        "type": "bytes32",
+        "indexed": true,
+        "internalType": "bytes32"
+      }
+    ],
+    "anonymous": false
+  },
+  {
     "type": "error",
     "name": "AccountHasVault",
     "inputs": [
@@ -835,6 +1000,22 @@
         "name": "vaultId",
         "type": "bytes32",
         "internalType": "bytes32"
+      }
+    ]
+  },
+  {
+    "type": "error",
+    "name": "AnchorNotConfirmed",
+    "inputs": [
+      {
+        "name": "tipHash",
+        "type": "bytes32",
+        "internalType": "bytes32"
+      },
+      {
+        "name": "confirmationWork",
+        "type": "uint256",
+        "internalType": "uint256"
       }
     ]
   },
@@ -925,6 +1106,11 @@
   },
   {
     "type": "error",
+    "name": "DepositProofsDisabled",
+    "inputs": []
+  },
+  {
+    "type": "error",
     "name": "DepositTagUsed",
     "inputs": [
       {
@@ -967,6 +1153,22 @@
     "inputs": [
       {
         "name": "provided",
+        "type": "uint256",
+        "internalType": "uint256"
+      }
+    ]
+  },
+  {
+    "type": "error",
+    "name": "InvalidDepositProofConfig",
+    "inputs": []
+  },
+  {
+    "type": "error",
+    "name": "InvalidJournalLength",
+    "inputs": [
+      {
+        "name": "length",
         "type": "uint256",
         "internalType": "uint256"
       }

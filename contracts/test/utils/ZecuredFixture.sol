@@ -11,7 +11,7 @@ import {ZZEC} from "../../src/ZZEC.sol";
 import {ZecuredRegistry} from "../../src/ZecuredRegistry.sol";
 import {SettlementAdapter} from "../../src/SettlementAdapter.sol";
 import {DepositAttestation, CloseRequest} from "../../src/libraries/ZecuredEIP712.sol";
-import {VaultStatus, ClaimKind, ClaimStatus} from "../../src/interfaces/IZecuredRegistry.sol";
+import {VaultStatus, ClaimKind, ClaimStatus, DepositProofConfig} from "../../src/interfaces/IZecuredRegistry.sol";
 
 /// @notice Shared fixture of the fork tests: a fork of Base Sepolia with the REAL Morpho Blue and AdaptiveCurveIRM, plus
 ///         freshly deployed MockUSDC + MockZecOracle (MOCK) and the production ZZEC / ZecuredRegistry /
@@ -98,17 +98,25 @@ abstract contract ZecuredFixture is Test {
         }
     }
 
+    /// Tier 2 configuration of the Registry under test: deposit proofs disabled unless a suite overrides this (it may
+    /// deploy contracts; it runs before the ZZEC / Registry / Adapter addresses are predicted).
+    function _depositProofConfig() internal virtual returns (DepositProofConfig memory) {}
+
+    /// Deposit proofs disabled (all zero).
+    function _noProofs() internal pure returns (DepositProofConfig memory none) {}
+
     /// Same ordering as script/DeployZecured.s.sol: ZZEC, Registry, Adapter at the deployer's next three nonces.
     function _deploySystem() internal {
         usdc = new MockUSDC(address(this));
         oracle = new MockZecOracle(address(this), PRICE_40);
+        DepositProofConfig memory proofs = _depositProofConfig();
 
         uint64 nonce = vm.getNonce(address(this));
         address predictedRegistry = vm.computeCreateAddress(address(this), nonce + 1);
         address predictedAdapter = vm.computeCreateAddress(address(this), nonce + 2);
         zzec = new ZZEC(predictedRegistry, predictedAdapter, address(MORPHO));
         registry = new ZecuredRegistry(
-            MORPHO, zzec, predictedAdapter, address(usdc), address(oracle), ADAPTIVE_CURVE_IRM, LLTV, signerSet
+            MORPHO, zzec, predictedAdapter, address(usdc), address(oracle), ADAPTIVE_CURVE_IRM, LLTV, signerSet, proofs
         );
         adapter = new SettlementAdapter(registry);
         assertEq(address(registry), predictedRegistry, "registry address prediction");

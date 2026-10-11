@@ -10,13 +10,24 @@ import {MarketParamsLib} from "morpho-blue/src/libraries/MarketParamsLib.sol";
 import {SharesMathLib} from "morpho-blue/src/libraries/SharesMathLib.sol";
 import {ORACLE_PRICE_SCALE} from "morpho-blue/src/libraries/ConstantsLib.sol";
 import {IZZEC} from "./interfaces/IZZEC.sol";
-import {IZecuredRegistry, VaultStatus, ClaimKind, ClaimStatus} from "./interfaces/IZecuredRegistry.sol";
+import {IRiscZeroVerifier} from "./interfaces/IRiscZeroVerifier.sol";
+import {IZcashHeaderRelay} from "./relay/IZcashHeaderRelay.sol";
+import {
+    IZecuredRegistry,
+    VaultStatus,
+    ClaimKind,
+    ClaimStatus,
+    DepositProofConfig
+} from "./interfaces/IZecuredRegistry.sol";
 import {ZecuredEIP712, DepositAttestation} from "./libraries/ZecuredEIP712.sol";
 
 /// @title ZecuredRegistry
 /// @notice Book-keeping for Zecured vaults on Base (docs/INTERFACES.md § 3.2):
 ///         - `attestDeposit`: a 3-of-5 signer attestation activates a vault, mints its zZEC and supplies it straight
 ///           into the account's Morpho position (I1, I4, I5, I6);
+///         - `attestDepositWithProof` (Tier 2): the same, on a RISC Zero proof that the deposit is in a Zcash block
+///           committed by a relay-verified header, for the vault all five signers described when it opened;
+///         - `cancelVault` (L-8): 3 of 5 signers retire a vault that was never activated before refunding its deposit;
 ///         - `requestRelease`: the account itself withdraws and burns its whole outstanding once the debt is repaid;
 ///         - `requestPartialRelease` (D14): the account withdraws and burns part of its outstanding, debt or not, as
 ///           long as the position's LTV stays <= 50 % afterwards and at least MIN_RELEASE stays in the vault;
@@ -40,6 +51,8 @@ contract ZecuredRegistry is IZecuredRegistry, EIP712 {
     /// @inheritdoc IZecuredRegistry
     uint256 public constant MAX_WITHDRAW_LTV_BPS = 5_000;
     uint256 private constant BPS = 10_000;
+    /// @inheritdoc IZecuredRegistry
+    uint256 public constant JOURNAL_LENGTH = 6 * 32;
 
     /// @inheritdoc IZecuredRegistry
     IMorpho public immutable morpho;
@@ -49,6 +62,15 @@ contract ZecuredRegistry is IZecuredRegistry, EIP712 {
     address public immutable adapter;
     /// @inheritdoc IZecuredRegistry
     Id public immutable marketId;
+
+    /// @inheritdoc IZecuredRegistry
+    IRiscZeroVerifier public immutable depositVerifier;
+    /// @inheritdoc IZecuredRegistry
+    bytes32 public immutable depositImageId;
+    /// @inheritdoc IZecuredRegistry
+    IZcashHeaderRelay public immutable relay;
+    /// @inheritdoc IZecuredRegistry
+    uint256 public immutable minConfirmationWork;
 
     // MarketParams cannot be an immutable struct: its fields are stored one by one (collateral token = zzec).
     address private immutable _loanToken;
@@ -68,6 +90,16 @@ contract ZecuredRegistry is IZecuredRegistry, EIP712 {
         uint64 outstanding; // zatoshi still locked (= zZEC supplied to Morpho for this vault)
         VaultStatus status;
         uint64 claimCount; // sequence number of the next claim
+    }
+
+    /// @dev The journal of a deposit proof (tier2/statement `Journal::abi_encode`).
+    struct DepositJournal {
+        bytes32 tipHash;
+        bytes32 vaultId;
+        address account;
+        uint64 amount;
+        bytes32 depositTag;
+        bytes32 vaultOpenedHash;
     }
 
     struct Claim {
@@ -98,6 +130,8 @@ contract ZecuredRegistry is IZecuredRegistry, EIP712 {
     /// @param irm_ Interest rate model of the market (must be enabled on Morpho).
     /// @param lltv_ Liquidation LTV of the market (must be enabled on Morpho).
     /// @param signers_ The 5 signer addresses, strictly increasing.
+    /// @param proofs_ Tier 2 deposit proofs: verifier, guest image id, header relay and minimum confirmation work; all
+    ///        zero to disable them.
     /// @dev Creates the zZEC market on Morpho unless it already exists (market creation is permissionless, so someone
     ///      may have created it between the zZEC deployment and this one).
     constructor(
@@ -108,7 +142,8 @@ contract ZecuredRegistry is IZecuredRegistry, EIP712 {
         address oracle_,
         address irm_,
         uint256 lltv_,
-        address[5] memory signers_
+        address[5] memory signers_,
+        DepositProofConfig memory proofs_
     ) EIP712(ZecuredEIP712.REGISTRY_DOMAIN_NAME, ZecuredEIP712.DOMAIN_VERSION) {
         if (
             address(morpho_) == address(0) || address(zzec_) == address(0) || adapter_ == address(0)
@@ -122,6 +157,11 @@ contract ZecuredRegistry is IZecuredRegistry, EIP712 {
             if (signers_[i] <= previous) revert InvalidSignerSet(); // strictly increasing => distinct and non-zero
             previous = signers_[i];
         }
+        bool proofsEnabled = address(proofs_.verifier) != address(0);
+        if (
+            proofsEnabled != (address(proofs_.relay) != address(0)) || proofsEnabled != (proofs_.imageId != bytes32(0))
+                || (!proofsEnabled && proofs_.minConfirmationWork != 0)
+        ) revert InvalidDepositProofConfig();
 
         morpho = morpho_;
         zzec = zzec_;
@@ -135,6 +175,10 @@ contract ZecuredRegistry is IZecuredRegistry, EIP712 {
         _signer2 = signers_[2];
         _signer3 = signers_[3];
         _signer4 = signers_[4];
+        depositVerifier = proofs_.verifier;
+        depositImageId = proofs_.imageId;
+        relay = proofs_.relay;
+        minConfirmationWork = proofs_.minConfirmationWork;
 
         MarketParams memory params = MarketParams({
             loanToken: loanToken_, collateralToken: address(zzec_), oracle: oracle_, irm: irm_, lltv: lltv_
@@ -148,27 +192,40 @@ contract ZecuredRegistry is IZecuredRegistry, EIP712 {
 
     /// @inheritdoc IZecuredRegistry
     function attestDeposit(DepositAttestation calldata att, bytes[] calldata sigs) external {
-        if (att.vaultId == bytes32(0)) revert ZeroVaultId();
-        if (att.account == address(0)) revert ZeroAccount();
-        if (att.amount == 0) revert ZeroAmount();
-        if (att.depositTag == bytes32(0)) revert ZeroDepositTag();
-        if (_vaults[att.vaultId].status != VaultStatus.None) revert VaultIdUsed(att.vaultId);
-        if (depositTagUsed[att.depositTag]) revert DepositTagUsed(att.depositTag);
-        bytes32 existing = _vaultOf[att.account];
-        if (existing != bytes32(0)) revert AccountHasVault(att.account, existing);
+        _checkNewVault(att.vaultId, att.account, att.amount, att.depositTag);
+        _verifySignerSignatures(_hashTypedDataV4(ZecuredEIP712.hashDepositAttestation(att)), sigs, THRESHOLD);
+        _activate(att.vaultId, att.account, att.amount, att.depositTag);
+    }
 
-        _verifySignerSignatures(_hashTypedDataV4(ZecuredEIP712.hashDepositAttestation(att)), sigs);
+    /// @inheritdoc IZecuredRegistry
+    /// @dev What the proof itself establishes is in tier2/statement/src/lib.rs. The Registry adds: the anchor header is
+    ///      on the relay's best chain with enough work on top (so is the deposit's block, which precedes it); all five
+    ///      signers described the vault (id, owner, account, amount, expiry, address and viewing-key hashes) in the
+    ///      `VaultOpened` whose struct hash the proof computed, which binds the proven note to this vault and account
+    ///      without the address hash ever reaching Base; the vault, tag and account are unused (I4, I5).
+    function attestDepositWithProof(bytes calldata journal, bytes calldata seal, bytes[] calldata openedSigs) external {
+        if (address(depositVerifier) == address(0)) revert DepositProofsDisabled();
+        if (journal.length != JOURNAL_LENGTH) revert InvalidJournalLength(journal.length);
+        // A struct of static fields decodes like the flat tuple; abi.decode rejects dirty address / uint64 words.
+        DepositJournal memory j = abi.decode(journal, (DepositJournal));
+        _checkNewVault(j.vaultId, j.account, j.amount, j.depositTag);
+        _checkAnchor(j.tipHash);
+        // All five: the DKG needs every signer, so all five always sign, and one honest signer suffices to refuse a
+        // vault key it did not help create.
+        _verifySignerSignatures(_hashTypedDataV4(j.vaultOpenedHash), openedSigs, SIGNER_COUNT);
+        depositVerifier.verify(seal, depositImageId, sha256(journal));
 
-        depositTagUsed[att.depositTag] = true;
-        _vaultOf[att.account] = att.vaultId;
-        _vaults[att.vaultId] =
-            Vault({account: att.account, outstanding: att.amount, status: VaultStatus.Active, claimCount: 0});
-        emit VaultActivated(att.vaultId, att.account, att.amount);
+        _activate(j.vaultId, j.account, j.amount, j.depositTag);
+    }
 
-        // The Registry holds the zZEC only within this call: Morpho pulls exactly `amount` from it.
-        zzec.mint(address(this), att.amount);
-        zzec.approve(address(morpho), att.amount);
-        morpho.supplyCollateral(_marketParams(), att.amount, att.account, "");
+    /// @inheritdoc IZecuredRegistry
+    function cancelVault(bytes32 vaultId, bytes[] calldata sigs) external {
+        if (vaultId == bytes32(0)) revert ZeroVaultId();
+        Vault storage v = _vaults[vaultId];
+        if (v.status != VaultStatus.None) revert VaultIdUsed(vaultId);
+        _verifySignerSignatures(_hashTypedDataV4(ZecuredEIP712.hashVaultCancellation(vaultId)), sigs, THRESHOLD);
+        v.status = VaultStatus.Cancelled;
+        emit VaultCancelled(vaultId);
     }
 
     // ------------------------------------------------------------------ exits
@@ -278,7 +335,9 @@ contract ZecuredRegistry is IZecuredRegistry, EIP712 {
     /// @inheritdoc IZecuredRegistry
     function confirmPayout(bytes32 vaultId, bytes32[] calldata claimIds, bytes[] calldata sigs) external {
         if (claimIds.length == 0) revert NoClaims();
-        _verifySignerSignatures(_hashTypedDataV4(ZecuredEIP712.hashPayoutConfirmation(vaultId, claimIds)), sigs);
+        _verifySignerSignatures(
+            _hashTypedDataV4(ZecuredEIP712.hashPayoutConfirmation(vaultId, claimIds)), sigs, THRESHOLD
+        );
 
         for (uint256 i; i < claimIds.length; ++i) {
             Claim storage c = _claims[claimIds[i]];
@@ -344,11 +403,48 @@ contract ZecuredRegistry is IZecuredRegistry, EIP712 {
     }
 
     /// @inheritdoc IZecuredRegistry
+    function hashVaultCancellation(bytes32 vaultId) external view returns (bytes32) {
+        return _hashTypedDataV4(ZecuredEIP712.hashVaultCancellation(vaultId));
+    }
+
+    /// @inheritdoc IZecuredRegistry
     function domainSeparator() external view returns (bytes32) {
         return _domainSeparatorV4();
     }
 
     // ------------------------------------------------------------------ internal
+
+    /// @dev I4, I5: a new vault id (never activated nor cancelled), an unused tag and an account without a vault.
+    function _checkNewVault(bytes32 vaultId, address account, uint64 amount, bytes32 depositTag) internal view {
+        if (vaultId == bytes32(0)) revert ZeroVaultId();
+        if (account == address(0)) revert ZeroAccount();
+        if (amount == 0) revert ZeroAmount();
+        if (depositTag == bytes32(0)) revert ZeroDepositTag();
+        if (_vaults[vaultId].status != VaultStatus.None) revert VaultIdUsed(vaultId);
+        if (depositTagUsed[depositTag]) revert DepositTagUsed(depositTag);
+        bytes32 existing = _vaultOf[account];
+        if (existing != bytes32(0)) revert AccountHasVault(account, existing);
+    }
+
+    /// @dev The header committing to a proof's deposit must be on the relay's best chain with `minConfirmationWork` on
+    ///      top of it (then so is the deposit's block, which precedes it).
+    function _checkAnchor(bytes32 tipHash) internal view {
+        uint256 work = relay.confirmationWork(tipHash);
+        if (!relay.isInBestChain(tipHash) || work < minConfirmationWork) revert AnchorNotConfirmed(tipHash, work);
+    }
+
+    /// @dev Registers the vault, mints its zZEC and supplies it to Morpho on behalf of the account (I1).
+    function _activate(bytes32 vaultId, address account, uint64 amount, bytes32 depositTag) internal {
+        depositTagUsed[depositTag] = true;
+        _vaultOf[account] = vaultId;
+        _vaults[vaultId] = Vault({account: account, outstanding: amount, status: VaultStatus.Active, claimCount: 0});
+        emit VaultActivated(vaultId, account, amount);
+
+        // The Registry holds the zZEC only within this call: Morpho pulls exactly `amount` from it.
+        zzec.mint(address(this), amount);
+        zzec.approve(address(morpho), amount);
+        morpho.supplyCollateral(_marketParams(), amount, account, "");
+    }
 
     /// @dev Withdraws `amount` of `account`'s collateral to the Registry, using the account's Morpho authorization of
     ///      the Registry. The zZEC expectation is armed immediately before the Morpho call (the guard then admits exactly
@@ -398,11 +494,11 @@ contract ZecuredRegistry is IZecuredRegistry, EIP712 {
             Claim({vaultId: vaultId, commitment: commitment, amount: amount, kind: kind, status: ClaimStatus.Pending});
     }
 
-    /// @dev I6: at least THRESHOLD signatures; every one must be a valid, non-malleable ECDSA signature (OpenZeppelin
-    ///      ECDSA rejects high-s and bad v) of a signer, and the recovered signers must be strictly increasing, so the
-    ///      same signer can never be counted twice.
-    function _verifySignerSignatures(bytes32 digest, bytes[] calldata sigs) internal view {
-        if (sigs.length < THRESHOLD) revert InsufficientSignatures(sigs.length);
+    /// @dev I6: at least `required` (>= THRESHOLD) signatures; every one must be a valid, non-malleable ECDSA signature
+    ///      (OpenZeppelin ECDSA rejects high-s and bad v) of a signer, and the recovered signers must be strictly
+    ///      increasing, so the same signer can never be counted twice.
+    function _verifySignerSignatures(bytes32 digest, bytes[] calldata sigs, uint256 required) internal view {
+        if (sigs.length < required) revert InsufficientSignatures(sigs.length);
         address previous = address(0);
         for (uint256 i; i < sigs.length; ++i) {
             address recovered = ECDSA.recoverCalldata(digest, sigs[i]);

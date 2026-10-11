@@ -160,7 +160,15 @@ contract ZecuredRegistryTest is ZecuredFixture {
         vm.prank(stranger);
         MORPHO.createMarket(p);
         ZecuredRegistry registry2 = new ZecuredRegistry(
-            MORPHO, zzec2, predictedAdapter, address(usdc), address(oracle), ADAPTIVE_CURVE_IRM, LLTV, signerSet
+            MORPHO,
+            zzec2,
+            predictedAdapter,
+            address(usdc),
+            address(oracle),
+            ADAPTIVE_CURVE_IRM,
+            LLTV,
+            signerSet,
+            _noProofs()
         );
         SettlementAdapter adapter2 = new SettlementAdapter(registry2);
         assertEq(address(registry2), predictedRegistry);
@@ -171,20 +179,40 @@ contract ZecuredRegistryTest is ZecuredFixture {
         address a = makeAddr("zecured.registry.someAdapter");
         vm.expectRevert(IZecuredRegistry.ZeroAddress.selector);
         new ZecuredRegistry(
-            IMorpho(address(0)), zzec, a, address(usdc), address(oracle), ADAPTIVE_CURVE_IRM, LLTV, signerSet
+            IMorpho(address(0)),
+            zzec,
+            a,
+            address(usdc),
+            address(oracle),
+            ADAPTIVE_CURVE_IRM,
+            LLTV,
+            signerSet,
+            _noProofs()
         );
         vm.expectRevert(IZecuredRegistry.ZeroAddress.selector);
         new ZecuredRegistry(
-            MORPHO, IZZEC(address(0)), a, address(usdc), address(oracle), ADAPTIVE_CURVE_IRM, LLTV, signerSet
+            MORPHO,
+            IZZEC(address(0)),
+            a,
+            address(usdc),
+            address(oracle),
+            ADAPTIVE_CURVE_IRM,
+            LLTV,
+            signerSet,
+            _noProofs()
         );
         vm.expectRevert(IZecuredRegistry.ZeroAddress.selector);
         new ZecuredRegistry(
-            MORPHO, zzec, address(0), address(usdc), address(oracle), ADAPTIVE_CURVE_IRM, LLTV, signerSet
+            MORPHO, zzec, address(0), address(usdc), address(oracle), ADAPTIVE_CURVE_IRM, LLTV, signerSet, _noProofs()
         );
         vm.expectRevert(IZecuredRegistry.ZeroAddress.selector);
-        new ZecuredRegistry(MORPHO, zzec, a, address(0), address(oracle), ADAPTIVE_CURVE_IRM, LLTV, signerSet);
+        new ZecuredRegistry(
+            MORPHO, zzec, a, address(0), address(oracle), ADAPTIVE_CURVE_IRM, LLTV, signerSet, _noProofs()
+        );
         vm.expectRevert(IZecuredRegistry.ZeroAddress.selector);
-        new ZecuredRegistry(MORPHO, zzec, a, address(usdc), address(0), ADAPTIVE_CURVE_IRM, LLTV, signerSet);
+        new ZecuredRegistry(
+            MORPHO, zzec, a, address(usdc), address(0), ADAPTIVE_CURVE_IRM, LLTV, signerSet, _noProofs()
+        );
     }
 
     function test_constructor_revertsWhenZZECIsWiredElsewhere() public {
@@ -196,7 +224,15 @@ contract ZecuredRegistryTest is ZecuredFixture {
         ZZEC wrongRegistry = new ZZEC(stranger, predictedAdapter, address(MORPHO));
         vm.expectRevert(IZecuredRegistry.ZZECMisconfigured.selector);
         new ZecuredRegistry(
-            MORPHO, wrongRegistry, predictedAdapter, address(usdc), address(oracle), ADAPTIVE_CURVE_IRM, LLTV, signerSet
+            MORPHO,
+            wrongRegistry,
+            predictedAdapter,
+            address(usdc),
+            address(oracle),
+            ADAPTIVE_CURVE_IRM,
+            LLTV,
+            signerSet,
+            _noProofs()
         );
 
         nonce = vm.getNonce(address(this));
@@ -205,7 +241,15 @@ contract ZecuredRegistryTest is ZecuredFixture {
         ZZEC wrongAdapter = new ZZEC(predictedRegistry, stranger, address(MORPHO));
         vm.expectRevert(IZecuredRegistry.ZZECMisconfigured.selector);
         new ZecuredRegistry(
-            MORPHO, wrongAdapter, predictedAdapter, address(usdc), address(oracle), ADAPTIVE_CURVE_IRM, LLTV, signerSet
+            MORPHO,
+            wrongAdapter,
+            predictedAdapter,
+            address(usdc),
+            address(oracle),
+            ADAPTIVE_CURVE_IRM,
+            LLTV,
+            signerSet,
+            _noProofs()
         );
 
         nonce = vm.getNonce(address(this));
@@ -215,7 +259,15 @@ contract ZecuredRegistryTest is ZecuredFixture {
         ZZEC wrongMorpho = new ZZEC(predictedRegistry, predictedAdapter, stranger);
         vm.expectRevert(IZecuredRegistry.ZZECMisconfigured.selector);
         new ZecuredRegistry(
-            MORPHO, wrongMorpho, predictedAdapter, address(usdc), address(oracle), ADAPTIVE_CURVE_IRM, LLTV, signerSet
+            MORPHO,
+            wrongMorpho,
+            predictedAdapter,
+            address(usdc),
+            address(oracle),
+            ADAPTIVE_CURVE_IRM,
+            LLTV,
+            signerSet,
+            _noProofs()
         );
     }
 
@@ -236,17 +288,21 @@ contract ZecuredRegistryTest is ZecuredFixture {
         for (uint256 i; i < bad.length; ++i) {
             (ZZEC z, address a) = _deployZZECForNextRegistry();
             vm.expectRevert(IZecuredRegistry.InvalidSignerSet.selector);
-            new ZecuredRegistry(MORPHO, z, a, address(usdc), address(oracle), ADAPTIVE_CURVE_IRM, LLTV, bad[i]);
+            new ZecuredRegistry(
+                MORPHO, z, a, address(usdc), address(oracle), ADAPTIVE_CURVE_IRM, LLTV, bad[i], _noProofs()
+            );
         }
     }
 
     function test_constructor_revertsWhenMorphoRefusesTheMarket() public {
         (ZZEC z, address a) = _deployZZECForNextRegistry();
         vm.expectRevert(bytes("IRM not enabled"));
-        new ZecuredRegistry(MORPHO, z, a, address(usdc), address(oracle), stranger, LLTV, signerSet);
+        new ZecuredRegistry(MORPHO, z, a, address(usdc), address(oracle), stranger, LLTV, signerSet, _noProofs());
         (z, a) = _deployZZECForNextRegistry();
         vm.expectRevert(bytes("LLTV not enabled"));
-        new ZecuredRegistry(MORPHO, z, a, address(usdc), address(oracle), ADAPTIVE_CURVE_IRM, 0.6e18, signerSet);
+        new ZecuredRegistry(
+            MORPHO, z, a, address(usdc), address(oracle), ADAPTIVE_CURVE_IRM, 0.6e18, signerSet, _noProofs()
+        );
     }
 
     function test_adapterConstructor_revertsAtAnUnexpectedAddress() public {

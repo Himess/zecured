@@ -10,6 +10,10 @@ import {MockZecOracle} from "../src/mocks/MockZecOracle.sol";
 import {ZZEC} from "../src/ZZEC.sol";
 import {ZecuredRegistry} from "../src/ZecuredRegistry.sol";
 import {SettlementAdapter} from "../src/SettlementAdapter.sol";
+import {DepositProofConfig} from "../src/interfaces/IZecuredRegistry.sol";
+import {IRiscZeroVerifier} from "../src/interfaces/IRiscZeroVerifier.sol";
+import {MockRiscZeroVerifier} from "../src/mocks/MockRiscZeroVerifier.sol";
+import {IZcashHeaderRelay} from "../src/relay/IZcashHeaderRelay.sol";
 
 /// @title DeployZecured
 /// @notice Deploys the Zecured contracts on Base Sepolia:
@@ -18,6 +22,7 @@ import {SettlementAdapter} from "../src/SettlementAdapter.sol";
 ///            first, because each contract needs the others' addresses as immutables; the constructors verify the
 ///            wiring). The Registry constructor creates the zZEC / MockUSDC / MockZecOracle / AdaptiveCurveIRM / 62.5 %
 ///            market on Morpho Blue;
+///            With DEPOSIT_IMAGE_ID set, the Registry also accepts Tier 2 deposit proofs (docs/TIER2.md);
 ///         3. optionally a demo lender supply (the deployer supplies LENDER_SEED_USDC freshly minted MockUSDC);
 ///         4. writes deployments/base-sepolia.json (broadcast) or deployments/base-sepolia.dry-run.json (simulation).
 /// @dev Environment (the repo-root .env is loaded by forge):
@@ -27,6 +32,13 @@ import {SettlementAdapter} from "../src/SettlementAdapter.sol";
 ///        MOCK_USDC, MOCK_ZEC_ORACLE   optional: reuse already deployed mocks
 ///        LENDER_SEED_USDC      optional: whole MockUSDC to supply as demo lender (default 0 = none)
 ///        DEPLOYMENT_NAME       optional: output file name (default base-sepolia; scripts/local-fork.sh uses anvil)
+///        DEPOSIT_IMAGE_ID      optional: image id of the deposit guest (tier2/); enables attestDepositWithProof
+///        ZCASH_RELAY           with DEPOSIT_IMAGE_ID: the ZcashHeaderRelay to anchor proofs to (script/DeployRelay.s.sol)
+///        RISC0_VERIFIER        with DEPOSIT_IMAGE_ID: RISC Zero verifier (default: the Base Sepolia router)
+///        RISC0_VERIFIER_MOCK   with DEPOSIT_IMAGE_ID: true deploys MockRiscZeroVerifier instead (MOCK, accepts
+///                              unproven journals); only allowed with DEPLOYMENT_NAME=anvil
+///        MIN_CONFIRMATION_WORK with DEPOSIT_IMAGE_ID: relay work required on top of a proof's anchor header (default
+///                              1,000,000: two to three NU7 Testnet blocks, which average ~490,000 each)
 ///      Dry run (simulation only, sends nothing):
 ///        forge script script/DeployZecured.s.sol --rpc-url https://sepolia.base.org
 ///      Real deployment (only once the deployer is funded):
@@ -39,6 +51,9 @@ contract DeployZecured is Script {
     uint256 internal constant LLTV = 0.625e18;
     uint256 internal constant BASE_SEPOLIA_CHAIN_ID = 84532;
     string internal constant OUT_DIR = "deployments";
+    /// RISC Zero verifier router on Base Sepolia (docs/TIER2.md § 5).
+    address internal constant RISC0_ROUTER = 0x0b144E07A0826182B6b59788c34b32Bfa86Fb711;
+    uint256 internal constant DEFAULT_MIN_CONFIRMATION_WORK = 1_000_000;
 
     struct Deployment {
         address deployer;
@@ -51,6 +66,8 @@ contract DeployZecured is Script {
         Id marketId;
         uint256 lenderSeed; // MockUSDC units (6 decimals)
         bool dryRun;
+        DepositProofConfig proofs;
+        bool verifierIsMock;
     }
 
     function run() external returns (Deployment memory d) {
@@ -97,19 +114,56 @@ contract DeployZecured is Script {
     /// ZZEC needs the Registry and the Adapter, the Registry needs ZZEC and the Adapter, the Adapter needs the
     /// Registry: all three are created back to back at the deployer's next nonces, whose addresses are known upfront.
     function _core(Deployment memory d, address[5] memory signerSet) internal {
+        _depositProofs(d);
         uint64 nonce = vm.getNonce(d.deployer);
         address predictedRegistry = vm.computeCreateAddress(d.deployer, nonce + 1);
         address predictedAdapter = vm.computeCreateAddress(d.deployer, nonce + 2);
 
         d.zzec = new ZZEC(predictedRegistry, predictedAdapter, address(MORPHO));
         d.registry = new ZecuredRegistry(
-            MORPHO, d.zzec, predictedAdapter, address(d.usdc), address(d.oracle), ADAPTIVE_CURVE_IRM, LLTV, signerSet
+            MORPHO,
+            d.zzec,
+            predictedAdapter,
+            address(d.usdc),
+            address(d.oracle),
+            ADAPTIVE_CURVE_IRM,
+            LLTV,
+            signerSet,
+            d.proofs
         );
         d.adapter = new SettlementAdapter(d.registry);
         require(address(d.registry) == predictedRegistry, "DeployZecured: registry address mismatch");
         require(address(d.adapter) == predictedAdapter, "DeployZecured: adapter address mismatch");
         d.marketId = d.registry.marketId();
         require(MORPHO.market(d.marketId).lastUpdate != 0, "DeployZecured: market not created");
+    }
+
+    /// Tier 2 configuration (before the core contracts: a MOCK verifier would shift their predicted addresses).
+    function _depositProofs(Deployment memory d) internal {
+        bytes32 imageId = vm.envOr("DEPOSIT_IMAGE_ID", bytes32(0));
+        if (imageId == bytes32(0)) return; // proofs disabled
+        address relay = vm.envAddress("ZCASH_RELAY");
+        require(relay.code.length > 0, "DeployZecured: ZCASH_RELAY has no code");
+        (bytes32 tip,,) = IZcashHeaderRelay(relay).bestChainTip();
+        require(tip != bytes32(0), "DeployZecured: ZCASH_RELAY is not a header relay");
+        address verifier;
+        if (vm.envOr("RISC0_VERIFIER_MOCK", false)) {
+            require(
+                keccak256(bytes(vm.envOr("DEPLOYMENT_NAME", string("")))) == keccak256("anvil"),
+                "DeployZecured: the MOCK verifier is for the local fork only (DEPLOYMENT_NAME=anvil)"
+            );
+            verifier = address(new MockRiscZeroVerifier());
+            d.verifierIsMock = true;
+        } else {
+            verifier = vm.envOr("RISC0_VERIFIER", RISC0_ROUTER);
+            require(verifier.code.length > 0, "DeployZecured: RISC0_VERIFIER has no code");
+        }
+        d.proofs = DepositProofConfig({
+            verifier: IRiscZeroVerifier(verifier),
+            imageId: imageId,
+            relay: IZcashHeaderRelay(relay),
+            minConfirmationWork: vm.envOr("MIN_CONFIRMATION_WORK", DEFAULT_MIN_CONFIRMATION_WORK)
+        });
     }
 
     function _seedLender(Deployment memory d) internal {
@@ -143,6 +197,13 @@ contract DeployZecured is Script {
         console.log("Morpho market id:");
         console.logBytes32(Id.unwrap(d.marketId));
         console.log("demo lender supply (MockUSDC units):", d.lenderSeed);
+        if (address(d.proofs.verifier) == address(0)) {
+            console.log("deposit proofs: disabled");
+        } else {
+            console.log("deposit proofs: verifier", address(d.proofs.verifier), d.verifierIsMock ? "(MOCK)" : "");
+            console.log("deposit proofs: relay", address(d.proofs.relay));
+            console.log("deposit proofs: min confirmation work", d.proofs.minConfirmationWork);
+        }
     }
 
     function _writeJson(Deployment memory d, address[5] memory signerSet) internal {
@@ -169,6 +230,13 @@ contract DeployZecured is Script {
         vm.serializeBytes32(eip712, "registryDomainSeparator", d.registry.domainSeparator());
         eip712 = vm.serializeBytes32(eip712, "adapterDomainSeparator", d.adapter.domainSeparator());
 
+        string memory proofs = "depositProofs";
+        vm.serializeAddress(proofs, "verifier", address(d.proofs.verifier));
+        vm.serializeBool(proofs, "verifierIsMock", d.verifierIsMock);
+        vm.serializeBytes32(proofs, "imageId", d.proofs.imageId);
+        vm.serializeAddress(proofs, "relay", address(d.proofs.relay));
+        proofs = vm.serializeString(proofs, "minConfirmationWork", vm.toString(d.proofs.minConfirmationWork));
+
         address[] memory signerList = new address[](5);
         for (uint256 i; i < 5; ++i) {
             signerList[i] = signerSet[i];
@@ -184,6 +252,7 @@ contract DeployZecured is Script {
         vm.serializeString(root, "contracts", contracts);
         vm.serializeString(root, "market", market);
         vm.serializeString(root, "eip712", eip712);
+        vm.serializeString(root, "depositProofs", proofs);
         vm.serializeAddress(root, "signers", signerList);
         vm.serializeUint(root, "threshold", d.registry.THRESHOLD());
         vm.serializeUint(root, "minSeize", d.adapter.MIN_SEIZE());
@@ -192,7 +261,11 @@ contract DeployZecured is Script {
         vm.serializeBool(root, "mocksReused", d.mocksReused);
         vm.serializeUint(root, "lenderSeedUsdcUnits", d.lenderSeed);
         string memory json = vm.serializeString(
-            root, "mocks", "MockUSDC and MockZecOracle are MOCKS (testnet stand-ins, owner-controlled)"
+            root,
+            "mocks",
+            d.verifierIsMock
+                ? "MockUSDC and MockZecOracle are MOCKS (testnet stand-ins, owner-controlled); MockRiscZeroVerifier is a MOCK (accepts unproven deposit journals)"
+                : "MockUSDC and MockZecOracle are MOCKS (testnet stand-ins, owner-controlled)"
         );
 
         vm.createDir(OUT_DIR, true);

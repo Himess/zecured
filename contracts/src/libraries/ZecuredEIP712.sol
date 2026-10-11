@@ -46,8 +46,9 @@ struct CloseRequest {
 library ZecuredEIP712 {
     // ------------------------------------------------------------------ domains (§ 2.1)
 
-    /// @notice Domain name of ZecuredRegistry: DepositAttestation, PayoutConfirmation and every off-chain owner
-    ///         request (OpenVault, Destination, RefundRequest, ViewKeyRequest).
+    /// @notice Domain name of ZecuredRegistry: DepositAttestation, PayoutConfirmation, VaultOpened,
+    ///         VaultCancellation and every off-chain owner request (OpenVault, Destination, RefundRequest,
+    ///         ViewKeyRequest).
     string internal constant REGISTRY_DOMAIN_NAME = "ZecuredRegistry";
     /// @notice Domain name of SettlementAdapter: CloseRequest.
     string internal constant ADAPTER_DOMAIN_NAME = "ZecuredSettlementAdapter";
@@ -64,6 +65,18 @@ library ZecuredEIP712 {
     ///      `claimIdsHash = keccak256(abi.encodePacked(claimIds))`, i.e. the hash of the concatenated 32-byte ids.
     bytes32 internal constant PAYOUT_CONFIRMATION_TYPEHASH =
         keccak256("PayoutConfirmation(bytes32 vaultId,bytes32 claimIdsHash)");
+
+    /// @dev keccak256("VaultOpened(bytes32 vaultId,address owner,address account,uint64 amount,uint32 expiryHeight,
+    ///      bytes32 addressHash,bytes32 ufvkHash)") (one line, no spaces). Signed by all five signers when a vault's DKG
+    ///      completes (D20). The owner's app checks it off-chain; `attestDepositWithProof` checks it on-chain against the
+    ///      struct hash a deposit proof computed, so the address and viewing-key hashes never reach Base.
+    bytes32 internal constant VAULT_OPENED_TYPEHASH = keccak256(
+        "VaultOpened(bytes32 vaultId,address owner,address account,uint64 amount,uint32 expiryHeight,bytes32 addressHash,bytes32 ufvkHash)"
+    );
+
+    /// @dev keccak256("VaultCancellation(bytes32 vaultId)"): signed by at least 3 signers before they refund the deposit
+    ///      of a vault that was never activated (L-8); afterwards the vault can never be activated.
+    bytes32 internal constant VAULT_CANCELLATION_TYPEHASH = keccak256("VaultCancellation(bytes32 vaultId)");
 
     /// @dev keccak256("CloseRequest(bytes32 vaultId,address account,address executor,uint16 marginBps,
     ///      uint64 minUserAmount,bytes32 userCommitment,uint256 nonce,uint64 deadline)") (one line, no spaces).
@@ -89,6 +102,27 @@ library ZecuredEIP712 {
     /// @notice EIP-712 struct hash of a DepositAttestation.
     function hashDepositAttestation(DepositAttestation memory att) internal pure returns (bytes32) {
         return keccak256(abi.encode(DEPOSIT_ATTESTATION_TYPEHASH, att.vaultId, att.account, att.amount, att.depositTag));
+    }
+
+    /// @notice EIP-712 struct hash of a VaultOpened (computed off-chain and inside deposit proofs; here for tests and
+    ///         tools).
+    function hashVaultOpened(
+        bytes32 vaultId,
+        address owner,
+        address account,
+        uint64 amount,
+        uint32 expiryHeight,
+        bytes32 addressHash,
+        bytes32 ufvkHash
+    ) internal pure returns (bytes32) {
+        return keccak256(
+            abi.encode(VAULT_OPENED_TYPEHASH, vaultId, owner, account, amount, expiryHeight, addressHash, ufvkHash)
+        );
+    }
+
+    /// @notice EIP-712 struct hash of a VaultCancellation.
+    function hashVaultCancellation(bytes32 vaultId) internal pure returns (bytes32) {
+        return keccak256(abi.encode(VAULT_CANCELLATION_TYPEHASH, vaultId));
     }
 
     /// @notice `claimIdsHash` of docs/INTERFACES.md § 2.2: keccak256 of the concatenated claim ids, in the given order.
