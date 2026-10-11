@@ -113,8 +113,10 @@ export function DemoPanel() {
         <OracleCard token={token} />
         <Card title="Bots">
           <p className="text-sm text-muted">
-            Placeholder. The liquidator and market-maker bots (bots/) will report their status here: watched positions,
-            last quote, last liquidation.
+            The liquidator and the market maker run as separate processes (<code>bots/</code>). The liquidator watches
+            every active position and liquidates through the Settlement Adapter once the price makes one unhealthy; the
+            market maker quotes and executes closes from collateral. Both are paid in shielded ZEC, sent without an
+            outgoing viewing key, so the vault's viewing key does not reveal where it went.
           </p>
         </Card>
       </div>
