@@ -396,6 +396,7 @@ pub fn apply(store: &mut Store, ev: &VaultEvent) -> Result<bool> {
     match &ev.event {
         RegistryEvent::VaultActivated { account, amount } => {
             ensure!(*account == v.account && *amount == v.amount, "activation does not match the vault");
+            ensure!(!v.cancelled, "activation of a cancelled vault");
             // M-9: activation sets `outstanding` once; later claims only lower it.
             if !v.activated {
                 v.activated = true;

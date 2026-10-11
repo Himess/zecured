@@ -25,7 +25,7 @@ use alloy::{
     primitives::{B256, Bytes},
     providers::Provider,
 };
-use anyhow::{Context, Result, anyhow, ensure};
+use anyhow::{Context, Result, anyhow, bail, ensure};
 use serde::{Deserialize, Serialize};
 use tokio::sync::{Mutex, MutexGuard};
 use tracing::warn;
@@ -453,11 +453,18 @@ impl Node {
             ensure!(r.deadline >= now(), "request expired");
             ensure_not_own_receiver(v, &recipient.receiver)?;
         }
-        let (mut store, mut v, notes) = self.scan_vault(&vault_id).await?;
-        ensure!(
-            notes.non_conforming.iter().any(|(id, _)| *id == r.note_id.0),
-            "note is not an unspent non-conforming deposit"
-        );
+        let (v, note) = {
+            let (_store, v, notes) = self.scan_vault(&vault_id).await?;
+            let (_, note) = notes
+                .non_conforming
+                .iter()
+                .find(|(id, _)| *id == r.note_id.0)
+                .context("note is not an unspent non-conforming deposit")?;
+            (v, note.clone())
+        };
+        self.check_refund_on_base(&v, &note).await?;
+        let mut store = self.store.lock().await;
+        let mut v = store.vaults.get(&vault_id).context("unknown vault")?.clone();
         ensure!(v.use_nonce(r.nonce), "nonce already used");
         v.refunds.retain(|x| x.note_id != r.note_id.0);
         v.refunds.push(RefundRecord {
@@ -465,6 +472,32 @@ impl Node {
             recipient,
         });
         store.save_vault(v)?;
+        Ok(())
+    }
+
+    /// Tier 2 review: a note of the vault's amount may back a mint that never went through this
+    /// node's classification (a deposit proof needs no signer), and the classification itself
+    /// rests on the light wallet server's answers and on the absence of reorgs deeper than the
+    /// confirmation depth. So before accepting or signing the refund of such a note, the node
+    /// asks the Registry, on every Base provider it is configured with: the vault must be
+    /// cancelled (D23), or activated against another note (this note's deposit tag unused, D24).
+    /// Never while the vault can still be activated. Notes of any other value cannot back a mint.
+    async fn check_refund_on_base(&self, v: &VaultRecord, note: &zecured_zcash_ops::scan::ReceivedNote) -> Result<()> {
+        if note.value() != v.amount {
+            return Ok(());
+        }
+        let cmx = orchard::note::ExtractedNoteCommitment::from(note.note.commitment()).to_bytes();
+        let tag = B256::from(deposit_tag(&v.ufvk, &cmx));
+        let mut providers = vec![chain::base_provider(&self.cfg.base_rpc_url)?];
+        if let Some(w) = self.base_rpc_witness.as_deref() {
+            providers.push(chain::base_provider(w)?);
+        }
+        for provider in &providers {
+            let registry = IZecuredRegistry::new(self.cfg.registry, provider);
+            let status = registry.vault(v.vault_id).call().await.context("Registry.vault")?.status;
+            let tag_used = registry.depositTagUsed(tag).call().await.context("Registry.depositTagUsed")?;
+            refund_allowed_by_registry(status, tag_used)?;
+        }
         Ok(())
     }
 
@@ -551,6 +584,11 @@ impl Node {
         let (store, v, notes) = self.scan_vault(&req.vault_id).await?;
         let (plan, inputs) = signing::expected_plan(&store, &v, &notes, &req.kind, now())?;
         drop(store);
+        if matches!(req.kind, signing::SignKind::Refund { .. }) {
+            for note in &inputs {
+                self.check_refund_on_base(&v, note).await?;
+            }
+        }
         // H-1 (inside `commit`): no other payout while one this node signed can still be mined.
         let (session, commitments) =
             signing::commit(&v, &plan, &inputs, notes.tip, &req, v.inflight.as_ref(), &notes.unspent)?;
@@ -742,6 +780,20 @@ impl Node {
     }
 }
 
+/// K2: whether one Base provider's view of the Registry allows refunding a note of the vault's
+/// amount: the vault is cancelled (D23), or activated or closed against another note (this
+/// note's deposit tag unused, D24). Never while the vault can still be activated.
+fn refund_allowed_by_registry(status: u8, tag_used: bool) -> Result<()> {
+    match status {
+        VAULT_CANCELLED => Ok(()),
+        STATUS_NONE => bail!("the vault can still be activated: it must be cancelled before this refund"),
+        _ => {
+            ensure!(!tag_used, "this note backs the vault on Base");
+            Ok(())
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use alloy::primitives::Address;
@@ -763,6 +815,21 @@ mod tests {
         // Full: a new key is refused, an existing one can be replaced.
         assert!(insert_bounded(&mut map, 4, Duration::from_secs(0), age, ttl, 2).is_err());
         insert_bounded(&mut map, 3, Duration::from_secs(1), age, ttl, 2).unwrap();
+    }
+
+    #[test]
+    fn a_note_of_the_vault_amount_is_refunded_only_if_it_cannot_back_the_vault() {
+        use zecured_base::verify::{VAULT_ACTIVE, VAULT_CLOSED};
+        // Cancelled (D23): the conforming deposit goes back, whatever its tag.
+        assert!(refund_allowed_by_registry(VAULT_CANCELLED, false).is_ok());
+        assert!(refund_allowed_by_registry(VAULT_CANCELLED, true).is_ok());
+        // Not activated yet: a deposit proof may still activate the vault with this note.
+        assert!(refund_allowed_by_registry(STATUS_NONE, false).is_err());
+        // Activated or closed: only a note other than the one that backs the vault.
+        for status in [VAULT_ACTIVE, VAULT_CLOSED] {
+            assert!(refund_allowed_by_registry(status, false).is_ok());
+            assert!(refund_allowed_by_registry(status, true).is_err());
+        }
     }
 
     fn vault_with(claims: &[[u8; 32]], inflight: Option<Inflight>) -> VaultRecord {

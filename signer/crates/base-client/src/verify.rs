@@ -38,7 +38,9 @@ pub const STATUS_NONE: u8 = 0;
 pub const CLAIM_PENDING: u8 = 1;
 /// `ClaimStatus.Paid`.
 pub const CLAIM_PAID: u8 = 2;
-/// `VaultStatus.Cancelled`.
+/// `VaultStatus.Active` / `VaultStatus.Closed` / `VaultStatus.Cancelled`.
+pub const VAULT_ACTIVE: u8 = 1;
+pub const VAULT_CLOSED: u8 = 2;
 pub const VAULT_CANCELLED: u8 = 3;
 
 /// The Registry's `ClaimKind` value for `kind`.
@@ -182,7 +184,11 @@ pub async fn check_event<R: RegistryReader>(reader: &R, ev: &VaultEvent, at: At)
         RegistryEvent::VaultActivated { account, amount } => {
             let now = reader.vault_at(ev.vault_id, after).await?;
             evidence.vaults.push(now);
-            if now.status == STATUS_NONE || now.account != *account || now.outstanding > *amount {
+            // Active or Closed (a cancelled vault was never activated).
+            if !(now.status == VAULT_ACTIVE || now.status == VAULT_CLOSED)
+                || now.account != *account
+                || now.outstanding > *amount
+            {
                 problems.push("no such vault activation in the Registry".into());
             }
             if let Some(b) = before {
