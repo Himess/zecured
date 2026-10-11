@@ -78,7 +78,11 @@ async fn main() -> Result<()> {
     let txid = TxId::from_hex(&args.deposit_txid).context("txid")?;
     let (raw_tx, height) = lwd::raw_transaction(&mut client, &txid).await?;
     let height = u32::try_from(height)?;
-    ensure!(height >= history::NU7_ACTIVATION_HEIGHT && height < args.tip, "deposit at {height}, tip {}", args.tip);
+    ensure!(
+        height >= history::NU7_ACTIVATION_HEIGHT && height < args.tip,
+        "deposit at {height}, tip {}",
+        args.tip
+    );
 
     // Per-block summaries of the NU7 epoch up to the block before the tip.
     let last = args.tip - 1;
@@ -125,7 +129,8 @@ async fn main() -> Result<()> {
         .cloned()
         .context("UFVK without an Orchard-protocol key")?;
     let ivk = PreparedIncomingViewingKey::new(&fvk.to_ivk(Scope::External));
-    let tx = Transaction::read(&raw_tx[..], BranchId::for_height(&Network::TestNetwork, BlockHeight::from_u32(height)))?;
+    let tx =
+        Transaction::read(&raw_tx[..], BranchId::for_height(&Network::TestNetwork, BlockHeight::from_u32(height)))?;
     let bundle = tx.ironwood_bundle().context("no Ironwood bundle")?;
     let (action_index, note, recipient) = bundle
         .actions()
@@ -157,7 +162,13 @@ async fn main() -> Result<()> {
         txid_path,
         block_header: header(height)?,
         leaf: V3::to_bytes(&leaves[leaf_index]),
-        mmr_path: path.iter().map(|(n, left)| MmrStep { sibling: V3::to_bytes(n), sibling_is_left: *left }).collect(),
+        mmr_path: path
+            .iter()
+            .map(|(n, left)| MmrStep {
+                sibling: V3::to_bytes(n),
+                sibling_is_left: *left,
+            })
+            .collect(),
         peaks: mmr.peaks().iter().map(V3::to_bytes).collect(),
         peak_index: u32::try_from(peak_index)?,
         tip_header: header(args.tip)?,

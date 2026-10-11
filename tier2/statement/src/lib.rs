@@ -216,7 +216,11 @@ pub fn txid_path_root(txid: [u8; 32], index: u32, path: &[[u8; 32]]) -> [u8; 32]
     let mut node = txid;
     let mut i = index;
     for sibling in path {
-        node = if i & 1 == 0 { sha256d(&[node, *sibling].concat()) } else { sha256d(&[*sibling, node].concat()) };
+        node = if i & 1 == 0 {
+            sha256d(&[node, *sibling].concat())
+        } else {
+            sha256d(&[*sibling, node].concat())
+        };
         i >>= 1;
     }
     node
@@ -261,7 +265,11 @@ pub fn verify(w: &Witness) -> Result<Journal, Error> {
     let mut acc = leaf;
     for step in &w.mmr_path {
         let sibling = node(&step.sibling)?;
-        acc = if step.sibling_is_left { V3::combine(&sibling, &acc) } else { V3::combine(&acc, &sibling) };
+        acc = if step.sibling_is_left {
+            V3::combine(&sibling, &acc)
+        } else {
+            V3::combine(&acc, &sibling)
+        };
     }
     let peak = w.peaks.get(w.peak_index as usize).ok_or(Error::HistoryPath)?;
     if V3::to_bytes(&acc) != *peak {
@@ -345,8 +353,8 @@ mod tests {
         let ufvk = "uviewtest1rl58wrlhq2eqws08m2jxqg0gjpn2yd7me5f9cfkwmf4axnq0vjvjgvjs5t70tsny62rxklz3ha8t5cr8k30jltjmjr0xxsdhpqeqpf55w3dx0mracz99uvrvyf4hpsfxs2nc5jykraqvnt22zpkdce6tcj85lkty9lcpduhl72vz80l8ygn0q3sxn04w8";
         let h = vault_opened_hash(&[0x55; 32], &[0x88; 20], &[0x33; 20], 1_000_000, 4_486_288, address, ufvk);
         let expected: [u8; 32] = [
-            0xf0, 0x12, 0x9c, 0x9f, 0x65, 0x2e, 0xd0, 0x78, 0xd8, 0x5e, 0x45, 0x62, 0xac, 0xca, 0xf9, 0x3d,
-            0x8d, 0x5d, 0x81, 0x82, 0x72, 0xa9, 0x2a, 0x9d, 0xba, 0x93, 0x1b, 0xbc, 0x37, 0x2e, 0x63, 0x02,
+            0xf0, 0x12, 0x9c, 0x9f, 0x65, 0x2e, 0xd0, 0x78, 0xd8, 0x5e, 0x45, 0x62, 0xac, 0xca, 0xf9, 0x3d, 0x8d, 0x5d,
+            0x81, 0x82, 0x72, 0xa9, 0x2a, 0x9d, 0xba, 0x93, 0x1b, 0xbc, 0x37, 0x2e, 0x63, 0x02,
         ];
         assert_eq!(h, expected);
     }

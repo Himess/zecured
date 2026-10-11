@@ -116,11 +116,15 @@ mod tests {
             let mmr = Mmr::new(ls.clone()).unwrap();
             assert_eq!(V3::hash(&mmr.root()), history_root(&ls).unwrap(), "root of {n} leaves");
             let peaks = mmr.peaks();
-            for i in 0..n as usize {
+            for (i, leaf) in ls.iter().enumerate() {
                 let (path, peak) = mmr.path(i).unwrap();
-                let mut acc = ls[i].clone();
+                let mut acc = leaf.clone();
                 for (sibling, left) in &path {
-                    acc = if *left { V3::combine(sibling, &acc) } else { V3::combine(&acc, sibling) };
+                    acc = if *left {
+                        V3::combine(sibling, &acc)
+                    } else {
+                        V3::combine(&acc, sibling)
+                    };
                 }
                 assert_eq!(V3::to_bytes(&acc), V3::to_bytes(&peaks[peak]), "path of leaf {i} of {n}");
             }
