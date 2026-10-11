@@ -366,7 +366,8 @@ impl Node {
         let mut store = self.store.lock().await;
         let mut v = store.vaults.get(&vault_id).context("unknown vault")?.clone();
         let nullifier = note.nullifier.to_bytes();
-        let tag = deposit_tag(&v.sk_bytes()?, &nullifier);
+        let cmx = orchard::note::ExtractedNoteCommitment::from(note.note.commitment()).to_bytes();
+        let tag = deposit_tag(&v.ufvk, &cmx);
         let msg = DepositAttestation {
             vaultId: vault_id,
             account: v.account,

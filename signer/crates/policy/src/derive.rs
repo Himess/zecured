@@ -41,11 +41,14 @@ pub fn vault_sk(vault_id: &[u8; 32], contributions_in_signer_order: &[[u8; 32]])
     blake2b_256(VAULT_SK, None, &parts)
 }
 
-/// The keyed tag the Registry stores to refuse a second mint for the same note (I5).
-/// Unlinkable to the note's nullifier without the vault secret (leak vector L9).
-pub fn deposit_tag(vault_sk: &[u8; 32], nullifier: &[u8; 32]) -> [u8; 32] {
-    let key = blake2b_256(TAG_KEY, None, &[vault_sk]);
-    blake2b_256(DEPOSIT_TAG, Some(&key), &[nullifier])
+/// The keyed tag the Registry stores to refuse a second mint for the same note (I5):
+/// BLAKE2b-256 keyed with BLAKE2b-256("Zecured_TagKey__", the vault's UFVK string) over the note
+/// commitment `cmx`. A Tier 2 deposit proof computes exactly this (tier2/statement
+/// `deposit_tag`), so an attestation and a proof of the same note carry the same tag. Unlinkable
+/// to the note without the vault's viewing key (leak vector L9).
+pub fn deposit_tag(ufvk: &str, cmx: &[u8; 32]) -> [u8; 32] {
+    let key = blake2b_256(TAG_KEY, None, &[ufvk.as_bytes()]);
+    blake2b_256(DEPOSIT_TAG, Some(&key), &[cmx])
 }
 
 /// Opaque id of a received note, used off-chain (e.g. in refund requests).
@@ -80,8 +83,16 @@ mod tests {
 
     #[test]
     fn deposit_tag_is_keyed() {
-        let nf = [8u8; 32];
-        assert_ne!(deposit_tag(&[1u8; 32], &nf), deposit_tag(&[2u8; 32], &nf));
-        assert_eq!(deposit_tag(&[1u8; 32], &nf), deposit_tag(&[1u8; 32], &nf));
+        let cmx = [8u8; 32];
+        assert_ne!(deposit_tag("uviewtest1a", &cmx), deposit_tag("uviewtest1b", &cmx));
+        assert_eq!(deposit_tag("uviewtest1a", &cmx), deposit_tag("uviewtest1a", &cmx));
+    }
+
+    /// The same value as tier2/statement's `deposit_tag` (and Python's hashlib.blake2b with the
+    /// same key and personalization).
+    #[test]
+    fn deposit_tag_vector() {
+        let tag = deposit_tag("uviewtest1a", &[7u8; 32]);
+        assert_eq!(hex::encode(tag), "add8548e79e01888ca52988bc44b01d0be125fdc5569db7597bd040f335f25aa");
     }
 }
