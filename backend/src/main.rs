@@ -244,6 +244,8 @@ async fn get_vault(State(c): App, Param(id): Param<B256>) -> ApiResult {
         "birthdayHeight": v.birthday_height,
         "tipHeight": v.tip_height,
         "nonConforming": v.non_conforming.iter().map(|n| json!({ "noteId": n.note_id, "amount": n.amount.to_string() })).collect::<Vec<_>>(),
+        // D23: a deposit never minted against; refunding it cancels the vault on Base first.
+        "cancellable": v.cancellable.as_ref().map(|n| json!({ "noteId": n.note_id, "amount": n.amount.to_string() })),
         "claims": v.claims.iter().map(|c| json!({ "claimId": c.claim_id, "kind": c.kind, "amount": c.amount.to_string(), "paid": c.paid })).collect::<Vec<_>>(),
     })))
 }

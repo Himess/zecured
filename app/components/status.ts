@@ -8,5 +8,6 @@ export const STATUS_LABEL: Record<Vault["status"], { text: string; tone: "info" 
   closing: { text: "Closing", tone: "warn" },
   closed: { text: "Closed", tone: "neutral" },
   expired: { text: "Expired", tone: "warn" },
+  cancelled: { text: "Cancelled", tone: "neutral" },
   unknown: { text: "Unknown", tone: "neutral" },
 };

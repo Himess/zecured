@@ -30,6 +30,9 @@ pub enum VaultStatus {
     Closed,
     /// No conforming deposit before the expiry height.
     Expired,
+    /// Cancelled on Base before it was ever activated (D23): its conforming deposit is
+    /// refundable.
+    Cancelled,
 }
 
 /// A payout broadcast to Zcash and not yet confirmed on Base.
@@ -113,12 +116,16 @@ pub struct CoordVault {
     /// what the owner checked before paying the vault (C-4). Empty for vaults opened before.
     #[serde(default)]
     pub opened_signatures: Vec<NodeSignature>,
+    /// The conforming deposit of a vault that was never activated, once its deposit window is
+    /// over: the owner may cancel the vault to get it back (D23, L-8).
+    #[serde(default)]
+    pub cancellable: Option<NoteView>,
 }
 
 impl CoordVault {
     /// Nothing is left to do for the vault but to watch for late deposits.
     pub fn is_idle(&self) -> bool {
-        matches!(self.status, VaultStatus::Expired | VaultStatus::Closed)
+        matches!(self.status, VaultStatus::Expired | VaultStatus::Closed | VaultStatus::Cancelled)
             && self.inflight.is_none()
             && self.refunds.iter().all(|r| r.done)
     }
@@ -256,6 +263,7 @@ pub(crate) mod tests {
             used_view_nonces: vec![],
             non_conforming: vec![],
             opened_signatures: vec![],
+            cancellable: None,
         }
     }
 

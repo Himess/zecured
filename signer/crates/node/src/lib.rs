@@ -31,14 +31,14 @@ use tokio::sync::{Mutex, MutexGuard};
 use tracing::warn;
 use zcash_protocol::TxId;
 use zecured_base::{
-    DepositAttestation, Destination, PayoutConfirmation, RefundRequest, claim_ids_hash,
-    events::{self, VaultEvent},
+    DepositAttestation, Destination, PayoutConfirmation, RefundRequest, VaultCancellation, claim_ids_hash,
+    events::{self, IZecuredRegistry, VaultEvent},
     recover_typed, registry_domain, sign_typed,
-    verify::Verdict,
+    verify::{STATUS_NONE, VAULT_CANCELLED, Verdict},
 };
 use zecured_policy::{
     classify::Classification,
-    derive::deposit_tag,
+    derive::{deposit_tag, note_id},
     ledger::{self, ClaimState, Recipient, commitment},
 };
 
@@ -365,6 +365,7 @@ impl Node {
 
         let mut store = self.store.lock().await;
         let mut v = store.vaults.get(&vault_id).context("unknown vault")?.clone();
+        ensure!(!v.cancelled, "the vault was cancelled on Base");
         let nullifier = note.nullifier.to_bytes();
         let cmx = orchard::note::ExtractedNoteCommitment::from(note.note.commitment()).to_bytes();
         let tag = deposit_tag(&v.ufvk, &cmx);
@@ -459,6 +460,73 @@ impl Node {
         });
         store.save_vault(v)?;
         Ok(())
+    }
+
+    // ----- cancellation (D23, L-8) -----
+
+    /// Signs `VaultCancellation` so that the owner can get back the conforming deposit of a
+    /// vault that was never activated, and records the owner's `RefundRequest` for that deposit
+    /// (the consent, and the refund's destination). Only past the deposit window, so that no
+    /// attestation of ours is about to land, and only while the Registry has not activated the
+    /// vault (on every configured Base provider). A cancellation and an activation exclude each
+    /// other on-chain; the deposit becomes refundable only once `VaultCancelled` is applied.
+    pub async fn cancel(&self, vault_id: B256, r: RefundIn) -> Result<ConfirmResponse> {
+        let recipient = parse_recipient(&r.recipient)?;
+        {
+            let store = self.store.lock().await;
+            let v = store.vaults.get(&vault_id).context("unknown vault")?;
+            let msg = RefundRequest {
+                vaultId: vault_id,
+                noteId: r.note_id,
+                commitment: B256::from(commitment(&recipient.salt, &recipient.receiver)),
+                nonce: r.nonce,
+                deadline: r.deadline,
+            };
+            ensure!(recover_typed(&self.domain(), &msg, &r.signature)? == v.owner, "not signed by the vault owner");
+            ensure!(r.deadline >= now(), "request expired");
+            ensure!(!v.activated, "the vault is active");
+            ensure_not_own_receiver(v, &recipient.receiver)?;
+        }
+        {
+            let (_store, v, notes) = self.scan_vault(&vault_id).await?;
+            let deposit = notes.conforming.as_ref().context("no conforming deposit")?;
+            ensure!(deposit.spent_at.is_none(), "the deposit was spent");
+            let id = note_id(&vault_id.0, &chain::to_policy_position(&deposit.position));
+            ensure!(id == r.note_id.0, "not the vault's conforming deposit");
+            ensure!(
+                notes.tip > v.expiry_height.saturating_add(self.cfg.confirmations),
+                "the deposit window is still open"
+            );
+        }
+        let mut providers = vec![chain::base_provider(&self.cfg.base_rpc_url)?];
+        if let Some(w) = self.base_rpc_witness.as_deref() {
+            providers.push(chain::base_provider(w)?);
+        }
+        for provider in &providers {
+            let status = IZecuredRegistry::new(self.cfg.registry, provider)
+                .vault(vault_id)
+                .call()
+                .await
+                .context("Registry.vault")?
+                .status;
+            ensure!(status == STATUS_NONE || status == VAULT_CANCELLED, "the Registry has activated the vault");
+        }
+        {
+            let mut store = self.store.lock().await;
+            let mut v = store.vaults.get(&vault_id).context("unknown vault")?.clone();
+            ensure!(!v.activated, "the vault is active");
+            ensure!(v.use_nonce(r.nonce), "nonce already used");
+            v.refunds.retain(|x| x.note_id != r.note_id.0);
+            v.refunds.push(RefundRecord {
+                note_id: r.note_id.0,
+                recipient,
+            });
+            store.save_vault(v)?;
+        }
+        Ok(ConfirmResponse {
+            index: self.id.index,
+            signature: sign_typed(&self.id.eth, &self.domain(), &VaultCancellation { vaultId: vault_id })?,
+        })
     }
 
     // ----- signing -----
@@ -727,6 +795,7 @@ mod tests {
             inflight,
             confirmed: vec![],
             last_event: None,
+            cancelled: false,
         }
     }
 

@@ -62,6 +62,7 @@ fn vault() -> VaultRecord {
         inflight: None,
         confirmed: vec![],
         last_event: None,
+        cancelled: false,
     }
 }
 

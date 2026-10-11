@@ -9,7 +9,8 @@
 //! - claim events: every claim exists from the event's block on, for that vault, with that
 //!   kind, amount and commitment, and did not exist before it;
 //! - `PayoutConfirmed`: every claim, of that vault, is paid from the event's block on and was
-//!   pending before it.
+//!   pending before it;
+//! - `VaultCancelled`: the vault is cancelled from the event's block on and was new before it.
 //!
 //! The block itself must have the hash and timestamp the log came with. A provider that no
 //! longer has the state of old blocks (not an archive node) is asked at a later block instead:
@@ -37,6 +38,8 @@ pub const STATUS_NONE: u8 = 0;
 pub const CLAIM_PENDING: u8 = 1;
 /// `ClaimStatus.Paid`.
 pub const CLAIM_PAID: u8 = 2;
+/// `VaultStatus.Cancelled`.
+pub const VAULT_CANCELLED: u8 = 3;
 
 /// The Registry's `ClaimKind` value for `kind`.
 pub fn kind_code(kind: ClaimKind) -> u8 {
@@ -209,6 +212,20 @@ pub async fn check_event<R: RegistryReader>(reader: &R, ev: &VaultEvent, at: At)
                     if prev.status != STATUS_NONE {
                         problems.push("claim existed before the event's block".into());
                     }
+                }
+            }
+        }
+        RegistryEvent::VaultCancelled => {
+            let now = reader.vault_at(ev.vault_id, after).await?;
+            evidence.vaults.push(now);
+            if now.status != VAULT_CANCELLED {
+                problems.push("no such cancellation in the Registry".into());
+            }
+            if let Some(b) = before {
+                let prev = reader.vault_at(ev.vault_id, b).await?;
+                evidence.vaults.push(prev);
+                if prev.status != STATUS_NONE {
+                    problems.push("vault was not new before the event's block".into());
                 }
             }
         }
@@ -477,6 +494,29 @@ mod tests {
         for ev in forged {
             assert!(matches!(verdict(&chain, None, &ev).await.unwrap(), Verdict::Forged(_)), "{ev:?}");
         }
+    }
+
+    #[tokio::test]
+    async fn cancellations_are_checked_against_the_vault_status() {
+        // A vault that was never activated, cancelled at block 60.
+        let cancelled = Chain {
+            vault: vec![(
+                60,
+                VaultState {
+                    account: Address::ZERO,
+                    outstanding: 0,
+                    status: VAULT_CANCELLED,
+                },
+            )],
+            hash: B256::repeat_byte(9),
+            ..Default::default()
+        };
+        let ev = event(60, RegistryEvent::VaultCancelled);
+        assert_eq!(verdict(&cancelled, None, &ev).await.unwrap(), Verdict::Proven);
+        // Re-dated after the fact, or claimed for an activated vault.
+        let late = event(70, RegistryEvent::VaultCancelled);
+        assert!(matches!(verdict(&cancelled, None, &late).await.unwrap(), Verdict::Forged(_)));
+        assert!(matches!(verdict(&honest(), None, &ev).await.unwrap(), Verdict::Forged(_)));
     }
 
     #[tokio::test]

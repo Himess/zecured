@@ -133,6 +133,10 @@ pub struct VaultRecord {
     /// event is applied at most once, whatever happens to the global cursor (M-9).
     #[serde(default)]
     pub last_event: Option<(u64, u64)>,
+    /// `VaultCancelled` seen on Base (D23): the vault was never activated and never will be,
+    /// so its conforming deposit is refundable.
+    #[serde(default)]
+    pub cancelled: bool,
 }
 
 impl VaultRecord {

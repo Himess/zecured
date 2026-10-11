@@ -12,7 +12,7 @@ use alloy::{
     primitives::{Address, B256, Bytes, U256, uint},
     sol_types::{Eip712Domain, SolStruct},
 };
-use zecured_base::{DepositAttestation, PayoutConfirmation, recover_typed};
+use zecured_base::{DepositAttestation, recover_typed};
 use zecured_node::{AttestResponse, ConfirmResponse, config::NodeInfo};
 
 /// secp256k1 n / 2: OpenZeppelin's `ECDSA` rejects larger `s` (signature malleability).
@@ -79,12 +79,12 @@ pub fn attestation(
     by_tag.into_iter().find_map(|(tag, sigs)| sorted_threshold(sigs, need).map(|s| (tag, s)))
 }
 
-/// Exactly `need` sorted `PayoutConfirmation` signatures, each checked against the answering
-/// node's configured address.
-pub fn confirmation(
+/// Exactly `need` sorted signatures of `message` (a `PayoutConfirmation` or a
+/// `VaultCancellation`), each checked against the answering node's configured address.
+pub fn confirmation<T: SolStruct>(
     nodes: &[NodeInfo],
     domain: &Eip712Domain,
-    message: &PayoutConfirmation,
+    message: &T,
     answers: &[(u16, ConfirmResponse)],
     need: usize,
 ) -> Option<Vec<Bytes>> {
@@ -102,7 +102,7 @@ pub fn confirmation(
 #[cfg(test)]
 mod tests {
     use alloy::signers::local::PrivateKeySigner;
-    use zecured_base::{claim_ids_hash, registry_domain, sign_typed};
+    use zecured_base::{PayoutConfirmation, claim_ids_hash, registry_domain, sign_typed};
 
     use super::*;
 

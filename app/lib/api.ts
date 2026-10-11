@@ -23,7 +23,7 @@ import type { CloseRequestMessage } from "./eip712";
 
 // ------------------------------------------------------------------ types
 
-export const VAULT_STATUSES = ["awaiting_deposit", "deposit_seen", "active", "closing", "closed", "expired"] as const;
+export const VAULT_STATUSES = ["awaiting_deposit", "deposit_seen", "active", "closing", "closed", "expired", "cancelled"] as const;
 export type VaultStatus = (typeof VAULT_STATUSES)[number];
 
 export const CLAIM_KINDS = ["Release", "Liquidation", "CloseUser", "CloseMarketMaker"] as const;
@@ -54,6 +54,8 @@ export interface Vault {
   expiryHeight: number;
   nonConforming: NonConformingNote[];
   claims: Claim[];
+  /** D23: the valid deposit of a vault that was never activated; refunding it cancels the vault. */
+  cancellable?: NonConformingNote;
   // In INTERFACES.md § 4; optional because older backends omit them:
   /** The vault's Ironwood-only unified address. */
   address?: string;
@@ -290,6 +292,10 @@ export function parseVault(raw: unknown): Vault {
     const d = r.deposit as Json;
     vault.deposit = { attested: d.attested === true };
     if (typeof d.txHash === "string" && isHex(d.txHash)) vault.deposit.txHash = d.txHash as Hex;
+  }
+  if (r.cancellable && typeof r.cancellable === "object") {
+    const o = obj(r.cancellable, "cancellable");
+    vault.cancellable = { noteId: hex32(o.noteId, "noteId"), amount: big(o.amount, "cancellable amount") };
   }
   if (typeof r.address === "string" && r.address) vault.address = r.address;
   const outstanding = optional(r.outstanding, (x) => big(x, "outstanding"));

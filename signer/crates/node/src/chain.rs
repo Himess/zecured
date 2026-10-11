@@ -160,7 +160,7 @@ impl ZcashView {
             confirmations,
         };
         let fvk = vault_fvk(v)?;
-        self.notes(&v.vault_id, &fvk, v.birthday, &rules, &mut v.decisions).await
+        self.notes(&v.vault_id, &fvk, v.birthday, &rules, &mut v.decisions, v.cancelled).await
     }
 
     /// Scans a vault up to the current tip, extends its persisted P1 `decisions` and sorts
@@ -169,6 +169,9 @@ impl ZcashView {
     /// The lineage returned here is the conforming deposit and every note the vault's own
     /// transactions returned to its internal address (H-2, [`ledger::lineage_members`]);
     /// [`VaultNotes::retain_planned_change`] then keeps only the planned change.
+    ///
+    /// A `cancelled` vault (D23) has no lineage: it was never activated, so nothing was minted
+    /// against its conforming deposit, which is refundable like a non-conforming one.
     pub async fn notes(
         &mut self,
         vault_id: &B256,
@@ -176,6 +179,7 @@ impl ZcashView {
         birthday: u32,
         rules: &DepositRules,
         decisions: &mut Vec<(classify::NotePosition, Classification)>,
+        cancelled: bool,
     ) -> Result<VaultNotes> {
         let tip = self.tip().await?;
         // tonic clients are cheap handles over one connection; clone to scan while `self`
@@ -243,7 +247,7 @@ impl ZcashView {
                 spent_in: n.spent_in.map(|t| *t.as_ref()),
             })
             .collect();
-        let root = conforming.as_ref().map(|n| n.nullifier.to_bytes());
+        let root = conforming.as_ref().filter(|_| !cancelled).map(|n| n.nullifier.to_bytes());
         let members = ledger::lineage_members(root.as_ref(), &refs);
 
         let mut notes = VaultNotes {
@@ -262,7 +266,12 @@ impl ZcashView {
             if in_lineage {
                 notes.lineage.push(n.clone());
             } else if n.scope == Scope::External {
-                if matches!(decision(n), Some(Classification::NonConforming(_))) {
+                let refundable = match decision(n) {
+                    Some(Classification::NonConforming(_)) => true,
+                    Some(Classification::Conforming) => cancelled,
+                    _ => false,
+                };
+                if refundable {
                     notes.non_conforming.push((note_id(&vault_id.0, &to_policy_position(&n.position)), n.clone()));
                 }
                 // Otherwise not classified yet (too few confirmations).
@@ -340,7 +349,7 @@ impl ZcashView {
     }
 }
 
-fn to_policy_position(p: &zecured_zcash_ops::scan::NotePosition) -> classify::NotePosition {
+pub fn to_policy_position(p: &zecured_zcash_ops::scan::NotePosition) -> classify::NotePosition {
     classify::NotePosition {
         height: p.height,
         tx_index: p.tx_index,
@@ -408,6 +417,10 @@ pub fn apply(store: &mut Store, ev: &VaultEvent) -> Result<bool> {
                 c.state = ClaimState::Paid;
             }
         }
+        RegistryEvent::VaultCancelled => {
+            ensure!(!v.activated, "cancellation of an activated vault");
+            v.cancelled = true;
+        }
     }
     v.last_event = Some(position);
     store.save_vault(v)?;
@@ -468,6 +481,7 @@ mod tests {
             inflight: None,
             confirmed: vec![],
             last_event: None,
+            cancelled: false,
         })
         .unwrap();
         (s, dir)
@@ -556,6 +570,22 @@ mod tests {
         assert_eq!(v.outstanding, 600_000);
         assert_eq!(v.claims.len(), 1);
         assert_eq!(v.last_event, Some((30, 0)));
+        std::fs::remove_dir_all(&dir).unwrap();
+    }
+
+    /// D23: a cancellation marks a never-activated vault; one for an activated vault is refused
+    /// (the Registry cannot produce it, so it would be a forged or misread event).
+    #[test]
+    fn cancellations_apply_only_to_vaults_never_activated() {
+        let (mut fresh, dir) = store();
+        assert_eq!(apply_all(&mut fresh, &[event(10, 0, RegistryEvent::VaultCancelled)]), 1);
+        assert!(fresh.vaults[&VAULT].cancelled);
+        std::fs::remove_dir_all(&dir).unwrap();
+
+        let (mut active, dir) = store();
+        assert_eq!(apply_all(&mut active, &[activation(10), event(20, 0, RegistryEvent::VaultCancelled)]), 1);
+        let v = &active.vaults[&VAULT];
+        assert!(v.activated && !v.cancelled);
         std::fs::remove_dir_all(&dir).unwrap();
     }
 

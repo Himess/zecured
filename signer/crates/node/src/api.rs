@@ -104,6 +104,15 @@ async fn refund(
     Ok(Json(json!({ "accepted": true })))
 }
 
+async fn cancel(
+    State(n): State<Arc<Node>>,
+    Path(id): Path<B256>,
+    Json(b): Json<RefundIn>,
+) -> ApiResult<crate::ConfirmResponse> {
+    online(&n).await?;
+    Ok(Json(n.cancel(id, b).await?))
+}
+
 async fn commit(
     State(n): State<Arc<Node>>,
     Json(b): Json<signing::CommitRequest>,
@@ -193,6 +202,7 @@ pub fn router(node: Arc<Node>) -> Router {
         .route("/v1/vaults/{id}/attest", post(attest))
         .route("/v1/vaults/{id}/destination", post(destination))
         .route("/v1/vaults/{id}/refund", post(refund))
+        .route("/v1/vaults/{id}/cancel", post(cancel))
         .route("/v1/vaults/{id}/confirm", post(confirm))
         .route("/v1/recipients", post(recipients))
         .route("/v1/sign/commit", post(commit))

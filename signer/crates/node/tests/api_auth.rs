@@ -225,6 +225,7 @@ async fn a_confirmation_can_be_given_again() {
                 txid,
             }],
             last_event: None,
+            cancelled: false,
         })
         .unwrap();
 

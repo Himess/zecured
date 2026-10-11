@@ -79,6 +79,7 @@ fn vault(owner: Address) -> (VaultRecord, FullViewingKey) {
         inflight: None,
         confirmed: vec![],
         last_event: None,
+        cancelled: false,
     };
     (record, fvk)
 }

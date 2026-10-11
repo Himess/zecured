@@ -31,8 +31,12 @@ sol! {
         event LiquidationRelease(bytes32 indexed vaultId, bytes32 indexed claimId, uint64 amount, bytes32 recipientCommitment);
         event CloseRelease(bytes32 indexed vaultId, bytes32 userClaimId, bytes32 mmClaimId, uint64 userAmount, uint64 mmAmount, bytes32 userCommitment, bytes32 mmCommitment);
         event PayoutConfirmed(bytes32 indexed vaultId, bytes32[] claimIds);
+        event VaultCancelled(bytes32 indexed vaultId);
 
         function attestDeposit(DepositAttestation att, bytes[] sigs) external;
+        function attestDepositWithProof(bytes journal, bytes seal, bytes[] openedSigs) external;
+        function cancelVault(bytes32 vaultId, bytes[] sigs) external;
+        function depositTagUsed(bytes32 depositTag) external view returns (bool);
         function confirmPayout(bytes32 vaultId, bytes32[] claimIds, bytes[] sigs) external;
         function vaultOf(address account) external view returns (bytes32 vaultId);
         function vault(bytes32 vaultId) external view returns (address account, uint64 outstanding, uint8 status);
@@ -49,6 +53,9 @@ pub enum RegistryEvent {
     Claims(Vec<Claim>),
     /// Claims were confirmed as paid on Base.
     PayoutConfirmed(Vec<B256>),
+    /// The signers cancelled a vault that was never activated (D23): it can never be activated,
+    /// and its conforming deposit becomes refundable.
+    VaultCancelled,
 }
 
 /// A decoded event with its vault and position.
@@ -164,6 +171,7 @@ pub fn decode(log: &Log, created_at: u64) -> Result<Option<VaultEvent>> {
             ]),
         ),
         E::PayoutConfirmed(e) => (e.vaultId, RegistryEvent::PayoutConfirmed(e.claimIds)),
+        E::VaultCancelled(e) => (e.vaultId, RegistryEvent::VaultCancelled),
     };
     Ok(Some(VaultEvent {
         vault_id,
@@ -239,6 +247,17 @@ mod tests {
         removed.removed = true;
         let kept = registry_logs(vec![other_contract, good.clone(), removed], registry);
         assert_eq!(kept, vec![good]);
+    }
+
+    #[test]
+    fn vault_cancelled_is_decoded() {
+        let ev = IZecuredRegistry::VaultCancelled {
+            vaultId: B256::repeat_byte(6),
+        };
+        let got = decode(&rpc_log(ev.encode_log_data(), 12, 3), 100).unwrap().unwrap();
+        assert_eq!(got.vault_id, B256::repeat_byte(6));
+        assert_eq!(got.event, RegistryEvent::VaultCancelled);
+        assert_eq!((got.block, got.log_index), (12, 3));
     }
 
     #[test]

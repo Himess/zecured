@@ -345,6 +345,7 @@ pub fn round3(
         inflight: None,
         confirmed: vec![],
         last_event: None,
+        cancelled: false,
     })?;
     Ok(out)
 }

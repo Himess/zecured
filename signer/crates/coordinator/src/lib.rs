@@ -47,13 +47,15 @@ use zcash_protocol::{
     consensus::{BlockHeight, Network},
 };
 use zecured_base::{
-    Destination, OpenVault, PayoutConfirmation, RefundRequest, ViewKeyRequest, check_signed_by_all, claim_ids_hash,
+    Destination, OpenVault, PayoutConfirmation, RefundRequest, VaultCancellation, ViewKeyRequest, check_signed_by_all,
+    claim_ids_hash,
     events::{self, IZecuredRegistry, RegistryEvent},
     recover_typed, registry_domain, vault_opened,
+    verify::VAULT_CANCELLED,
 };
 use zecured_node::{
     AttestResponse, ConfirmIn, ConfirmResponse, DestinationIn, RecipientIn, RefundIn,
-    chain::{VaultNotes, ZcashView},
+    chain::{VaultNotes, ZcashView, to_policy_position},
     config::NetworkConfig,
     dkg::{Round1Out, Round2In, Round2Out, Round3In, Round3Out, Sealed, VaultOpen},
     now,
@@ -61,6 +63,7 @@ use zecured_node::{
 };
 use zecured_policy::{
     classify::{self, Classification, DepositRules, NotePosition},
+    derive::note_id,
     ledger::{self, ClaimState, NextPayout, PayoutPlan, Recipient},
 };
 use zecured_zcash_ops::{
@@ -141,6 +144,8 @@ pub struct VaultView {
     pub outstanding: u64,
     pub claims: Vec<ClaimView>,
     pub non_conforming: Vec<NoteView>,
+    /// A conforming deposit that was never minted against: refundable after a cancellation.
+    pub cancellable: Option<NoteView>,
     pub inflight: bool,
     pub birthday_height: u32,
     /// Zcash tip at the last coordinator pass (0 before the first pass).
@@ -307,6 +312,7 @@ fn finish_open(
         used_view_nonces: vec![],
         non_conforming: vec![],
         opened_signatures: signatures.clone(),
+        cancellable: None,
     };
     let response = OpenVaultResponse {
         vault_id: vault.vault_id,
@@ -344,6 +350,13 @@ fn apply_event(v: &mut CoordVault, event: RegistryEvent) {
         RegistryEvent::PayoutConfirmed(ids) => {
             for c in v.claims.iter_mut().filter(|c| ids.iter().any(|i| i.0 == c.id)) {
                 c.state = ClaimState::Paid;
+            }
+        }
+        RegistryEvent::VaultCancelled => {
+            // The Registry cancels only vaults it never activated.
+            if !matches!(v.status, VaultStatus::Active | VaultStatus::Closed) {
+                v.status = VaultStatus::Cancelled;
+                v.cancellable = None;
             }
         }
     }
@@ -567,6 +580,21 @@ impl Coordinator {
             deadline,
             signature,
         };
+        if v.cancellable.as_ref().is_some_and(|c| c.note_id == note_id) {
+            // D23: the conforming deposit of a vault never activated. The nodes record the refund
+            // and sign the cancellation; the refund runs once the cancellation is on Base.
+            self.cancel_on_base(&vault_id, &body).await?;
+            return self
+                .update_vault(&vault_id, |v| {
+                    v.refunds.retain(|x| x.note_id != note_id);
+                    v.refunds.push(Refund {
+                        note_id,
+                        recipient: r,
+                        done: false,
+                    });
+                })
+                .await;
+        }
         let path = format!("/v1/vaults/{vault_id}/refund");
         let answers = self.nodes.post_many(&self.nodes.indices(), &path, &body).await;
         at_least::<serde_json::Value>(answers, usize::from(MIN_SIGNERS), "refund")?;
@@ -620,6 +648,7 @@ impl Coordinator {
                 })
                 .collect(),
             non_conforming: v.non_conforming.clone(),
+            cancellable: v.cancellable.clone(),
             inflight: v.inflight.is_some(),
             birthday_height: v.birthday,
             tip_height: self.last_tip.load(Ordering::Relaxed),
@@ -782,7 +811,8 @@ impl Coordinator {
             confirmations: self.cfg.confirmations,
         };
         let fvk = fvk_of(v)?;
-        self.zcash.lock().await.notes(&v.vault_id, &fvk, v.birthday, &rules, decisions).await
+        let cancelled = v.status == VaultStatus::Cancelled;
+        self.zcash.lock().await.notes(&v.vault_id, &fvk, v.birthday, &rules, decisions, cancelled).await
     }
 
     fn idle_scan_is_due(&self, id: &B256) -> bool {
@@ -812,11 +842,26 @@ impl Coordinator {
                 amount: n.value(),
             })
             .collect();
+        // L-8: a conforming deposit the Registry never minted against, past the deposit window.
+        let window_over = notes.tip > v.expiry_height.saturating_add(self.cfg.confirmations);
+        let cancellable = notes
+            .conforming
+            .as_ref()
+            .filter(|n| {
+                n.spent_at.is_none()
+                    && window_over
+                    && matches!(v.status, VaultStatus::AwaitingDeposit | VaultStatus::DepositSeen)
+            })
+            .map(|n| NoteView {
+                note_id: B256::from(note_id(&id.0, &to_policy_position(&n.position))),
+                amount: n.value(),
+            });
         // Only what the scan produced is written; everything else stays as it is now.
         let v = self
             .update_vault(id, |cur| {
                 cur.decisions = decisions;
                 cur.non_conforming = non_conforming;
+                cur.cancellable = cancellable.filter(|_| cur.status != VaultStatus::Cancelled);
                 cur.clone()
             })
             .await?;
@@ -849,7 +894,7 @@ impl Coordinator {
                     .await?;
                 }
             }
-            VaultStatus::DepositSeen | VaultStatus::Expired => {}
+            VaultStatus::DepositSeen | VaultStatus::Expired | VaultStatus::Cancelled => {}
             VaultStatus::Active | VaultStatus::Closed => {
                 if self.pay_next(&v, &notes).await? {
                     return Ok(());
@@ -885,12 +930,18 @@ impl Coordinator {
             .wallet(EthereumWallet::from(self.gas.clone()))
             .connect_http(self.cfg.base_rpc_url.parse()?);
         let registry = IZecuredRegistry::new(self.cfg.registry, &provider);
-        // A receipt lost after a successful attestDeposit must not make us resend it forever.
-        if registry.vault(*id).call().await.context("Registry.vault")?.status != 0 {
+        // A receipt lost after a successful attestDeposit must not make us resend it forever; a
+        // vault cancelled on Base (D23) is never attested.
+        let status = registry.vault(*id).call().await.context("Registry.vault")?.status;
+        if status != 0 {
             return self
                 .update_vault(id, |cur| {
                     if cur.status == VaultStatus::AwaitingDeposit {
-                        cur.status = VaultStatus::DepositSeen;
+                        cur.status = if status == VAULT_CANCELLED {
+                            VaultStatus::Cancelled
+                        } else {
+                            VaultStatus::DepositSeen
+                        };
                     }
                 })
                 .await;
@@ -1249,6 +1300,44 @@ impl Coordinator {
         info!(vault = %short(id), "payout confirmed on Base");
         Ok(())
     }
+
+    /// D23: gets 3 signers' `VaultCancellation` (each node also records the owner's refund
+    /// request, `body`) and submits `cancelVault`.
+    async fn cancel_on_base(&self, id: &B256, body: &RefundIn) -> Result<()> {
+        let path = format!("/v1/vaults/{id}/cancel");
+        let (answers, failed) =
+            split(self.nodes.post_many::<_, ConfirmResponse>(&self.nodes.indices(), &path, body).await);
+        let need = usize::from(MIN_SIGNERS);
+        let msg = VaultCancellation { vaultId: *id };
+        let Some(sigs) = select::confirmation(&self.cfg.nodes, &self.domain(), &msg, &answers, need) else {
+            return Err(if answers.len() >= need {
+                anyhow!("fewer than {need} valid cancellation signatures").context(PublicError::SignersUnavailable)
+            } else {
+                shortfall("vault cancellation", answers.len(), need, &failed)
+            });
+        };
+        let provider = ProviderBuilder::new()
+            .wallet(EthereumWallet::from(self.gas.clone()))
+            .connect_http(self.cfg.base_rpc_url.parse()?);
+        let registry = IZecuredRegistry::new(self.cfg.registry, &provider);
+        if registry.vault(*id).call().await.context("Registry.vault")?.status == VAULT_CANCELLED {
+            return Ok(());
+        }
+        let call = registry.cancelVault(*id, sigs);
+        let gas = zecured_base::gas_with_headroom(call.estimate_gas().await.context("estimate cancelVault")?);
+        let receipt = call
+            .gas(gas)
+            .send()
+            .await
+            .context("send cancelVault")?
+            .with_timeout(Some(RECEIPT_TIMEOUT))
+            .get_receipt()
+            .await
+            .context("cancelVault receipt")?;
+        ensure!(receipt.status(), "cancelVault reverted");
+        info!(vault = %short(id), "vault cancelled on Base");
+        Ok(())
+    }
 }
 
 #[cfg(test)]
@@ -1291,6 +1380,26 @@ mod tests {
             partner: None,
             state: ClaimState::Unpaid,
         }
+    }
+
+    /// D23: a cancellation moves a never-activated vault to `Cancelled` and clears the
+    /// cancellable deposit (it is now an ordinary refundable note); an active vault is untouched.
+    #[test]
+    fn cancellations_apply_to_vaults_never_activated() {
+        let mut v = vault(1);
+        v.cancellable = Some(NoteView {
+            note_id: B256::repeat_byte(4),
+            amount: 1_000_000,
+        });
+        apply_event(&mut v, RegistryEvent::VaultCancelled);
+        assert_eq!(v.status, VaultStatus::Cancelled);
+        assert!(v.cancellable.is_none());
+        assert!(v.is_idle(), "nothing left but late deposits once no refund is pending");
+
+        let mut active = vault(2);
+        active.status = VaultStatus::Active;
+        apply_event(&mut active, RegistryEvent::VaultCancelled);
+        assert_eq!(active.status, VaultStatus::Active);
     }
 
     /// M-9 (coordinator side): re-applying a chunk after a crash must not reset `outstanding`.

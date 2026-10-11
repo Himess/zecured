@@ -99,7 +99,10 @@ export function PositionView() {
           Verify vault (viewing key)
         </Link>
         <Link href={vaultHref("refund", vaultId)} prefetch={false} className={buttonClass("secondary", "no-underline")}>
-          Refunds{v && v.nonConforming.length ? ` (${v.nonConforming.length})` : ""}
+          Refunds
+          {v && v.nonConforming.length + (v.cancellable ? 1 : 0)
+            ? ` (${v.nonConforming.length + (v.cancellable ? 1 : 0)})`
+            : ""}
         </Link>
         <Link href="/world" className={buttonClass("ghost", "no-underline")}>
           What the world sees

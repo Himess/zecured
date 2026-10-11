@@ -34,6 +34,13 @@ sol! {
         bytes32 claimIdsHash;
     }
 
+    /// Signed by signer nodes before they refund the conforming deposit of a vault that was
+    /// never activated (D23, L-8); verified by the Registry (`cancelVault`).
+    #[derive(Debug, PartialEq, Eq)]
+    struct VaultCancellation {
+        bytes32 vaultId;
+    }
+
     /// Off-chain, signed by the vault owner key; verified by every signer node.
     #[derive(Debug, PartialEq, Eq)]
     struct OpenVault {
@@ -263,6 +270,7 @@ mod tests {
             PayoutConfirmation::eip712_encode_type(),
             "PayoutConfirmation(bytes32 vaultId,bytes32 claimIdsHash)"
         );
+        assert_eq!(VaultCancellation::eip712_encode_type(), "VaultCancellation(bytes32 vaultId)");
         assert_eq!(
             OpenVault::eip712_encode_type(),
             "OpenVault(address owner,address account,uint64 amount,bytes32 requestId,uint64 deadline)"
