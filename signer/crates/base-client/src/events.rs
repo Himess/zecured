@@ -37,10 +37,24 @@ sol! {
         function attestDepositWithProof(bytes journal, bytes seal, bytes[] openedSigs) external;
         function cancelVault(bytes32 vaultId, bytes[] sigs) external;
         function depositTagUsed(bytes32 depositTag) external view returns (bool);
+        function relay() external view returns (address);
+        function minConfirmationWork() external view returns (uint256);
+        function depositImageId() external view returns (bytes32);
         function confirmPayout(bytes32 vaultId, bytes32[] claimIds, bytes[] sigs) external;
         function vaultOf(address account) external view returns (bytes32 vaultId);
         function vault(bytes32 vaultId) external view returns (address account, uint64 outstanding, uint8 status);
         function claim(bytes32 claimId) external view returns (bytes32 vaultId, uint8 kind, uint64 amount, bytes32 commitment, uint8 status);
+    }
+}
+
+sol! {
+    /// The Zcash header relay (contracts/src/relay/IZcashHeaderRelay.sol), as far as a deposit
+    /// prover needs it: an anchor header must be on its best chain under enough work.
+    #[sol(rpc)]
+    interface IZcashHeaderRelay {
+        function bestChainTip() external view returns (bytes32 blockHash, uint256 height, uint256 chainWork);
+        function bestBlockHashAt(uint256 height) external view returns (bytes32);
+        function confirmationWork(bytes32 blockHash) external view returns (uint256);
     }
 }
 

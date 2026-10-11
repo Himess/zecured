@@ -17,6 +17,7 @@ zecured-zcash-ops = { path = "../zcash-ops" }
 zecured-threshold = { path = "../threshold" }
 zecured-policy = { path = "../policy" }
 zecured-base = { path = "../base-client" }
+zecured-deposit-witness = { path = "../deposit-witness" }
 orchard.workspace = true
 pczt.workspace = true
 reddsa.workspace = true

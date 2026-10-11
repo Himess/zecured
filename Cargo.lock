@@ -7391,6 +7391,7 @@ dependencies = [
  "zcash_primitives",
  "zcash_protocol",
  "zecured-base",
+ "zecured-deposit-witness",
  "zecured-node",
  "zecured-policy",
  "zecured-threshold",

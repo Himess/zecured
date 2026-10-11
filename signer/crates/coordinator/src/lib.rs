@@ -13,6 +13,7 @@ pub mod error;
 mod frost;
 pub mod inflight;
 pub mod nodes;
+pub mod proofs;
 pub mod select;
 pub mod store;
 
@@ -100,7 +101,7 @@ pub const IDLE_SCAN_INTERVAL: Duration = Duration::from_secs(600);
 const VAULT_PASS_TIMEOUT: Duration = Duration::from_secs(15 * 60);
 const BASE_SYNC_TIMEOUT: Duration = Duration::from_secs(5 * 60);
 /// Wait for a Base transaction's receipt at most this long (alloy's default is forever).
-const RECEIPT_TIMEOUT: Duration = Duration::from_secs(120);
+pub(crate) const RECEIPT_TIMEOUT: Duration = Duration::from_secs(120);
 
 alloy::sol! {
     #[sol(rpc)]
@@ -191,6 +192,8 @@ pub struct Coordinator {
     last_tip: AtomicU32,
     /// When each idle (expired or closed) vault was last scanned.
     idle_scans: std::sync::Mutex<HashMap<B256, Instant>>,
+    /// Tier 2: activate vaults on deposit proofs made here instead of signer attestations.
+    proofs: Option<proofs::Prover>,
     /// TEST ONLY: see [`TEST_WITHHOLD_FLAG`].
     #[cfg(feature = "test-hooks")]
     withhold_flag: std::path::PathBuf,
@@ -380,6 +383,7 @@ impl Coordinator {
             pk: OnceLock::new(),
             last_tip: AtomicU32::new(0),
             idle_scans: std::sync::Mutex::default(),
+            proofs: None,
             #[cfg(feature = "test-hooks")]
             withhold_flag: data_dir.join(TEST_WITHHOLD_FLAG),
             cfg,
@@ -884,7 +888,11 @@ impl Coordinator {
                     if confs < self.cfg.confirmations + delay {
                         return Ok(());
                     }
-                    self.attest(id).await?;
+                    if self.proves_deposits() {
+                        self.prove_deposit(id, conforming.txid, conforming.position.height).await?;
+                    } else {
+                        self.attest(id).await?;
+                    }
                 } else if notes.tip > v.expiry_height + self.cfg.confirmations {
                     self.update_vault(id, |cur| {
                         if cur.status == VaultStatus::AwaitingDeposit {

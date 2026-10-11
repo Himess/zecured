@@ -28,6 +28,7 @@ use tracing::{debug, error, info, warn};
 use zecured_coordinator::{
     Coordinator, MIN_SIGNERS, OpenVaultRequest, OpenVaultResponse,
     error::{PublicError, public_error, scrubbed},
+    proofs::DepositProofs,
 };
 use zecured_node::config::NetworkConfig;
 
@@ -84,6 +85,19 @@ struct Cli {
     /// Seconds between coordinator passes.
     #[arg(long, default_value_t = 10)]
     tick_secs: u64,
+    /// Tier 2 (D22): activate vaults on deposit proofs made by this coordinator, using the zkVM
+    /// host at this path (`tier2/target/release/zecured-tier2-host`), instead of attestations.
+    #[arg(long, env = "DEPOSIT_PROOF_HOST")]
+    deposit_proof_host: Option<PathBuf>,
+    /// With `--deposit-proof-host`: MOCK seals for a Registry deployed with MockRiscZeroVerifier
+    /// (local fork only); otherwise succinct proofs wrapped in Groth16 (Docker on x86).
+    #[arg(long, env = "DEPOSIT_PROOF_MOCK", default_value_t = false)]
+    deposit_proof_mock: bool,
+    /// Header file and per-block summary cache of the deposit witness builder.
+    #[arg(long, env = "DEPOSIT_PROOF_HEADERS", default_value = "data/tier2/headers_nu7.json")]
+    deposit_proof_headers: PathBuf,
+    #[arg(long, env = "DEPOSIT_PROOF_SUMMARIES", default_value = "data/tier2/summaries.json")]
+    deposit_proof_summaries: PathBuf,
 }
 
 // ------------------------------------------------------------------------- errors (L-2)
@@ -756,7 +770,20 @@ async fn main() -> Result<()> {
         allowlist,
     )?);
     let sponsorship = proxy.bundler_url.is_some() && proxy.paymaster_url.is_some() && proxy.allowlist.is_some();
-    let coordinator = Arc::new(Coordinator::new(cfg, &cli.data, &cli.coordinator_key)?);
+    let mut coordinator = Coordinator::new(cfg, &cli.data, &cli.coordinator_key)?;
+    if let Some(host) = &cli.deposit_proof_host {
+        coordinator = coordinator.with_deposit_proofs(
+            DepositProofs {
+                host: host.clone(),
+                mock: cli.deposit_proof_mock,
+                headers: cli.deposit_proof_headers.clone(),
+                summaries: cli.deposit_proof_summaries.clone(),
+            },
+            &cli.data,
+        )?;
+        info!(mock = cli.deposit_proof_mock, "deposits are activated with Tier 2 proofs");
+    }
+    let coordinator = Arc::new(coordinator);
 
     let worker = coordinator.clone();
     tokio::spawn(supervise(Duration::from_secs(cli.tick_secs), move || {
