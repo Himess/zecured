@@ -33,6 +33,7 @@ demo = []
 
 [dev-dependencies]
 zecured-threshold = { path = "../threshold" }
+sha2 = "0.10"
 rand_core_06 = { workspace = true }
 serde = { workspace = true }
 serde_json = { workspace = true }

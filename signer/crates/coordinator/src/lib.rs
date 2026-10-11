@@ -47,9 +47,9 @@ use zcash_protocol::{
     consensus::{BlockHeight, Network},
 };
 use zecured_base::{
-    Destination, OpenVault, PayoutConfirmation, RefundRequest, ViewKeyRequest, claim_ids_hash,
+    Destination, OpenVault, PayoutConfirmation, RefundRequest, ViewKeyRequest, check_signed_by_all, claim_ids_hash,
     events::{self, IZecuredRegistry, RegistryEvent},
-    recover_typed, registry_domain,
+    recover_typed, registry_domain, vault_opened,
 };
 use zecured_node::{
     AttestResponse, ConfirmIn, ConfirmResponse, DestinationIn, RecipientIn, RefundIn,
@@ -71,7 +71,7 @@ use zecured_zcash_ops::{
 
 pub use zecured_threshold::MIN_SIGNERS;
 
-pub use crate::store::NoteView;
+pub use crate::store::{NodeSignature, NoteView};
 use crate::{
     error::{PublicError, public_error, scrubbed},
     inflight::{Action, Inputs, Settled},
@@ -124,6 +124,11 @@ pub struct OpenVaultResponse {
     pub zip321: String,
     pub amount: u64,
     pub expiry_height: u32,
+    /// `keccak256` of the vault's UFVK, as the signers signed it in `VaultOpened`: the owner
+    /// needs it to check the signatures now and the viewing key later.
+    pub ufvk_hash: B256,
+    /// Every signer's `VaultOpened` signature, ordered by node index (C-4).
+    pub signatures: Vec<NodeSignature>,
 }
 
 /// Public view of a vault for the app: what its pages read, nothing more (L-10).
@@ -236,6 +241,83 @@ fn log_failure(vault: &B256, what: &str, e: &anyhow::Error) {
 /// True if an idle vault last scanned at `last` is due for another scan at `now`.
 pub fn idle_scan_due(last: Option<Instant>, now: Instant) -> bool {
     last.is_none_or(|t| now.duration_since(t) >= IDLE_SCAN_INTERVAL)
+}
+
+/// The end of a vault opening: every signer of the network answered round 3 for itself, all
+/// derived the same keys and address, and each signed `VaultOpened` for them with its
+/// configured attestation key (C-4; the owner checks the same signatures against its own
+/// pinned signer set). Returns the vault record and the response for the owner.
+fn finish_open(
+    cfg: &NetworkConfig,
+    domain: &Eip712Domain,
+    open: &VaultOpen,
+    round3: &[(u16, Round3Out)],
+) -> Result<(CoordVault, OpenVaultResponse)> {
+    let (_, first) = round3.first().context("no round-3 output")?;
+    let agree = round3.iter().all(|(index, o)| {
+        o.index == *index
+            && o.ak == first.ak
+            && o.ufvk == first.ufvk
+            && o.address == first.address
+            && o.public_key_package == first.public_key_package
+    });
+    if !agree {
+        return Err(anyhow!("signers disagree on the vault keys").context(PublicError::SignersUnavailable));
+    }
+    let opened = vault_opened(
+        open.vault_id,
+        open.owner,
+        open.account,
+        open.amount,
+        open.expiry_height,
+        &first.address,
+        &first.ufvk,
+    );
+    let signers: Vec<(u16, Address)> = cfg.nodes.iter().map(|n| (n.index, n.eth)).collect();
+    let mut signatures: Vec<NodeSignature> = round3
+        .iter()
+        .map(|(index, o)| NodeSignature {
+            index: *index,
+            signature: o.signature.clone(),
+        })
+        .collect();
+    signatures.sort_by_key(|s| s.index);
+    let pairs: Vec<(u16, Bytes)> = signatures.iter().map(|s| (s.index, s.signature.clone())).collect();
+    check_signed_by_all(domain, &opened, &signers, &pairs)
+        .context("the signers' VaultOpened signatures do not check out")
+        .context(PublicError::SignersUnavailable)?;
+    let vault = CoordVault {
+        vault_id: open.vault_id,
+        owner: open.owner,
+        account: open.account,
+        amount: open.amount,
+        birthday: open.birthday,
+        expiry_height: open.expiry_height,
+        ufvk: first.ufvk.clone(),
+        address: first.address.clone(),
+        public_key_package: first.public_key_package.clone(),
+        status: VaultStatus::AwaitingDeposit,
+        decisions: vec![],
+        attest_tx: None,
+        outstanding: 0,
+        claims: vec![],
+        inflight: None,
+        refunds: vec![],
+        attest_delay: None,
+        used_view_nonces: vec![],
+        non_conforming: vec![],
+        opened_signatures: signatures.clone(),
+    };
+    let response = OpenVaultResponse {
+        vault_id: vault.vault_id,
+        zip321: zip321_uri(&vault.address, vault.amount),
+        address: vault.address.clone(),
+        amount: vault.amount,
+        expiry_height: vault.expiry_height,
+        ufvk_hash: opened.ufvkHash,
+        signatures,
+    };
+    Ok((vault, response))
 }
 
 /// Applies one Registry event to the coordinator's record. Idempotent: a chunk applied again
@@ -389,46 +471,11 @@ impl Coordinator {
                 )
             })
             .collect();
+        // DKG needs all five signers, and so does the owner: each must vouch for the vault.
         let r3: Vec<(u16, Round3Out)> =
             at_least(self.nodes.post_each(&bodies, "/v1/dkg/round3").await, n, "DKG round 3")?;
-        let first = &r3[0].1;
-        let agree = r3[1..].iter().all(|(_, o)| {
-            o.ak == first.ak
-                && o.ufvk == first.ufvk
-                && o.address == first.address
-                && o.public_key_package == first.public_key_package
-        });
-        if !agree {
-            return Err(anyhow!("signers disagree on the vault keys").context(PublicError::SignersUnavailable));
-        }
-        let vault = CoordVault {
-            vault_id: open.vault_id,
-            owner: open.owner,
-            account: open.account,
-            amount: open.amount,
-            birthday: open.birthday,
-            expiry_height: open.expiry_height,
-            ufvk: first.ufvk.clone(),
-            address: first.address.clone(),
-            public_key_package: first.public_key_package.clone(),
-            status: VaultStatus::AwaitingDeposit,
-            decisions: vec![],
-            attest_tx: None,
-            outstanding: 0,
-            claims: vec![],
-            inflight: None,
-            refunds: vec![],
-            attest_delay: None,
-            used_view_nonces: vec![],
-            non_conforming: vec![],
-        };
-        let resp = OpenVaultResponse {
-            vault_id: vault.vault_id,
-            zip321: zip321_uri(&vault.address, vault.amount),
-            address: vault.address.clone(),
-            amount: vault.amount,
-            expiry_height: vault.expiry_height,
-        };
+        let (vault, resp) = finish_open(&self.cfg, &self.domain(), &open, &r3)?;
+        // Kept with the vault, so the signatures can be served again.
         self.store.lock().await.save(vault)?;
         info!(vault = %short(&resp.vault_id), "vault opened");
         Ok(resp)
@@ -663,13 +710,17 @@ impl Coordinator {
         })
     }
 
-    /// Health of every node (unreachable nodes are reported as such).
+    /// Health of every node, under the index it was asked as (unreachable nodes are reported as
+    /// such).
     pub async fn node_health(&self) -> Vec<serde_json::Value> {
         let mut out = vec![];
         for i in self.nodes.indices() {
             out.push(match self.nodes.get_json(i, "/v1/health").await {
-                Ok(v) => v,
-                Err(_) => serde_json::json!({ "index": i, "mode": "unreachable" }),
+                Ok(serde_json::Value::Object(mut v)) => {
+                    v.insert("index".into(), i.into());
+                    serde_json::Value::Object(v)
+                }
+                _ => serde_json::json!({ "index": i, "mode": "unreachable" }),
             });
         }
         out
@@ -1311,6 +1362,119 @@ mod tests {
             deadline,
             signature: sign_typed(owner, &c.domain(), &msg).unwrap(),
         }
+    }
+
+    const UFVK: &str = "uviewtest1vaultkey";
+
+    /// A five-node network whose attestation keys the test holds.
+    fn keyed_network() -> (NetworkConfig, Vec<PrivateKeySigner>) {
+        let urls: Vec<String> = (1..=5).map(|_| "http://127.0.0.1:9".to_owned()).collect();
+        let mut cfg = config(&urls);
+        let keys: Vec<PrivateKeySigner> = (0..5).map(|_| PrivateKeySigner::random()).collect();
+        for (node, key) in cfg.nodes.iter_mut().zip(&keys) {
+            node.eth = key.address();
+        }
+        (cfg, keys)
+    }
+
+    fn vault_open() -> VaultOpen {
+        VaultOpen {
+            vault_id: B256::repeat_byte(7),
+            owner: Address::repeat_byte(0xaa),
+            account: Address::repeat_byte(0xee),
+            amount: 1_000_000,
+            request_id: B256::repeat_byte(3),
+            deadline: u64::MAX,
+            signature: Bytes::new(),
+            birthday: 4_486_000,
+            expiry_height: 4_486_288,
+        }
+    }
+
+    /// `VaultOpened` for `open` and `address`, signed by `key`.
+    fn opened_signature(cfg: &NetworkConfig, key: &PrivateKeySigner, open: &VaultOpen, address: &str) -> Bytes {
+        let msg = vault_opened(open.vault_id, open.owner, open.account, open.amount, open.expiry_height, address, UFVK);
+        sign_typed(key, &registry_domain(cfg.chain_id, cfg.registry), &msg).unwrap()
+    }
+
+    /// Round 3 as five honest nodes answer it.
+    fn round3_answers(cfg: &NetworkConfig, keys: &[PrivateKeySigner], open: &VaultOpen) -> Vec<(u16, Round3Out)> {
+        cfg.nodes
+            .iter()
+            .zip(keys)
+            .map(|(node, key)| {
+                let out = Round3Out {
+                    index: node.index,
+                    ak: "ab".repeat(32),
+                    ufvk: UFVK.into(),
+                    address: "utest1vault".into(),
+                    public_key_package: serde_json::json!({ "group": "key" }),
+                    signature: opened_signature(cfg, key, open, "utest1vault"),
+                };
+                (node.index, out)
+            })
+            .collect()
+    }
+
+    /// C-4: the address and viewing key reach the owner only with every signer's `VaultOpened`
+    /// signature, checked against that node's configured attestation address, ordered by index
+    /// and kept with the vault.
+    #[test]
+    fn a_vault_opens_with_every_signers_signature() {
+        let (cfg, keys) = keyed_network();
+        let domain = registry_domain(cfg.chain_id, cfg.registry);
+        let open = vault_open();
+        let mut answers = round3_answers(&cfg, &keys, &open);
+        answers.reverse(); // the order nodes answer in does not matter
+        let (vault, resp) = finish_open(&cfg, &domain, &open, &answers).unwrap();
+        assert_eq!(resp.signatures.iter().map(|s| s.index).collect::<Vec<_>>(), vec![1, 2, 3, 4, 5]);
+        assert_eq!(resp.ufvk_hash, zecured_base::text_hash(UFVK));
+        assert_eq!((resp.address.as_str(), resp.amount, resp.expiry_height), ("utest1vault", 1_000_000, 4_486_288));
+        assert_eq!(resp.zip321, "zcash:utest1vault?amount=0.01");
+        assert_eq!(vault.opened_signatures, resp.signatures);
+        assert_eq!(vault.ufvk, UFVK);
+
+        // Persisted with the vault, so they can be served again after a restart.
+        let dir = TempDir::new("opened");
+        Store::open(&dir.0).unwrap().save(vault).unwrap();
+        assert_eq!(Store::open(&dir.0).unwrap().vaults[&open.vault_id].opened_signatures, resp.signatures);
+    }
+
+    #[test]
+    fn a_vault_without_every_signers_signature_is_refused() {
+        let (cfg, keys) = keyed_network();
+        let domain = registry_domain(cfg.chain_id, cfg.registry);
+        let open = vault_open();
+        let honest = round3_answers(&cfg, &keys, &open);
+        let refused = |answers: &[(u16, Round3Out)]| {
+            let e = finish_open(&cfg, &domain, &open, answers).unwrap_err();
+            assert_eq!(public_error(&e), Some(PublicError::SignersUnavailable), "{e:#}");
+        };
+        // Node 3 signed another address (say, one a compromised coordinator would hand out).
+        let mut other = honest.clone();
+        other[2].1.signature = opened_signature(&cfg, &keys[2], &open, "utest1attacker");
+        refused(&other);
+        // Node 2 relays node 5's signature; node 4 signs with a key that is not its own.
+        let mut relayed = honest.clone();
+        relayed[1].1.signature = honest[4].1.signature.clone();
+        refused(&relayed);
+        let mut foreign = honest.clone();
+        foreign[3].1.signature = opened_signature(&cfg, &PrivateKeySigner::random(), &open, "utest1vault");
+        refused(&foreign);
+        // A signature for another expiry height than the one the coordinator chose.
+        let mut late = open.clone();
+        late.expiry_height += 1;
+        let mut expiry = honest.clone();
+        expiry[0].1.signature = opened_signature(&cfg, &keys[0], &late, "utest1vault");
+        refused(&expiry);
+        // Four of five, a node answering as another, nodes disagreeing on the address.
+        refused(&honest[..4]);
+        let mut renamed = honest.clone();
+        renamed[0].1.index = 2;
+        refused(&renamed);
+        let mut split = honest.clone();
+        split[4].1.address = "utest1other".into();
+        refused(&split);
     }
 
     /// M-8: forged, expired or excess vault openings are refused before any DKG work.

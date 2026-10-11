@@ -26,7 +26,7 @@ use serde_json::json;
 use tower_http::cors::{AllowOrigin, CorsLayer};
 use tracing::{debug, error, info, warn};
 use zecured_coordinator::{
-    Coordinator, MIN_SIGNERS, OpenVaultRequest,
+    Coordinator, MIN_SIGNERS, OpenVaultRequest, OpenVaultResponse,
     error::{PublicError, public_error, scrubbed},
 };
 use zecured_node::config::NetworkConfig;
@@ -212,13 +212,22 @@ async fn open_vault(State(c): App, Body(b): Body<OpenBody>) -> ApiResult {
             signature: b.signature,
         })
         .await?;
-    Ok(Json(json!({
+    Ok(Json(open_vault_json(&r)))
+}
+
+/// `POST /vaults` response: the vault, the hash of its viewing key and every signer's
+/// `VaultOpened` signature for them, which the app and the CLI check against the signer set
+/// pinned in their build before showing the address (C-4).
+fn open_vault_json(r: &OpenVaultResponse) -> serde_json::Value {
+    json!({
         "vaultId": r.vault_id,
         "address": r.address,
         "zip321": r.zip321,
         "amount": r.amount.to_string(),
         "expiryHeight": r.expiry_height,
-    })))
+        "ufvkHash": r.ufvk_hash,
+        "signatures": r.signatures.iter().map(|s| json!({ "index": s.index, "signature": s.signature })).collect::<Vec<_>>(),
+    })
 }
 
 /// The fields the app reads (app/lib/api.ts `parseVault`); the vault's address is not among
@@ -352,6 +361,19 @@ impl ModePolicy {
             _ => Err(ApiError::bad_request()),
         }
     }
+
+    /// Adds `compromisable` to each node of a `node_health` list, so the demo panel offers
+    /// "compromised" only where it is allowed.
+    fn annotate(&self, mut nodes: Vec<serde_json::Value>) -> Vec<serde_json::Value> {
+        for node in &mut nodes {
+            let index = node.get("index").and_then(serde_json::Value::as_u64).and_then(|i| u16::try_from(i).ok());
+            if let Some(fields) = node.as_object_mut() {
+                let allowed = index.is_some_and(|i| self.compromisable.contains(&i));
+                fields.insert("compromisable".into(), allowed.into());
+            }
+        }
+        nodes
+    }
 }
 
 #[derive(Deserialize)]
@@ -392,9 +414,14 @@ async fn admin_mode(
     Ok(Json(json!({ "mode": mode })))
 }
 
-async fn admin_nodes(State(c): App, axum::Extension(t): axum::Extension<AdminToken>, headers: HeaderMap) -> ApiResult {
+async fn admin_nodes(
+    State(c): App,
+    axum::Extension(t): axum::Extension<AdminToken>,
+    axum::Extension(policy): axum::Extension<ModePolicy>,
+    headers: HeaderMap,
+) -> ApiResult {
     check_admin(&t, &headers)?;
-    Ok(Json(json!({ "nodes": c.node_health().await })))
+    Ok(Json(json!({ "nodes": policy.annotate(c.node_health().await) })))
 }
 
 // ------------------------------------------------------------------------- market maker relay
@@ -531,25 +558,48 @@ async fn health() -> Json<serde_json::Value> {
     Json(json!({ "ok": true }))
 }
 
-/// `GET /config`: chain, contract addresses, market and signer-network parameters.
-/// `sponsorship`: the bundler, the paymaster and the paymaster allowlist are all configured, so the
-/// app can send sponsored UserOps.
-fn public_config_json(cfg: &NetworkConfig, deployments: &std::path::Path, sponsorship: bool) -> serde_json::Value {
-    let dep: serde_json::Value = std::fs::read(deployments)
+/// The deployment file written by the deploy script (`Null` if there is none).
+fn load_deployment(path: &std::path::Path) -> serde_json::Value {
+    std::fs::read(path)
         .ok()
         .and_then(|raw| serde_json::from_slice(&raw).ok())
-        .unwrap_or(serde_json::Value::Null);
+        .unwrap_or(serde_json::Value::Null)
+}
+
+/// The deployment's signer set (the Registry's), ascending; `None` if it lists none or a
+/// malformed one.
+fn deployment_signers(dep: &serde_json::Value) -> Option<Vec<Address>> {
+    let mut signers: Vec<Address> =
+        dep.get("signers")?.as_array()?.iter().map(|s| s.as_str()?.parse().ok()).collect::<Option<_>>()?;
+    signers.sort();
+    Some(signers)
+}
+
+/// `GET /config`: chain, contract addresses, market, signer set and signer-network parameters.
+/// The app checks the addresses and the signer set against the ones pinned in its build.
+/// `sponsorship`: the bundler, the paymaster and the paymaster allowlist are all configured, so the
+/// app can send sponsored UserOps.
+fn public_config_json(cfg: &NetworkConfig, dep: &serde_json::Value, sponsorship: bool) -> serde_json::Value {
     json!({
         "chainId": cfg.chain_id,
         "registry": cfg.registry,
         "adapter": cfg.adapter,
         "contracts": dep.get("contracts").cloned().unwrap_or(serde_json::Value::Null),
         "market": dep.get("market").cloned().unwrap_or(serde_json::Value::Null),
+        "signers": deployment_signers(dep),
         "denominations": cfg.denominations.iter().map(|d| d.to_string()).collect::<Vec<_>>(),
         "confirmations": cfg.confirmations,
         "vaultExpiryBlocks": cfg.vault_expiry_blocks,
         "sponsorship": sponsorship,
     })
+}
+
+/// True unless the deployment's signer set differs from the network's node addresses: owners
+/// check every vault's `VaultOpened` signatures against the former, nodes sign with the latter.
+fn signer_sets_agree(cfg: &NetworkConfig, dep: &serde_json::Value) -> bool {
+    let mut nodes: Vec<Address> = cfg.nodes.iter().map(|n| n.eth).collect();
+    nodes.sort();
+    deployment_signers(dep).is_none_or(|s| s == nodes)
 }
 
 /// Reads the allowlist parameters from the deployment file written by the deploy script.
@@ -680,6 +730,12 @@ async fn main() -> Result<()> {
     let indices: Vec<u16> = cfg.nodes.iter().map(|n| n.index).collect();
     let modes = ModePolicy::parse(&cli.demo_compromisable_nodes, &indices)?;
     let cors = cors_layer(&cli.app_origins)?;
+    let deployment = load_deployment(&cli.deployments);
+    if !signer_sets_agree(&cfg, &deployment) {
+        warn!(
+            "the deployment file's signers are not the network config's node addresses: owners will refuse new vaults"
+        );
+    }
     let allowlist = load_allowlist(&cli.deployments);
     let allowlist_oracle = allowlist.as_ref().map(|a| a.oracle);
     if allowlist.is_none() {
@@ -707,7 +763,7 @@ async fn main() -> Result<()> {
     }));
 
     let wiring = Wiring {
-        public_config: PublicConfig(Arc::new(public_config_json(&coordinator.cfg, &cli.deployments, sponsorship))),
+        public_config: PublicConfig(Arc::new(public_config_json(&coordinator.cfg, &deployment, sponsorship))),
         admin_token: AdminToken(Arc::new(cli.admin_token.clone())),
         modes,
         oracle: Oracle {
@@ -771,6 +827,82 @@ mod tests {
         assert!(ModePolicy::parse("four", &nodes).is_err());
         let none = ModePolicy::parse("", &nodes).unwrap();
         assert_eq!(none.check(4, "compromised"), Err(ApiError::MODE_NOT_ALLOWED));
+    }
+
+    /// The demo panel learns which nodes it may offer "compromised" for.
+    #[test]
+    fn node_health_says_which_nodes_are_compromisable() {
+        let p = ModePolicy::parse("4,5", &[1, 2, 3, 4, 5]).unwrap();
+        let nodes = p.annotate(vec![
+            json!({ "index": 1, "mode": "normal", "vaults": 2 }),
+            json!({ "index": 4, "mode": "unreachable" }),
+            json!({ "index": 5, "mode": "compromised", "vaults": 2 }),
+        ]);
+        let flags: Vec<bool> = nodes.iter().map(|n| n["compromisable"].as_bool().unwrap()).collect();
+        assert_eq!(flags, [false, true, true]);
+        assert_eq!(nodes[0], json!({ "index": 1, "mode": "normal", "vaults": 2, "compromisable": false }));
+    }
+
+    /// C-4: the vault comes with the hash of its viewing key and every signer's signature.
+    #[test]
+    fn open_vault_answers_with_the_signers_signatures() {
+        let signature = |b: u8| Bytes::from(vec![b; 65]);
+        let r = OpenVaultResponse {
+            vault_id: B256::repeat_byte(7),
+            address: "utest1vault".into(),
+            zip321: "zcash:utest1vault?amount=0.01".into(),
+            amount: 1_000_000,
+            expiry_height: 4_486_288,
+            ufvk_hash: B256::repeat_byte(9),
+            signatures: (1..=5u8)
+                .map(|i| zecured_coordinator::NodeSignature {
+                    index: u16::from(i),
+                    signature: signature(i),
+                })
+                .collect(),
+        };
+        let v = open_vault_json(&r);
+        assert_eq!(v["vaultId"], json!(B256::repeat_byte(7)));
+        assert_eq!((v["amount"].as_str(), v["expiryHeight"].as_u64()), (Some("1000000"), Some(4_486_288)));
+        assert_eq!(v["ufvkHash"], json!(format!("0x{}", "09".repeat(32))));
+        let sigs = v["signatures"].as_array().unwrap();
+        assert_eq!(sigs.len(), 5);
+        assert_eq!(sigs[1], json!({ "index": 2, "signature": format!("0x{}", "02".repeat(65)) }));
+    }
+
+    /// `GET /config` reports the deployment's signer set (ascending), for the app to compare
+    /// with the one pinned in its build.
+    #[test]
+    fn config_reports_the_deployments_signer_set() {
+        let keys: Vec<Address> = (1..=5u8).map(Address::repeat_byte).collect();
+        let nodes: Vec<serde_json::Value> = keys
+            .iter()
+            .zip(1u16..)
+            .map(|(eth, index)| json!({ "index": index, "url": "http://127.0.0.1:9", "x25519": "00", "eth": eth }))
+            .collect();
+        let cfg: NetworkConfig = serde_json::from_value(json!({
+            "lightwalletd_url": "http://127.0.0.1:9", "base_rpc_url": "http://127.0.0.1:9", "chain_id": 84_532,
+            "registry": Address::repeat_byte(0x11), "adapter": Address::repeat_byte(0x22), "registry_from_block": 1,
+            "confirmations": 3, "vault_expiry_blocks": 288, "denominations": [1_000_000], "nodes": nodes,
+        }))
+        .unwrap();
+        let reversed: Vec<String> = keys.iter().rev().map(|a| a.to_string()).collect();
+        let dep = json!({ "contracts": {}, "signers": reversed });
+        let c = public_config_json(&cfg, &dep, true);
+        assert_eq!(c["signers"], json!(keys));
+        assert!(signer_sets_agree(&cfg, &dep));
+        // Another set: reported as is (the app then refuses it), and flagged at startup.
+        let other = json!({ "signers": [Address::repeat_byte(9), keys[1], keys[2], keys[3], keys[4]] });
+        assert!(!signer_sets_agree(&cfg, &other));
+        // No deployment file, or no or malformed signers: none reported.
+        for dep in [
+            serde_json::Value::Null,
+            json!({ "contracts": {} }),
+            json!({ "signers": ["0x12"] }),
+        ] {
+            assert_eq!(public_config_json(&cfg, &dep, false)["signers"], serde_json::Value::Null);
+            assert!(signer_sets_agree(&cfg, &dep));
+        }
     }
 
     /// L-2: callers only ever get a fixed message and a code.
@@ -907,6 +1039,16 @@ mod tests {
         // C-3: no third compromised node, whatever the token.
         let (status, body, _) = call(Method::POST, "/admin/nodes/1/mode", r#"{"mode":"compromised"}"#).await;
         assert_eq!((status, body["code"].as_str()), (StatusCode::FORBIDDEN, Some("mode_not_allowed")));
+        // The panel is told where "compromised" is allowed (the nodes themselves are unreachable).
+        let (status, body, _) = call(Method::GET, "/admin/nodes", "").await;
+        assert_eq!(status, StatusCode::OK);
+        let compromisable: Vec<(u64, bool)> = body["nodes"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|n| (n["index"].as_u64().unwrap(), n["compromisable"].as_bool().unwrap()))
+            .collect();
+        assert_eq!(compromisable, [(1, false), (2, false), (3, false), (4, true), (5, true)]);
         // M-8: POST /vaults allows a burst of 3, then answers 429.
         for _ in 0..3 {
             let (status, body, _) = call(Method::POST, "/vaults", "{}").await;

@@ -6,7 +6,7 @@ use std::{
     path::{Path, PathBuf},
 };
 
-use alloy::primitives::{Address, B256};
+use alloy::primitives::{Address, B256, Bytes};
 use anyhow::{Context, Result};
 use serde::{Deserialize, Serialize};
 use zecured_node::store::write_atomic;
@@ -60,6 +60,13 @@ pub struct Refund {
     pub done: bool,
 }
 
+/// One signer node's signature, by node index.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct NodeSignature {
+    pub index: u16,
+    pub signature: Bytes,
+}
+
 /// A refundable (non-conforming, unspent) note of a vault, as the app shows it.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct NoteView {
@@ -102,6 +109,10 @@ pub struct CoordVault {
     /// and then (M-10).
     #[serde(default)]
     pub non_conforming: Vec<NoteView>,
+    /// Every signer's `VaultOpened` signature for `address` and `ufvk`, ordered by node index:
+    /// what the owner checked before paying the vault (C-4). Empty for vaults opened before.
+    #[serde(default)]
+    pub opened_signatures: Vec<NodeSignature>,
 }
 
 impl CoordVault {
@@ -244,6 +255,7 @@ pub(crate) mod tests {
             attest_delay: None,
             used_view_nonces: vec![],
             non_conforming: vec![],
+            opened_signatures: vec![],
         }
     }
 
@@ -292,6 +304,7 @@ pub(crate) mod tests {
         let mut v = serde_json::to_value(vault(3)).unwrap();
         let obj = v.as_object_mut().unwrap();
         obj.remove("non_conforming");
+        obj.remove("opened_signatures");
         obj.insert(
             "inflight".into(),
             serde_json::json!({ "claim_ids": [], "refund_note": null, "txid": "00", "expiry_height": 5 }),
@@ -301,6 +314,7 @@ pub(crate) mod tests {
         let store = Store::open(&dir.0).unwrap();
         let v = &store.vaults[&B256::repeat_byte(3)];
         assert!(v.non_conforming.is_empty());
+        assert!(v.opened_signatures.is_empty(), "vaults opened before C-4 have no signatures");
         assert!(v.inflight.as_ref().unwrap().inputs.is_empty());
     }
 

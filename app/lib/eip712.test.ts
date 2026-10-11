@@ -95,7 +95,7 @@ function sample(type: string, i: number): unknown {
 describe("type strings (docs/INTERFACES.md § 2)", () => {
   const spec = specTypeStrings();
 
-  it("the spec defines exactly the app's seven types", () => {
+  it("the spec defines exactly the app's eight types", () => {
     expect([...spec.keys()].sort()).toEqual(Object.keys(types).sort());
   });
 

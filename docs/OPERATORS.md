@@ -24,9 +24,13 @@ decision from its own view of both chains:
 - **Its Zcash data source.** A node scans vaults through a light wallet server. A server that
   lies about deposits could get a fake deposit attested. Each operator should use **their own**
   `zebrad` + `lightwalletd` (or at least a server different from the coordinator's), set with
-  `NODE_LIGHTWALLETD_URL`. Three nodes with independent data sources must agree.
+  `NODE_LIGHTWALLETD_URL`, and can add witnesses with `NODE_LIGHTWALLETD_WITNESS_URLS`
+  (comma-separated): before attesting, every witness must report the same block hash at the
+  deposit's height, the same transaction bytes and a tip within 3 blocks, or the node refuses.
 - **Its Base RPC.** Set with `NODE_BASE_RPC_URL`. The node only ingests Registry events at or
-  below the `safe` head, so short reorgs cannot inject claims.
+  below the `safe` head, drops logs that are not from the Registry or were removed, and checks
+  every event against Registry state with `eth_call`. A witness RPC
+  (`NODE_BASE_RPC_WITNESS_URL`) must return the same evidence; a disagreement stops ingestion.
 - **The network configuration** (`network.json`): the Registry and Adapter addresses, chain id,
   denominations, confirmations, the five nodes' public keys and the coordinator's address. Check
   it against the deployment (the Registry's `signers()` must list the five node addresses).
@@ -49,7 +53,9 @@ cargo build --release -p zecured-node
 
 # 2. With the shared network.json in hand:
 NODE_LIGHTWALLETD_URL=https://your-lightwalletd:443 \
+NODE_LIGHTWALLETD_WITNESS_URLS=https://another-lightwalletd:443 \
 NODE_BASE_RPC_URL=https://your-base-sepolia-rpc \
+NODE_BASE_RPC_WITNESS_URL=https://another-base-sepolia-rpc \
 ./target/release/zecured-node run --data /var/lib/zecured-node --config network.json \
     --bind 127.0.0.1:9101
 ```
@@ -58,10 +64,17 @@ Put the API behind TLS (a reverse proxy) and allow inbound connections from the 
 only. TLS is not optional: payout PCZTs carry recipient addresses in the clear for
 verification. Outbound, the node needs only its light wallet server and its Base RPC.
 
-`network.json` must set `coordinator`: nodes then accept only requests signed by that address
-(D16; `/v1/health` stays open for monitoring). Never set `DEMO_ADMIN_TOKEN` on a production
-node: it enables the demo panel's switch that makes a node refuse everything ("offline") or
-sign without policy checks ("compromised") for the threshold demo.
+`network.json` must set `coordinator`: nodes accept only requests signed by that address
+within ±60 s, each signed request once (D16; `/v1/health` stays open for monitoring). A node
+refuses to start without it, unless started with `--insecure-no-auth` (local development only).
+
+Build production nodes **without** the `demo` feature: the threshold demo's "compromised" mode
+(signing without policy checks) does not exist in such a build, and a node started with
+`--demo-allow-compromise` refuses to run. Don't set `DEMO_ADMIN_TOKEN` either: it enables the
+demo panel's switch that takes a node "offline".
+
+The node writes its identity, vault and recipient files with mode 0600 in 0700 directories,
+and tightens older files when it opens them.
 
 ## What to protect
 

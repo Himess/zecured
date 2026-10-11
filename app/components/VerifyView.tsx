@@ -7,7 +7,7 @@ import { Button, Card, Notice } from "./ui";
 import type { Vault } from "@/lib/api";
 import { config } from "@/lib/config";
 import { useAction, useLoanByVault, useUrlFragment, useVault } from "@/lib/hooks";
-import { fetchViewingKey } from "@/lib/owner";
+import { fetchViewingKey, type ViewingKey } from "@/lib/owner";
 import { vaultIdFromFragment } from "@/lib/routes";
 
 /**
@@ -27,11 +27,11 @@ export function VerifyView() {
   const vaultId = (fragment && vaultIdFromFragment(fragment)) || undefined;
   const { loan, ready } = useLoanByVault(vaultId);
   const vault = useVault(vaultId, 0);
-  const [ufvk, setUfvk] = useState<string | null>(null);
+  const [key, setKey] = useState<ViewingKey | null>(null);
   const request = useAction(async () => {
     if (!loan || !vaultId) throw new Error("No owner key for this vault in this browser");
-    const key = await fetchViewingKey(loan, vaultId);
-    setUfvk(key);
+    // Rejected unless it is the key every signer signed for when the vault opened (C-4).
+    setKey(await fetchViewingKey(loan, vaultId));
     return true;
   });
 
@@ -57,26 +57,38 @@ export function VerifyView() {
               </p>
             </Notice>
           ) : null}
-          {!ufvk ? (
+          {!key ? (
             <Button onClick={() => request.run()} busy={request.busy} disabled={!loan}>
               Request the viewing key
             </Button>
           ) : (
             <div className="space-y-3">
+              {key.checked ? (
+                <Notice tone="ok" title="Signed by all 5 signers, checked in this browser">
+                  <p>This is the viewing key every signer signed for when the vault was opened.</p>
+                </Notice>
+              ) : (
+                <Notice tone="warn" title="This key could not be checked">
+                  <p>
+                    This loan was opened before the signers signed vault keys, so nothing here shows that this is the key of
+                    the vault they control.
+                  </p>
+                </Notice>
+              )}
               <label htmlFor="ufvk" className="block text-sm font-medium">
                 Unified full viewing key
               </label>
               <textarea
                 id="ufvk"
                 readOnly
-                value={ufvk}
+                value={key.ufvk}
                 rows={5}
                 spellCheck={false}
                 className="w-full rounded-lg border border-border bg-bg px-3 py-2 font-mono text-xs break-all text-text"
               />
               <div className="flex flex-wrap gap-2">
-                <CopyButton value={ufvk} label="Copy viewing key" size="md" />
-                <Button variant="ghost" onClick={() => setUfvk(null)}>
+                <CopyButton value={key.ufvk} label="Copy viewing key" size="md" />
+                <Button variant="ghost" onClick={() => setKey(null)}>
                   Hide
                 </Button>
               </div>
@@ -84,7 +96,7 @@ export function VerifyView() {
           )}
           {request.error ? (
             <div className="mt-4">
-              <Notice tone="danger" title="The signers did not return the key" live>
+              <Notice tone="danger" title="No viewing key shown" live>
                 <p>{request.error}</p>
               </Notice>
             </div>

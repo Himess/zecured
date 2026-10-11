@@ -9,8 +9,8 @@ Ironwood pool. This document describes the system as built; interfaces are in
 | Component | Where | Role |
 |---|---|---|
 | Vault | Zcash (Ironwood) | One per loan. Its spend authority is a 3-of-5 FROST key; its address has a single Orchard-protocol receiver, so it is paid in the Ironwood pool. |
-| Signer nodes (×5) | `signer/` | Each holds one FROST share per vault, an ECDSA key for Base attestations, and its own connections to Zcash and Base. Each node enforces the policy below independently. |
-| Coordinator | `signer/`, `backend/` | Relays messages, builds PCZTs, aggregates signatures, submits Base transactions. It holds **no** key material: it cannot move funds or mint on its own. |
+| Signer nodes (×5) | `signer/` | Each holds one FROST share per vault and an ECDSA key for Base attestations, and reads Zcash and Base through sources it configures itself (optionally checked against witness sources). Each node enforces the policy below independently. |
+| Coordinator | `signer/`, `backend/` | Relays messages, builds PCZTs, aggregates signatures, submits Base transactions. It holds **no** key share: it cannot move funds or mint on its own, and the deposit address it relays is signed by all five signers. It can delay or withhold work (liveness only). |
 | `ZecuredRegistry`, `ZZEC`, `SettlementAdapter` | `contracts/` (Base) | Receipt token and accounting on top of a Morpho Blue market. |
 | App + proxy | `app/`, `backend/` | Browser UI; every RPC / bundler / paymaster call goes through our proxy, which logs nothing. |
 | Bots | `bots/` | Liquidator and market maker (permissionless roles; ours in the demo). |
@@ -21,6 +21,11 @@ Ironwood pool. This document describes the system as built; interfaces are in
   exact transaction outputs and the vault's books before signing. One or two compromised
   signers cannot move funds; three colluding signers can (hackathon trust assumption, all
   five run by us).
+- Each signer is as honest as the chain data it reads: independent operators run their own
+  Zcash and Base sources ([OPERATORS.md](OPERATORS.md)); verifying deposits on Base itself is
+  the Tier 2 roadmap ([TIER2.md](TIER2.md)).
+- The vault address and its viewing key are signed by all five signers when the vault opens;
+  the app checks the signatures before showing the address.
 - The borrower gets the vault's viewing key and can check the vault independently.
 - The smart account's collateral can only be withdrawn by the borrower's own `requestRelease`,
   by a liquidation, or by a close request the borrower signed.

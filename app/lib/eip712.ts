@@ -3,8 +3,8 @@
  * against that file and against the Solidity golden vectors).
  *
  * - Registry domain ("ZecuredRegistry", "1", 84532, Registry): DepositAttestation,
- *   PayoutConfirmation and every off-chain owner request (OpenVault, Destination,
- *   RefundRequest, ViewKeyRequest).
+ *   PayoutConfirmation, VaultOpened (signed by the signer nodes, checked by the app: lib/signers.ts)
+ *   and every off-chain owner request (OpenVault, Destination, RefundRequest, ViewKeyRequest).
  * - Adapter domain ("ZecuredSettlementAdapter", "1", 84532, Adapter): CloseRequest, which the
  *   owner signs *through the Safe* (ERC-1271, SafeMessage wrapping; see docs/spikes/SPIKE_C.md).
  */
@@ -81,6 +81,16 @@ export const types = {
     { name: "nonce", type: "uint256" },
     { name: "deadline", type: "uint64" },
   ],
+  // § 2.5 — signed by every signer node when the vault opens, verified here (C-4)
+  VaultOpened: [
+    { name: "vaultId", type: "bytes32" },
+    { name: "owner", type: "address" },
+    { name: "account", type: "address" },
+    { name: "amount", type: "uint64" },
+    { name: "expiryHeight", type: "uint32" },
+    { name: "addressHash", type: "bytes32" },
+    { name: "ufvkHash", type: "bytes32" },
+  ],
 } as const;
 
 export type PrimaryType = keyof typeof types;
@@ -127,6 +137,18 @@ export interface CloseRequestMessage {
   nonce: bigint;
   deadline: bigint;
 }
+export interface VaultOpenedMessage {
+  vaultId: Hex;
+  owner: Address;
+  account: Address;
+  amount: bigint;
+  /** uint32: a Zcash height. */
+  expiryHeight: number;
+  /** keccak256 of the vault address's UTF-8 bytes. */
+  addressHash: Hex;
+  /** keccak256 of the vault UFVK's UTF-8 bytes. */
+  ufvkHash: Hex;
+}
 
 // Typed-data builders (one per request kind, so every message is fully typed).
 
@@ -166,6 +188,15 @@ export function closeRequestTypedData(adapter: Address, message: CloseRequestMes
     domain: adapterDomain(adapter),
     types: { CloseRequest: types.CloseRequest },
     primaryType: "CloseRequest",
+    message,
+  } as const;
+}
+
+export function vaultOpenedTypedData(registry: Address, message: VaultOpenedMessage) {
+  return {
+    domain: registryDomain(registry),
+    types: { VaultOpened: types.VaultOpened },
+    primaryType: "VaultOpened",
     message,
   } as const;
 }

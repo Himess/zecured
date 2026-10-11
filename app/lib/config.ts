@@ -57,8 +57,13 @@ export interface AppConfig {
   zzec: Address;
   irm: Address;
   lltv: bigint;
-  /** The five signer addresses, ascending (`NEXT_PUBLIC_SIGNERS`); null when unknown. */
+  /**
+   * The five signer addresses, ascending: `NEXT_PUBLIC_SIGNERS`, or, in a development build
+   * without it, the backend's (`signersPinned` false); null when unknown.
+   */
   signers: readonly Address[] | null;
+  /** `signers` is this build's pin (NEXT_PUBLIC_SIGNERS), not the backend's report. */
+  signersPinned: boolean;
   /** A development build (`next dev`): unpinned addresses may come from the backend. */
   development: boolean;
   /** The `NEXT_PUBLIC_*` pins this build lacks. */
@@ -343,6 +348,7 @@ export function buildConfig(env: ConfigEnv, remote?: RemoteConfigResult): AppCon
     irm: v.irm,
     lltv: MARKET_LLTV,
     signers,
+    signersPinned: Boolean(signersPin),
     development,
     unpinned,
     contractsDeployed: problems.length === 0 && complete && (development || unpinned.length === 0),

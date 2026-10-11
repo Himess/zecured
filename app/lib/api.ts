@@ -79,6 +79,13 @@ export interface OpenVaultBody {
   signature: Hex;
 }
 
+/** One signer node's signature, by node index. */
+export interface VaultSignature {
+  index: number;
+  /** 65 bytes, r || s || v. */
+  signature: Hex;
+}
+
 export interface OpenVaultResult {
   vaultId: Hex;
   /** The vault's Ironwood-only unified address. */
@@ -86,6 +93,10 @@ export interface OpenVaultResult {
   zip321: string;
   amount: bigint;
   expiryHeight: number;
+  /** keccak256 of the vault's UFVK, as the signers signed it (VaultOpened). */
+  ufvkHash: Hex;
+  /** Every signer's VaultOpened signature (docs/INTERFACES.md § 2.5): unchecked as parsed here. */
+  signatures: VaultSignature[];
 }
 
 export interface DestinationBody {
@@ -124,6 +135,8 @@ export interface NodeHealth {
   index: number;
   mode: NodeMode | "unreachable";
   vaults?: number;
+  /** The demo panel may switch this node to "compromised" (DEMO_COMPROMISABLE_NODES). */
+  compromisable?: boolean;
 }
 
 export interface DrainVote {
@@ -361,14 +374,28 @@ export function parseOracleUpdate(raw: unknown): OracleUpdate {
   return { priceUsdCents: big(r.priceUsdCents, "priceUsdCents"), txHash: hex32(r.txHash, "txHash") };
 }
 
+/** A 65-byte signature, lowercase. */
+function sig65(v: unknown, what: string): Hex {
+  if (typeof v === "string" && isHex(v) && v.length === 2 + 65 * 2) return v.toLowerCase() as Hex;
+  throw invalid(what);
+}
+
 export function parseOpenVault(raw: unknown): OpenVaultResult {
   const r = obj(raw, "open vault");
+  if (!Array.isArray(r.signatures)) throw invalid("signatures");
+  const expiryHeight = uint(r.expiryHeight, "expiryHeight");
+  if (expiryHeight > 0xffff_ffff) throw invalid("expiryHeight");
   return {
     vaultId: hex32(r.vaultId, "vaultId"),
     address: str(r.address, "address"),
     zip321: str(r.zip321, "zip321"),
     amount: big(r.amount, "amount"),
-    expiryHeight: int(r.expiryHeight, "expiryHeight"),
+    expiryHeight,
+    ufvkHash: hex32(r.ufvkHash, "ufvkHash"),
+    signatures: r.signatures.map((s) => {
+      const o = obj(s, "signature");
+      return { index: uint(o.index, "signature index"), signature: sig65(o.signature, "signature") };
+    }),
   };
 }
 
@@ -412,6 +439,7 @@ export function parseNodes(raw: unknown): NodeHealth[] {
       : "unreachable";
     const node: NodeHealth = { index: int(o.index, "node index"), mode };
     if (typeof o.vaults === "number") node.vaults = o.vaults;
+    if (typeof o.compromisable === "boolean") node.compromisable = o.compromisable;
     return node;
   });
 }

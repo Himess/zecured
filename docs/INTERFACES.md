@@ -24,7 +24,7 @@ the signers. Salts are never logged.
 
 | Domain | name | version | chainId | verifyingContract | Used for |
 |---|---|---|---|---|---|
-| Registry | `ZecuredRegistry` | `1` | 84532 | ZecuredRegistry | `DepositAttestation`, `PayoutConfirmation`, and all off-chain owner requests (`OpenVault`, `Destination`, `RefundRequest`, `ViewKeyRequest`) |
+| Registry | `ZecuredRegistry` | `1` | 84532 | ZecuredRegistry | `DepositAttestation`, `PayoutConfirmation`, `VaultOpened` (off-chain), and all off-chain owner requests (`OpenVault`, `Destination`, `RefundRequest`, `ViewKeyRequest`) |
 | Adapter | `ZecuredSettlementAdapter` | `1` | 84532 | SettlementAdapter | `CloseRequest` |
 
 Every request kind has its own type, so a signature for one kind never verifies as another.
@@ -67,6 +67,26 @@ CloseRequest(bytes32 vaultId,address account,address executor,uint16 marginBps,u
 
 `marginBps` is the market maker's quoted margin (adapter caps it); `minUserAmount` protects
 the user against price moves; `deadline` is a short Unix-time expiry (≈ 10 min).
+
+### 2.5 Signed by signer nodes, verified off-chain by the vault owner (app, CLI)
+
+```
+VaultOpened(bytes32 vaultId,address owner,address account,uint64 amount,uint32 expiryHeight,bytes32 addressHash,bytes32 ufvkHash)
+```
+
+- Each node signs it with its attestation key when it completes the vault's DKG (round 3),
+  from values it derived or checked itself: the `OpenVault` it verified (`owner`, `account`,
+  `amount`), the expiry height it checked against its own Zcash tip, and the vault's address and
+  UFVK as it derived them. Never submitted to Base.
+- `addressHash = keccak256(UTF-8 bytes of the vault's unified address)` and `ufvkHash =
+  keccak256(UTF-8 bytes of its UFVK)`, each string exactly as the owner receives it (`POST
+  /vaults`, `POST /vaults/:id/viewing-key`).
+- 65-byte `r || s || v` signatures (v = 27/28, low s), as in § 2.2.
+- The app and the CLI accept a vault only if all five signers of the set pinned in their own
+  build signed it (app: `NEXT_PUBLIC_SIGNERS`, compared as a set; CLI: the node `eth` addresses
+  of its network config, by index), never a set obtained from the backend. Only then do they show
+  the address or the payment request. They keep `ufvkHash` and show a viewing key only if it
+  hashes to it.
 
 ## 3. Contracts (Base Sepolia)
 
@@ -169,7 +189,7 @@ addresses, salts, viewing keys or IPs.
 
 | Method & path | Body | Response |
 |---|---|---|
-| `POST /vaults` | `{ owner, account, amount, requestId, deadline, signature }` (`OpenVault`) | `{ vaultId, address (Ironwood-only UA), zip321, amount, expiryHeight }` |
+| `POST /vaults` | `{ owner, account, amount, requestId, deadline, signature }` (`OpenVault`) | `{ vaultId, address (Ironwood-only UA), zip321, amount, expiryHeight, ufvkHash, signatures: [{ index, signature }] }`; `signatures`: every signer's `VaultOpened` (§ 2.5), ordered by node index; the client checks all five before showing `address` and builds the payment URI itself |
 | `GET /vaults/:id` | — | `{ vaultId, status, amount, address, expiryHeight, birthdayHeight, tipHeight, outstanding, payoutInFlight, nonConforming: [{ noteId, amount }], claims: [{ claimId, kind, amount, paid }] }`; `kind` ∈ `Release`, `Liquidation`, `CloseUser`, `CloseMarketMaker` |
 | `POST /vaults/:id/destination` | `{ receiver (UA), salt, nonce, deadline, signature }` (`Destination`) | `{ commitment }` — validated **before** any Base tx that burns zZEC |
 | `POST /vaults/:id/refund` | `{ noteId, receiver, salt, nonce, deadline, signature }` (`RefundRequest`) | `{ accepted: true }` |
@@ -177,7 +197,7 @@ addresses, salts, viewing keys or IPs.
 | `POST /recipients` | `{ receiver (UA), salt }` (liquidator / market maker) | `{ commitment }` |
 | `GET /quotes/close/:vaultId` | — | `{ executor, marginBps (number), repayAssets, mmAmount, userAmount, expiresAt (number, Unix s) }` (relayed to the market maker) |
 | `POST /closes` | `{ request: CloseRequest (camelCase), signature }` | `{ txHash }` once `closeWithCollateral` is mined (relayed; executed by the market maker) |
-| `GET /config` | — | `{ chainId, registry, adapter, contracts, market, denominations, confirmations, vaultExpiryBlocks, sponsorship }` — the app pins contract addresses and signers at build time and uses this only as a consistency check (any mismatch disables Base actions); it takes `sponsorship` (bundler, paymaster and allowlist all configured), denominations, confirmations and the deposit window from it |
+| `GET /config` | — | `{ chainId, registry, adapter, contracts, market, signers, denominations, confirmations, vaultExpiryBlocks, sponsorship }` (`signers`: the deployment's five signer addresses, ascending, or `null`) — the app pins contract addresses and signers at build time and uses this only as a consistency check (any mismatch disables Base actions); it takes `sponsorship` (bundler, paymaster and allowlist all configured), denominations, confirmations and the deposit window from it |
 | `POST /proxy/rpc` | JSON-RPC | Base RPC passthrough (read methods + `eth_sendRawTransaction` disallowed) |
 | `POST /proxy/bundler` | JSON-RPC | ERC-4337 bundler passthrough |
 | `POST /proxy/paymaster` | JSON-RPC | Sponsors only the allowlist below; rejects anything else |
@@ -189,7 +209,7 @@ Amounts are decimal strings in zatoshis (ZEC) or 6-decimal units (USDC).
 
 | Method & path | Body | Response |
 |---|---|---|
-| `GET /admin/nodes` | — | `{ nodes: [{ index, mode, vaults }] }` |
+| `GET /admin/nodes` | — | `{ nodes: [{ index, mode, vaults, compromisable }] }`; `compromisable`: the panel may switch this node to "compromised" (`DEMO_COMPROMISABLE_NODES`) |
 | `POST /admin/nodes/:index/mode` | `{ mode: "normal" \| "compromised" \| "offline" }` | `{ mode }` |
 | `POST /admin/vaults/:id/drain` | `{ to (UA) }` | `{ vaultId, amount, votes: [{ index, signed, reason }], thresholdReached }` — never broadcasts |
 | `GET /admin/oracle` | — | `{ priceUsdCents, raw }` |

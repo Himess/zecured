@@ -71,6 +71,20 @@ sol! {
         uint64 deadline;
     }
 
+    /// Off-chain, signed by every signer node once the vault's DKG is complete, with values the
+    /// node derived or checked itself; verified by the owner (app, CLI) against its own pinned
+    /// signer set before the vault's address is shown (security review C-4).
+    #[derive(Debug, PartialEq, Eq)]
+    struct VaultOpened {
+        bytes32 vaultId;
+        address owner;
+        address account;
+        uint64 amount;
+        uint32 expiryHeight;
+        bytes32 addressHash;
+        bytes32 ufvkHash;
+    }
+
     /// Signed by the vault owner through the smart account (ERC-1271), verified by the Adapter.
     #[derive(Debug, PartialEq, Eq)]
     struct CloseRequest {
@@ -112,6 +126,66 @@ pub fn claim_ids_hash(claim_ids: &[B256]) -> B256 {
         packed.extend_from_slice(id.as_slice());
     }
     keccak256(packed)
+}
+
+/// `keccak256` of a string's UTF-8 bytes. `VaultOpened.addressHash` is this of the vault's unified
+/// address and `.ufvkHash` of its unified full viewing key, each exactly as the owner gets it.
+pub fn text_hash(text: &str) -> B256 {
+    keccak256(text.as_bytes())
+}
+
+/// The `VaultOpened` message for a vault's address and viewing key (C-4).
+pub fn vault_opened(
+    vault_id: B256,
+    owner: Address,
+    account: Address,
+    amount: u64,
+    expiry_height: u32,
+    address: &str,
+    ufvk: &str,
+) -> VaultOpened {
+    VaultOpened {
+        vaultId: vault_id,
+        owner,
+        account,
+        amount,
+        expiryHeight: expiry_height,
+        addressHash: text_hash(address),
+        ufvkHash: text_hash(ufvk),
+    }
+}
+
+/// Checks that every member of `signers` (node index, attestation address) signed `message`
+/// under `domain`: exactly one signature per index, recovering to that node's address, and no
+/// signature from anyone else (C-4: a vault counts only when all five signers vouch for it).
+pub fn check_signed_by_all<T: SolStruct>(
+    domain: &Eip712Domain,
+    message: &T,
+    signers: &[(u16, Address)],
+    signatures: &[(u16, Bytes)],
+) -> Result<()> {
+    ensure!(!signers.is_empty(), "no signer set to check against");
+    for (k, (index, address)) in signers.iter().enumerate() {
+        ensure!(
+            signers[..k].iter().all(|(i, a)| i != index && a != address),
+            "the signer set lists signer {index} or its address twice"
+        );
+    }
+    if let Some((index, _)) = signatures.iter().find(|(i, _)| !signers.iter().any(|(s, _)| s == i)) {
+        return Err(anyhow!("a signature claims to come from signer {index}, who is not in the signer set"));
+    }
+    for (index, expected) in signers {
+        let mut theirs = signatures.iter().filter(|(i, _)| i == index);
+        let (_, signature) = theirs.next().with_context(|| format!("signer {index} did not sign"))?;
+        ensure!(theirs.next().is_none(), "signer {index} answered twice");
+        let signer = recover_typed(domain, message, signature)
+            .with_context(|| format!("signer {index}: unreadable signature"))?;
+        ensure!(
+            signer == *expected,
+            "signer {index}: the signature is not by its attestation key, or for other values"
+        );
+    }
+    Ok(())
 }
 
 /// `claimIdOf(vaultId, sequence) = keccak256(abi.encode(vaultId, uint64(sequence)))`.
@@ -209,6 +283,111 @@ mod tests {
             CloseRequest::eip712_encode_type(),
             "CloseRequest(bytes32 vaultId,address account,address executor,uint16 marginBps,uint64 minUserAmount,bytes32 userCommitment,uint256 nonce,uint64 deadline)"
         );
+        assert_eq!(
+            VaultOpened::eip712_encode_type(),
+            "VaultOpened(bytes32 vaultId,address owner,address account,uint64 amount,uint32 expiryHeight,bytes32 addressHash,bytes32 ufvkHash)"
+        );
+    }
+
+    /// A real Ironwood-only testnet UA and the UFVK of the first ZIP 2005 `use_qsk` vector
+    /// (signer/crates/zcash-ops/tests/fixtures/zip2005_use_qsk.json; the UA encodes its default
+    /// address with `encode_ironwood_ua`).
+    const VECTOR_ADDRESS: &str = "utest1yv0hq77h4th2c882kdmcgt47xrm5zmhkfnfpw6dcack8e6kgfmg5new7vxed0trhkc67cmf2tjea8pnd09key4v85kmqdnz33yuas40f";
+    const VECTOR_UFVK: &str = "uviewtest1rl58wrlhq2eqws08m2jxqg0gjpn2yd7me5f9cfkwmf4axnq0vjvjgvjs5t70tsny62rxklz3ha8t5cr8k30jltjmjr0xxsdhpqeqpf55w3dx0mracz99uvrvyf4hpsfxs2nc5jykraqvnt22zpkdce6tcj85lkty9lcpduhl72vz80l8ygn0q3sxn04w8";
+    /// Foundry / anvil test account #0: a publicly known key, for test vectors only.
+    const TEST_KEY: &str = "0xac0974bec39a17e36ba4a6b4d238ff944bacb478cbed5efcae784d7bf4f2ff80";
+
+    fn vector_vault_opened() -> VaultOpened {
+        vault_opened(
+            B256::repeat_byte(0x55),
+            Address::repeat_byte(0x88),
+            Address::repeat_byte(0x33),
+            1_000_000,
+            4_486_288,
+            VECTOR_ADDRESS,
+            VECTOR_UFVK,
+        )
+    }
+
+    /// Cross-language vector (C-4), generated here and asserted byte for byte by the app
+    /// (app/lib/signers.test.ts): hashes, digest and the signature of Foundry's test key.
+    #[test]
+    fn vault_opened_golden_vector() {
+        let b = |h: &str| h.parse::<B256>().unwrap();
+        let rd = registry_domain(BASE_SEPOLIA_CHAIN_ID, Address::repeat_byte(0x11));
+        let msg = vector_vault_opened();
+        assert_eq!(msg.addressHash, b("0x4871c7074d79798b7991d7f71f57e723823958fec9d143805fd5127ccfa55f59"));
+        assert_eq!(msg.ufvkHash, b("0xd35968aa50b8474e84cfea69d0eff1947f4ca7211cff9741684554da48617ad5"));
+        assert_eq!(
+            msg.eip712_signing_hash(&rd),
+            b("0x1932a4dbbbf80e6972e48b0115a69e3ed93e16a745c88a2f1347c21ed3addbf4")
+        );
+        let key: PrivateKeySigner = TEST_KEY.parse().unwrap();
+        assert_eq!(key.address(), "0xf39Fd6e51aad88F6F4ce6aB8827279cffFb92266".parse::<Address>().unwrap());
+        let signature = sign_typed(&key, &rd, &msg).unwrap();
+        // Identical to `cast wallet sign --data` (Foundry 1.4.2) of the same typed data.
+        assert_eq!(
+            signature,
+            "0xfe9a489467c520b22c87d6b39a74fd182105b865db21e972e0f6393a91db27e92fe53661655207b10761c9d4dd106e5eaea61a3d9561bc705de2c2c0bf8d4d971c"
+                .parse::<Bytes>()
+                .unwrap()
+        );
+        assert_eq!(recover_typed(&rd, &msg, &signature).unwrap(), key.address());
+    }
+
+    #[test]
+    fn text_hash_is_keccak_of_the_exact_utf8_bytes() {
+        assert_eq!(text_hash(""), keccak256(b""));
+        assert_eq!(text_hash("utest1x"), keccak256(b"utest1x"));
+        // No normalization: the hash is of the string exactly as the owner gets it.
+        assert_ne!(text_hash("utest1x"), text_hash("utest1x "));
+        assert_ne!(text_hash("utest1x"), text_hash("UTEST1X"));
+    }
+
+    /// C-4: the vault counts only if each signer of the set signed the very values shown.
+    #[test]
+    fn every_signer_of_the_set_must_sign_the_same_vault() {
+        let domain = registry_domain(BASE_SEPOLIA_CHAIN_ID, Address::repeat_byte(0x11));
+        let keys: Vec<PrivateKeySigner> = (0..5).map(|_| PrivateKeySigner::random()).collect();
+        let set: Vec<(u16, Address)> = keys.iter().zip(1u16..).map(|(k, i)| (i, k.address())).collect();
+        let msg = vector_vault_opened();
+        let sign = |k: &PrivateKeySigner, m: &VaultOpened| sign_typed(k, &domain, m).unwrap();
+        let all: Vec<(u16, Bytes)> = keys.iter().zip(1u16..).map(|(k, i)| (i, sign(k, &msg))).collect();
+        check_signed_by_all(&domain, &msg, &set, &all).unwrap();
+        // Order does not matter.
+        let reversed: Vec<(u16, Bytes)> = all.iter().rev().cloned().collect();
+        check_signed_by_all(&domain, &msg, &set, &reversed).unwrap();
+
+        let refused = |sigs: &[(u16, Bytes)], m: &VaultOpened| check_signed_by_all(&domain, m, &set, sigs).is_err();
+        // One signer missing (four of five is not enough), or answering twice.
+        assert!(refused(&all[..4], &msg));
+        let mut twice = all.clone();
+        twice.push(all[0].clone());
+        assert!(refused(&twice, &msg));
+        // Node 2 relays node 5's signature; a signature from outside the set.
+        let mut swapped = all.clone();
+        swapped[1].1 = all[4].1.clone();
+        assert!(refused(&swapped, &msg));
+        let mut stranger = all[..4].to_vec();
+        stranger.push((5, sign(&PrivateKeySigner::random(), &msg)));
+        assert!(refused(&stranger, &msg));
+        let mut extra = all.clone();
+        extra.push((6, sign(&keys[0], &msg)));
+        assert!(refused(&extra, &msg));
+        // The same signatures do not vouch for another address, viewing key, expiry or owner.
+        let other = |f: fn(&mut VaultOpened)| {
+            let mut m = vector_vault_opened();
+            f(&mut m);
+            m
+        };
+        assert!(refused(&all, &other(|m| m.addressHash = text_hash("utest1attacker"))));
+        assert!(refused(&all, &other(|m| m.ufvkHash = text_hash("uviewtest1attacker"))));
+        assert!(refused(&all, &other(|m| m.expiryHeight += 1)));
+        assert!(refused(&all, &other(|m| m.owner = Address::repeat_byte(0x99))));
+        // Unusable signer sets.
+        assert!(check_signed_by_all(&domain, &msg, &[], &[]).is_err());
+        let dup = [set[0], set[0], set[2], set[3], set[4]];
+        assert!(check_signed_by_all(&domain, &msg, &dup, &all).is_err());
     }
 
     #[test]

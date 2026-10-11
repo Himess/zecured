@@ -168,7 +168,8 @@ function NodesCard({ token }: { token: string }) {
               </div>
               {n.vaults !== undefined ? <p className="text-xs text-muted">{n.vaults} vault share(s)</p> : null}
               <div className="flex flex-wrap gap-1" role="group" aria-label={`Mode of node ${n.index}`}>
-                {MODES.map((m) => (
+                {/* "Compromised" only where the backend allows it (fewer nodes than the threshold). */}
+                {MODES.filter((m) => m.mode !== "compromised" || n.compromisable === true).map((m) => (
                   <Button
                     key={m.mode}
                     variant={n.mode === m.mode ? "primary" : "secondary"}
@@ -186,7 +187,8 @@ function NodesCard({ token }: { token: string }) {
         </ul>
       ) : null}
       <p className="mt-3 text-xs text-muted">
-        {MODES.map((m) => `${m.label}: ${m.help.toLowerCase()}.`).join(" ")}
+        {MODES.map((m) => `${m.label}: ${m.help.toLowerCase()}.`).join(" ")} Only the nodes the backend allows
+        (DEMO_COMPROMISABLE_NODES, at most two: below the threshold of 3) can be compromised.
       </p>
       {setMode.error ? <p className="mt-3 text-sm text-danger">{setMode.error}</p> : null}
     </Card>

@@ -1,12 +1,17 @@
 //! Five nodes run the vault DKG through a relaying "coordinator" that only moves JSON
-//! messages: all five derive the same vault keys and address, and a tampered contribution
-//! is detected, as is a relay that shows signers different round-1 transcripts (M-4).
+//! messages: all five derive the same vault keys and address and each signs `VaultOpened` for
+//! them (C-4), and a tampered contribution is detected, as is a relay that shows signers
+//! different round-1 transcripts (M-4).
 
 use std::collections::BTreeMap;
 
-use alloy::primitives::{Address, B256, Bytes};
+use alloy::{
+    primitives::{Address, B256, Bytes},
+    signers::local::PrivateKeySigner,
+};
 use rand_core_06::OsRng;
 use x25519_dalek::{PublicKey, StaticSecret};
+use zecured_base::{VaultOpened, check_signed_by_all, registry_domain, text_hash, vault_opened};
 use zecured_node::{
     config::{NetworkConfig, NodeInfo},
     dkg::{self, Round1Out, Round2In, Round3In, Sealed, VaultOpen},
@@ -16,6 +21,8 @@ use zecured_node::{
 struct TestNode {
     index: u16,
     secret: StaticSecret,
+    /// Attestation key (signs `VaultOpened`).
+    eth: PrivateKeySigner,
     store: Store,
     _dir: tempdir::Dir,
 }
@@ -46,16 +53,18 @@ fn setup() -> (NetworkConfig, Vec<TestNode>) {
     let mut infos = vec![];
     for index in 1..=5u16 {
         let secret = StaticSecret::random_from_rng(OsRng);
+        let eth = PrivateKeySigner::random();
         infos.push(NodeInfo {
             index,
             url: format!("http://127.0.0.1:910{index}"),
             x25519: hex::encode(PublicKey::from(&secret).as_bytes()),
-            eth: Address::repeat_byte(index as u8),
+            eth: eth.address(),
         });
         let dir = tempdir::Dir::new(&format!("node{index}"));
         nodes.push(TestNode {
             index,
             secret,
+            eth,
             store: Store::open(&dir.0).unwrap(),
             _dir: dir,
         });
@@ -123,9 +132,20 @@ fn run_dkg(cfg: &NetworkConfig, nodes: &mut [TestNode], tamper: bool) -> Vec<any
                 round1: r1.clone(),
                 sealed: to.remove(&n.index).unwrap_or_default(),
             };
-            dkg::round3(cfg, &n.secret, n.index, pending.remove(&n.index).unwrap(), &input, &mut n.store)
+            dkg::round3(cfg, &n.secret, &n.eth, n.index, pending.remove(&n.index).unwrap(), &input, &mut n.store)
         })
         .collect()
+}
+
+/// The `VaultOpened` the owner checks: the request it signed, the vault id and expiry height
+/// the coordinator chose, the address and viewing key it was given.
+fn opened_for(address: &str, ufvk: &str) -> VaultOpened {
+    let o = open();
+    vault_opened(o.vault_id, o.owner, o.account, o.amount, o.expiry_height, address, ufvk)
+}
+
+fn signer_set(cfg: &NetworkConfig) -> Vec<(u16, Address)> {
+    cfg.nodes.iter().map(|n| (n.index, n.eth)).collect()
 }
 
 #[test]
@@ -139,6 +159,29 @@ fn five_nodes_agree_on_the_vault() {
         assert_eq!(o.public_key_package, outs[0].public_key_package);
     }
     assert!(outs[0].address.starts_with("utest1"));
+
+    // C-4: each node signed `VaultOpened` for that address and viewing key with its own
+    // attestation key; all five together vouch for them.
+    let domain = registry_domain(cfg.chain_id, cfg.registry);
+    let signatures: Vec<(u16, Bytes)> = outs.iter().map(|o| (o.index, o.signature.clone())).collect();
+    let opened = opened_for(&outs[0].address, &outs[0].ufvk);
+    check_signed_by_all(&domain, &opened, &signer_set(&cfg), &signatures).unwrap();
+    // They vouch for nothing else: not another address or viewing key (a coordinator's own),
+    // nor another expiry height or owner than the request each node checked.
+    let mut forged = opened_for("utest1attacker", &outs[0].ufvk);
+    assert!(check_signed_by_all(&domain, &forged, &signer_set(&cfg), &signatures).is_err());
+    forged = opened_for(&outs[0].address, "uviewtest1attacker");
+    assert!(check_signed_by_all(&domain, &forged, &signer_set(&cfg), &signatures).is_err());
+    forged = opened_for(&outs[0].address, &outs[0].ufvk);
+    forged.expiryHeight += 1;
+    assert!(check_signed_by_all(&domain, &forged, &signer_set(&cfg), &signatures).is_err());
+    forged = opened_for(&outs[0].address, &outs[0].ufvk);
+    forged.owner = Address::repeat_byte(0x99);
+    assert!(check_signed_by_all(&domain, &forged, &signer_set(&cfg), &signatures).is_err());
+    assert_eq!(opened.addressHash, text_hash(&nodes[0].store.vaults[&open().vault_id].address));
+    // Four of five signatures are not enough.
+    assert!(check_signed_by_all(&domain, &opened, &signer_set(&cfg), &signatures[1..]).is_err());
+
     // Every node stored the vault with the same sk but its own key share.
     let sks: Vec<String> = nodes.iter().map(|n| n.store.vaults[&open().vault_id].sk.clone()).collect();
     assert!(sks.iter().all(|s| *s == sks[0]));
@@ -207,7 +250,8 @@ fn equivocated_round1_creates_no_vault() {
             round1: view(n.index),
             sealed: to.remove(&n.index).unwrap_or_default(),
         };
-        let res = dkg::round3(&cfg, &n.secret, n.index, pending.remove(&n.index).unwrap(), &input, &mut n.store);
+        let res =
+            dkg::round3(&cfg, &n.secret, &n.eth, n.index, pending.remove(&n.index).unwrap(), &input, &mut n.store);
         assert!(res.is_err(), "signer {} must refuse", n.index);
         assert!(n.store.vaults.is_empty());
     }
@@ -259,7 +303,8 @@ fn round1_transcript_is_fixed_after_round2() {
         sealed: to.remove(&1).unwrap(),
     };
     let n1 = &mut nodes[0];
-    let err = dkg::round3(&cfg, &n1.secret, 1, pending.remove(&1).unwrap(), &input, &mut n1.store).unwrap_err();
+    let err =
+        dkg::round3(&cfg, &n1.secret, &n1.eth, 1, pending.remove(&1).unwrap(), &input, &mut n1.store).unwrap_err();
     assert!(err.to_string().contains("transcript"), "{err}");
     assert!(n1.store.vaults.is_empty());
 }

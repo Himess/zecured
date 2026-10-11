@@ -12,7 +12,7 @@ use std::{
 };
 
 use alloy::{
-    primitives::{Address, B256},
+    primitives::{Address, B256, Bytes},
     signers::local::PrivateKeySigner,
 };
 use anyhow::{Context, Result, anyhow, bail, ensure};
@@ -23,7 +23,10 @@ use rand_core_06::{OsRng, RngCore};
 use serde::{Deserialize, Serialize};
 use serde_json::json;
 use zcash_protocol::consensus::{BlockHeight, Network};
-use zecured_base::{Destination, OpenVault, RefundRequest, ViewKeyRequest, registry_domain, sign_typed};
+use zecured_base::{
+    Destination, OpenVault, RefundRequest, VaultOpened, ViewKeyRequest, check_signed_by_all, registry_domain,
+    sign_typed, text_hash,
+};
 use zecured_zcash_ops::{
     keys::{encode_ironwood_ua, ironwood_receiver},
     lwd,
@@ -35,6 +38,8 @@ mod base_test;
 
 const NETWORK: Network = Network::TestNetwork;
 const ZATS_PER_ZEC: f64 = 100_000_000.0;
+/// Signer nodes that must all vouch for a new vault (C-4).
+const SIGNERS: usize = 5;
 /// Owner requests expire after this many seconds.
 const REQUEST_TTL_SECS: u64 = 600;
 
@@ -92,7 +97,8 @@ enum Cmd {
 
 #[derive(Subcommand)]
 enum LoanCmd {
-    /// Open a vault for a new loan (fresh owner key).
+    /// Open a vault for a new loan (fresh owner key). Refused unless every signer of the
+    /// network config signed the vault's address (C-4).
     Open {
         /// Collateral in ZEC (a standard denomination, e.g. 0.01).
         #[arg(long)]
@@ -123,7 +129,8 @@ enum LoanCmd {
         #[arg(long)]
         to: Option<String>,
     },
-    /// Fetch the vault's viewing key (UFVK) to verify it independently.
+    /// Fetch the vault's viewing key (UFVK) to verify it independently; refused unless it is
+    /// the key the signers signed when the vault opened.
     ViewingKey { vault: B256 },
     /// TEST ONLY (the app uses a gasless smart account): borrow USDC with the owner EOA as
     /// the account, after authorizing the Registry and the Adapter on Morpho.
@@ -180,10 +187,15 @@ struct LoanFile {
     owner_key: String,
     account: Address,
     amount: u64,
+    /// The vault's address, signed by every signer (C-4).
     address: String,
     registry: Address,
     chain_id: u64,
     next_nonce: u64,
+    /// `keccak256` of the vault's viewing key as every signer signed it when the vault opened
+    /// (C-4); `None` for loans opened before the signers signed vaults.
+    #[serde(default)]
+    ufvk_hash: Option<B256>,
 }
 
 struct Wallet {
@@ -295,11 +307,22 @@ fn loan_path(wallet: &Path, vault: &B256) -> PathBuf {
     wallet.with_file_name(format!("loan-{}.json", hex::encode(&vault[..8])))
 }
 
-/// Network parameters the backend's signers expect for owner signatures.
+/// One signer node of the network config: its index and attestation address.
+#[derive(Deserialize)]
+struct SignerParams {
+    index: u16,
+    eth: Address,
+}
+
+/// Network parameters the backend's signers expect for owner signatures, and the signer set
+/// whose signatures a new vault needs (C-4). Read from the local network config, never from
+/// the backend.
 #[derive(Deserialize)]
 struct NetworkParams {
     registry: Address,
     chain_id: u64,
+    #[serde(default)]
+    nodes: Vec<SignerParams>,
 }
 
 fn network_params() -> Result<NetworkParams> {
@@ -307,6 +330,90 @@ fn network_params() -> Result<NetworkParams> {
         &std::env::var("ZECURED_NETWORK_CONFIG").unwrap_or_else(|_| "signer/data/network.json".into()),
     ))?;
     Ok(serde_json::from_value(cfg)?)
+}
+
+/// A vault as `POST /vaults` returns it.
+struct OpenedVault {
+    vault_id: B256,
+    address: String,
+    amount: u64,
+    expiry_height: u32,
+    ufvk_hash: B256,
+    /// `VaultOpened` signatures by node index.
+    signatures: Vec<(u16, Bytes)>,
+}
+
+fn parse_opened(r: &serde_json::Value) -> Result<OpenedVault> {
+    let field = |name: &str| r.get(name).with_context(|| format!("the backend's answer has no {name}"));
+    let text = |name: &str| field(name)?.as_str().with_context(|| format!("malformed {name}"));
+    let signatures = field("signatures")?
+        .as_array()
+        .context("malformed signatures")?
+        .iter()
+        .map(|s| {
+            let index = s.get("index").and_then(|i| i.as_u64()).context("malformed signature index")?;
+            let signature = s.get("signature").and_then(|x| x.as_str()).context("malformed signature")?;
+            Ok((u16::try_from(index)?, signature.parse::<Bytes>()?))
+        })
+        .collect::<Result<_>>()?;
+    Ok(OpenedVault {
+        vault_id: text("vaultId")?.parse()?,
+        address: text("address")?.to_owned(),
+        amount: text("amount")?.parse()?,
+        expiry_height: u32::try_from(field("expiryHeight")?.as_u64().context("malformed expiryHeight")?)?,
+        ufvk_hash: text("ufvkHash")?.parse()?,
+        signatures,
+    })
+}
+
+/// C-4: a vault's address, and the hash of its viewing key, count only if every signer of
+/// the local network config signed `VaultOpened` for them and for this owner's own request.
+fn check_vault_opened(
+    net: &NetworkParams,
+    owner: Address,
+    account: Address,
+    amount: u64,
+    v: &OpenedVault,
+) -> Result<()> {
+    ensure!(v.amount == amount, "the backend opened a vault for another amount");
+    ensure!(
+        net.nodes.len() == SIGNERS,
+        "the network config must list the {SIGNERS} signer nodes (index and eth address) to check the vault"
+    );
+    let signers: Vec<(u16, Address)> = net.nodes.iter().map(|n| (n.index, n.eth)).collect();
+    let message = VaultOpened {
+        vaultId: v.vault_id,
+        owner,
+        account,
+        amount,
+        expiryHeight: v.expiry_height,
+        addressHash: text_hash(&v.address),
+        ufvkHash: v.ufvk_hash,
+    };
+    check_signed_by_all(&registry_domain(net.chain_id, net.registry), &message, &signers, &v.signatures)
+}
+
+/// C-4: the viewing key must hash to the `ufvkHash` all five signers signed when the vault
+/// opened. Ok(false): a loan opened before that, with nothing to check against.
+fn check_viewing_key(ufvk: &str, expected: Option<B256>) -> Result<bool> {
+    let Some(expected) = expected else { return Ok(false) };
+    ensure!(
+        text_hash(ufvk) == expected,
+        "the backend returned a viewing key that the signers did not sign for this vault: not printing it"
+    );
+    Ok(true)
+}
+
+/// `zcash:` payment URI for `amount` zatoshis (ZIP 321), built here from the checked address.
+fn zip321_uri(address: &str, amount: u64) -> String {
+    let zats = 100_000_000;
+    let (whole, frac) = (amount / zats, amount % zats);
+    let amount = if frac == 0 {
+        whole.to_string()
+    } else {
+        format!("{whole}.{}", format!("{frac:08}").trim_end_matches('0'))
+    };
+    format!("zcash:{address}?amount={amount}")
 }
 
 async fn post(backend: &str, path: &str, body: serde_json::Value) -> Result<serde_json::Value> {
@@ -467,21 +574,28 @@ async fn loan(wallet: &Path, lwd_url: &str, backend: &str, cmd: LoanCmd) -> Resu
                         "requestId": B256::from(rid), "deadline": deadline.to_string(), "signature": sig }),
             )
             .await?;
-            let vault_id: B256 = serde_json::from_value(r["vaultId"].clone())?;
+            // C-4: nothing is kept or shown unless every signer vouches for the vault.
+            let v = parse_opened(&r).context("refusing the vault: do NOT pay any address the backend gave for it")?;
+            check_vault_opened(&net, owner.address(), account, amount, &v)
+                .context("refusing the vault: do NOT pay any address the backend gave for it")?;
             write_json(
-                &loan_path(wallet, &vault_id),
+                &loan_path(wallet, &v.vault_id),
                 &LoanFile {
-                    vault_id,
+                    vault_id: v.vault_id,
                     owner_key: hex::encode(owner.to_bytes()),
                     account,
                     amount,
-                    address: r["address"].as_str().unwrap_or_default().to_owned(),
+                    address: v.address.clone(),
                     registry: net.registry,
                     chain_id: net.chain_id,
                     next_nonce: 1,
+                    ufvk_hash: Some(v.ufvk_hash),
                 },
             )?;
-            println!("{}", serde_json::to_string_pretty(&r)?);
+            eprintln!("vault address signed by all {SIGNERS} signers of the network config (checked here)");
+            let shown = json!({ "vaultId": v.vault_id, "address": v.address, "zip321": zip321_uri(&v.address, amount),
+                                "amount": amount.to_string(), "expiryHeight": v.expiry_height });
+            println!("{}", serde_json::to_string_pretty(&shown)?);
         }
         LoanCmd::Status { vault } => {
             let v: serde_json::Value =
@@ -544,7 +658,14 @@ async fn loan(wallet: &Path, lwd_url: &str, backend: &str, cmd: LoanCmd) -> Resu
             .await?;
             l.next_nonce += 1;
             write_json(&loan_path(wallet, &vault), &l)?;
-            println!("{}", r["ufvk"].as_str().unwrap_or_default());
+            let ufvk = r["ufvk"].as_str().context("the backend returned no viewing key")?;
+            if !check_viewing_key(ufvk, l.ufvk_hash)? {
+                eprintln!(
+                    "note: this loan was opened before the signers signed vault keys, so this key could not be \
+                     checked against them"
+                );
+            }
+            println!("{ufvk}");
         }
         LoanCmd::Borrow { vault, usdc, rpc } => base_test::borrow(wallet, &vault, usdc, &rpc).await?,
         LoanCmd::RepayRelease { vault, to, rpc } => {
@@ -653,6 +774,127 @@ fn commitment(salt: &[u8; 32], receiver: &[u8; 43]) -> [u8; 32] {
     let mut preimage = salt.to_vec();
     preimage.extend_from_slice(receiver);
     alloy::primitives::keccak256(preimage).0
+}
+
+/// C-4: what `loan open` and `loan viewing-key` accept from the backend.
+#[cfg(test)]
+mod vault_checks {
+    use zecured_base::vault_opened;
+
+    use super::*;
+
+    const ADDRESS: &str = "utest1vault";
+    const UFVK: &str = "uviewtest1vaultkey";
+
+    struct Fixture {
+        keys: Vec<PrivateKeySigner>,
+        net: NetworkParams,
+        owner: Address,
+        account: Address,
+    }
+
+    fn fixture() -> Fixture {
+        let keys: Vec<PrivateKeySigner> = (0..SIGNERS).map(|_| PrivateKeySigner::random()).collect();
+        let nodes = keys
+            .iter()
+            .zip(1u16..)
+            .map(|(k, index)| SignerParams {
+                index,
+                eth: k.address(),
+            })
+            .collect();
+        Fixture {
+            net: NetworkParams {
+                registry: Address::repeat_byte(0x11),
+                chain_id: 84_532,
+                nodes,
+            },
+            keys,
+            owner: Address::repeat_byte(0xaa),
+            account: Address::repeat_byte(0xee),
+        }
+    }
+
+    /// The backend's `POST /vaults` answer, signed by `signers` for `address`.
+    fn answer(f: &Fixture, signers: &[PrivateKeySigner], address: &str) -> serde_json::Value {
+        let (vault_id, expiry) = (B256::repeat_byte(7), 4_486_288u32);
+        let msg = vault_opened(vault_id, f.owner, f.account, 1_000_000, expiry, address, UFVK);
+        let domain = registry_domain(f.net.chain_id, f.net.registry);
+        let signatures: Vec<serde_json::Value> = signers
+            .iter()
+            .zip(1u16..)
+            .map(|(k, index)| json!({ "index": index, "signature": sign_typed(k, &domain, &msg).unwrap() }))
+            .collect();
+        json!({ "vaultId": vault_id, "address": address, "zip321": "zcash:x", "amount": "1000000",
+                "expiryHeight": expiry, "ufvkHash": text_hash(UFVK), "signatures": signatures })
+    }
+
+    fn check(f: &Fixture, r: &serde_json::Value) -> Result<()> {
+        check_vault_opened(&f.net, f.owner, f.account, 1_000_000, &parse_opened(r)?)
+    }
+
+    #[test]
+    fn a_vault_counts_only_with_every_signers_signature() {
+        let f = fixture();
+        let honest = answer(&f, &f.keys, ADDRESS);
+        check(&f, &honest).unwrap();
+        let v = parse_opened(&honest).unwrap();
+        assert_eq!((v.address.as_str(), v.amount, v.expiry_height), (ADDRESS, 1_000_000, 4_486_288));
+        assert_eq!(v.ufvk_hash, text_hash(UFVK));
+
+        // The backend's own address, signed by nobody or by keys outside the network config.
+        let mut swapped = honest.clone();
+        swapped["address"] = json!("utest1attacker");
+        assert!(check(&f, &swapped).is_err());
+        let strangers: Vec<PrivateKeySigner> = (0..SIGNERS).map(|_| PrivateKeySigner::random()).collect();
+        assert!(check(&f, &answer(&f, &strangers, "utest1attacker")).is_err());
+        // Four signatures, another viewing key, another amount, or no signatures at all.
+        let mut four = honest.clone();
+        four["signatures"].as_array_mut().unwrap().pop();
+        assert!(check(&f, &four).is_err());
+        let mut ufvk = honest.clone();
+        ufvk["ufvkHash"] = json!(text_hash("uviewtest1attacker"));
+        assert!(check(&f, &ufvk).is_err());
+        let v = parse_opened(&honest).unwrap();
+        assert!(check_vault_opened(&f.net, f.owner, f.account, 5_000_000, &v).is_err());
+        let mut unsigned = honest.clone();
+        unsigned.as_object_mut().unwrap().remove("signatures");
+        assert!(check(&f, &unsigned).is_err());
+        // Signatures for another owner's request.
+        assert!(check_vault_opened(&f.net, Address::repeat_byte(0xbb), f.account, 1_000_000, &v).is_err());
+        // A network config without the signer set cannot check anything.
+        let bare = NetworkParams {
+            registry: f.net.registry,
+            chain_id: f.net.chain_id,
+            nodes: vec![],
+        };
+        assert!(check_vault_opened(&bare, f.owner, f.account, 1_000_000, &v).is_err());
+    }
+
+    #[test]
+    fn the_viewing_key_must_be_the_one_the_signers_signed() {
+        assert!(check_viewing_key(UFVK, Some(text_hash(UFVK))).unwrap());
+        assert!(check_viewing_key("uviewtest1attacker", Some(text_hash(UFVK))).is_err());
+        // A loan opened before vaults were signed: nothing to check against.
+        assert!(!check_viewing_key(UFVK, None).unwrap());
+    }
+
+    /// Loan files written before C-4 still load.
+    #[test]
+    fn old_loan_files_have_no_viewing_key_hash() {
+        let old = json!({ "vault_id": B256::repeat_byte(7), "owner_key": "11", "account": Address::ZERO,
+                          "amount": 1_000_000, "address": ADDRESS, "registry": Address::ZERO, "chain_id": 84_532,
+                          "next_nonce": 3 });
+        let l: LoanFile = serde_json::from_value(old).unwrap();
+        assert!(l.ufvk_hash.is_none());
+    }
+
+    #[test]
+    fn zip321_uris_are_built_here() {
+        assert_eq!(zip321_uri("utest1x", 1_000_000), "zcash:utest1x?amount=0.01");
+        assert_eq!(zip321_uri("utest1x", 100_000_000), "zcash:utest1x?amount=1");
+        assert_eq!(zip321_uri("utest1x", 123_456_789), "zcash:utest1x?amount=1.23456789");
+    }
 }
 
 #[cfg(all(test, unix))]

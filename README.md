@@ -62,7 +62,7 @@ txids) and how to reproduce every run: [docs/TESTING.md](docs/TESTING.md).
 | `bots/` | Liquidator and market maker |
 | `cli/` | `zecured-wallet`: Ironwood CLI wallet and borrower actions |
 | `app/` | Next.js app (in progress) |
-| `docs/` | [Architecture](docs/ARCHITECTURE.md), [Interfaces](docs/INTERFACES.md), [Threat model](docs/THREAT_MODEL.md), [Decisions](docs/DECISIONS.md), [Testing and evidence](docs/TESTING.md), [Tier 2 design](docs/TIER2.md), [Operators](docs/OPERATORS.md), [Jury FAQ](docs/JURY_FAQ.md), spikes |
+| `docs/` | [Architecture](docs/ARCHITECTURE.md), [Interfaces](docs/INTERFACES.md), [Threat model](docs/THREAT_MODEL.md), [Decisions](docs/DECISIONS.md), [Testing and evidence](docs/TESTING.md), [Security review](docs/SECURITY_REVIEW.md), [Tier 2 design](docs/TIER2.md), [Operators](docs/OPERATORS.md), [Jury FAQ](docs/JURY_FAQ.md), spikes |
 
 ## Running it
 
@@ -104,7 +104,9 @@ scripts/signer-network.sh init && scripts/signer-network.sh start
 ## Security notes
 
 This is a hackathon build. All five signers are run by the authors, key material is stored
-unencrypted on the signers' disks, and the code has not been audited. See
+unencrypted on the signers' disks (files readable by their owner only), and the code has not
+been audited by a third party. An internal security review of the off-chain code, its fixes
+and the remaining risks are in [SECURITY_REVIEW.md](docs/SECURITY_REVIEW.md); see
 [THREAT_MODEL.md](docs/THREAT_MODEL.md) for what leaks, what doesn't, and why.
 
 ## License

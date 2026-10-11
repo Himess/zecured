@@ -41,7 +41,7 @@ describe("build-time pins (production rules)", () => {
     expect(c.adapter).toBe(PLACEHOLDER_CONTRACT);
     expect(c.morpho).toBe("0xBBBBBbbBBb9cC5e90e3b3Af64bdAF62C37EEFFCb");
     expect(c.signers).toBeNull();
-    expect(c).toMatchObject({ contractsDeployed: false, ownerSigning: false, sponsorship: false, remote: "pending" });
+    expect(c).toMatchObject({ contractsDeployed: false, ownerSigning: false, sponsorship: false, remote: "pending", signersPinned: false });
     expect(c.denominations).toEqual([1_000_000n, 5_000_000n]);
     expect(c.confirmations).toBeNull();
     expect(configIssues(c)).toEqual([
@@ -51,7 +51,7 @@ describe("build-time pins (production rules)", () => {
 
   it("reads the pinned deployment; the market id matches Morpho's MarketParamsLib.id", () => {
     const c = buildConfig(DRY_RUN_ENV);
-    expect(c).toMatchObject({ contractsDeployed: true, ownerSigning: true, unpinned: [], problems: [] });
+    expect(c).toMatchObject({ contractsDeployed: true, ownerSigning: true, unpinned: [], problems: [], signersPinned: true });
     expect(c.signers).toEqual(SIGNERS);
     // The dry run's marketId was computed on-chain by the Registry constructor.
     expect(marketIdOf(marketParams(c))).toBe(DRY_RUN_ENV.NEXT_PUBLIC_MARKET_ID);
@@ -203,7 +203,9 @@ describe("development builds (next dev) may run unpinned", () => {
     expect(configIssues(c)).toEqual([
       `Unpinned development configuration: this build does not pin ${ALL_PINS}, so the app takes them from the backend's GET /config. A production build must pin them.`,
     ]);
-    expect(buildConfig(DEV, remote({ signers: SIGNERS as `0x${string}`[] })).signers).toEqual(SIGNERS);
+    // The backend's signer set fills the gap, marked as not pinned (lib/signers.ts says so in the UI).
+    const fromBackend = buildConfig(DEV, remote({ signers: SIGNERS as `0x${string}`[] }));
+    expect(fromBackend).toMatchObject({ signers: SIGNERS, signersPinned: false });
   });
 
   it("still refuses an inconsistent backend, and pins still win", () => {

@@ -1,6 +1,6 @@
 import { afterEach, describe, expect, it, vi } from "vitest";
 import { DRY_RUN_CONFIG, DRY_RUN_ENV } from "./__fixtures__/deployment";
-import { ApiError, createApi, describeError, parseRemoteConfig, parseVault } from "./api";
+import { ApiError, createApi, describeError, parseOpenVault, parseRemoteConfig, parseVault } from "./api";
 
 const BASE = "http://backend.test";
 const VAULT = `0x${"ab".repeat(32)}` as const;
@@ -29,11 +29,20 @@ afterEach(() => {
   vi.useRealTimers();
 });
 
+/** POST /vaults as the backend answers it (docs/INTERFACES.md § 4). */
+const OPENED = {
+  vaultId: VAULT,
+  address: "utest1vault",
+  zip321: "zcash:utest1vault?amount=0.01",
+  amount: "1000000",
+  expiryHeight: 4_600_288,
+  ufvkHash: `0x${"EE".repeat(32)}`,
+  signatures: [1, 2, 3, 4, 5].map((index) => ({ index, signature: `0x${String(index).repeat(130)}` })),
+};
+
 describe("owner endpoints", () => {
   it("POST /vaults sends camelCase decimal strings and parses the response", async () => {
-    const { api, calls } = mockFetch(() =>
-      json({ vaultId: VAULT, address: "utest1vault", zip321: "zcash:utest1vault?amount=0.01", amount: "1000000", expiryHeight: 4_600_288 }),
-    );
+    const { api, calls } = mockFetch(() => json(OPENED));
     const owner = "0x1111111111111111111111111111111111111111";
     const account = "0x2222222222222222222222222222222222222222";
     const r = await api.openVault({
@@ -60,7 +69,23 @@ describe("owner endpoints", () => {
       zip321: "zcash:utest1vault?amount=0.01",
       amount: 1_000_000n,
       expiryHeight: 4_600_288,
+      ufvkHash: `0x${"ee".repeat(32)}`,
+      signatures: OPENED.signatures,
     });
+  });
+
+  it("POST /vaults: the signers' signatures and the viewing key hash are required (C-4)", () => {
+    const { signatures: _s, ...unsigned } = OPENED;
+    const { ufvkHash: _h, ...unhashed } = OPENED;
+    const broken: [string, unknown][] = [
+      ["signatures", unsigned],
+      ["signatures", { ...OPENED, signatures: "0x11" }],
+      ["ufvkHash", unhashed],
+      ["signature", { ...OPENED, signatures: [{ index: 1, signature: "0x1234" }] }],
+      ["signature index", { ...OPENED, signatures: [{ index: -1, signature: OPENED.signatures[0]!.signature }] }],
+      ["expiryHeight", { ...OPENED, expiryHeight: 2 ** 32 }],
+    ];
+    for (const [what, raw] of broken) expect(() => parseOpenVault(raw), what).toThrow(`(${what})`);
   });
 
   it("never sends credentials or a referrer, and never caches", async () => {
@@ -269,7 +294,13 @@ describe("demo control", () => {
   it("sends the admin token header and normalizes the snake_case drain report", async () => {
     const { api, calls } = mockFetch((url) => {
       if (url.endsWith("/admin/nodes"))
-        return json({ nodes: [{ index: 1, mode: "normal", vaults: 3 }, { index: 2, mode: "unreachable" }] });
+        return json({
+          nodes: [
+            { index: 1, mode: "normal", vaults: 3, compromisable: false },
+            { index: 2, mode: "unreachable" },
+            { index: 4, mode: "compromised", vaults: 3, compromisable: true },
+          ],
+        });
       if (url.endsWith("/mode")) return json({ mode: "compromised" });
       return json({
         vault_id: VAULT,
@@ -282,8 +313,9 @@ describe("demo control", () => {
       });
     });
     expect(await api.adminNodes("tok")).toEqual([
-      { index: 1, mode: "normal", vaults: 3 },
+      { index: 1, mode: "normal", vaults: 3, compromisable: false },
       { index: 2, mode: "unreachable" },
+      { index: 4, mode: "compromised", vaults: 3, compromisable: true },
     ]);
     await api.adminSetMode("tok", 2, "compromised");
     const report = await api.adminDrain("tok", VAULT, "utest1attacker");

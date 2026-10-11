@@ -84,7 +84,7 @@ addresses are what the app trusts.
 |---|---|
 | `/` | Pitch, how it works in three steps, "what the world sees" preview. |
 | `/prepare` | Why Ironwood only (pool crossings reveal amounts at the turnstile), migration advice, what counts as a valid deposit, refunds. |
-| `/borrow` | Wizard: amount (the signers' denominations from `GET /config`) → fresh key + Safe address, `OpenVault` signature, `POST /vaults` → key backup → verified Ironwood-only vault address, ZIP 321 QR, deadline, live status → borrow up to 40 % LTV. |
+| `/borrow` | Wizard: amount (the signers' denominations from `GET /config`) → fresh key + Safe address, `OpenVault` signature, `POST /vaults` → key backup → Ironwood-only vault address signed by all five signers (checked in the browser), ZIP 321 QR, deadline, live status → borrow up to 40 % LTV. |
 | `/loans` | Loan keys held in this browser: export, import (validated against the derived account), forget. |
 | `/position#<vaultId>` | Collateral, debt (with accrued interest), health factor, liquidation price, payouts; exits: close from collateral, repay + release, release after liquidation; withdraw part of the ZEC (D14); send USDC; borrow more. |
 | `/verify#<vaultId>` | Owner-signed `ViewKeyRequest` → the vault's UFVK (never stored), what it shows and hides, and the `zecured-wallet watch` command from the vault's birthday height. |
@@ -116,7 +116,11 @@ sponsored UserOp and follows the new Release claim until it is paid.
   try/catch) and leaves the device only in a backup the user downloads. Salts and destination
   addresses are sent to the signers and never stored; only the resulting commitment is kept to
   resume an interrupted exit. The UFVK is shown once and never stored.
-- **The app checks the backend.** It decodes the vault address itself and refuses to show a QR
+- **The app checks the backend.** It shows a vault's address, as text or QR code, only once all
+  five signers' `VaultOpened` signatures (INTERFACES § 2.5) verify against the signer set pinned
+  in the build (`NEXT_PUBLIC_SIGNERS`), and a viewing key only if it hashes to the `ufvkHash` they
+  signed (security review C-4; a development build without the pin falls back to the backend's set
+  and says so, a production build refuses). It decodes the vault address itself and refuses to show a QR
   code unless it is an Ironwood-only testnet UA (one Orchard-protocol receiver, D4); it builds
   the ZIP 321 URI itself (no label, message or memo); it computes every commitment itself and
   stops if the signers acknowledge a different one.
@@ -148,6 +152,7 @@ lib/api.ts               typed client for the coordinator API (§ 4) incl. GET /
                          control, response normalization, errors, loadRuntimeConfig()
 lib/eip712.ts            domains and types of § 2, owner signing, Safe ERC-1271 signing of CloseRequest
 lib/owner.ts             owner flows: open vault, destination, refund, viewing key; vault address check
+lib/signers.ts           the signers' VaultOpened signatures on a vault (C-4): checked against the pinned set
 lib/keys.ts              per-loan owner keys: create, store, export/import, wipe
 lib/safe.ts              pinned Safe 1.4.1 + 4337 module config and its counterfactual address (no RPC)
 lib/account.ts           smart-account layer: LoanAccount interface, sponsored UserOps via the proxy
@@ -170,13 +175,18 @@ the version-matched docs in `node_modules/next/dist/docs/`.
 
 ## Tests
 
-`pnpm test` runs about 255 offline unit tests (vitest, no network). Cross-checks against independent sources:
+`pnpm test` runs about 270 offline unit tests (vitest, no network). Cross-checks against independent sources:
 
 - **EIP-712:** the type strings are parsed from `docs/INTERFACES.md` and compared with the app's
   types and with viem's type hashes; domain separators and digests match the Solidity golden
   vectors (`contracts/test/unit/ZecuredEIP712.t.sol`) and the dry-run deployment; owner-request
   signatures are byte-identical to alloy's (`cast wallet sign --data`); the Safe-wrapped
-  `CloseRequest` signature matches a `safeHash` and signature computed with `cast`.
+  `CloseRequest` signature matches a `safeHash` and signature computed with `cast`; the
+  `VaultOpened` digest and signature match the Rust signer's vector (`zecured-base`,
+  `vault_opened_golden_vector`, also equal to `cast wallet sign --data`).
+- **Vault signatures (C-4):** all five pinned signers must sign; the backend's own address, viewing
+  key or signer set, four signatures, duplicates, another Registry, request or expiry are refused;
+  production builds without `NEXT_PUBLIC_SIGNERS` open no vault; development fallbacks are marked.
 - **Unified addresses:** all 60 `unified_address` and 8 `f4jumble` vectors of
   zcash-test-vectors (identical to the copies in librustzcash), re-encoding, testnet and
   Revision 2 addresses, and the ZIP 316 rejection rules the decoder enforces.
@@ -210,9 +220,5 @@ the version-matched docs in `node_modules/next/dist/docs/`.
 
 ## Open points
 
-- The vault address and the UFVK still come unsigned from the coordinator (security review
-  C-4): `NEXT_PUBLIC_SIGNERS` is pinned for the coming check of the signers' signatures.
-- `GET /config` does not report the signer set yet; once it does, the app compares it with
-  `NEXT_PUBLIC_SIGNERS` (already implemented).
 - Owner keys live in `localStorage` under a CSP that allows inline scripts (Next.js without
   nonces); a nonce-based CSP and optional passphrase encryption of stored keys are not done (L-11).

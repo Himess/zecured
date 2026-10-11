@@ -4,19 +4,25 @@
 //! contribution `r_i` to the vault secret.
 //! Round 2: run DKG part 2; seal each recipient's round-2 package together with `r_i`.
 //! Round 3: open the packages sealed to us, check every `r_j` against its commitment,
-//! finish the DKG, derive `sk = H(vault_id, r_1..r_5)` and the vault's viewing keys.
+//! finish the DKG, derive `sk = H(vault_id, r_1..r_5)` and the vault's viewing keys, and sign
+//! `VaultOpened` for the address and viewing key we derived (C-4).
 //!
 //! The coordinator relays every message but only ever sees public packages, commitments
 //! and ciphertexts. Sealed messages are bound to the round-1 transcript (M-4): if the
 //! coordinator shows two signers different round-1 outputs, they cannot open each other's
-//! messages and the DKG fails instead of producing two different vaults.
+//! messages and the DKG fails instead of producing two different vaults. The owner accepts the
+//! vault's address only with all five `VaultOpened` signatures, so the coordinator cannot hand
+//! out an address (or viewing key) of its own.
 
 use std::{
     collections::{BTreeMap, BTreeSet},
     time::{Duration, Instant},
 };
 
-use alloy::primitives::{Address, B256, Bytes};
+use alloy::{
+    primitives::{Address, B256, Bytes},
+    signers::local::PrivateKeySigner,
+};
 use anyhow::{Context, Result, anyhow, bail, ensure};
 use rand_core_06::{OsRng, RngCore};
 use reddsa::frost::redpallas::{
@@ -28,7 +34,7 @@ use reddsa::frost::redpallas::{
 };
 use serde::{Deserialize, Serialize};
 use zcash_protocol::consensus::Network;
-use zecured_base::{OpenVault, recover_typed, registry_domain};
+use zecured_base::{OpenVault, recover_typed, registry_domain, sign_typed, vault_opened};
 use zecured_policy::derive::{sk_commitment, vault_sk};
 use zecured_threshold::{MAX_SIGNERS, MIN_SIGNERS, ak_bytes, signer_id};
 use zecured_zcash_ops::keys::{VaultSecret, encode_ironwood_ua, encode_ufvk, vault_address};
@@ -92,6 +98,9 @@ pub struct Round3Out {
     pub address: String,
     /// Public: group key + verifying shares (needed by the coordinator to aggregate).
     pub public_key_package: serde_json::Value,
+    /// `VaultOpened` (EIP-712, Registry domain) signed with this node's attestation key, for
+    /// the owner's checked request and the `address` and `ufvk` above (C-4).
+    pub signature: Bytes,
 }
 
 /// What travels inside a sealed round-2 message.
@@ -253,9 +262,11 @@ pub fn round2(
     Ok(Round2Out { index, sealed })
 }
 
+/// `eth` is this node's attestation key: it signs `VaultOpened` for the vault derived here.
 pub fn round3(
     cfg: &NetworkConfig,
     me: &x25519_dalek::StaticSecret,
+    eth: &PrivateKeySigner,
     index: u16,
     pending: Pending,
     input: &Round3In,
@@ -296,14 +307,21 @@ pub fn round3(
     let sk = vault_sk(&vault_id.0, &ordered);
     let fvk = VaultSecret::from_bytes(sk).full_viewing_key(&ak)?;
     let network = Network::TestNetwork;
+    let ufvk = encode_ufvk(&network, &fvk)?;
+    let address = encode_ironwood_ua(&network, vault_address(&fvk))?;
+    let open = pending.open;
+    // C-4: vouch for the address and viewing key derived here, for the request checked in
+    // round 1 (owner signature, account, denomination, expiry height against our own tip).
+    let opened = vault_opened(vault_id, open.owner, open.account, open.amount, open.expiry_height, &address, &ufvk);
+    let signature = sign_typed(eth, &registry_domain(cfg.chain_id, cfg.registry), &opened)?;
     let out = Round3Out {
         index,
         ak: hex::encode(ak),
-        ufvk: encode_ufvk(&network, &fvk)?,
-        address: encode_ironwood_ua(&network, vault_address(&fvk))?,
+        ufvk,
+        address,
         public_key_package: serde_json::to_value(&public_key_package)?,
+        signature,
     };
-    let open = pending.open;
     store.save_vault(VaultRecord {
         vault_id,
         owner: open.owner,

@@ -10,7 +10,8 @@ Zecured's claim, in full:
 > and the amount of ZEC returned to you at close — none of it linked to you.
 
 This document says exactly what each party can see, every leakage vector we know of, what
-mitigates it and where that is enforced in the code.
+mitigates it and where that is enforced in the code. The findings of the internal security
+review and their status are in [SECURITY_REVIEW.md](SECURITY_REVIEW.md).
 
 ## Who sees what
 
@@ -19,9 +20,11 @@ mitigates it and where that is enforced in the code.
 | Zcash chain observer | Ordinary Ironwood → Ironwood transactions; no pool crossing anywhere in the flow | Who paid whom, amounts, any link to Zecured |
 | Base chain observer | A fresh account with no history; a standard-size zZEC position on Morpho and its debt; release / close / liquidation events; salted recipient commitments | Who owns the account; the user's ZEC wallet, balance or history |
 | Signer network (3-of-5) | Vault balances, timing, payout recipients | The user's identity and any ZEC outside the vault |
-| Coordinator | Same as the signers (it builds the transactions) | Any key material; it cannot move funds or mint |
+| Coordinator | Same as the signers (it builds the transactions); it can delay or withhold work | Any key share: it cannot move funds, mint, or hand you a deposit address the signers did not sign |
 | The borrower (with the vault UFVK) | The vault's own notes, its payouts to the borrower and its change | Third-party payouts (liquidator, market maker): encrypted with `ovk = None` |
-| Our backend proxy | Requests (never logged) | — |
+| Our backend proxy | Requests and client IPs (never logged) | — |
+| The app's host | Page loads and client IPs | Vault ids (kept in the URL fragment) and keys (they stay in the browser) |
+| The light wallet server operator | Which transactions the signers look up: Zecured deposits and payouts | Amounts and addresses (shielded); the Base account |
 | RPC / bundler / paymaster providers | Account addresses and transactions (public anyway) | The user's IP address (all browser traffic goes through our proxy) |
 
 ## Leakage vectors
@@ -37,7 +40,7 @@ mitigates it and where that is enforced in the code.
 | L7 | Deshielding the returned amount right away | Warning and guidance in the app | app |
 | L8 | Reusing a vault | A fresh vault (fresh FROST key) per loan; one account ↔ one vault | DKG per vault; Registry I4 |
 | L9 | Linking `depositTag` to the note's nullifier | Keyed tag (key derived from the vault secret) | `policy/src/derive.rs` |
-| L10 | Our backend sees client IPs | Nothing is logged; Tor support is roadmap | `backend/` |
+| L10 | Our backend and the app's host see client IPs | Nothing is logged; vault ids stay in the URL fragment, so the app's host never sees them; Tor support is roadmap | `backend/`, app routes |
 | L11 | Liquidator / market maker addresses | Revealed off-chain only; Base sees salted commitments; a fresh salt per operation | `bots/`, coordinator |
 | L12 | Bridges or NEAR Intents in the ZEC flow | None: ZEC never leaves Zcash | design |
 | L13 | Paying interest/principal from an outside wallet | Close from collateral (P6) needs no outside USDC; the repay-with-USDC path shows a warning | contracts, app |
@@ -48,12 +51,18 @@ mitigates it and where that is enforced in the code.
 | L18 | Moving exactly the collateral amount into Ironwood and depositing at once | Preparation screen: move a different amount, wait, or use the wallet's ZIP 318 migration | app |
 | L19 | Unsalted address hashes on Base | `keccak256(salt32 ‖ receiver43)`; salts only with the signers | `ledger::commitment`, contracts |
 | L20 | Registering the vault on Base just before the deposit | Vaults are opened off-chain; the first Base trace is the attested deposit | coordinator, Registry |
+| L21 | The light wallet server learns which transactions the signers look up (deposits, payouts) | Each signer can use its own server; roadmap: every signer on its own full node | node config ([OPERATORS.md](OPERATORS.md)) |
 
 ## Attacks on the signer network
 
 | Threat | Mitigation | Where |
 |---|---|---|
-| One or two signers compromised | Payouts need 3 of 5 FROST shares; each signer checks the request independently. Shown live: two "compromised" signers signed a sweep, three refused, nothing moved | `node/src/signing.rs`, `coordinator::demo_drain` |
+| One or two signers compromised | Payouts need 3 of 5 FROST shares; each signer checks the request independently. Shown live: two "compromised" signers signed a sweep, three refused, nothing moved. The demo's "compromised" mode exists only in demo builds and only on two nodes started for it | `node/src/signing.rs`, `coordinator::demo_drain` |
+| Forged chain data (a lying light wallet server or Base RPC) | Each node reads its own sources; optional witness sources must agree on the deposit (block hash, transaction bytes, tip); Registry events are checked against contract state | `zcash-ops/src/witness.rs`, `base-client/src/verify.rs` |
+| A substituted deposit address or viewing key | All five signers sign `VaultOpened` (address and UFVK hashes); the app and the CLI verify the signatures against a signer set pinned in the build | node DKG, `app/`, `cli/` |
+| One payout's transaction attributed to another payout's claims | A node never signs a second payout while one it signed can still be mined, and confirms only the transaction it signed | `node/src/signing.rs` |
+| Third-party payouts made unspendable (garbled ciphertext) | Every non-zero output must decrypt to exactly the planned note | `policy/src/verify.rs` |
+| Dust or foreign notes sent to the vault to freeze it or inflate fees | Only the planned change of a vault transaction joins the vault's books | `node/src/chain.rs` |
 | Malicious coordinator alters a payout (recipient, amount, split, extra input, OVK, fee, expiry) | Every signer recomputes the plan from its own view of both chains and verifies the PCZT against it | `policy/src/verify.rs` (9 adversarial tests) |
 | One FROST signature authorizing two actions (equal randomizers) | Refused: no other action may reuse the randomized key of a spend being signed | `policy/src/verify.rs` |
 | Burning vault value into fees through an unaccounted spend | Refused: the bundle's value balance must equal the plan's fee exactly | `policy/src/verify.rs` |
@@ -68,8 +77,12 @@ mitigates it and where that is enforced in the code.
 - All five signers, the coordinator and the bots are run by us (signer independence is a mock).
 - Signer key material (FROST shares, vault `sk`) is stored unencrypted on each node's disk.
 - The price oracle and USDC are mocks.
-- Only one public light wallet server runs NU7 software today; the signers trust it for data
-  availability (not for authorization).
+- Only one public light wallet server runs NU7 software today, so every node reads Zcash from it:
+  a server that lies about a deposit could get it attested. Independent operators run their own
+  (the witness mechanism is in place); the structural fix is verifying deposits on Base itself
+  ([TIER2.md](TIER2.md)).
+- The backend host holds the coordinator key, the demo token and the MOCK oracle key (one
+  operator during the hackathon).
 - Testnet's low volume shrinks the anonymity set.
 
 ## Intentionally public

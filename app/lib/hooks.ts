@@ -8,6 +8,7 @@ import { api, describeError, type Vault } from "./api";
 import { readPosition, type PositionSnapshot } from "./chain";
 import { config } from "./config";
 import { loanStore, type StoredLoan } from "./keys";
+import { storedVault, verifyVaultOpened, type VaultCheck } from "./signers";
 
 // ------------------------------------------------------------------ local loans
 
@@ -51,6 +52,67 @@ export function useLoanByVault(vaultId: string | undefined): { loan: StoredLoan 
   const { loans, ready } = useLoans();
   const v = vaultId?.toLowerCase();
   return { loan: (v && loans.find((l) => l.vaultId?.toLowerCase() === v)) || null, ready };
+}
+
+// ------------------------------------------------------------------ the signers' word on a vault
+
+export type VaultProofState =
+  /** The loan has no vault yet. */
+  | { state: "none" }
+  | { state: "checking" }
+  /** Every signer vouches for the stored address and viewing key hash (C-4). */
+  | { state: "vouched"; check: VaultCheck }
+  /** Opened before vaults were signed: its address cannot be checked. */
+  | { state: "legacy" }
+  /** The signatures do not check out, or this build cannot check them: never pay it. */
+  | { state: "refused"; message: string };
+
+/**
+ * Checks a stored loan's vault against the signers' `VaultOpened` signatures, again on every
+ * change: a stored or imported record is not trusted on its own (lib/signers.ts).
+ */
+export function useVaultProof(loan: StoredLoan | null): VaultProofState {
+  const [state, setState] = useState<VaultProofState>({ state: "checking" });
+  const loanRef = useRef(loan);
+  loanRef.current = loan;
+  const key = loan
+    ? [
+        loan.vaultId,
+        loan.vaultAddress,
+        loan.expiryHeight,
+        loan.ufvkHash,
+        loan.amount,
+        loan.owner,
+        loan.account,
+        ...(loan.vaultSignatures ?? []).map((s) => `${s.index}:${s.signature}`),
+      ].join("|")
+    : "";
+  useEffect(() => {
+    const current = loanRef.current;
+    if (!current?.vaultId || !current.vaultAddress) {
+      setState({ state: "none" });
+      return;
+    }
+    const stored = storedVault(current);
+    if (!stored) {
+      setState({ state: "legacy" });
+      return;
+    }
+    let live = true;
+    setState({ state: "checking" });
+    verifyVaultOpened(stored.fields, stored.signatures).then(
+      (check) => {
+        if (live) setState({ state: "vouched", check });
+      },
+      (e: unknown) => {
+        if (live) setState({ state: "refused", message: describeError(e) });
+      },
+    );
+    return () => {
+      live = false;
+    };
+  }, [key]);
+  return state;
 }
 
 // ------------------------------------------------------------------ URL fragment

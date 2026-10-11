@@ -345,7 +345,7 @@ impl Node {
         let p = self.pending_dkg.lock().await.remove(&input.vault_id).context("no DKG in progress for this vault")?;
         ensure!(p.age() < DKG_TTL, "this vault opening expired");
         let mut store = self.store.lock().await;
-        dkg::round3(&self.cfg, &self.id.x25519, self.id.index, p, &input, &mut store)
+        dkg::round3(&self.cfg, &self.id.x25519, &self.id.eth, self.id.index, p, &input, &mut store)
     }
 
     // ----- P1 -----

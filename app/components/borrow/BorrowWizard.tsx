@@ -8,10 +8,11 @@ import { KeyBackup } from "@/components/KeyBackup";
 import { Badge, Button, buttonClass, Card, cx, KeyValue, Mono, Notice, Steps } from "@/components/ui";
 import type { Vault } from "@/lib/api";
 import { config } from "@/lib/config";
-import { notifyLoansChanged, useAction, useLoans, usePosition, useVault } from "@/lib/hooks";
+import { notifyLoansChanged, useAction, useLoans, usePosition, useVault, useVaultProof } from "@/lib/hooks";
 import { createLoan, loanStore, short, type StoredLoan } from "@/lib/keys";
 import { checkVaultAddress, openVault } from "@/lib/owner";
 import { vaultHref } from "@/lib/routes";
+import { vaultCheckUnavailable, VaultProofError, type VaultCheck } from "@/lib/signers";
 import { blocksToDuration, formatTaz } from "@/lib/zcash";
 
 const STEPS = ["Amount", "Back up key", "Deposit", "Borrow"];
@@ -151,13 +152,30 @@ function AmountStep({
   const groupId = useId();
   const [amount, setAmount] = useState<bigint>(loan ? BigInt(loan.amount) : config.denominations[0]!);
   const [ready, setReady] = useState(false);
+  // The signers did not vouch for the vault the backend returned (C-4).
+  const [unvouched, setUnvouched] = useState(false);
+  const cannotCheck = vaultCheckUnavailable();
   const open = useAction(async (current: StoredLoan | null) => {
+    setUnvouched(false);
     // The key is saved *before* the backend is contacted, so a crash never loses it.
     const l = current ?? createLoan(amount);
     if (!current) onLoan(l);
-    const res = await openVault(l);
-    onLoan({ ...l, vaultId: res.vaultId, vaultAddress: res.address, expiryHeight: res.expiryHeight });
-    return res;
+    try {
+      const res = await openVault(l);
+      // Stored as payable only now that every signer vouches for the address (lib/signers.ts).
+      onLoan({
+        ...l,
+        vaultId: res.vaultId,
+        vaultAddress: res.address,
+        expiryHeight: res.expiryHeight,
+        ufvkHash: res.ufvkHash,
+        vaultSignatures: res.signatures,
+      });
+      return res;
+    } catch (e) {
+      if (e instanceof VaultProofError) setUnvouched(true);
+      throw e;
+    }
   });
   const alreadyBound = open.error?.includes("already has a vault");
 
@@ -219,9 +237,19 @@ function AmountStep({
             <p>This build cannot sign owner requests right now: see the configuration notice at the top of the page.</p>
           </Notice>
         </div>
+      ) : cannotCheck ? (
+        <div className="mt-4">
+          <Notice tone="danger" title="Opening a vault is disabled">
+            <p>{cannotCheck}</p>
+          </Notice>
+        </div>
       ) : null}
       <div className="mt-4 flex flex-wrap gap-2">
-        <Button onClick={() => open.run(loan)} busy={open.busy} disabled={(!ready && !loan) || !config.ownerSigning}>
+        <Button
+          onClick={() => open.run(loan)}
+          busy={open.busy}
+          disabled={(!ready && !loan) || !config.ownerSigning || cannotCheck !== null}
+        >
           {loan ? "Retry opening the vault" : "Create loan and open vault"}
         </Button>
         {loan ? (
@@ -239,7 +267,12 @@ function AmountStep({
         <div className="mt-4">
           <Notice tone="danger" title="The vault could not be opened" live>
             <p>{open.error}</p>
-            {alreadyBound ? (
+            {unvouched ? (
+              <p>
+                Nothing was kept for this vault. Discard this key and start over; if it happens again, the backend may be
+                compromised.
+              </p>
+            ) : alreadyBound ? (
               <p>This key already opened a vault whose details were lost. Discard it and start over with a new key.</p>
             ) : (
               <p>Your new key is saved in this browser; you can retry.</p>
@@ -266,9 +299,19 @@ const STATUS_STEPS = [
   { status: "active", label: "zZEC minted into your Morpho position" },
 ] as const;
 
+/** What the address label says about the signers' signatures (C-4). */
+const VOUCHED: Record<VaultCheck, string> = {
+  pinned: "Vault address · Ironwood-only · signed by all 5 signers, checked in this browser",
+  backend: "Vault address · Ironwood-only · signed by the 5 signers the backend lists (development build: not pinned)",
+  unchecked: "Vault address · Ironwood-only · NOT checked against any signer set (development build)",
+};
+
 function DepositStep({ loan, vault, vaultError }: { loan: StoredLoan; vault: Vault | null; vaultError: string | null }) {
   const amount = BigInt(loan.amount);
   const check = loan.vaultAddress ? checkVaultAddress(loan.vaultAddress, amount) : null;
+  // The stored address is shown, as text or QR code, only while every signer vouches for it.
+  const proof = useVaultProof(loan);
+  const vouched = proof.state === "vouched" ? proof.check : null;
   const statusIndex = vault ? STATUS_STEPS.findIndex((s) => s.status === vault.status) : 0;
   // Paying again after the deposit was seen, or after expiry, only creates refundable notes.
   const awaiting = !vault || vault.status === "awaiting_deposit" || vault.status === "unknown";
@@ -285,6 +328,25 @@ function DepositStep({ loan, vault, vaultError }: { loan: StoredLoan; vault: Vau
             ))}
           </Notice>
         ) : null}
+        {awaiting && proof.state === "refused" ? (
+          <Notice tone="danger" title="Do not pay this vault" live>
+            <p>{proof.message}</p>
+            <p>The signers do not vouch for this address. Discard this loan and start a new one.</p>
+          </Notice>
+        ) : null}
+        {awaiting && proof.state === "legacy" ? (
+          <Notice tone="danger" title="This vault's address cannot be checked">
+            <p>
+              It was opened before the signers signed vault addresses, so nothing shows that the signers control it. Do
+              not pay it: let it expire and start a new loan.
+            </p>
+          </Notice>
+        ) : null}
+        {awaiting && proof.state === "checking" ? (
+          <p className="text-sm text-muted" aria-live="polite">
+            Checking the signers&apos; signatures on this vault…
+          </p>
+        ) : null}
         {!awaiting && vault?.status === "deposit_seen" ? (
           <Notice tone="ok" title="Deposit received" live>
             <p>
@@ -298,14 +360,26 @@ function DepositStep({ loan, vault, vaultError }: { loan: StoredLoan; vault: Vau
             <p>Its deposit deadline passed. Do not pay this address; start a new loan instead.</p>
           </Notice>
         ) : null}
-        {awaiting && check?.ok && check.uri ? (
+        {awaiting && vouched && check?.ok && check.uri ? (
           <div className="space-y-4">
+            {vouched !== "pinned" ? (
+              <Notice tone="warn" title="Development build: the signer set is not pinned">
+                <p>
+                  {vouched === "backend"
+                    ? "The vault's signatures were checked against the signer set the backend reports, which does not protect against a compromised backend."
+                    : "The vault's signatures were not checked: neither this build nor the backend names the signer set."}{" "}
+                  A production build pins NEXT_PUBLIC_SIGNERS and refuses vaults it cannot check.
+                </p>
+              </Notice>
+            ) : null}
             <div className="flex flex-col items-center gap-4 sm:flex-row sm:items-start">
               <Qr value={check.uri} label={`ZIP 321 payment request for ${formatTaz(amount)} to the vault`} size={220} />
               <div className="min-w-0 space-y-3 text-sm">
                 <p className="text-muted">Scan with an Ironwood-capable wallet, or copy the address and amount.</p>
                 <div>
-                  <p className="text-xs uppercase tracking-wide text-faint">Vault address (Ironwood-only, verified here)</p>
+                  <p className={cx("text-xs uppercase tracking-wide", vouched === "pinned" ? "text-faint" : "text-warn")}>
+                    {VOUCHED[vouched]}
+                  </p>
                   <Mono className="block">{loan.vaultAddress}</Mono>
                   <div className="mt-2 flex flex-wrap gap-2">
                     <CopyButton value={loan.vaultAddress!} label="Copy address" />

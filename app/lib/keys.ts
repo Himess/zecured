@@ -12,6 +12,7 @@
  */
 import { getAddress, isAddress, isHex, type Address, type Hex } from "viem";
 import { generatePrivateKey, privateKeyToAccount } from "viem/accounts";
+import type { VaultSignature } from "./api";
 import { config } from "./config";
 import { randomBytes32 } from "./eip712";
 import { predictAccountAddress } from "./safe";
@@ -47,6 +48,13 @@ export interface StoredLoan {
   /** The vault's Ironwood-only UA (public; kept to show the QR again). */
   vaultAddress?: string;
   expiryHeight?: number;
+  /**
+   * keccak256 of the vault's UFVK, as all five signers signed it when the vault opened
+   * (VaultOpened, security review C-4). Absent for loans opened before that check.
+   */
+  ufvkHash?: Hex;
+  /** The signers' VaultOpened signatures, checked when the vault opened and again before use. */
+  vaultSignatures?: VaultSignature[];
   /** The user confirmed they exported the key. */
   backedUp?: boolean;
   /**
@@ -113,6 +121,18 @@ export function parseLoan(raw: unknown): StoredLoan {
   if (isBytes32(r.vaultId)) loan.vaultId = r.vaultId.toLowerCase() as Hex;
   if (typeof r.vaultAddress === "string") loan.vaultAddress = r.vaultAddress;
   if (typeof r.expiryHeight === "number" && Number.isInteger(r.expiryHeight)) loan.expiryHeight = r.expiryHeight;
+  if (isBytes32(r.ufvkHash)) loan.ufvkHash = r.ufvkHash.toLowerCase() as Hex;
+  // Kept as stored; whether they vouch for the vault is checked before every use (lib/signers.ts).
+  if (Array.isArray(r.vaultSignatures)) {
+    const signatures = r.vaultSignatures.filter(
+      (s): s is VaultSignature =>
+        !!s &&
+        typeof s === "object" &&
+        Number.isInteger((s as VaultSignature).index) &&
+        isHex((s as VaultSignature).signature),
+    );
+    loan.vaultSignatures = signatures.map((s) => ({ index: s.index, signature: s.signature.toLowerCase() as Hex }));
+  }
   if (r.backedUp === true) loan.backedUp = true;
   if (isBytes32(r.destinationCommitment)) loan.destinationCommitment = r.destinationCommitment;
   const pc = r.pendingClose as Record<string, unknown> | undefined;
