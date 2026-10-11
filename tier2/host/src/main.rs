@@ -4,6 +4,7 @@
 //!   zecured-tier2-host prove <witness.json> <receipt.bin>    # succinct (STARK) receipt, locally
 //!   zecured-tier2-host groth16 <receipt.bin> <seal.json>     # Groth16 seal for Base (x86 + Docker)
 //!   zecured-tier2-host mock-seal <witness.json> <seal.json>  # MOCK seal for the local fork only
+//!   zecured-tier2-host image-id                              # the guest's image id
 //!
 //! `seal.json` is `{ imageId, journal, seal }`, what `Registry.attestDepositWithProof` takes.
 //! The witness contains the vault's viewing key and stays on the machine that builds and proves
@@ -50,7 +51,11 @@ fn write_seal(out: &str, journal: &[u8], seal: &[u8]) -> Result<()> {
 
 fn main() -> Result<()> {
     let args: Vec<String> = std::env::args().collect();
-    let cmd = args.get(1).context("command: execute | prove | groth16 | mock-seal")?;
+    let cmd = args.get(1).context("command: execute | prove | groth16 | mock-seal | image-id")?;
+    if cmd == "image-id" {
+        println!("0x{}", hex::encode(image_id()));
+        return Ok(());
+    }
     let input = args.get(2).context("input path")?;
     println!("image id 0x{}", hex::encode(image_id()));
 

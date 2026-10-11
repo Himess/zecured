@@ -42,3 +42,7 @@ path = "src/bin/dump_tx.rs"
 [[bin]]
 name = "build-witness"
 path = "src/bin/build_witness.rs"
+
+[[bin]]
+name = "update-headers"
+path = "src/bin/update_headers.rs"

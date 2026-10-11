@@ -104,6 +104,20 @@ scripts/signer-network.sh init && scripts/signer-network.sh start
 ./target/debug/zecured-bots market-maker &    # and: zecured-bots liquidator &
 ```
 
+### Tier 2: minting on a deposit proof
+
+```bash
+(cd tier2 && cargo build --release)           # RISC Zero guest and host (rzup toolchain)
+./target/debug/update-headers data/tier2/headers_nu7.json   # NU7-epoch headers over P2P (first run: see docs/TIER2.md)
+TIER2=1 scripts/local-fork.sh start           # + header relay fed from the Testnet, image id, MOCK verifier
+DEPOSIT_PROOF_HOST=$PWD/tier2/target/release/zecured-tier2-host DEPOSIT_PROOF_MOCK=true \
+  scripts/signer-network.sh start             # the coordinator proves deposits instead of attesting them
+```
+
+On the local fork the proof is checked by `MockRiscZeroVerifier` (MOCK); the real seal is a
+succinct receipt wrapped in Groth16 (`zecured-tier2-host prove`, then `groth16` on an x86 machine
+with Docker), checked by RISC Zero's verifier router on Base Sepolia.
+
 ## Security notes
 
 This is a hackathon build. All five signers are run by the authors, key material is stored
