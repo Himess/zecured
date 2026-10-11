@@ -1,4 +1,7 @@
 //! Registry ABI and ingestion of its events up to Base's `safe` head.
+//!
+//! Logs only say what an RPC provider claims happened; signer nodes check every event they
+//! apply against the Registry's state (see [`crate::verify`]).
 
 use std::collections::HashMap;
 
@@ -33,6 +36,7 @@ sol! {
         function confirmPayout(bytes32 vaultId, bytes32[] claimIds, bytes[] sigs) external;
         function vaultOf(address account) external view returns (bytes32 vaultId);
         function vault(bytes32 vaultId) external view returns (address account, uint64 outstanding, uint8 status);
+        function claim(bytes32 claimId) external view returns (bytes32 vaultId, uint8 kind, uint64 amount, bytes32 commitment, uint8 status);
     }
 }
 
@@ -53,6 +57,10 @@ pub struct VaultEvent {
     pub vault_id: B256,
     pub block: u64,
     pub log_index: u64,
+    /// Hash of the block, as reported with the log.
+    pub block_hash: Option<B256>,
+    /// Timestamp of the block.
+    pub timestamp: u64,
     pub event: RegistryEvent,
 }
 
@@ -72,7 +80,7 @@ pub async fn fetch<P: Provider>(provider: &P, registry: Address, from: u64, to: 
         return Ok(vec![]);
     }
     let filter = Filter::new().address(registry).from_block(from).to_block(to);
-    let logs = provider.get_logs(&filter).await.context("eth_getLogs")?;
+    let logs = registry_logs(provider.get_logs(&filter).await.context("eth_getLogs")?, registry);
     let mut timestamps: HashMap<u64, u64> = HashMap::new();
     let mut out = Vec::with_capacity(logs.len());
     for log in logs {
@@ -99,6 +107,12 @@ pub async fn fetch<P: Provider>(provider: &P, registry: Address, from: u64, to: 
     }
     out.sort_by_key(|e| (e.block, e.log_index));
     Ok(out)
+}
+
+/// Keeps only the Registry's own logs, never one the provider reports as removed by a reorg,
+/// whatever the provider returned for the filter (C-2).
+pub fn registry_logs(logs: Vec<Log>, registry: Address) -> Vec<Log> {
+    logs.into_iter().filter(|l| l.inner.address == registry && !l.removed).collect()
 }
 
 /// Decodes one Registry log. Unknown logs are ignored.
@@ -155,6 +169,8 @@ pub fn decode(log: &Log, created_at: u64) -> Result<Option<VaultEvent>> {
         vault_id,
         block,
         log_index,
+        block_hash: log.block_hash,
+        timestamp: created_at,
         event,
     }))
 }
@@ -207,6 +223,22 @@ mod tests {
         assert_eq!(claims[1].amount, 3_800_000);
         assert_eq!(claims[1].order, (10, 7));
         assert_eq!(claims[1].created_at, 1_000);
+    }
+
+    #[test]
+    fn only_live_registry_logs_are_kept() {
+        let ev = IZecuredRegistry::PayoutConfirmed {
+            vaultId: B256::repeat_byte(1),
+            claimIds: vec![B256::repeat_byte(2)],
+        };
+        let registry = Address::repeat_byte(0xaa);
+        let good = rpc_log(ev.encode_log_data(), 10, 0);
+        let mut other_contract = good.clone();
+        other_contract.inner.address = Address::repeat_byte(0xbb);
+        let mut removed = good.clone();
+        removed.removed = true;
+        let kept = registry_logs(vec![other_contract, good.clone(), removed], registry);
+        assert_eq!(kept, vec![good]);
     }
 
     #[test]

@@ -3,8 +3,7 @@
 //! Compact blocks may omit transparent data, so the structure of a deposit transaction is
 //! always checked on the full transaction fetched by txid.
 
-use anyhow::{Context, Result, anyhow};
-use zcash_client_backend::proto::service::TxFilter;
+use anyhow::{Context, Result};
 use zcash_primitives::transaction::Transaction;
 use zcash_protocol::{
     TxId,
@@ -60,17 +59,21 @@ pub async fn fetch<P: Parameters>(
     params: &P,
     txid: &TxId,
 ) -> Result<(Transaction, BlockHeight)> {
-    let raw = client
-        .get_transaction(TxFilter {
-            hash: txid.as_ref().to_vec(),
-            ..Default::default()
-        })
-        .await
-        .map_err(|s| anyhow!("GetTransaction: {s}"))?
-        .into_inner();
-    let height = BlockHeight::from_u32(u32::try_from(raw.height).context("height")?);
+    let (data, height) = crate::lwd::raw_transaction(client, txid).await?;
+    parse_mined(params, txid, &data, height)
+}
+
+/// Parses the raw bytes of the mined transaction `txid`, as returned by a server with the
+/// height of its block, and checks they are that transaction.
+pub fn parse_mined<P: Parameters>(
+    params: &P,
+    txid: &TxId,
+    data: &[u8],
+    height: u64,
+) -> Result<(Transaction, BlockHeight)> {
+    let height = BlockHeight::from_u32(u32::try_from(height).context("height")?);
     anyhow::ensure!(u32::from(height) > 0, "transaction {txid} is not mined yet");
-    let tx = Transaction::read(&raw.data[..], BranchId::for_height(params, height)).context("parse transaction")?;
+    let tx = Transaction::read(data, BranchId::for_height(params, height)).context("parse transaction")?;
     anyhow::ensure!(tx.txid() == *txid, "server returned a different transaction");
     Ok((tx, height))
 }

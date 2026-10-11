@@ -1,4 +1,7 @@
 //! HTTP API of a signer node (called by the coordinator only; bind it to a private address).
+//!
+//! Every route except `/v1/health` requires the coordinator's signature (D16), the demo mode
+//! switch included (C-3), and a signed request is accepted only once (L-1).
 
 use std::sync::Arc;
 
@@ -15,7 +18,7 @@ use axum::{
 use serde::{Deserialize, Serialize};
 use serde_json::json;
 
-use crate::{ConfirmIn, DestinationIn, Mode, Node, RecipientIn, RefundIn, dkg, signing};
+use crate::{ConfirmIn, DestinationIn, Mode, ModeError, Node, RecipientIn, RefundIn, dkg, signing};
 
 /// An error returned to the coordinator. Messages describe the policy decision only and
 /// never echo addresses, keys or salts.
@@ -135,23 +138,30 @@ struct ModeIn {
 }
 
 async fn set_mode(State(n): State<Arc<Node>>, Json(b): Json<ModeIn>) -> ApiResult<serde_json::Value> {
-    let mode = n.set_mode(b.mode, &b.token).await.map_err(|e| ApiError(StatusCode::UNAUTHORIZED, e.to_string()))?;
+    let mode = n.set_mode(b.mode, &b.token).await.map_err(|e| {
+        let status = match e {
+            ModeError::Unauthorized => StatusCode::UNAUTHORIZED,
+            ModeError::NotAllowed => StatusCode::FORBIDDEN,
+        };
+        ApiError(status, e.to_string())
+    })?;
     Ok(Json(json!({ "mode": mode })))
 }
 
 /// Largest request body a node accepts (PCZTs are a few hundred kB at most).
 const MAX_BODY_BYTES: usize = 8 * 1024 * 1024;
 
-/// D16: every request except health and the demo mode switch must be signed by the
-/// configured coordinator.
+/// D16: every request except the health probe must be signed by the configured coordinator,
+/// the demo mode switch included (C-3), and is accepted once (L-1).
 async fn authenticate(State(n): State<Arc<Node>>, req: Request, next: Next) -> Response {
+    let path = req.uri().path().to_owned();
+    if path == "/v1/health" {
+        return next.run(req).await;
+    }
+    // No coordinator configured: only possible with --insecure-no-auth (development).
     let Some(coordinator) = n.cfg.coordinator else {
         return next.run(req).await;
     };
-    let path = req.uri().path().to_owned();
-    if path == "/v1/health" || path == "/v1/admin/mode" {
-        return next.run(req).await;
-    }
     let method = req.method().as_str().to_owned();
     let (ts, sig) = {
         let headers = req.headers();
@@ -165,7 +175,10 @@ async fn authenticate(State(n): State<Arc<Node>>, req: Request, next: Next) -> R
     let Ok(bytes) = to_bytes(body, MAX_BODY_BYTES).await else {
         return ApiError(StatusCode::PAYLOAD_TOO_LARGE, "body too large".into()).into_response();
     };
-    if let Err(e) = crate::auth::verify(coordinator, &method, &path, &bytes, &ts, &sig, crate::now()) {
+    let now = crate::now();
+    let checked = crate::auth::verify_signed(coordinator, &method, &path, &bytes, &ts, &sig, now)
+        .and_then(|(digest, ts)| n.replay.check(digest, ts, now));
+    if let Err(e) = checked {
         return ApiError(StatusCode::UNAUTHORIZED, e.to_string()).into_response();
     }
     next.run(Request::from_parts(parts, Body::from(bytes))).await

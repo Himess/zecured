@@ -16,7 +16,10 @@ use alloy::{
 use anyhow::{Context, Result, anyhow, ensure};
 use axum::{
     Json, Router,
-    extract::{Path, State},
+    extract::{
+        Path, State,
+        rejection::{JsonRejection, PathRejection},
+    },
     http::StatusCode,
     response::{IntoResponse, Response},
     routing::{get, post},
@@ -24,8 +27,9 @@ use axum::{
 use clap::{Parser, Subcommand};
 use serde::Deserialize;
 use serde_json::json;
-use tracing::{info, warn};
+use tracing::{debug, info, warn};
 use zecured_base::events::{self, RegistryEvent};
+use zecured_zcash_ops::spend::zip317_fee;
 
 use crate::chain::{CloseRequest, Deployment, IRegistryView, ISettlementAdapter, ORACLE_PRICE_SCALE};
 
@@ -116,13 +120,14 @@ async fn liquidator(
     every: u64,
 ) -> Result<()> {
     let me = key.address();
+    let receiver = chain::ironwood_receiver(zaddr)?;
     let provider = ProviderBuilder::new().wallet(EthereumWallet::from(key)).connect_http(rpc.parse()?);
     chain::ensure_allowance(&provider, d.usdc, me, d.adapter).await?;
     let mut accounts: BTreeMap<B256, Address> = BTreeMap::new();
     let mut cursor = d.block;
     info!("liquidator running");
     loop {
-        if let Err(e) = liquidation_pass(&provider, backend, &d, zaddr, &mut accounts, &mut cursor).await {
+        if let Err(e) = liquidation_pass(&provider, backend, &d, zaddr, &receiver, &mut accounts, &mut cursor).await {
             warn!("liquidation pass failed: {e:#}");
         }
         tokio::time::sleep(Duration::from_secs(every)).await;
@@ -134,6 +139,7 @@ async fn liquidation_pass<P: Provider>(
     backend: &str,
     d: &Deployment,
     zaddr: &str,
+    receiver: &[u8; 43],
     accounts: &mut BTreeMap<B256, Address>,
     cursor: &mut u64,
 ) -> Result<()> {
@@ -152,7 +158,7 @@ async fn liquidation_pass<P: Provider>(
             continue;
         }
         info!(vault = %hex::encode(&vault_id[..4]), "unhealthy position: liquidating");
-        let commitment = chain::fresh_commitment(backend, zaddr).await?;
+        let commitment = chain::fresh_commitment(backend, zaddr, receiver).await?;
         let adapter = ISettlementAdapter::new(d.adapter, p);
         let call = adapter.liquidate(account, U256::ZERO, U256::from(pos.borrow_shares), commitment);
         // Simulate first: the adapter enforces the dust floor and may revert.
@@ -179,20 +185,71 @@ struct Mm {
     backend: String,
     key: PrivateKeySigner,
     zaddr: String,
+    /// Raw Ironwood receiver of `zaddr`, to check the commitments the backend returns (M-11).
+    receiver: [u8; 43],
     margin_bps: u16,
 }
 
-struct ApiError(StatusCode, String);
+/// Smallest borrower share of a close the market maker takes on (H-3).
+///
+/// The signers pay a close as one transaction whose fee the borrower's output bears: one
+/// vault note in, and up to three outputs (borrower, market maker, and change when earlier
+/// claims are still unpaid in the vault), i.e. `zip317_fee(1, 3)` = 15,000 zat. A borrower
+/// share at or below that is dust: the signers keep it in the vault, and the market maker's
+/// claim, which is paid together with (or after) the borrower's, would never be paid.
+///
+/// Remaining risk, not checkable here: a borrower can sign a close whose `userCommitment` was
+/// never revealed to the signers. Its claim is then set aside and, until the signers' ledger
+/// pays the market maker alone after the grace period, the market maker's claim waits too.
+fn min_close_user_amount() -> u64 {
+    zip317_fee(1, 3)
+}
+
+/// An error of the market maker API: a fixed message and a short code (the backend relays
+/// only known codes, with its own messages).
+#[derive(Debug, PartialEq, Eq)]
+struct ApiError {
+    status: StatusCode,
+    code: &'static str,
+    message: &'static str,
+}
+
+impl ApiError {
+    const fn refuse(code: &'static str, message: &'static str) -> Self {
+        Self {
+            status: StatusCode::UNPROCESSABLE_ENTITY,
+            code,
+            message,
+        }
+    }
+
+    const BAD_REQUEST: Self = Self {
+        status: StatusCode::BAD_REQUEST,
+        code: "bad_request",
+        message: "Invalid request.",
+    };
+    const NO_DEBT: Self = Self::refuse("no_debt", "There is no debt to close.");
+    const UNDERWATER: Self = Self::refuse("underwater", "The position is underwater.");
+    const USER_AMOUNT_TOO_SMALL: Self =
+        Self::refuse("user_amount_too_small", "The borrower's share would not cover the Zcash payout fee.");
+    const QUOTE_MISMATCH: Self = Self::refuse("quote_mismatch", "The request does not match our quote.");
+    const CLOSE_REJECTED: Self = Self::refuse("close_rejected", "The close would revert.");
+}
 
 impl IntoResponse for ApiError {
     fn into_response(self) -> Response {
-        (self.0, Json(json!({ "error": self.1 }))).into_response()
+        (self.status, Json(json!({ "error": self.message, "code": self.code }))).into_response()
     }
 }
 
 impl From<anyhow::Error> for ApiError {
     fn from(e: anyhow::Error) -> Self {
-        ApiError(StatusCode::UNPROCESSABLE_ENTITY, format!("{e:#}"))
+        debug!("market maker request failed: {e:#}");
+        Self {
+            status: StatusCode::INTERNAL_SERVER_ERROR,
+            code: "internal",
+            message: "Internal error.",
+        }
     }
 }
 
@@ -205,6 +262,7 @@ async fn market_maker(
     bind: SocketAddr,
     margin_bps: u16,
 ) -> Result<()> {
+    let receiver = chain::ironwood_receiver(&zaddr)?;
     let provider = ProviderBuilder::new().wallet(EthereumWallet::from(key.clone())).connect_http(rpc.parse()?);
     chain::ensure_allowance(&provider, d.usdc, key.address(), d.adapter).await?;
     let mm = Arc::new(Mm {
@@ -213,6 +271,7 @@ async fn market_maker(
         backend,
         key,
         zaddr,
+        receiver,
         margin_bps,
     });
     let app = Router::new().route("/quote/{vault_id}", get(quote)).route("/close", post(close)).with_state(mm);
@@ -226,12 +285,18 @@ fn mul_div_up(a: U256, b: U256, d: U256) -> U256 {
     (a * b + d - U256::from(1u8)) / d
 }
 
-async fn quote(State(mm): State<Arc<Mm>>, Path(vault_id): Path<B256>) -> Result<Json<serde_json::Value>, ApiError> {
+async fn quote(
+    State(mm): State<Arc<Mm>>,
+    vault_id: Result<Path<B256>, PathRejection>,
+) -> Result<Json<serde_json::Value>, ApiError> {
+    let Ok(Path(vault_id)) = vault_id else {
+        return Err(ApiError::BAD_REQUEST);
+    };
     let p = ProviderBuilder::new().connect_http(mm.rpc.parse().map_err(anyhow::Error::from)?);
     let v = IRegistryView::new(mm.d.registry, &p).vault(vault_id).call().await.map_err(anyhow::Error::from)?;
     let pos = chain::position(&p, &mm.d, v.account).await?;
     if pos.debt == 0 {
-        return Err(ApiError(StatusCode::UNPROCESSABLE_ENTITY, "no debt to close".into()));
+        return Err(ApiError::NO_DEBT);
     }
     // Same formula as the adapter (INTERFACES § 3.3), on the current debt.
     let mm_amount = mul_div_up(
@@ -240,7 +305,8 @@ async fn quote(State(mm): State<Arc<Mm>>, Path(vault_id): Path<B256>) -> Result<
         U256::from(10_000u32) * U256::from(pos.price),
     );
     let mm_amount = u64::try_from(mm_amount).map_err(|_| anyhow!("amount overflow"))?;
-    let user_amount = v.outstanding.checked_sub(mm_amount).context("position is underwater")?;
+    let user_amount = v.outstanding.checked_sub(mm_amount).ok_or(ApiError::UNDERWATER)?;
+    check_user_amount(user_amount)?;
     Ok(Json(json!({
         "executor": mm.key.address(),
         "marginBps": mm.margin_bps,
@@ -249,6 +315,14 @@ async fn quote(State(mm): State<Arc<Mm>>, Path(vault_id): Path<B256>) -> Result<
         "userAmount": user_amount.to_string(),
         "expiresAt": zecured_now() + 600,
     })))
+}
+
+/// H-3: refuses a close whose borrower share would be dust for the signers.
+fn check_user_amount(user_amount: u64) -> Result<(), ApiError> {
+    if user_amount <= min_close_user_amount() {
+        return Err(ApiError::USER_AMOUNT_TOO_SMALL);
+    }
+    Ok(())
 }
 
 fn zecured_now() -> u64 {
@@ -283,40 +357,77 @@ fn num(v: &serde_json::Value) -> Result<U256> {
     }
 }
 
-async fn close(State(mm): State<Arc<Mm>>, Json(b): Json<CloseBody>) -> Result<Json<serde_json::Value>, ApiError> {
+async fn close(
+    State(mm): State<Arc<Mm>>,
+    body: Result<Json<CloseBody>, JsonRejection>,
+) -> Result<Json<serde_json::Value>, ApiError> {
+    let Ok(Json(b)) = body else {
+        return Err(ApiError::BAD_REQUEST);
+    };
     let r = &b.request;
     if r.executor != mm.key.address() || r.margin_bps != mm.margin_bps {
-        return Err(ApiError(StatusCode::UNPROCESSABLE_ENTITY, "request does not match our quote".into()));
+        return Err(ApiError::QUOTE_MISMATCH);
     }
+    let field = |v: &serde_json::Value| num(v).map_err(|_| ApiError::BAD_REQUEST);
+    let small = |v: U256| u64::try_from(v).map_err(|_| ApiError::BAD_REQUEST);
     let req = CloseRequest {
         vaultId: r.vault_id,
         account: r.account,
         executor: r.executor,
         marginBps: r.margin_bps,
-        minUserAmount: u64::try_from(num(&r.min_user_amount)?).map_err(|_| anyhow!("minUserAmount"))?,
+        minUserAmount: small(field(&r.min_user_amount)?)?,
         userCommitment: r.user_commitment,
-        nonce: num(&r.nonce)?,
-        deadline: u64::try_from(num(&r.deadline)?).map_err(|_| anyhow!("deadline"))?,
+        nonce: field(&r.nonce)?,
+        deadline: small(field(&r.deadline)?)?,
     };
-    let mm_commitment = chain::fresh_commitment(&mm.backend, &mm.zaddr).await?;
+    // The adapter guarantees the borrower at least `minUserAmount`, so this bounds the
+    // executed share, not just the quoted one.
+    check_user_amount(req.minUserAmount)?;
+    let mm_commitment = chain::fresh_commitment(&mm.backend, &mm.zaddr, &mm.receiver).await?;
     let p = ProviderBuilder::new()
         .wallet(EthereumWallet::from(mm.key.clone()))
         .connect_http(mm.rpc.parse().map_err(anyhow::Error::from)?);
     let adapter = ISettlementAdapter::new(mm.d.adapter, &p);
     let call = adapter.closeWithCollateral(req, b.signature.clone(), mm_commitment);
-    call.call().await.map_err(|e| anyhow!("close would revert: {e}"))?;
+    if let Err(e) = call.call().await {
+        debug!("close would revert: {e}");
+        return Err(ApiError::CLOSE_REJECTED);
+    }
     let gas = zecured_base::gas_with_headroom(call.estimate_gas().await.map_err(anyhow::Error::from)?);
     let receipt = call
         .gas(gas)
         .send()
         .await
         .map_err(anyhow::Error::from)?
+        .with_timeout(Some(Duration::from_secs(120)))
         .get_receipt()
         .await
         .map_err(anyhow::Error::from)?;
     if !receipt.status() {
-        return Err(ApiError(StatusCode::BAD_GATEWAY, "close reverted".into()));
+        return Err(ApiError::CLOSE_REJECTED);
     }
     info!(tx = %receipt.transaction_hash, "closed from collateral");
     Ok(Json(json!({ "txHash": receipt.transaction_hash })))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// H-3: a borrower share that would be dust for the signers is refused, at quote time
+    /// and on the signed minimum at execution time.
+    #[test]
+    fn dust_borrower_shares_are_refused() {
+        assert_eq!(min_close_user_amount(), 15_000);
+        assert_eq!(check_user_amount(0), Err(ApiError::USER_AMOUNT_TOO_SMALL));
+        assert_eq!(check_user_amount(10_000), Err(ApiError::USER_AMOUNT_TOO_SMALL));
+        assert_eq!(check_user_amount(15_000), Err(ApiError::USER_AMOUNT_TOO_SMALL));
+        assert_eq!(check_user_amount(15_001), Ok(()));
+    }
+
+    #[test]
+    fn api_errors_are_fixed() {
+        let e = ApiError::from(anyhow!("error sending request for url (https://rpc.example/v2/SECRETKEY)"));
+        assert_eq!((e.code, e.message), ("internal", "Internal error."));
+    }
 }

@@ -29,6 +29,7 @@ use zecured_zcash_ops::{
     scan::{IronwoodWitness, NotePosition, ReceivedNote},
     spend::{self, OutputPrivacy, Payment},
     tx::TxShape,
+    witness,
 };
 
 /// A height after NU7 activation on testnet (4,465,026).
@@ -100,6 +101,7 @@ fn funded(vault: &Vault) -> (ReceivedNote, orchard::Anchor) {
         scope: Scope::External,
         witness,
         spent_at: None,
+        spent_in: None,
     };
     (received, orchard::Anchor::from(tree.root()))
 }
@@ -163,6 +165,20 @@ fn frost_vault_spend_verifies_and_hides_third_party_output() {
     .unwrap();
     let pczt = spend::apply_signatures(pczt, &[(requests[0].action_index, sig)]).unwrap();
     let tx = spend::extract(pczt).expect("fully verified transaction");
+
+    // For a v6 transaction without transparent parts, the shielded sighash the signers sign is
+    // the transaction id (ZIP 244: the transparent sighash digest is the transparent txid
+    // digest), so a node can recognise the transaction it signed when it is mined (H-1).
+    assert_eq!(tx.txid().as_ref(), &sighash);
+
+    // C-1: the agreed transaction bytes must create the scanned note at its action index.
+    let raw = spend::serialize(&tx).unwrap();
+    let cmx0 = tx.ironwood_bundle().expect("Ironwood bundle").actions()[0].cmx().to_bytes();
+    let net = Network::TestNetwork;
+    witness::check_note_in_tx(&net, &tx.txid(), &raw, TARGET_HEIGHT, 0, &cmx0).unwrap();
+    assert!(witness::check_note_in_tx(&net, &tx.txid(), &raw, TARGET_HEIGHT, 1, &cmx0).is_err());
+    assert!(witness::check_note_in_tx(&net, &tx.txid(), &raw, TARGET_HEIGHT, 9, &cmx0).is_err());
+    assert!(witness::check_note_in_tx(&net, &TxId::from_bytes([9; 32]), &raw, TARGET_HEIGHT, 0, &cmx0).is_err());
 
     assert_eq!(tx.version(), TxVersion::V6);
     assert_eq!(tx.consensus_branch_id(), BranchId::Nu7);

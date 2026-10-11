@@ -7,9 +7,14 @@
 //! finish the DKG, derive `sk = H(vault_id, r_1..r_5)` and the vault's viewing keys.
 //!
 //! The coordinator relays every message but only ever sees public packages, commitments
-//! and ciphertexts.
+//! and ciphertexts. Sealed messages are bound to the round-1 transcript (M-4): if the
+//! coordinator shows two signers different round-1 outputs, they cannot open each other's
+//! messages and the DKG fails instead of producing two different vaults.
 
-use std::collections::BTreeMap;
+use std::{
+    collections::{BTreeMap, BTreeSet},
+    time::{Duration, Instant},
+};
 
 use alloy::primitives::{Address, B256, Bytes};
 use anyhow::{Context, Result, anyhow, bail, ensure};
@@ -51,7 +56,7 @@ pub struct VaultOpen {
     pub expiry_height: u32,
 }
 
-#[derive(Clone, Debug, Serialize, Deserialize)]
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct Round1Out {
     pub index: u16,
     pub package: serde_json::Value,
@@ -102,11 +107,48 @@ pub struct Pending {
     contribution: [u8; 32],
     round1_secret: Option<round1::SecretPackage>,
     round2_secret: Option<round2::SecretPackage>,
+    /// Our own round-1 output, which must be relayed unchanged.
+    round1_out: Round1Out,
+    /// Hash of the round-1 transcript seen in round 2 (M-4).
+    transcript: Option<[u8; 32]>,
+    created: Instant,
 }
 
-fn context(vault_id: &B256) -> Vec<u8> {
+impl Pending {
+    /// Time since round 1 (pending DKGs expire, L-7).
+    pub fn age(&self) -> Duration {
+        self.created.elapsed()
+    }
+}
+
+/// Hash of a DKG attempt's round-1 transcript: the vault id and every signer's round-1 output
+/// in index order. The coordinator draws a fresh vault id for every opening attempt and every
+/// round-1 output carries fresh randomness, so this also identifies the attempt (M-4).
+pub fn transcript_hash(vault_id: &B256, round1: &[Round1Out]) -> Result<[u8; 32]> {
+    let mut outputs: Vec<&Round1Out> = round1.iter().collect();
+    outputs.sort_by_key(|r| r.index);
+    ensure!(outputs.windows(2).all(|w| w[0].index != w[1].index), "duplicate round-1 output");
+    let mut h = blake2b_simd::Params::new().hash_length(32).personal(b"Zecured_DkgTrans").to_state();
+    h.update(vault_id.as_slice());
+    for r in outputs {
+        // serde_json maps are ordered, so this encoding is canonical for a given value.
+        let package = serde_json::to_vec(&r.package)?;
+        h.update(&r.index.to_be_bytes());
+        h.update(&u64::try_from(package.len())?.to_be_bytes());
+        h.update(&package);
+        h.update(r.sk_commitment.as_slice());
+    }
+    let mut out = [0u8; 32];
+    out.copy_from_slice(h.finalize().as_bytes());
+    Ok(out)
+}
+
+/// Associated data of the sealed round-2 messages of one DKG attempt: the vault id and the
+/// round-1 transcript hash.
+fn context(vault_id: &B256, transcript: &[u8; 32]) -> Vec<u8> {
     let mut c = b"zecured/dkg2/".to_vec();
     c.extend_from_slice(vault_id.as_slice());
+    c.extend_from_slice(transcript);
     c
 }
 
@@ -125,12 +167,16 @@ pub fn check_open(cfg: &NetworkConfig, store: &Store, open: &VaultOpen, now: u64
     ensure!(cfg.denominations.contains(&open.amount), "not a standard denomination");
     ensure!(!store.vaults.contains_key(&open.vault_id), "vault id already used");
     ensure!(!store.is_bound(open.account, open.owner), "account or owner already has a vault");
+    // M-2: the vault is scanned from its birthday, so a birthday ahead of our own tip could
+    // miss a deposit mined below it (never attested, never refundable).
+    ensure!(open.birthday <= zcash_tip, "birthday {} is ahead of our tip {zcash_tip}", open.birthday);
     ensure!(
-        open.birthday.abs_diff(zcash_tip) <= MAX_TIP_SKEW,
-        "birthday {} too far from our tip {zcash_tip}",
+        zcash_tip - open.birthday <= MAX_TIP_SKEW,
+        "birthday {} too far behind our tip {zcash_tip}",
         open.birthday
     );
-    ensure!(open.expiry_height == open.birthday + cfg.vault_expiry_blocks, "unexpected expiry height");
+    let expiry = open.birthday.checked_add(cfg.vault_expiry_blocks).context("expiry height overflow")?;
+    ensure!(open.expiry_height == expiry, "unexpected expiry height");
     Ok(())
 }
 
@@ -153,6 +199,9 @@ pub fn round1(index: u16, open: VaultOpen) -> Result<(Pending, Round1Out)> {
             contribution,
             round1_secret: Some(secret),
             round2_secret: None,
+            round1_out: out.clone(),
+            transcript: None,
+            created: Instant::now(),
         },
         out,
     ))
@@ -174,10 +223,22 @@ pub fn round2(
     pending: &mut Pending,
     input: &Round2In,
 ) -> Result<Round2Out> {
+    ensure!(input.vault_id == pending.open.vault_id, "vault id mismatch");
+    let signers: BTreeSet<u16> = cfg.nodes.iter().map(|n| n.index).collect();
+    let senders: BTreeSet<u16> = input.round1.iter().map(|r| r.index).collect();
+    ensure!(
+        input.round1.len() == signers.len() && senders == signers,
+        "need exactly one round-1 output from every signer"
+    );
+    let mine = input.round1.iter().find(|r| r.index == index).context("our round-1 output is missing")?;
+    ensure!(*mine == pending.round1_out, "our round-1 output was altered");
+    let transcript = transcript_hash(&input.vault_id, &input.round1)?;
     let secret = pending.round1_secret.take().context("round 1 not run or round 2 repeated")?;
     let (secret2, packages) =
         dkg::part2(secret, &others_round1(index, &input.round1)?).map_err(|e| anyhow!("dkg part2: {e}"))?;
     pending.round2_secret = Some(secret2);
+    pending.transcript = Some(transcript);
+    let associated_data = context(&input.vault_id, &transcript);
     let mut sealed = BTreeMap::new();
     for node in cfg.nodes.iter().filter(|n| n.index != index) {
         let package = packages
@@ -187,7 +248,7 @@ pub fn round2(
             package: serde_json::to_value(package)?,
             contribution: B256::from(pending.contribution),
         })?;
-        sealed.insert(node.index, envelope::seal(me, &node.x25519_public()?, &context(&input.vault_id), &payload)?);
+        sealed.insert(node.index, envelope::seal(me, &node.x25519_public()?, &associated_data, &payload)?);
     }
     Ok(Round2Out { index, sealed })
 }
@@ -203,13 +264,19 @@ pub fn round3(
     let secret2 = pending.round2_secret.as_ref().context("round 2 not run")?;
     let vault_id = pending.open.vault_id;
     ensure!(input.vault_id == vault_id, "vault id mismatch");
+    let transcript = pending.transcript.context("round 2 not run")?;
+    ensure!(
+        transcript_hash(&vault_id, &input.round1)? == transcript,
+        "the round-1 transcript changed since round 2"
+    );
+    let associated_data = context(&vault_id, &transcript);
 
     let mut contributions: BTreeMap<u16, [u8; 32]> = BTreeMap::new();
     contributions.insert(index, pending.contribution);
     let mut received = BTreeMap::new();
     for (&sender, sealed) in &input.sealed {
         let node = cfg.node(sender)?;
-        let plain = envelope::open(me, &node.x25519_public()?, &context(&vault_id), sealed)?;
+        let plain = envelope::open(me, &node.x25519_public()?, &associated_data, sealed)?;
         let payload: Round2Payload = serde_json::from_slice(&plain)?;
         let commitment =
             input.round1.iter().find(|r| r.index == sender).context("missing round-1 output")?.sk_commitment;
@@ -258,6 +325,73 @@ pub fn round3(
         refunds: vec![],
         used_nonces: vec![],
         inflight: None,
+        confirmed: vec![],
+        last_event: None,
     })?;
     Ok(out)
+}
+
+#[cfg(test)]
+mod tests {
+    use alloy::signers::local::PrivateKeySigner;
+    use zecured_base::sign_typed;
+
+    use super::*;
+
+    fn cfg() -> NetworkConfig {
+        NetworkConfig {
+            lightwalletd_url: String::new(),
+            base_rpc_url: String::new(),
+            chain_id: 84_532,
+            registry: Address::repeat_byte(0xaa),
+            adapter: Address::repeat_byte(0xbb),
+            registry_from_block: 0,
+            confirmations: 3,
+            vault_expiry_blocks: 288,
+            denominations: vec![1_000_000],
+            nodes: vec![],
+            coordinator: None,
+            attest_delay_max_blocks: 0,
+        }
+    }
+
+    fn open(owner: &PrivateKeySigner, birthday: u32) -> VaultOpen {
+        let cfg = cfg();
+        let msg = OpenVault {
+            owner: owner.address(),
+            account: Address::repeat_byte(2),
+            amount: 1_000_000,
+            requestId: B256::repeat_byte(3),
+            deadline: u64::MAX,
+        };
+        VaultOpen {
+            vault_id: B256::repeat_byte(7),
+            owner: owner.address(),
+            account: msg.account,
+            amount: msg.amount,
+            request_id: msg.requestId,
+            deadline: msg.deadline,
+            signature: sign_typed(owner, &registry_domain(cfg.chain_id, cfg.registry), &msg).unwrap(),
+            birthday,
+            expiry_height: birthday.wrapping_add(cfg.vault_expiry_blocks),
+        }
+    }
+
+    /// M-2 (security review 2026-10-11): a birthday ahead of our tip used to be accepted (up to
+    /// +20 blocks); a prompt deposit mined below it would never be scanned.
+    #[test]
+    fn birthday_must_not_be_ahead_of_our_tip() {
+        let dir = std::env::temp_dir().join(format!("zecured-dkg-open-{}", std::process::id()));
+        let store = Store::open(&dir).unwrap();
+        let (cfg, owner, tip) = (cfg(), PrivateKeySigner::random(), 4_486_000);
+        let check = |birthday: u32, tip: u32| check_open(&cfg, &store, &open(&owner, birthday), 1_000, tip);
+        check(tip, tip).unwrap();
+        check(tip - MAX_TIP_SKEW, tip).unwrap();
+        assert!(check(tip + 1, tip).is_err());
+        assert!(check(tip + MAX_TIP_SKEW, tip).is_err());
+        assert!(check(tip - MAX_TIP_SKEW - 1, tip).is_err());
+        // I-4: no overflow on extreme heights.
+        assert!(check(u32::MAX, u32::MAX).is_err());
+        std::fs::remove_dir_all(&dir).unwrap();
+    }
 }

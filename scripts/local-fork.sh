@@ -50,8 +50,10 @@ cmd_start() {
   if running anvil; then
     echo "anvil already running"
   else
+    # --prune-history: keep only recent states (like a public RPC), so the fork's disk use
+    # stays flat instead of growing by gigabytes a day.
     anvil --fork-url "$FORK_URL" --chain-id 84532 --port 8545 --block-time 2 \
-      --compute-units-per-second 15 --fork-retry-backoff 1000 --retries 10 --silent \
+      --compute-units-per-second 15 --fork-retry-backoff 1000 --retries 10 --prune-history 300 --silent \
       > "$STATE/anvil.log" 2>&1 &
     echo $! > "$STATE/anvil.pid"
     wait_for anvil "cast chain-id --rpc-url $RPC"

@@ -1,6 +1,6 @@
 //! Five nodes run the vault DKG through a relaying "coordinator" that only moves JSON
 //! messages: all five derive the same vault keys and address, and a tampered contribution
-//! is detected.
+//! is detected, as is a relay that shows signers different round-1 transcripts (M-4).
 
 use std::collections::BTreeMap;
 
@@ -9,7 +9,7 @@ use rand_core_06::OsRng;
 use x25519_dalek::{PublicKey, StaticSecret};
 use zecured_node::{
     config::{NetworkConfig, NodeInfo},
-    dkg::{self, Round1Out, Round2In, Round3In, VaultOpen},
+    dkg::{self, Round1Out, Round2In, Round3In, Sealed, VaultOpen},
     store::Store,
 };
 
@@ -152,4 +152,114 @@ fn tampered_relay_is_detected() {
     let outs = run_dkg(&cfg, &mut nodes, true);
     assert!(outs[0].is_err(), "node 1 must reject the altered message");
     assert!(nodes[0].store.vaults.is_empty());
+}
+
+/// M-4 (security review 2026-10-11): a malicious coordinator and one malicious signer (5) show
+/// two groups of honest signers two different round-1 outputs of signer 5. Before sealed
+/// messages were bound to the round-1 transcript, each group completed the DKG with its own
+/// group key and `sk`: two vault addresses, the user paying one that half the signers never
+/// watch. Now honest signers cannot open each other's messages, and all of them refuse.
+#[test]
+fn equivocated_round1_creates_no_vault() {
+    let (cfg, mut nodes) = setup();
+    let vault_id = open().vault_id;
+    let mut pending = BTreeMap::new();
+    let mut honest = vec![];
+    for n in nodes.iter().take(4) {
+        let (p, out) = dkg::round1(n.index, open()).unwrap();
+        pending.insert(n.index, p);
+        honest.push(out);
+    }
+    let (mut p5a, out5a) = dkg::round1(5, open()).unwrap();
+    let (mut p5b, out5b) = dkg::round1(5, open()).unwrap();
+    let list_a: Vec<Round1Out> = honest.iter().cloned().chain([out5a]).collect();
+    let list_b: Vec<Round1Out> = honest.iter().cloned().chain([out5b]).collect();
+    let in_group_a = |i: u16| i == 1 || i == 2;
+    let view = |i: u16| if in_group_a(i) { list_a.clone() } else { list_b.clone() };
+
+    let mut to: BTreeMap<u16, BTreeMap<u16, Sealed>> = BTreeMap::new();
+    for n in nodes.iter().take(4) {
+        let input = Round2In {
+            vault_id,
+            round1: view(n.index),
+        };
+        let out = dkg::round2(&cfg, &n.secret, n.index, pending.get_mut(&n.index).unwrap(), &input).unwrap();
+        for (recipient, sealed) in out.sealed {
+            to.entry(recipient).or_default().insert(n.index, sealed);
+        }
+    }
+    let secret5 = &nodes[4].secret;
+    for (p, list, group_a) in [(&mut p5a, &list_a, true), (&mut p5b, &list_b, false)] {
+        let input = Round2In {
+            vault_id,
+            round1: list.clone(),
+        };
+        for (recipient, sealed) in dkg::round2(&cfg, secret5, 5, p, &input).unwrap().sealed {
+            if in_group_a(recipient) == group_a {
+                to.entry(recipient).or_default().insert(5, sealed);
+            }
+        }
+    }
+
+    for n in nodes.iter_mut().take(4) {
+        let input = Round3In {
+            vault_id,
+            round1: view(n.index),
+            sealed: to.remove(&n.index).unwrap_or_default(),
+        };
+        let res = dkg::round3(&cfg, &n.secret, n.index, pending.remove(&n.index).unwrap(), &input, &mut n.store);
+        assert!(res.is_err(), "signer {} must refuse", n.index);
+        assert!(n.store.vaults.is_empty());
+    }
+}
+
+/// M-4: the round-1 transcript relayed in round 3 must be the one of round 2, and a signer's
+/// own round-1 output must be relayed unchanged.
+#[test]
+fn round1_transcript_is_fixed_after_round2() {
+    let (cfg, mut nodes) = setup();
+    let vault_id = open().vault_id;
+    let mut pending = BTreeMap::new();
+    let mut r1: Vec<Round1Out> = vec![];
+    for n in nodes.iter() {
+        let (p, out) = dkg::round1(n.index, open()).unwrap();
+        pending.insert(n.index, p);
+        r1.push(out);
+    }
+    assert_eq!(r1[0].index, 1);
+
+    // Round 2 with node 1's own output altered: refused (before any state is used up).
+    let mut altered = r1.clone();
+    altered[0].sk_commitment = B256::repeat_byte(0xee);
+    let bad = Round2In {
+        vault_id,
+        round1: altered,
+    };
+    let err = dkg::round2(&cfg, &nodes[0].secret, 1, pending.get_mut(&1).unwrap(), &bad).unwrap_err();
+    assert!(err.to_string().contains("altered"), "{err}");
+
+    let r2_in = Round2In {
+        vault_id,
+        round1: r1.clone(),
+    };
+    let mut to: BTreeMap<u16, BTreeMap<u16, Sealed>> = BTreeMap::new();
+    for n in nodes.iter() {
+        let out = dkg::round2(&cfg, &n.secret, n.index, pending.get_mut(&n.index).unwrap(), &r2_in).unwrap();
+        for (recipient, sealed) in out.sealed {
+            to.entry(recipient).or_default().insert(n.index, sealed);
+        }
+    }
+    // Round 3 for node 1 with its own (otherwise unused) round-1 entry altered: the old code
+    // ignored it; the transcript no longer matches round 2's.
+    let mut changed = r1.clone();
+    changed[0].sk_commitment = B256::repeat_byte(0xee);
+    let input = Round3In {
+        vault_id,
+        round1: changed,
+        sealed: to.remove(&1).unwrap(),
+    };
+    let n1 = &mut nodes[0];
+    let err = dkg::round3(&cfg, &n1.secret, 1, pending.remove(&1).unwrap(), &input, &mut n1.store).unwrap_err();
+    assert!(err.to_string().contains("transcript"), "{err}");
+    assert!(n1.store.vaults.is_empty());
 }

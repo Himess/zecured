@@ -6,6 +6,11 @@ rust-version.workspace = true
 license.workspace = true
 publish.workspace = true
 
+[features]
+# TEST ONLY: honour the `test-withhold-next-broadcast` flag file (docs/TESTING.md, expiry and
+# rebuild path). Never enable it in a demo or production build.
+test-hooks = []
+
 [dependencies]
 zecured-node = { path = "../node" }
 zecured-zcash-ops = { path = "../zcash-ops" }
@@ -18,6 +23,9 @@ reddsa.workspace = true
 zcash_protocol.workspace = true
 zcash_primitives.workspace = true
 zcash_keys.workspace = true
+# GetTransaction status codes (I-5); both are already dependencies of zecured-zcash-ops.
+zcash_client_backend.workspace = true
+tonic.workspace = true
 alloy.workspace = true
 reqwest.workspace = true
 tokio.workspace = true
@@ -29,3 +37,6 @@ hex.workspace = true
 rand_core_06.workspace = true
 base64 = "0.22"
 futures = "0.3"
+
+[dev-dependencies]
+axum.workspace = true

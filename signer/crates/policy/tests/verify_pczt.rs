@@ -2,8 +2,8 @@
 //!
 //! The honest PCZT for a plan passes; every deviation a coordinator could try (other
 //! recipient, split payment, OVK on a third-party output, extra or missing inputs, bad
-//! expiry, fee games) is refused. No proving is needed: all checked fields exist once the
-//! PCZT is built.
+//! expiry, fee games, an undecryptable third-party output, an unfinalized PCZT) is refused.
+//! No proving is needed: all checked fields exist once the PCZT is built and IO-finalized.
 
 use incrementalmerkletree::frontier::CommitmentTree;
 use orchard::{
@@ -16,6 +16,10 @@ use orchard::{
 use pasta_curves::{
     group::ff::{Field, PrimeField},
     pallas,
+};
+use pczt::roles::{
+    io_finalizer::IoFinalizer,
+    low_level_signer::{OrchardParseError, Signer as LowLevelSigner},
 };
 use rand_core_06::{OsRng, RngCore};
 use zcash_protocol::{
@@ -93,6 +97,7 @@ fn notes(fvk: &FullViewingKey, values: &[u64]) -> (Vec<ReceivedNote>, orchard::A
             scope: Scope::External,
             witness: IronwoodWitness::from_tree(tree.clone()).unwrap(),
             spent_at: None,
+            spent_in: None,
         });
     }
     (out, orchard::Anchor::from(tree.root()))
@@ -133,10 +138,72 @@ fn plan(liquidator: Address, seized: u64) -> PayoutPlan {
     }
 }
 
+/// The PCZT as the coordinator sends it: built and IO-finalized (dummy spends signed).
 fn build(fvk: &FullViewingKey, anchor: orchard::Anchor, notes: &[&ReceivedNote], payments: &[Payment]) -> pczt::Pczt {
+    IoFinalizer::new(build_unfinalized(fvk, anchor, notes, payments))
+        .finalize_io(rand_010::rng())
+        .unwrap()
+}
+
+fn build_unfinalized(
+    fvk: &FullViewingKey,
+    anchor: orchard::Anchor,
+    notes: &[&ReceivedNote],
+    payments: &[Payment],
+) -> pczt::Pczt {
     spend::build(&Network::TestNetwork, BlockHeight::from_u32(TARGET), fvk, anchor, notes, payments)
         .unwrap()
         .pczt
+}
+
+/// `(epk, enc_ciphertext)` of the action whose output pays `to` a non-zero value.
+fn output_ciphertext(pczt: &pczt::Pczt, to: &Address) -> ([u8; 32], [u8; 580]) {
+    let mut found = None;
+    LowLevelSigner::new(pczt.clone())
+        .sign_ironwood_with(|_, bundle, _| -> Result<(), OrchardParseError> {
+            for a in bundle.actions() {
+                let paid = a.output().value().is_some_and(|v| v.inner() > 0);
+                if paid && a.output().recipient().as_ref() == Some(to) {
+                    let e = a.output().encrypted_note();
+                    found = Some((e.epk_bytes, e.enc_ciphertext.0));
+                }
+            }
+            Ok(())
+        })
+        .unwrap();
+    found.expect("an output paying this address")
+}
+
+/// The PCZT a malicious coordinator would send after rewriting the ephemeral key and note
+/// ciphertext of the output paying `to`. The v2 encoding normally stores an honest ciphertext
+/// as its memo plaintext (re-encrypted and checked when parsed); a rewritten one has to be
+/// stored verbatim, which the parser accepts as is.
+fn with_output(pczt: pczt::Pczt, to: &Address, tamper: impl Fn(&mut [u8; 32], &mut [u8; 580])) -> pczt::Pczt {
+    let (epk, mut ct) = output_ciphertext(&pczt, to);
+    let mut new_epk = epk;
+    tamper(&mut new_epk, &mut ct);
+    let bytes = pczt.serialize().unwrap();
+    let start = bytes.windows(32).position(|w| w == epk.as_slice()).expect("epk in the encoding");
+    let at = start + 32;
+    // `EncCiphertext`: variant 0 = Encrypted(Vec<u8>), 1 = MemoPlaintext(Vec<u8>).
+    let old_len = match bytes[at] {
+        0 => {
+            assert_eq!(bytes[at + 1..at + 3], [0xC4, 0x04], "580 as a varint");
+            3 + 580
+        }
+        1 => {
+            let memo_len = usize::from(bytes[at + 1]);
+            assert!(memo_len < 0x80, "single-byte varint");
+            2 + memo_len
+        }
+        tag => panic!("unexpected enc_ciphertext variant {tag}"),
+    };
+    let mut patched = bytes[..start].to_vec();
+    patched.extend_from_slice(&new_epk);
+    patched.extend_from_slice(&[0x00, 0xC4, 0x04]);
+    patched.extend_from_slice(&ct);
+    patched.extend_from_slice(&bytes[at + old_len..]);
+    pczt::Pczt::parse(&patched).expect("still a well-formed PCZT")
 }
 
 fn honest_payments(p: &PayoutPlan) -> Vec<Payment> {
@@ -268,4 +335,43 @@ fn wrong_vault_is_refused() {
     let pczt = build(&fvk, anchor, &[&ns[0]], &honest_payments(&p));
     let stranger = vault_fvk();
     assert!(verify_payout(&pczt, &stranger, &inputs(&[&ns[0]]), &p, &expect()).is_err());
+}
+
+/// H-4 (security review 2026-10-11): the coordinator garbles the liquidator's note ciphertext
+/// (or its ephemeral key). Commitment, value and recipient still verify and the transaction
+/// would be valid, but the liquidator could never find or spend the note.
+#[test]
+fn undecryptable_third_party_output_is_refused() {
+    let fvk = vault_fvk();
+    let (ns, anchor) = notes(&fvk, &[NOTE]);
+    let liq = other();
+    let p = plan(liq, 3_500_000);
+    let honest = build(&fvk, anchor, &[&ns[0]], &honest_payments(&p));
+    let ins = inputs(&[&ns[0]]);
+
+    // Re-encoding the honest ciphertext verbatim keeps the PCZT valid (the patching is sound).
+    let same = with_output(honest.clone(), &liq, |_, _| {});
+    verify_payout(&same, &fvk, &ins, &p, &expect()).unwrap();
+
+    let garbled = with_output(honest.clone(), &liq, |_, ct| ct[100] ^= 0x01);
+    let res = verify_payout(&garbled, &fvk, &ins, &p, &expect());
+    assert!(matches!(res, Err(VerifyError::Undecryptable(_))), "{res:?}");
+
+    // Another valid ephemeral key (the change output's): the AEAD key no longer matches.
+    let (change_epk, _) = output_ciphertext(&honest, &fvk.address_at(0u32, Scope::Internal));
+    let wrong_epk = with_output(honest, &liq, |epk, _| *epk = change_epk);
+    let res = verify_payout(&wrong_epk, &fvk, &ins, &p, &expect());
+    assert!(matches!(res, Err(VerifyError::Undecryptable(_))), "{res:?}");
+}
+
+/// I-1: a PCZT whose dummy spends still carry their spending keys is not IO-finalized; signers
+/// must reject it.
+#[test]
+fn unfinalized_pczt_is_refused() {
+    let fvk = vault_fvk();
+    let (ns, anchor) = notes(&fvk, &[NOTE]);
+    let p = plan(other(), 3_500_000);
+    let pczt = build_unfinalized(&fvk, anchor, &[&ns[0]], &honest_payments(&p));
+    let res = verify_payout(&pczt, &fvk, &inputs(&[&ns[0]]), &p, &expect());
+    assert!(matches!(res, Err(VerifyError::DummySpendKey(_))), "{res:?}");
 }

@@ -47,8 +47,15 @@ tonic = { version = "0.14", default-features = false, features = ["transport", "
 
 # Halo 2 proving and note trial-decryption are unusably slow without optimization;
 # optimize dependencies even in dev builds, keep our own crates quick to compile.
+# Dependencies carry no debug info and our crates only line tables (enough for backtraces):
+# with full debug info a dev build of this workspace takes over 20 GB of disk.
+[profile.dev]
+debug = "line-tables-only"
+
 [profile.dev.package."*"]
 opt-level = 3
+debug = false
 
 [profile.test.package."*"]
 opt-level = 3
+debug = false

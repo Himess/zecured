@@ -85,7 +85,7 @@ impl Deployment {
 
 fn owner(wallet: &Path, vault: &B256) -> Result<PrivateKeySigner> {
     let path = wallet.with_file_name(format!("loan-{}.json", hex::encode(&vault[..8])));
-    let loan: serde_json::Value = serde_json::from_slice(&std::fs::read(&path)?)?;
+    let loan: serde_json::Value = crate::read_secret_json(&path)?;
     Ok(loan["owner_key"].as_str().context("owner_key")?.parse()?)
 }
 

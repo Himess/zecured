@@ -27,6 +27,10 @@ thiserror.workspace = true
 tonic.workspace = true
 tokio.workspace = true
 
+[features]
+# DEMO ONLY: helpers for the threshold demo's "compromised" signer (see zecured-node's `demo`).
+demo = []
+
 [dev-dependencies]
 zecured-threshold = { path = "../threshold" }
 rand_core_06 = { workspace = true }

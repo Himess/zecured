@@ -23,7 +23,7 @@ use zcash_client_backend::proto::{
 use zcash_note_encryption::try_compact_note_decryption;
 use zcash_protocol::TxId;
 
-use crate::lwd::LwdClient;
+use crate::lwd::{self, LwdClient};
 
 /// Depth of the Orchard-protocol note commitment tree (shared shape with Ironwood).
 pub const TREE_DEPTH: u8 = orchard::NOTE_COMMITMENT_TREE_DEPTH as u8;
@@ -54,6 +54,8 @@ pub struct ReceivedNote {
     pub witness: IronwoodWitness,
     /// Height of the block that spent this note, if seen.
     pub spent_at: Option<u32>,
+    /// Id of the transaction that spent this note, if seen.
+    pub spent_in: Option<TxId>,
 }
 
 impl ReceivedNote {
@@ -127,7 +129,12 @@ impl ScanState {
             .await
             .map_err(|s| anyhow!("GetBlockRange: {s}"))?
             .into_inner();
-        while let Some(block) = stream.message().await.map_err(|s| anyhow!("GetBlockRange stream: {s}"))? {
+        // The request timeout only covers the start of the stream; bound every message too (M-7).
+        while let Some(block) = tokio::time::timeout(lwd::STREAM_MESSAGE_TIMEOUT, stream.message())
+            .await
+            .map_err(|_| anyhow!("GetBlockRange stream stalled"))?
+            .map_err(|s| anyhow!("GetBlockRange stream: {s}"))?
+        {
             self.scan_block(&block)?;
         }
         ensure!(self.scanned_to == to, "server returned blocks up to {} instead of {to}", self.scanned_to);
@@ -136,18 +143,24 @@ impl ScanState {
 
     fn scan_block(&mut self, block: &CompactBlock) -> Result<()> {
         let height = u32::try_from(block.height).context("block height")?;
-        ensure!(height == self.scanned_to + 1, "expected block {}, got {height}", self.scanned_to + 1);
+        let expected = self.scanned_to.checked_add(1).context("block height overflow")?;
+        ensure!(height == expected, "expected block {expected}, got {height}");
         // A reorg replaced a block we already scanned: the caller must rescan.
         ensure!(
             self.last_hash.is_empty() || block.prev_hash == self.last_hash,
             "chain reorganized below height {height}"
         );
+        // Validate what the server sent before changing any state (`CompactTx::txid` panics on
+        // a malformed id).
+        ensure!(block.vtx.iter().all(|tx| tx.txid.len() == 32), "malformed transaction id in block {height}");
         for tx in &block.vtx {
+            let txid = tx.txid();
             for (action_index, action) in tx.ironwood_actions.iter().enumerate() {
                 let nf = action.nf().map_err(|e| anyhow!("action nullifier: {e:?}"))?;
                 for note in self.notes.iter_mut().filter(|n| n.spent_at.is_none()) {
                     if note.nullifier == nf {
                         note.spent_at = Some(height);
+                        note.spent_in = Some(txid);
                     }
                 }
 
@@ -170,13 +183,14 @@ impl ScanState {
                                 tx_index: tx.index,
                                 action_index: u32::try_from(action_index)?,
                             },
-                            txid: tx.txid(),
+                            txid,
                             nullifier: note.nullifier(&self.fvk),
                             note,
                             recipient,
                             scope: *scope,
                             witness,
                             spent_at: None,
+                            spent_in: None,
                         });
                         break;
                     }
@@ -269,5 +283,27 @@ mod tests {
         assert!(s.scan_block(&block(103, 4, 2)).is_err());
         s.scan_block(&block(102, 3, 2)).unwrap();
         assert_eq!(s.scanned_to, 102);
+    }
+
+    #[test]
+    fn malformed_server_data_is_refused_without_panicking() {
+        use zcash_client_backend::proto::compact_formats::CompactTx;
+        let mut s = state_at(99);
+        let mut b = block(100, 1, 0);
+        b.vtx = vec![
+            CompactTx {
+                txid: vec![5; 32],
+                ..Default::default()
+            },
+            CompactTx {
+                txid: vec![5; 31],
+                ..Default::default()
+            },
+        ];
+        assert!(s.scan_block(&b).is_err());
+        assert_eq!(s.scanned_to, 99, "nothing applied");
+        // A server claiming the highest representable height cannot overflow the scanner.
+        let mut s = state_at(u32::MAX);
+        assert!(s.scan_block(&block(u32::MAX, 1, 0)).is_err());
     }
 }

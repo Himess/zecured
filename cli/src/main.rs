@@ -6,6 +6,7 @@
 
 use std::{
     fs,
+    io::Write,
     path::{Path, PathBuf},
     time::{SystemTime, UNIX_EPOCH},
 };
@@ -200,11 +201,72 @@ fn zats(zec: f64) -> Result<u64> {
     Ok((zec * ZATS_PER_ZEC).round() as u64)
 }
 
+/// Writes `v` as JSON to `path`, replacing it atomically. Wallet and loan files hold spending
+/// and owner keys, so the file is readable by its owner only (0600) and missing directories
+/// are created 0700 (L-3).
 fn write_json<T: Serialize>(path: &Path, v: &T) -> Result<()> {
-    if let Some(d) = path.parent() {
-        fs::create_dir_all(d)?;
+    if let Some(d) = path.parent().filter(|d| !d.as_os_str().is_empty()) {
+        create_private_dir(d)?;
     }
-    fs::write(path, serde_json::to_vec_pretty(v)?)?;
+    let tmp = path.with_extension("tmp");
+    {
+        let mut f = create_private_file(&tmp)?;
+        f.write_all(&serde_json::to_vec_pretty(v)?)?;
+        f.sync_all()?;
+    }
+    fs::rename(&tmp, path).with_context(|| format!("write {}", path.display()))?;
+    Ok(())
+}
+
+#[cfg(unix)]
+fn create_private_dir(d: &Path) -> Result<()> {
+    use std::os::unix::fs::DirBuilderExt;
+    fs::DirBuilder::new()
+        .recursive(true)
+        .mode(0o700)
+        .create(d)
+        .with_context(|| format!("create {}", d.display()))?;
+    Ok(())
+}
+
+#[cfg(not(unix))]
+fn create_private_dir(d: &Path) -> Result<()> {
+    Ok(fs::create_dir_all(d)?)
+}
+
+#[cfg(unix)]
+fn create_private_file(path: &Path) -> Result<fs::File> {
+    use std::os::unix::fs::{OpenOptionsExt, PermissionsExt};
+    let f = fs::OpenOptions::new()
+        .write(true)
+        .create(true)
+        .truncate(true)
+        .mode(0o600)
+        .open(path)
+        .with_context(|| format!("create {}", path.display()))?;
+    // `mode` only applies to a new file; a leftover one keeps its permissions.
+    f.set_permissions(fs::Permissions::from_mode(0o600))?;
+    Ok(f)
+}
+
+#[cfg(not(unix))]
+fn create_private_file(path: &Path) -> Result<fs::File> {
+    Ok(fs::File::create(path)?)
+}
+
+/// Restricts a key file written by an earlier version (with the default umask) to its owner.
+#[cfg(unix)]
+fn restrict(path: &Path) -> Result<()> {
+    use std::os::unix::fs::PermissionsExt;
+    if fs::metadata(path)?.permissions().mode() & 0o077 != 0 {
+        fs::set_permissions(path, fs::Permissions::from_mode(0o600))?;
+        eprintln!("note: restricted {} to its owner (0600)", path.display());
+    }
+    Ok(())
+}
+
+#[cfg(not(unix))]
+fn restrict(_: &Path) -> Result<()> {
     Ok(())
 }
 
@@ -212,8 +274,14 @@ fn read_json<T: for<'de> Deserialize<'de>>(path: &Path) -> Result<T> {
     Ok(serde_json::from_slice(&fs::read(path).with_context(|| format!("read {}", path.display()))?)?)
 }
 
+/// Reads a wallet or loan file (they hold keys), restricting its permissions first.
+pub(crate) fn read_secret_json<T: for<'de> Deserialize<'de>>(path: &Path) -> Result<T> {
+    restrict(path).with_context(|| format!("read {}", path.display()))?;
+    read_json(path)
+}
+
 fn load_wallet(path: &Path) -> Result<Wallet> {
-    let f: WalletFile = read_json(path)?;
+    let f: WalletFile = read_secret_json(path)?;
     let bytes: [u8; 32] = hex::decode(&f.spending_key)?.try_into().map_err(|_| anyhow!("bad key"))?;
     let sk = Option::<SpendingKey>::from(SpendingKey::from_bytes(bytes)).context("invalid spending key")?;
     Ok(Wallet {
@@ -421,7 +489,7 @@ async fn loan(wallet: &Path, lwd_url: &str, backend: &str, cmd: LoanCmd) -> Resu
             println!("{}", serde_json::to_string_pretty(&v)?);
         }
         LoanCmd::Deposit { vault, amount } => {
-            let l: LoanFile = read_json(&loan_path(wallet, &vault))?;
+            let l: LoanFile = read_secret_json(&loan_path(wallet, &vault))?;
             let w = load_wallet(wallet)?;
             let amount = match amount {
                 Some(a) => zats(a)?,
@@ -563,7 +631,7 @@ async fn destination(wallet: &Path, backend: &str, vault: &B256, to: Option<Stri
 
 /// Loan file, owner key and destination (defaults to the wallet's own address).
 fn owner_ctx(wallet: &Path, vault: &B256, to: Option<String>) -> Result<(LoanFile, PrivateKeySigner, String)> {
-    let mut l: LoanFile = read_json(&loan_path(wallet, vault))?;
+    let mut l: LoanFile = read_secret_json(&loan_path(wallet, vault))?;
     // Sign under the network's current Registry domain (the signers verify against it).
     if let Ok(net) = network_params() {
         l.registry = net.registry;
@@ -585,4 +653,50 @@ fn commitment(salt: &[u8; 32], receiver: &[u8; 43]) -> [u8; 32] {
     let mut preimage = salt.to_vec();
     preimage.extend_from_slice(receiver);
     alloy::primitives::keccak256(preimage).0
+}
+
+#[cfg(all(test, unix))]
+mod tests {
+    use std::os::unix::fs::PermissionsExt;
+
+    use super::*;
+
+    struct TempDir(PathBuf);
+
+    impl Drop for TempDir {
+        fn drop(&mut self) {
+            let _ = fs::remove_dir_all(&self.0);
+        }
+    }
+
+    fn temp_dir() -> TempDir {
+        TempDir(std::env::temp_dir().join(format!("zecured-cli-test-{}", hex::encode(fresh_salt()))))
+    }
+
+    fn mode(p: &Path) -> u32 {
+        fs::metadata(p).unwrap().permissions().mode() & 0o777
+    }
+
+    /// L-3: wallet and loan files are 0600 and the directories created for them 0700.
+    #[test]
+    fn key_files_are_private() {
+        let dir = temp_dir();
+        let wallet = dir.0.join("data").join("wallet").join("wallet.json");
+        write_json(&wallet, &json!({ "spending_key": "00", "birthday": 1 })).unwrap();
+        assert_eq!(mode(&wallet), 0o600);
+        assert_eq!(mode(wallet.parent().unwrap()), 0o700);
+        assert_eq!(mode(&dir.0.join("data")), 0o700);
+
+        // A file left world-readable by an earlier version is tightened when rewritten...
+        let loan = wallet.with_file_name("loan-00.json");
+        fs::write(&loan, b"{}").unwrap();
+        fs::set_permissions(&loan, fs::Permissions::from_mode(0o644)).unwrap();
+        write_json(&loan, &json!({ "owner_key": "11" })).unwrap();
+        assert_eq!(mode(&loan), 0o600);
+        // ...or when read.
+        fs::set_permissions(&loan, fs::Permissions::from_mode(0o644)).unwrap();
+        let v: serde_json::Value = read_secret_json(&loan).unwrap();
+        assert_eq!(v["owner_key"], "11");
+        assert_eq!(mode(&loan), 0o600);
+    }
 }

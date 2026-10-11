@@ -7303,6 +7303,7 @@ dependencies = [
  "serde",
  "serde_json",
  "tokio",
+ "tower",
  "tower-http",
  "tracing",
  "tracing-subscriber",
@@ -7339,7 +7340,9 @@ dependencies = [
  "tokio",
  "tracing",
  "tracing-subscriber",
+ "zcash_protocol",
  "zecured-base",
+ "zecured-zcash-ops",
 ]
 
 [[package]]
@@ -7348,6 +7351,7 @@ version = "0.1.0"
 dependencies = [
  "alloy",
  "anyhow",
+ "axum",
  "base64 0.22.1",
  "futures",
  "hex",
@@ -7359,7 +7363,9 @@ dependencies = [
  "serde",
  "serde_json",
  "tokio",
+ "tonic",
  "tracing",
+ "zcash_client_backend",
  "zcash_keys",
  "zcash_primitives",
  "zcash_protocol",
@@ -7418,6 +7424,7 @@ dependencies = [
  "serde",
  "sha3 0.10.9",
  "thiserror 2.0.21",
+ "zcash_note_encryption",
  "zcash_primitives",
  "zcash_protocol",
  "zecured-threshold",

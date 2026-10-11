@@ -205,16 +205,19 @@ pub fn signing_requests(pczt: &Pczt, spend_action_indices: &[usize]) -> Result<(
     Ok((sighash, requests))
 }
 
-/// The sighash and the randomizer of every non-dummy spend in a PCZT, without any policy
-/// check. DEMO ONLY: used by a signer node switched to "compromised" mode to show that two
-/// misbehaving signers cannot move funds on their own.
+/// The sighash and the randomizer of every spend in a PCZT that still needs a signature,
+/// without any policy check. DEMO ONLY (feature `demo`): used by a signer node switched to
+/// "compromised" mode to show that two misbehaving signers cannot move funds on their own.
+#[cfg(feature = "demo")]
 pub fn signing_requests_all(pczt: &Pczt) -> Result<([u8; 32], Vec<SpendAuthRequest>)> {
     let mut requests = vec![];
     LowLevelSigner::new(pczt.clone())
         .sign_ironwood_with(|_, bundle, _| -> Result<(), OrchardParseError> {
             for (i, action) in bundle.actions().iter().enumerate() {
                 let spend = action.spend();
+                // Dummy spends carry their key until the IO Finalizer signs them with it.
                 if spend.dummy_sk().is_none()
+                    && spend.spend_auth_sig().is_none()
                     && let Some(alpha) = spend.alpha()
                 {
                     requests.push(SpendAuthRequest {

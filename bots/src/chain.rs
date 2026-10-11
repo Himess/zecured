@@ -3,13 +3,14 @@
 use std::path::Path;
 
 use alloy::{
-    primitives::{Address, B256, U256},
+    primitives::{Address, B256, U256, keccak256},
     providers::Provider,
     sol,
 };
-use anyhow::{Context, Result, anyhow, bail};
+use anyhow::{Context, Result, anyhow, bail, ensure};
 use rand_core_06::{OsRng, RngCore};
 use serde_json::{Value, json};
+use zcash_protocol::consensus::Network;
 
 sol! {
     #[derive(Debug)]
@@ -164,23 +165,46 @@ pub async fn position<P: Provider>(p: &P, d: &Deployment, user: Address) -> Resu
     })
 }
 
+/// The raw 43-byte Orchard-protocol (Ironwood) receiver of the bot's unified address.
+pub fn ironwood_receiver(zcash_address: &str) -> Result<[u8; 43]> {
+    Ok(zecured_zcash_ops::keys::ironwood_receiver(&Network::TestNetwork, zcash_address)
+        .context("the bot's Zcash address has no Ironwood (Orchard-protocol) receiver")?
+        .to_raw_address_bytes())
+}
+
+/// `keccak256(salt32 || receiver43)` (docs/INTERFACES.md § 1).
+pub fn commitment(salt: &[u8; 32], receiver: &[u8; 43]) -> B256 {
+    let mut preimage = salt.to_vec();
+    preimage.extend_from_slice(receiver);
+    keccak256(preimage)
+}
+
 /// Reveals a fresh (receiver, salt) for the bot's Ironwood address to the signers through
 /// the backend and returns the salted commitment to put on Base.
-pub async fn fresh_commitment(backend: &str, zcash_address: &str) -> Result<B256> {
+///
+/// The commitment is computed here, and the backend's answer must be the same (M-11): a
+/// backend that answered with a commitment to its own receiver would otherwise get the bot's
+/// ZEC paid to it.
+pub async fn fresh_commitment(backend: &str, zcash_address: &str, receiver: &[u8; 43]) -> Result<B256> {
     let mut salt = [0u8; 32];
     OsRng.fill_bytes(&mut salt);
-    let resp = reqwest::Client::new()
+    let expected = commitment(&salt, receiver);
+    let resp = reqwest::Client::builder()
+        .timeout(std::time::Duration::from_secs(120))
+        .build()?
         .post(format!("{}/recipients", backend.trim_end_matches('/')))
         .json(&json!({ "receiver": zcash_address, "salt": hex::encode(salt) }))
         .send()
         .await
         .context("backend unreachable")?;
     let status = resp.status();
-    let v: Value = resp.json().await?;
+    let v: Value = resp.json().await.unwrap_or(Value::Null);
     if !status.is_success() {
-        bail!("backend refused the recipient: {}", v["error"]);
+        bail!("backend refused the recipient ({})", v["code"].as_str().unwrap_or("no code"));
     }
-    v["commitment"].as_str().context("no commitment")?.parse().map_err(|e| anyhow!("{e}"))
+    let returned: B256 = v["commitment"].as_str().context("no commitment")?.parse().map_err(|e| anyhow!("{e}"))?;
+    ensure!(returned == expected, "the backend answered with a commitment that is not ours; not using it");
+    Ok(expected)
 }
 
 /// Approves `spender` for unlimited USDC once.
@@ -195,7 +219,42 @@ pub async fn ensure_allowance<P: Provider>(p: &P, usdc: Address, owner: Address,
 
 #[cfg(test)]
 mod tests {
+    use axum::{Json, Router, routing::post};
+
     use super::*;
+
+    async fn backend(answer_for: [u8; 43]) -> String {
+        let app = Router::new().route(
+            "/recipients",
+            post(move |Json(b): Json<Value>| async move {
+                let salt: [u8; 32] = hex::decode(b["salt"].as_str().unwrap()).unwrap().try_into().unwrap();
+                Json(json!({ "commitment": commitment(&salt, &answer_for) }))
+            }),
+        );
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        tokio::spawn(async move { axum::serve(listener, app).await.unwrap() });
+        format!("http://{addr}")
+    }
+
+    /// M-11: a backend answering with a commitment to another receiver is caught.
+    #[tokio::test]
+    async fn the_backend_commitment_is_checked() {
+        let ours = [7u8; 43];
+        let honest = backend(ours).await;
+        let c = fresh_commitment(&honest, "utest1ours", &ours).await.unwrap();
+        assert_ne!(c, B256::ZERO);
+        let malicious = backend([8u8; 43]).await;
+        let e = fresh_commitment(&malicious, "utest1ours", &ours).await.unwrap_err();
+        assert!(e.to_string().contains("not ours"), "{e}");
+    }
+
+    #[test]
+    fn commitment_is_keccak_of_salt_then_receiver() {
+        let mut preimage = vec![1u8; 32];
+        preimage.extend([2u8; 43]);
+        assert_eq!(commitment(&[1u8; 32], &[2u8; 43]), keccak256(preimage));
+    }
 
     #[test]
     fn rounding_matches_morpho() {

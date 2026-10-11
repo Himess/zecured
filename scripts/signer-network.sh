@@ -7,6 +7,10 @@
 #   scripts/signer-network.sh stop
 #
 # State lives in signer/data/ (gitignored). Logs: signer/data/logs/.
+#
+# DEMO build: the node binary is built with the `demo` feature and nodes 4 and 5 are started
+# with --demo-allow-compromise, so the demo panel can switch them (and only them) to
+# "compromised" for the threshold demo. "offline" works on every node. Never deploy this build.
 set -euo pipefail
 
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
@@ -45,12 +49,22 @@ admin_token() {
   cat "$DATA/admin-token"
 }
 
+# Nodes that the demo panel may switch to "compromised" (two at most: below the 3-of-5 threshold).
+DEMO_COMPROMISABLE_NODES=" 4 5 "
+
 build() {
-  (cd "$ROOT" && cargo build -q -p zecured-node -p zecured-backend -p zecured-wallet)
+  # Two builds: only the node binary gets the `demo` feature.
+  (cd "$ROOT" && cargo build -q -p zecured-node --features demo && cargo build -q -p zecured-backend -p zecured-wallet)
 }
 
 cmd_init() {
   load_env
+  if [[ -z "${COORDINATOR_ADDRESS:-}" ]]; then
+    echo "COORDINATOR_ADDRESS is not set (the address of COORDINATOR_PRIVATE_KEY, in .env):" >&2
+    echo "nodes refuse to start without it, as every request must be signed by the coordinator (D16)." >&2
+    exit 1
+  fi
+  export COORDINATOR_ADDRESS
   build
   mkdir -p "$DATA"
   local infos=()
@@ -89,8 +103,8 @@ cfg = {
     "vault_expiry_blocks": 288,
     "denominations": [1000000, 5000000],
     "nodes": [json.load(open(p)) for p in infos],
-    # D16: nodes only accept requests signed by the coordinator.
-    "coordinator": os.environ.get("COORDINATOR_ADDRESS") or None,
+    # D16: nodes only accept requests signed by the coordinator (and refuse to start without it).
+    "coordinator": os.environ["COORDINATOR_ADDRESS"],
     # D15: random extra confirmations before attesting (0 for the demo).
     "attest_delay_max_blocks": int(os.environ.get("ATTEST_DELAY_MAX_BLOCKS", "0")),
 }
@@ -110,8 +124,12 @@ cmd_start() {
     if [[ -f "$PIDS/node-$i" ]] && kill -0 "$(cat "$PIDS/node-$i")" 2>/dev/null; then
       continue
     fi
+    local demo_flags=()
+    if [[ "$DEMO_COMPROMISABLE_NODES" == *" $i "* ]]; then
+      demo_flags=(--demo-allow-compromise)
+    fi
     DEMO_ADMIN_TOKEN="$token" nohup "$BIN/zecured-node" run --data "$DATA/node-$i" --config "$NETWORK" \
-      --bind "127.0.0.1:910$i" > "$LOGS/node-$i.log" 2>&1 &
+      --bind "127.0.0.1:910$i" ${demo_flags[@]+"${demo_flags[@]}"} > "$LOGS/node-$i.log" 2>&1 &
     echo $! > "$PIDS/node-$i"
   done
   if ! { [[ -f "$PIDS/backend" ]] && kill -0 "$(cat "$PIDS/backend")" 2>/dev/null; }; then

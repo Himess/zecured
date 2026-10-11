@@ -48,7 +48,8 @@ pub struct NetworkConfig {
     pub denominations: Vec<u64>,
     pub nodes: Vec<NodeInfo>,
     /// Address whose signature every coordinator request must carry (D16). `None` disables
-    /// the check (local development only).
+    /// the check, which a node accepts only when started with `--insecure-no-auth` (local
+    /// development only, L-1).
     #[serde(default)]
     pub coordinator: Option<Address>,
     /// Upper bound of the random extra confirmations before a deposit is attested (D15).
@@ -102,13 +103,18 @@ impl Identity {
             x25519_secret: hex::encode(x25519.to_bytes()),
         };
         if let Some(dir) = path.parent() {
-            fs::create_dir_all(dir)?;
+            crate::store::private_dir(dir)?;
         }
         crate::store::write_atomic(path, serde_json::to_vec_pretty(&file)?.as_slice())?;
         Ok(Identity { index, eth, x25519 })
     }
 
     pub fn load(path: &Path) -> Result<Identity> {
+        // L-3: an identity written before permissions were restricted is fixed on load.
+        if let Some(dir) = path.parent() {
+            crate::store::private_dir(dir)?;
+        }
+        crate::store::private_file(path)?;
         let raw = fs::read_to_string(path).with_context(|| format!("read {}", path.display()))?;
         let file: IdentityFile = serde_json::from_str(&raw)?;
         let eth = file.eth_private_key.parse::<PrivateKeySigner>()?;

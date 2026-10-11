@@ -8,6 +8,9 @@ publish.workspace = true
 
 [dependencies]
 zecured-base = { path = "../signer/crates/base-client" }
+# Ironwood receiver parsing and the ZIP-317 fee (already built as dependencies of zecured-base).
+zecured-zcash-ops = { path = "../signer/crates/zcash-ops" }
+zcash_protocol.workspace = true
 alloy.workspace = true
 axum.workspace = true
 tokio.workspace = true

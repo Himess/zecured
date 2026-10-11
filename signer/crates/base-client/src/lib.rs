@@ -12,6 +12,7 @@ use alloy::{
 use anyhow::{Context, Result, anyhow, ensure};
 
 pub mod events;
+pub mod verify;
 
 /// Base Sepolia chain id.
 pub const BASE_SEPOLIA_CHAIN_ID: u64 = 84_532;

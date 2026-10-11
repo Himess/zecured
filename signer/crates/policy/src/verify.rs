@@ -7,15 +7,23 @@
 //! - every real spend is one of the expected vault notes (and all of them are spent);
 //! - the non-zero outputs are exactly the plan's payments plus the change to the vault's
 //!   internal address, so the fee is exactly the plan's fee;
+//! - every non-zero output's note ciphertext decrypts, for its recipient, to exactly the note
+//!   the action commits to (otherwise the recipient could never find or spend it);
 //! - third-party outputs cannot be recovered with the vault's outgoing viewing keys
-//!   (`ovk = None`), while the borrower's outputs can (so the borrower can verify them).
+//!   (`ovk = None`), while the borrower's outputs can (so the borrower can verify them);
+//! - it is an Ironwood bundle with the standard flags and no leftover dummy spending keys.
 //!
 //! Anything else is refused (policy P4). On success the signer gets the sighash and the
 //! per-spend randomizers it will sign for; it never signs any other action.
 
 use orchard::{
+    Note,
+    bundle::{BundleVersion, Flags},
     keys::{FullViewingKey, Scope},
-    pczt::Bundle,
+    note::Rho,
+    note_encryption::IronwoodDomain,
+    pczt::{Action, Bundle},
+    value::NoteValue,
 };
 use pasta_curves::group::ff::PrimeField;
 use pczt::{
@@ -25,6 +33,7 @@ use pczt::{
         signer::Signer,
     },
 };
+use zcash_note_encryption::{Domain, try_output_recovery_with_pkd_esk};
 use zcash_protocol::{PoolType, constants::V6_TX_VERSION};
 use zecured_zcash_ops::spend::{OutputPrivacy, SpendAuthRequest};
 
@@ -40,8 +49,12 @@ pub struct ExpectedInput {
 /// What the signer will sign.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct Verified {
+    /// The shielded sighash. These v6 transactions have no transparent part, so it is also the
+    /// id of the transaction once mined (ZIP 244; checked in zcash-ops' `frost_spend` test).
     pub sighash: [u8; 32],
     pub spends: Vec<SpendAuthRequest>,
+    /// The transaction's expiry height (within the accepted window).
+    pub expiry_height: u32,
 }
 
 /// Transaction-level expectations.
@@ -84,6 +97,12 @@ pub enum VerifyError {
     WrongValueBalance { actual: i64, expected: u64 },
     #[error("action {0} reuses the randomized key of a spend we sign")]
     ReusedRandomizedKey(usize),
+    #[error("output in action {0} does not decrypt to the note it commits to")]
+    Undecryptable(usize),
+    #[error("action {0} still carries a dummy spending key")]
+    DummySpendKey(usize),
+    #[error("unexpected bundle: {0}")]
+    WrongBundle(&'static str),
     #[error("signer: {0}")]
     Signer(String),
 }
@@ -136,6 +155,7 @@ pub fn verify_payout(
     let mut outputs: Vec<FoundOutput> = vec![];
     let mut value_balance: i64 = 0;
     LowLevelSigner::new(pczt.clone()).sign_ironwood_with(|_, bundle, _| -> Result<(), VerifyError> {
+        check_bundle(*bundle.bundle_version(), bundle.flags())?;
         value_balance =
             i64::try_from(*bundle.value_sum()).map_err(|e| VerifyError::Action(0, format!("value sum: {e:?}")))?;
         inspect(bundle, fvk, inputs, &mut spends, &mut outputs)
@@ -206,7 +226,36 @@ pub fn verify_payout(
             .into_iter()
             .map(|(action_index, _, _, alpha)| SpendAuthRequest { action_index, alpha })
             .collect(),
+        expiry_height: expiry,
     })
+}
+
+/// I-1: every payout is an Ironwood bundle built with the standard flags (spends, outputs and
+/// cross-address transfers enabled).
+fn check_bundle(version: BundleVersion, flags: &Flags) -> Result<(), VerifyError> {
+    if version != BundleVersion::ironwood_v3() {
+        return Err(VerifyError::WrongBundle("not an Ironwood bundle"));
+    }
+    if !(flags.spends_enabled() && flags.outputs_enabled() && flags.cross_address_enabled()) {
+        return Err(VerifyError::WrongBundle("unexpected bundle flags"));
+    }
+    Ok(())
+}
+
+/// H-4: whether the output's note ciphertext decrypts, for its recipient, to exactly `note`.
+///
+/// The note commitment binds recipient, value, `rho` and `rseed`, but not the transmitted
+/// ciphertext: a coordinator could garble the ciphertext (or `epk`) of a third-party output and
+/// the transaction would still be valid, while the recipient could never find or spend the
+/// note. Rebuilding `esk` and `pk_d` from the note and decrypting as the recipient would (which
+/// also checks `epk` and the note commitment) rules that out.
+fn output_decrypts(action: &Action, note: &Note) -> bool {
+    let domain = IronwoodDomain::for_pczt_action(action);
+    let Some(esk) = IronwoodDomain::derive_esk(note) else {
+        return false;
+    };
+    let pk_d = IronwoodDomain::get_pk_d(note);
+    matches!(try_output_recovery_with_pkd_esk(&domain, pk_d, esk, action), Some((n, _, _)) if n == *note)
 }
 
 fn inspect(
@@ -225,12 +274,17 @@ fn inspect(
     for (i, action) in bundle.actions().iter().enumerate() {
         action.verify_cv_net().map_err(|e| err(i, &e))?;
         let spend = action.spend();
+        // I-1: the IO Finalizer signs the dummy spends and clears their keys; a PCZT that still
+        // carries one is not a finalized payout (signers must reject it).
+        if spend.dummy_sk().is_some() {
+            return Err(VerifyError::DummySpendKey(i));
+        }
         let value = spend.value().ok_or_else(|| err(i, &"missing spend value"))?.inner();
         let nf = spend.nullifier().to_bytes();
         match inputs.iter().find(|n| n.nullifier == nf) {
             Some(expected) => {
                 // A vault note: it must be the expected value and be spendable by this vault.
-                if spend.dummy_sk().is_some() || value != expected.value {
+                if value != expected.value {
                     return Err(VerifyError::UnexpectedSpend(i));
                 }
                 spend.verify_nullifier(Some(fvk)).map_err(|e| err(i, &e))?;
@@ -256,6 +310,20 @@ fn inspect(
         let out_value = output.value().ok_or_else(|| err(i, &"missing output value"))?.inner();
         if out_value > 0 {
             let recipient = output.recipient().ok_or_else(|| err(i, &"missing recipient"))?;
+            let rseed = output.rseed().ok_or_else(|| err(i, &"missing output rseed"))?;
+            let rho = Option::<Rho>::from(Rho::from_bytes(&spend.nullifier().to_bytes()))
+                .ok_or_else(|| err(i, &"invalid rho"))?;
+            let note = Option::<Note>::from(Note::from_parts(
+                recipient,
+                NoteValue::from_raw(out_value),
+                rho,
+                rseed,
+                *output.note_version(),
+            ))
+            .ok_or_else(|| err(i, &"invalid output note"))?;
+            if !output_decrypts(action, &note) {
+                return Err(VerifyError::Undecryptable(i));
+            }
             let visible =
                 |ovk| action.recover_output_with_ovk(ovk, version).map(|r| r.is_some()).map_err(|e| err(i, &e));
             outputs.push(FoundOutput {
@@ -268,4 +336,24 @@ fn inspect(
         }
     }
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn only_standard_ironwood_bundles_are_accepted() {
+        let ironwood = BundleVersion::ironwood_v3();
+        check_bundle(ironwood, &ironwood.default_flags()).unwrap();
+        for flags in [
+            Flags::SPENDS_DISABLED,
+            Flags::OUTPUTS_DISABLED,
+            Flags::CROSS_ADDRESS_DISABLED,
+        ] {
+            assert!(matches!(check_bundle(ironwood, &flags), Err(VerifyError::WrongBundle(_))));
+        }
+        let orchard = BundleVersion::orchard_v3();
+        assert!(matches!(check_bundle(orchard, &orchard.default_flags()), Err(VerifyError::WrongBundle(_))));
+    }
 }

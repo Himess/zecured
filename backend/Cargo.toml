@@ -6,6 +6,11 @@ rust-version.workspace = true
 license.workspace = true
 publish.workspace = true
 
+[features]
+# TEST ONLY: honour the coordinator's `test-withhold-next-broadcast` flag file
+# (docs/TESTING.md). Never enable it in a demo or production build.
+test-hooks = ["zecured-coordinator/test-hooks"]
+
 [dependencies]
 zecured-coordinator = { path = "../signer/crates/coordinator" }
 zecured-node = { path = "../signer/crates/node" }
@@ -21,3 +26,7 @@ hex.workspace = true
 clap.workspace = true
 reqwest.workspace = true
 tower-http = { version = "0.6", features = ["cors"] }
+
+[dev-dependencies]
+# Already in the lockfile (axum depends on it); used to drive routers in tests.
+tower = { version = "0.5", features = ["util"] }

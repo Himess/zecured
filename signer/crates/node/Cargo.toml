@@ -13,6 +13,13 @@ path = "src/lib.rs"
 name = "zecured-node"
 path = "src/main.rs"
 
+[features]
+default = []
+# DEMO ONLY: the threshold demo's "compromised" signer, which signs any PCZT without policy
+# checks. Never enable it in a real deployment; even then a node must also be started with
+# --demo-allow-compromise before it can be switched to that mode.
+demo = ["zecured-zcash-ops/demo"]
+
 [dependencies]
 zecured-zcash-ops = { path = "../zcash-ops" }
 zecured-threshold = { path = "../threshold" }

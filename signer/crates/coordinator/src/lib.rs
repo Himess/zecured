@@ -5,14 +5,26 @@
 //! whichever signers accept, aggregates, broadcasts, and relays attestations and payout
 //! confirmations to Base with its own gas key. Every decision that moves value is taken
 //! independently by at least three signer nodes.
+//!
+//! Errors returned to API callers carry a [`error::PublicError`] (fixed message and code);
+//! details are logged at debug level only, scrubbed of identifiers and numbers.
 
+pub mod error;
+mod frost;
+pub mod inflight;
 pub mod nodes;
+pub mod select;
 pub mod store;
 
 use std::{
-    collections::BTreeMap,
-    path::{Path, PathBuf},
-    sync::{Arc, OnceLock},
+    collections::{BTreeMap, HashMap},
+    panic::AssertUnwindSafe,
+    path::Path,
+    sync::{
+        Arc, OnceLock,
+        atomic::{AtomicU32, Ordering},
+    },
+    time::{Duration, Instant},
 };
 
 use alloy::{
@@ -20,22 +32,24 @@ use alloy::{
     primitives::{Address, B256, Bytes},
     providers::ProviderBuilder,
     signers::local::PrivateKeySigner,
+    sol_types::{Eip712Domain, SolStruct},
 };
 use anyhow::{Context, Result, anyhow, bail, ensure};
+use futures::FutureExt;
 use orchard::{circuit::ProvingKey, keys::FullViewingKey};
-use reddsa::frost::redpallas::{keys::PublicKeyPackage, round1::SigningCommitments, round2::SignatureShare};
+use reddsa::frost::redpallas::keys::PublicKeyPackage;
 use serde::{Deserialize, Serialize};
 use tokio::sync::Mutex;
-use tracing::{info, warn};
+use tracing::{debug, error, info, warn};
 use zcash_keys::keys::UnifiedFullViewingKey;
 use zcash_protocol::{
     TxId,
     consensus::{BlockHeight, Network},
 };
 use zecured_base::{
-    DepositAttestation, PayoutConfirmation, ViewKeyRequest,
+    Destination, OpenVault, PayoutConfirmation, RefundRequest, ViewKeyRequest, claim_ids_hash,
     events::{self, IZecuredRegistry, RegistryEvent},
-    order_signatures, recover_typed, registry_domain,
+    recover_typed, registry_domain,
 };
 use zecured_node::{
     AttestResponse, ConfirmIn, ConfirmResponse, DestinationIn, RecipientIn, RefundIn,
@@ -43,27 +57,54 @@ use zecured_node::{
     config::NetworkConfig,
     dkg::{Round1Out, Round2In, Round2Out, Round3In, Round3Out, Sealed, VaultOpen},
     now,
-    signing::{CommitRequest, CommitResponse, ShareRequest, ShareResponse, SignKind},
+    signing::{CommitRequest, CommitResponse, SignKind},
 };
 use zecured_policy::{
-    classify::{self, DepositRules},
+    classify::{self, Classification, DepositRules, NotePosition},
     ledger::{self, ClaimState, NextPayout, PayoutPlan, Recipient},
 };
-use zecured_threshold::{self as threshold, MIN_SIGNERS, signer_id};
 use zecured_zcash_ops::{
     keys,
     scan::ReceivedNote,
     spend::{self, Payment},
-    tx,
 };
 
+pub use zecured_threshold::MIN_SIGNERS;
+
+pub use crate::store::NoteView;
 use crate::{
-    nodes::{Answer, Nodes},
+    error::{PublicError, public_error, scrubbed},
+    inflight::{Action, Inputs, Settled},
+    nodes::{Answer, Nodes, is_refusal, shortfall, split},
     store::{CoordVault, Inflight, Refund, Store, VaultStatus},
 };
 
 const NETWORK: Network = Network::TestNetwork;
 const ZATS_PER_ZEC: u64 = 100_000_000;
+
+/// Most vaults that may wait for their deposit at once (M-8): each one cost a 5-node DKG and
+/// is scanned on every pass until it expires.
+pub const MAX_PENDING_VAULTS: usize = 32;
+/// The vault birthday is set this many blocks below the coordinator's Zcash tip, so signers
+/// whose tip lags slightly still accept it (nodes refuse a birthday above their own tip).
+const BIRTHDAY_MARGIN: u32 = 3;
+/// An expired or closed vault is rescanned this often, so late deposits still show up as
+/// refundable notes (M-10).
+pub const IDLE_SCAN_INTERVAL: Duration = Duration::from_secs(600);
+/// Safety net against a hung provider: one vault's pass (scan, proving, both FROST rounds,
+/// Base transactions) never takes this long when things work. Every step is safe to cancel:
+/// a payout is recorded before it is broadcast.
+const VAULT_PASS_TIMEOUT: Duration = Duration::from_secs(15 * 60);
+const BASE_SYNC_TIMEOUT: Duration = Duration::from_secs(5 * 60);
+/// Wait for a Base transaction's receipt at most this long (alloy's default is forever).
+const RECEIPT_TIMEOUT: Duration = Duration::from_secs(120);
+
+alloy::sol! {
+    #[sol(rpc)]
+    interface IRegistryClaims {
+        function claim(bytes32 claimId) external view returns (bytes32 vaultId, uint8 kind, uint64 amount, bytes32 commitment, uint8 status);
+    }
+}
 
 /// The app's request to open a vault (`OpenVault`, signed by the owner key).
 #[derive(Clone, Debug, Serialize, Deserialize)]
@@ -85,13 +126,12 @@ pub struct OpenVaultResponse {
     pub expiry_height: u32,
 }
 
-/// Public view of a vault for the app.
+/// Public view of a vault for the app: what its pages read, nothing more (L-10).
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct VaultView {
     pub vault_id: B256,
     pub status: VaultStatus,
     pub amount: u64,
-    pub address: String,
     pub expiry_height: u32,
     pub outstanding: u64,
     pub claims: Vec<ClaimView>,
@@ -108,12 +148,6 @@ pub struct ClaimView {
     pub kind: ledger::ClaimKind,
     pub amount: u64,
     pub paid: bool,
-}
-
-#[derive(Clone, Debug, Serialize, Deserialize)]
-pub struct NoteView {
-    pub note_id: B256,
-    pub amount: u64,
 }
 
 /// One signer's reaction to the demo attack.
@@ -144,14 +178,20 @@ pub struct Coordinator {
     gas: PrivateKeySigner,
     pk: OnceLock<Arc<ProvingKey>>,
     /// Zcash tip seen by the last coordinator pass (for the app's countdowns).
-    last_tip: std::sync::atomic::AtomicU32,
-    data_dir: PathBuf,
+    last_tip: AtomicU32,
+    /// When each idle (expired or closed) vault was last scanned.
+    idle_scans: std::sync::Mutex<HashMap<B256, Instant>>,
+    /// TEST ONLY: see [`TEST_WITHHOLD_FLAG`].
+    #[cfg(feature = "test-hooks")]
+    withhold_flag: std::path::PathBuf,
 }
 
-/// TEST ONLY: while this file exists in the coordinator's data directory, the next payout is
-/// signed and recorded but neither broadcast nor rebroadcast, so it expires unmined and the
-/// rebuild path runs end to end (docs/TESTING.md). The file is removed when used.
-const TEST_WITHHOLD_FLAG: &str = "test-withhold-next-broadcast";
+/// TEST ONLY (cargo feature `test-hooks`, off by default): while this file exists in the
+/// coordinator's data directory, the next payout is signed and recorded but neither broadcast
+/// nor rebroadcast, so it expires unmined and the rebuild path runs end to end
+/// (docs/TESTING.md). The file is removed when used. Builds without the feature ignore it.
+#[cfg(feature = "test-hooks")]
+pub const TEST_WITHHOLD_FLAG: &str = "test-withhold-next-broadcast";
 
 /// `zcash:` payment URI for `amount` zatoshis (ZIP 321).
 pub fn zip321_uri(address: &str, amount: u64) -> String {
@@ -177,33 +217,76 @@ fn short(id: &B256) -> String {
     hex::encode(&id[..4])
 }
 
-/// Successful answers, or an error if fewer than `need` nodes agreed.
+/// Successful answers, or the shortfall error if fewer than `need` nodes accepted.
 fn at_least<T>(answers: Vec<Answer<T>>, need: usize, what: &str) -> Result<Vec<(u16, T)>> {
-    let mut ok = vec![];
-    let mut errors = vec![];
-    for (i, a) in answers {
-        match a {
-            Ok(v) => ok.push((i, v)),
-            Err(e) => errors.push(format!("{e:#}")),
-        }
-    }
+    let (ok, failed) = split(answers);
     if ok.len() < need {
-        bail!("{what}: only {} of {need} signers agreed ({})", ok.len(), errors.join("; "));
+        return Err(shortfall(what, ok.len(), need, &failed));
     }
     Ok(ok)
+}
+
+/// Logs a failed step: its public code at warn level, the scrubbed chain at debug level.
+fn log_failure(vault: &B256, what: &str, e: &anyhow::Error) {
+    let code = public_error(e).unwrap_or(PublicError::Internal).code();
+    warn!(vault = %short(vault), code, "{what} failed");
+    debug!(vault = %short(vault), error = %scrubbed(e), "{what} failed");
+}
+
+/// True if an idle vault last scanned at `last` is due for another scan at `now`.
+pub fn idle_scan_due(last: Option<Instant>, now: Instant) -> bool {
+    last.is_none_or(|t| now.duration_since(t) >= IDLE_SCAN_INTERVAL)
+}
+
+/// Applies one Registry event to the coordinator's record. Idempotent: a chunk applied again
+/// after a crash (vault files are saved before the cursor) changes nothing.
+fn apply_event(v: &mut CoordVault, event: RegistryEvent) {
+    match event {
+        RegistryEvent::VaultActivated { amount, .. } => {
+            // Once only: re-applying it after claims would reset `outstanding`.
+            if !matches!(v.status, VaultStatus::Active | VaultStatus::Closed) && v.claims.is_empty() {
+                v.status = VaultStatus::Active;
+                v.outstanding = amount;
+            }
+        }
+        RegistryEvent::Claims(claims) => {
+            for c in claims {
+                if v.claims.iter().any(|x| x.id == c.id) {
+                    continue;
+                }
+                // Every claim burns exactly its amount (D14: releases may be partial).
+                v.outstanding = v.outstanding.saturating_sub(c.amount);
+                v.claims.push(c);
+            }
+        }
+        RegistryEvent::PayoutConfirmed(ids) => {
+            for c in v.claims.iter_mut().filter(|c| ids.iter().any(|i| i.0 == c.id)) {
+                c.state = ClaimState::Paid;
+            }
+        }
+    }
+    if v.status == VaultStatus::Active
+        && v.outstanding == 0
+        && !v.claims.is_empty()
+        && v.claims.iter().all(|c| c.state == ClaimState::Paid)
+    {
+        v.status = VaultStatus::Closed;
+    }
 }
 
 impl Coordinator {
     pub fn new(cfg: NetworkConfig, data_dir: &Path, gas_key: &str) -> Result<Self> {
         let gas: PrivateKeySigner = gas_key.parse().context("coordinator gas key")?;
         Ok(Self {
-            nodes: Nodes::new(&cfg, Some(gas.clone()))?,
+            nodes: Nodes::new(&cfg, gas.clone())?,
             zcash: Mutex::new(ZcashView::new(&cfg.lightwalletd_url)),
             store: Mutex::new(Store::open(data_dir)?),
             gas,
             pk: OnceLock::new(),
-            last_tip: std::sync::atomic::AtomicU32::new(0),
-            data_dir: data_dir.to_owned(),
+            last_tip: AtomicU32::new(0),
+            idle_scans: std::sync::Mutex::default(),
+            #[cfg(feature = "test-hooks")]
+            withhold_flag: data_dir.join(TEST_WITHHOLD_FLAG),
             cfg,
         })
     }
@@ -217,12 +300,50 @@ impl Coordinator {
         Ok(self.pk.get_or_init(|| pk).clone())
     }
 
+    fn domain(&self) -> Eip712Domain {
+        registry_domain(self.cfg.chain_id, self.cfg.registry)
+    }
+
+    async fn vault(&self, id: &B256) -> Result<CoordVault> {
+        self.store.lock().await.vaults.get(id).cloned().context(PublicError::UnknownVault)
+    }
+
+    /// Read-modify-write of a vault record under the store lock (L-5).
+    async fn update_vault<R>(&self, id: &B256, f: impl FnOnce(&mut CoordVault) -> R) -> Result<R> {
+        self.store.lock().await.update(id, f)
+    }
+
+    /// P0 checks the coordinator can do itself before involving the signers: the request is
+    /// signed by the vault owner and not expired. Every node checks again (and the nonce).
+    fn check_owner<T: SolStruct>(&self, v: &CoordVault, message: &T, signature: &[u8], deadline: u64) -> Result<()> {
+        let signer = recover_typed(&self.domain(), message, signature).context(PublicError::NotOwner)?;
+        ensure!(signer == v.owner, PublicError::NotOwner);
+        ensure!(deadline >= now(), PublicError::Expired);
+        Ok(())
+    }
+
     // ------------------------------------------------------------------ vault opening
 
     pub async fn open_vault(&self, req: OpenVaultRequest) -> Result<OpenVaultResponse> {
-        ensure!(self.cfg.denominations.contains(&req.amount), "not a standard denomination");
-        ensure!(!self.store.lock().await.is_bound(req.account, req.owner), "account or owner already has a vault");
-        let tip = self.zcash.lock().await.tip().await?;
+        ensure!(self.cfg.denominations.contains(&req.amount), PublicError::NotDenomination);
+        // Checked here too (every node checks it), so a forged or stale request costs no DKG.
+        let msg = OpenVault {
+            owner: req.owner,
+            account: req.account,
+            amount: req.amount,
+            requestId: req.request_id,
+            deadline: req.deadline,
+        };
+        let signer = recover_typed(&self.domain(), &msg, &req.signature).context(PublicError::NotOwner)?;
+        ensure!(signer == req.owner, PublicError::NotOwner);
+        ensure!(req.deadline >= now(), PublicError::Expired);
+        {
+            let store = self.store.lock().await;
+            ensure!(!store.is_bound(req.account, req.owner), PublicError::AlreadyBound);
+            ensure!(store.pending() < MAX_PENDING_VAULTS, PublicError::Busy);
+        }
+        let tip = self.zcash.lock().await.tip().await.context(PublicError::ChainUnavailable)?;
+        let birthday = tip.saturating_sub(BIRTHDAY_MARGIN).max(1);
         let mut id = [0u8; 32];
         rand_core_06::RngCore::fill_bytes(&mut rand_core_06::OsRng, &mut id);
         let open = VaultOpen {
@@ -233,8 +354,8 @@ impl Coordinator {
             request_id: req.request_id,
             deadline: req.deadline,
             signature: req.signature,
-            birthday: tip,
-            expiry_height: tip + self.cfg.vault_expiry_blocks,
+            birthday,
+            expiry_height: birthday.checked_add(self.cfg.vault_expiry_blocks).context("expiry height overflows")?,
         };
         let all = self.nodes.indices();
         let n = all.len();
@@ -271,14 +392,14 @@ impl Coordinator {
         let r3: Vec<(u16, Round3Out)> =
             at_least(self.nodes.post_each(&bodies, "/v1/dkg/round3").await, n, "DKG round 3")?;
         let first = &r3[0].1;
-        for (_, o) in &r3[1..] {
-            ensure!(
-                o.ak == first.ak
-                    && o.ufvk == first.ufvk
-                    && o.address == first.address
-                    && o.public_key_package == first.public_key_package,
-                "signers disagree on the vault keys"
-            );
+        let agree = r3[1..].iter().all(|(_, o)| {
+            o.ak == first.ak
+                && o.ufvk == first.ufvk
+                && o.address == first.address
+                && o.public_key_package == first.public_key_package
+        });
+        if !agree {
+            return Err(anyhow!("signers disagree on the vault keys").context(PublicError::SignersUnavailable));
         }
         let vault = CoordVault {
             vault_id: open.vault_id,
@@ -299,6 +420,7 @@ impl Coordinator {
             refunds: vec![],
             attest_delay: None,
             used_view_nonces: vec![],
+            non_conforming: vec![],
         };
         let resp = OpenVaultResponse {
             vault_id: vault.vault_id,
@@ -315,7 +437,7 @@ impl Coordinator {
     // ------------------------------------------------------------------ recipients
 
     fn recipient_from_ua(ua: &str, salt: [u8; 32]) -> Result<Recipient> {
-        let addr = keys::ironwood_receiver(&NETWORK, ua)?;
+        let addr = keys::ironwood_receiver(&NETWORK, ua).context(PublicError::InvalidReceiver)?;
         Ok(Recipient {
             receiver: addr.to_raw_address_bytes(),
             salt,
@@ -348,6 +470,14 @@ impl Coordinator {
         signature: Bytes,
     ) -> Result<B256> {
         let r = Self::recipient_from_ua(ua, salt)?;
+        let v = self.vault(&vault_id).await?;
+        let msg = Destination {
+            vaultId: vault_id,
+            commitment: B256::from(r.commitment()),
+            nonce,
+            deadline,
+        };
+        self.check_owner(&v, &msg, &signature, deadline)?;
         let body = DestinationIn {
             recipient: Self::recipient_in(&r),
             nonce,
@@ -373,6 +503,16 @@ impl Coordinator {
         signature: Bytes,
     ) -> Result<()> {
         let r = Self::recipient_from_ua(ua, salt)?;
+        let v = self.vault(&vault_id).await?;
+        let msg = RefundRequest {
+            vaultId: vault_id,
+            noteId: note_id,
+            commitment: B256::from(r.commitment()),
+            nonce,
+            deadline,
+        };
+        // Before any node scans anything for it (M-8).
+        self.check_owner(&v, &msg, &signature, deadline)?;
         let body = RefundIn {
             note_id,
             recipient: Self::recipient_in(&r),
@@ -383,74 +523,43 @@ impl Coordinator {
         let path = format!("/v1/vaults/{vault_id}/refund");
         let answers = self.nodes.post_many(&self.nodes.indices(), &path, &body).await;
         at_least::<serde_json::Value>(answers, usize::from(MIN_SIGNERS), "refund")?;
-        let mut store = self.store.lock().await;
-        let mut v = store.vaults.get(&vault_id).context("unknown vault")?.clone();
-        v.refunds.retain(|x| x.note_id != note_id);
-        v.refunds.push(Refund {
-            note_id,
-            recipient: r,
-            done: false,
-        });
-        store.save(v)
+        self.update_vault(&vault_id, |v| {
+            v.refunds.retain(|x| x.note_id != note_id);
+            v.refunds.push(Refund {
+                note_id,
+                recipient: r,
+                done: false,
+            });
+        })
+        .await
     }
 
     /// The vault's viewing key, for the owner only.
     pub async fn viewing_key(&self, vault_id: B256, nonce: u64, deadline: u64, signature: &[u8]) -> Result<String> {
         let mut store = self.store.lock().await;
-        let mut v = store.vaults.get(&vault_id).context("unknown vault")?.clone();
+        let v = store.vaults.get(&vault_id).context(PublicError::UnknownVault)?;
         let msg = ViewKeyRequest {
             vaultId: vault_id,
             nonce,
             deadline,
         };
-        let signer = recover_typed(&registry_domain(self.cfg.chain_id, self.cfg.registry), &msg, signature)?;
-        ensure!(signer == v.owner, "not signed by the vault owner");
-        ensure!(deadline >= now(), "request expired");
-        ensure!(!v.used_view_nonces.contains(&nonce), "nonce already used");
-        v.used_view_nonces.push(nonce);
-        let ufvk = v.ufvk.clone();
-        store.save(v)?;
-        Ok(ufvk)
+        self.check_owner(v, &msg, signature, deadline)?;
+        ensure!(!v.used_view_nonces.contains(&nonce), PublicError::NonceUsed);
+        store.update(&vault_id, |v| {
+            v.used_view_nonces.push(nonce);
+            v.ufvk.clone()
+        })
     }
 
+    /// The app's view of a vault, from the store alone: no Zcash lock, no scan (L-10). The
+    /// refundable notes are the ones persisted by the last scan (M-10).
     pub async fn view(&self, vault_id: B256) -> Result<VaultView> {
         let store = self.store.lock().await;
-        let v = store.vaults.get(&vault_id).context("unknown vault")?;
-        let non_conforming = {
-            let zcash = self.zcash.lock().await;
-            zcash
-                .scan(&vault_id)
-                .map(|s| {
-                    s.unspent()
-                        .into_iter()
-                        .filter(|n| {
-                            v.decisions.iter().any(|(p, c)| {
-                                matches!(c, classify::Classification::NonConforming(_))
-                                    && p.height == n.position.height
-                                    && p.tx_index == n.position.tx_index
-                                    && p.action_index == n.position.action_index
-                            })
-                        })
-                        .map(|n| NoteView {
-                            note_id: B256::from(zecured_policy::derive::note_id(
-                                &vault_id.0,
-                                &classify::NotePosition {
-                                    height: n.position.height,
-                                    tx_index: n.position.tx_index,
-                                    action_index: n.position.action_index,
-                                },
-                            )),
-                            amount: n.value(),
-                        })
-                        .collect()
-                })
-                .unwrap_or_default()
-        };
+        let v = store.vaults.get(&vault_id).context(PublicError::UnknownVault)?;
         Ok(VaultView {
             vault_id,
             status: v.status,
             amount: v.amount,
-            address: v.address.clone(),
             expiry_height: v.expiry_height,
             outstanding: v.outstanding,
             claims: v
@@ -463,10 +572,10 @@ impl Coordinator {
                     paid: c.state == ClaimState::Paid,
                 })
                 .collect(),
-            non_conforming,
+            non_conforming: v.non_conforming.clone(),
             inflight: v.inflight.is_some(),
             birthday_height: v.birthday,
-            tip_height: self.last_tip.load(std::sync::atomic::Ordering::Relaxed),
+            tip_height: self.last_tip.load(Ordering::Relaxed),
         })
     }
 
@@ -476,23 +585,31 @@ impl Coordinator {
     /// all signers for round-1 commitments. Honest signers refuse (the PCZT matches no
     /// plan); signers switched to "compromised" mode accept. Never broadcasts anything.
     pub async fn demo_drain(&self, vault_id: B256, to: &str) -> Result<DrainReport> {
-        let mut v = self.store.lock().await.vaults.get(&vault_id).cloned().context("unknown vault")?;
-        let notes = self.notes(&mut v).await?;
+        let attacker = keys::ironwood_receiver(&NETWORK, to).context(PublicError::InvalidReceiver)?;
+        let v = self.vault(&vault_id).await?;
+        let mut decisions = v.decisions.clone();
+        let notes = self.notes(&v, &mut decisions).await?;
         let mut inputs: Vec<ReceivedNote> = notes.lineage.clone();
         inputs.extend(notes.non_conforming.iter().map(|(_, n)| n.clone()));
-        ensure!(!inputs.is_empty(), "the vault holds nothing to sweep");
+        ensure!(!inputs.is_empty(), PublicError::BadRequest);
         let total: u64 = inputs.iter().map(|n| n.value()).sum();
         let fee = spend::zip317_fee(inputs.len(), 1);
-        let attacker = keys::ironwood_receiver(&NETWORK, to)?;
         let payments = [Payment {
             recipient: attacker,
-            value: total.checked_sub(fee).context("vault too small to sweep")?,
+            value: total.checked_sub(fee).context(PublicError::BadRequest)?,
             privacy: spend::OutputPrivacy::NoOvk,
         }];
         let fvk = fvk_of(&v)?;
         let anchor = self.zcash.lock().await.scan(&vault_id).context("vault not scanned")?.anchor();
         let refs: Vec<&ReceivedNote> = inputs.iter().collect();
-        let unsigned = spend::build(&NETWORK, BlockHeight::from_u32(notes.tip + 1), &fvk, anchor, &refs, &payments)?;
+        let unsigned = spend::build(
+            &NETWORK,
+            BlockHeight::from_u32(notes.tip.checked_add(1).context("tip overflows")?),
+            &fvk,
+            anchor,
+            &refs,
+            &payments,
+        )?;
         let pk = self.proving_key().await?;
         let pczt = tokio::task::spawn_blocking(move || spend::finalize_and_prove(unsigned.pczt, &pk)).await??;
         let mut sid = [0u8; 16];
@@ -516,7 +633,7 @@ impl Coordinator {
                 Err(e) => DrainVote {
                     index,
                     signed: false,
-                    reason: Some(format!("{e:#}")),
+                    reason: Some(scrubbed(&e)),
                 },
             })
             .collect();
@@ -530,9 +647,20 @@ impl Coordinator {
         })
     }
 
-    /// Forwards a demo mode switch to one node.
+    /// Forwards a demo mode switch to one node. The request is signed with the coordinator
+    /// key like every node request (D16); which mode the caller may set on which node is the
+    /// caller's policy (the backend allows "compromised" on two fixed nodes at most).
     pub async fn set_node_mode(&self, index: u16, mode: &str, token: &str) -> Result<serde_json::Value> {
-        self.nodes.post(index, "/v1/admin/mode", &serde_json::json!({ "mode": mode, "token": token })).await
+        ensure!(self.nodes.contains(index), PublicError::BadRequest);
+        let body = serde_json::json!({ "mode": mode, "token": token });
+        self.nodes.post(index, "/v1/admin/mode", &body).await.map_err(|e| {
+            let public = if is_refusal(&e) {
+                PublicError::SignersRefused
+            } else {
+                PublicError::SignersUnavailable
+            };
+            e.context(public)
+        })
     }
 
     /// Health of every node (unreachable nodes are reported as such).
@@ -551,63 +679,44 @@ impl Coordinator {
 
     /// One pass over Base events and every vault. Errors of one vault do not stop others.
     pub async fn tick(&self) -> Result<()> {
-        if let Err(e) = self.sync_base().await {
-            warn!("base sync failed: {e:#}");
+        match tokio::time::timeout(BASE_SYNC_TIMEOUT, self.sync_base()).await {
+            Ok(Ok(())) => {}
+            Ok(Err(e)) => {
+                warn!(code = public_error(&e).unwrap_or(PublicError::Internal).code(), "base sync failed");
+                debug!(error = %scrubbed(&e), "base sync failed");
+            }
+            Err(_) => warn!("base sync timed out"),
         }
         let ids: Vec<B256> = self.store.lock().await.vaults.keys().copied().collect();
         for id in ids {
-            if let Err(e) = self.process(&id).await {
-                warn!(vault = %short(&id), "{e:#}");
+            // A vault whose pass panics must not starve the vaults after it.
+            let pass = AssertUnwindSafe(tokio::time::timeout(VAULT_PASS_TIMEOUT, self.process(&id))).catch_unwind();
+            match pass.await {
+                Ok(Ok(Ok(()))) => {}
+                Ok(Ok(Err(e))) => log_failure(&id, "vault pass", &e),
+                Ok(Err(_)) => warn!(vault = %short(&id), "vault pass timed out"),
+                Err(_) => error!(vault = %short(&id), "vault pass panicked"),
             }
         }
         Ok(())
     }
 
+    /// Applies Registry events up to Base's safe head. No lock is held while the RPC answers.
     async fn sync_base(&self) -> Result<()> {
         let provider = ProviderBuilder::new().connect_http(self.cfg.base_rpc_url.parse()?);
         let safe = events::safe_head(&provider).await?;
-        let mut store = self.store.lock().await;
-        let start = store.base_cursor.max(self.cfg.registry_from_block.saturating_sub(1)) + 1;
-        if start > safe {
-            return Ok(());
-        }
+        let cursor = self.store.lock().await.base_cursor;
+        let start = cursor.max(self.cfg.registry_from_block.saturating_sub(1)) + 1;
         const MAX_RANGE: u64 = 2_000;
         let mut from = start;
         while from <= safe {
             let to = (from + MAX_RANGE - 1).min(safe);
-            for ev in events::fetch(&provider, self.cfg.registry, from, to).await? {
-                let Some(mut v) = store.vaults.get(&ev.vault_id).cloned() else {
-                    continue;
-                };
-                match ev.event {
-                    RegistryEvent::VaultActivated { amount, .. } => {
-                        v.status = VaultStatus::Active;
-                        v.outstanding = amount;
-                    }
-                    RegistryEvent::Claims(claims) => {
-                        for c in claims {
-                            if v.claims.iter().any(|x| x.id == c.id) {
-                                continue;
-                            }
-                            // Every claim burns exactly its amount (D14: releases may be partial).
-                            v.outstanding = v.outstanding.saturating_sub(c.amount);
-                            v.claims.push(c);
-                        }
-                    }
-                    RegistryEvent::PayoutConfirmed(ids) => {
-                        for c in v.claims.iter_mut().filter(|c| ids.iter().any(|i| i.0 == c.id)) {
-                            c.state = ClaimState::Paid;
-                        }
-                    }
+            let evs = events::fetch(&provider, self.cfg.registry, from, to).await?;
+            let mut store = self.store.lock().await;
+            for ev in evs {
+                if store.vaults.contains_key(&ev.vault_id) {
+                    store.update(&ev.vault_id, |v| apply_event(v, ev.event))?;
                 }
-                if v.status == VaultStatus::Active
-                    && v.outstanding == 0
-                    && v.claims.iter().all(|c| c.state == ClaimState::Paid)
-                    && !v.claims.is_empty()
-                {
-                    v.status = VaultStatus::Closed;
-                }
-                store.save(v)?;
             }
             store.set_base_cursor(to)?;
             from = to + 1;
@@ -615,55 +724,78 @@ impl Coordinator {
         Ok(())
     }
 
-    async fn notes(&self, v: &mut CoordVault) -> Result<VaultNotes> {
+    async fn notes(&self, v: &CoordVault, decisions: &mut Vec<(NotePosition, Classification)>) -> Result<VaultNotes> {
         let rules = DepositRules {
             amount: v.amount,
             expiry_height: v.expiry_height,
             confirmations: self.cfg.confirmations,
         };
         let fvk = fvk_of(v)?;
-        self.zcash.lock().await.notes(&v.vault_id, &fvk, v.birthday, &rules, &mut v.decisions).await
+        self.zcash.lock().await.notes(&v.vault_id, &fvk, v.birthday, &rules, decisions).await
+    }
+
+    fn idle_scan_is_due(&self, id: &B256) -> bool {
+        let scans = self.idle_scans.lock().unwrap_or_else(|p| p.into_inner());
+        idle_scan_due(scans.get(id).copied(), Instant::now())
+    }
+
+    fn mark_idle_scanned(&self, id: &B256) {
+        self.idle_scans.lock().unwrap_or_else(|p| p.into_inner()).insert(*id, Instant::now());
     }
 
     async fn process(&self, id: &B256) -> Result<()> {
-        let mut v = self.store.lock().await.vaults.get(id).context("vault vanished")?.clone();
-        let refunds_pending = v.refunds.iter().any(|r| !r.done);
-        if matches!(v.status, VaultStatus::Expired | VaultStatus::Closed) && v.inflight.is_none() && !refunds_pending {
+        let v = self.vault(id).await?;
+        // Expired and closed vaults are only watched for late (refundable) deposits.
+        let idle = v.is_idle();
+        if idle && !self.idle_scan_is_due(id) {
             return Ok(());
         }
-        let notes = self.notes(&mut v).await?;
-        self.last_tip.fetch_max(notes.tip, std::sync::atomic::Ordering::Relaxed);
-        self.store.lock().await.save(v.clone())?;
+        let mut decisions = v.decisions.clone();
+        let mut notes = self.notes(&v, &mut decisions).await?;
+        self.last_tip.fetch_max(notes.tip, Ordering::Relaxed);
+        let non_conforming: Vec<NoteView> = notes
+            .non_conforming
+            .iter()
+            .map(|(note_id, n)| NoteView {
+                note_id: B256::from(*note_id),
+                amount: n.value(),
+            })
+            .collect();
+        // Only what the scan produced is written; everything else stays as it is now.
+        let v = self
+            .update_vault(id, |cur| {
+                cur.decisions = decisions;
+                cur.non_conforming = non_conforming;
+                cur.clone()
+            })
+            .await?;
+        if idle {
+            self.mark_idle_scanned(id);
+            return Ok(());
+        }
+        // Plan from the same lineage as the signers (H-2): the conforming deposit or the change
+        // worth exactly the vault's book value; foreign and zero-value notes are ignored.
+        notes.retain_planned_change(ledger::book_value(v.outstanding, &v.claims));
 
         if let Some(inflight) = v.inflight.clone() {
-            return self.check_inflight(v, inflight, notes.tip).await;
+            return self.check_inflight(id, inflight, notes.tip).await;
         }
         match v.status {
             VaultStatus::AwaitingDeposit => {
                 if let Some(conforming) = &notes.conforming {
-                    // D15: wait a random number of extra confirmations, drawn once per vault.
-                    let delay = match v.attest_delay {
-                        Some(d) => d,
-                        None => {
-                            let max = self.cfg.attest_delay_max_blocks;
-                            let d = if max == 0 {
-                                0
-                            } else {
-                                rand_core_06::RngCore::next_u32(&mut rand_core_06::OsRng) % (max + 1)
-                            };
-                            v.attest_delay = Some(d);
-                            self.store.lock().await.save(v.clone())?;
-                            d
-                        }
-                    };
+                    let delay = self.attest_delay(id, &v).await?;
                     let confs = classify::confirmations(conforming.position.height, notes.tip);
                     if confs < self.cfg.confirmations + delay {
                         return Ok(());
                     }
-                    self.attest(v.clone()).await?;
+                    self.attest(id).await?;
                 } else if notes.tip > v.expiry_height + self.cfg.confirmations {
-                    v.status = VaultStatus::Expired;
-                    self.store.lock().await.save(v.clone())?;
+                    self.update_vault(id, |cur| {
+                        if cur.status == VaultStatus::AwaitingDeposit {
+                            cur.status = VaultStatus::Expired;
+                        }
+                    })
+                    .await?;
                 }
             }
             VaultStatus::DepositSeen | VaultStatus::Expired => {}
@@ -673,45 +805,66 @@ impl Coordinator {
                 }
             }
         }
-        let v = self.store.lock().await.vaults.get(id).cloned().context("vault vanished")?;
+        let v = self.vault(id).await?;
         if v.inflight.is_none() {
             self.refund_next(&v, &notes).await?;
         }
         Ok(())
     }
 
+    /// D15: extra confirmations before attesting, drawn once per vault.
+    async fn attest_delay(&self, id: &B256, v: &CoordVault) -> Result<u32> {
+        if let Some(d) = v.attest_delay {
+            return Ok(d);
+        }
+        let max = self.cfg.attest_delay_max_blocks;
+        let d = if max == 0 {
+            0
+        } else {
+            rand_core_06::RngCore::next_u32(&mut rand_core_06::OsRng) % (max + 1)
+        };
+        self.update_vault(id, |cur| *cur.attest_delay.get_or_insert(d)).await
+    }
+
     // ------------------------------------------------------------------ P1 → Base
 
-    async fn attest(&self, mut v: CoordVault) -> Result<()> {
-        let path = format!("/v1/vaults/{}/attest", v.vault_id);
-        let answers: Vec<Answer<AttestResponse>> =
-            self.nodes.post_many(&self.nodes.indices(), &path, &serde_json::json!({})).await;
-        let ok = at_least(answers, usize::from(MIN_SIGNERS), "deposit attestation")?;
-        let tag = ok[0].1.deposit_tag;
-        let att = DepositAttestation {
-            vaultId: v.vault_id,
-            account: v.account,
-            amount: v.amount,
-            depositTag: tag,
-        };
-        let sigs: Vec<Bytes> = ok
-            .iter()
-            .filter(|(_, a)| a.deposit_tag == tag && a.account == v.account && a.amount == v.amount)
-            .map(|(_, a)| a.signature.clone())
-            .collect();
-        ensure!(sigs.len() >= usize::from(MIN_SIGNERS), "signers disagree on the attestation");
-        let sigs = order_signatures(&registry_domain(self.cfg.chain_id, self.cfg.registry), &att, &sigs)?;
-
+    async fn attest(&self, id: &B256) -> Result<()> {
+        let v = self.vault(id).await?;
         let provider = ProviderBuilder::new()
             .wallet(EthereumWallet::from(self.gas.clone()))
             .connect_http(self.cfg.base_rpc_url.parse()?);
         let registry = IZecuredRegistry::new(self.cfg.registry, &provider);
+        // A receipt lost after a successful attestDeposit must not make us resend it forever.
+        if registry.vault(*id).call().await.context("Registry.vault")?.status != 0 {
+            return self
+                .update_vault(id, |cur| {
+                    if cur.status == VaultStatus::AwaitingDeposit {
+                        cur.status = VaultStatus::DepositSeen;
+                    }
+                })
+                .await;
+        }
+
+        let path = format!("/v1/vaults/{id}/attest");
+        let empty = serde_json::json!({});
+        let (answers, failed) =
+            split(self.nodes.post_many::<_, AttestResponse>(&self.nodes.indices(), &path, &empty).await);
+        let need = usize::from(MIN_SIGNERS);
+        let Some((tag, sigs)) =
+            select::attestation(&self.cfg.nodes, &self.domain(), *id, v.account, v.amount, &answers, need)
+        else {
+            return Err(if answers.len() >= need {
+                anyhow!("no deposit tag with {need} valid signatures").context(PublicError::SignersUnavailable)
+            } else {
+                shortfall("deposit attestation", answers.len(), need, &failed)
+            });
+        };
         let call = registry.attestDeposit(
             IZecuredRegistry::DepositAttestation {
-                vaultId: att.vaultId,
-                account: att.account,
-                amount: att.amount,
-                depositTag: att.depositTag,
+                vaultId: *id,
+                account: v.account,
+                amount: v.amount,
+                depositTag: tag,
             },
             sigs,
         );
@@ -721,14 +874,19 @@ impl Coordinator {
             .send()
             .await
             .context("send attestDeposit")?
+            .with_timeout(Some(RECEIPT_TIMEOUT))
             .get_receipt()
             .await
             .context("attestDeposit receipt")?;
         ensure!(receipt.status(), "attestDeposit reverted");
-        v.status = VaultStatus::DepositSeen;
-        v.attest_tx = Some(receipt.transaction_hash);
-        self.store.lock().await.save(v.clone())?;
-        info!(vault = %short(&v.vault_id), "deposit attested on Base");
+        self.update_vault(id, |cur| {
+            if cur.status == VaultStatus::AwaitingDeposit {
+                cur.status = VaultStatus::DepositSeen;
+            }
+            cur.attest_tx = Some(receipt.transaction_hash);
+        })
+        .await?;
+        info!(vault = %short(id), "deposit attested on Base");
         Ok(())
     }
 
@@ -740,15 +898,19 @@ impl Coordinator {
             return Ok(false);
         }
         ledger::check_i10(notes.lineage_value(), v.outstanding, &v.claims).map_err(|e| anyhow!("{e}"))?;
+        // The nodes never pay a vault's own addresses (security review H-2): plan the same way.
+        let fvk = fvk_of(v)?;
         let next = {
             let store = self.store.lock().await;
-            ledger::next_payout(&v.claims, |c| store.recipient(c), notes.lineage_value(), notes.lineage.len(), now())?
+            let recipient =
+                |c: &_| store.recipient(c).filter(|r| !zecured_node::chain::owns_receiver(&fvk, &r.receiver));
+            ledger::next_payout(&v.claims, recipient, notes.lineage_value(), notes.lineage.len(), now())?
         };
         let NextPayout::Pay(plan) = next else { return Ok(false) };
         let kind = SignKind::Payout {
             claim_ids: plan.claims.iter().map(|c| B256::from(*c)).collect(),
         };
-        self.execute(v, kind, &plan, &notes.lineage, notes.tip).await?;
+        self.execute(&v.vault_id, kind, &plan, &notes.lineage, notes.tip).await?;
         Ok(true)
     }
 
@@ -759,22 +921,35 @@ impl Coordinator {
             };
             let plan = ledger::refund_plan(note.value(), r.recipient.receiver)?;
             let kind = SignKind::Refund { note_id: r.note_id };
-            return self.execute(v, kind, &plan, std::slice::from_ref(note), notes.tip).await;
+            return self.execute(&v.vault_id, kind, &plan, std::slice::from_ref(note), notes.tip).await;
         }
         Ok(())
+    }
+
+    /// TEST ONLY: consumes the withhold flag if this build has the `test-hooks` feature.
+    fn take_withhold_flag(&self) -> bool {
+        #[cfg(feature = "test-hooks")]
+        {
+            std::fs::remove_file(&self.withhold_flag).is_ok()
+        }
+        #[cfg(not(feature = "test-hooks"))]
+        {
+            false
+        }
     }
 
     /// Builds, proves, gets signed (3 of 5) and broadcasts the transaction for `plan`.
     async fn execute(
         &self,
-        v: &CoordVault,
+        id: &B256,
         kind: SignKind,
         plan: &PayoutPlan,
         inputs: &[ReceivedNote],
         tip: u32,
     ) -> Result<()> {
-        let fvk = fvk_of(v)?;
-        let anchor = self.zcash.lock().await.scan(&v.vault_id).context("vault not scanned")?.anchor();
+        let v = self.vault(id).await?;
+        let fvk = fvk_of(&v)?;
+        let anchor = self.zcash.lock().await.scan(id).context("vault not scanned")?.anchor();
         let payments: Vec<Payment> = plan
             .payments
             .iter()
@@ -788,7 +963,14 @@ impl Coordinator {
             })
             .collect::<Result<_>>()?;
         let refs: Vec<&ReceivedNote> = inputs.iter().collect();
-        let unsigned = spend::build(&NETWORK, BlockHeight::from_u32(tip + 1), &fvk, anchor, &refs, &payments)?;
+        let unsigned = spend::build(
+            &NETWORK,
+            BlockHeight::from_u32(tip.checked_add(1).context("tip overflows")?),
+            &fvk,
+            anchor,
+            &refs,
+            &payments,
+        )?;
         ensure!(
             unsigned.fee == plan.fee && unsigned.change == plan.change,
             "built transaction does not match the plan"
@@ -800,84 +982,48 @@ impl Coordinator {
         let (sighash, requests) = spend::signing_requests(&pczt, &indices)?;
         let expiry = *pczt.global().expiry_height();
         let pczt_bytes = pczt.clone().serialize().map_err(|e| anyhow!("serialize PCZT: {e:?}"))?;
-
-        // Round 1 on every signer; each checks the PCZT against its own plan.
-        let mut sid = [0u8; 16];
-        rand_core_06::RngCore::fill_bytes(&mut rand_core_06::OsRng, &mut sid);
-        let session_id = hex::encode(sid);
-        let commit_req = CommitRequest {
-            session_id: session_id.clone(),
-            vault_id: v.vault_id,
-            kind: kind.clone(),
-            pczt: pczt_bytes,
-        };
-        let commits: Vec<(u16, CommitResponse)> = at_least(
-            self.nodes.post_many(&self.nodes.indices(), "/v1/sign/commit", &commit_req).await,
-            usize::from(MIN_SIGNERS),
-            "signing round 1",
-        )?;
-        let chosen: Vec<(u16, CommitResponse)> = commits.into_iter().take(usize::from(MIN_SIGNERS)).collect();
-        for (i, c) in &chosen {
-            ensure!(c.commitments.len() == requests.len(), "signer {i} committed to a different number of spends");
-        }
-        let per_spend: Vec<BTreeMap<u16, serde_json::Value>> = (0..requests.len())
-            .map(|k| chosen.iter().map(|(i, c)| (*i, c.commitments[k].clone())).collect())
-            .collect();
-
-        // Round 2 on the chosen signers only.
-        let share_req = ShareRequest {
-            session_id,
-            commitments: per_spend.clone(),
-        };
-        let chosen_ids: Vec<u16> = chosen.iter().map(|(i, _)| *i).collect();
-        let shares: Vec<(u16, ShareResponse)> = at_least(
-            self.nodes.post_many(&chosen_ids, "/v1/sign/share", &share_req).await,
-            chosen_ids.len(),
-            "signing round 2",
-        )?;
-
         let pkp: PublicKeyPackage = serde_json::from_value(v.public_key_package.clone())?;
-        let mut signatures = Vec::with_capacity(requests.len());
-        for (k, req) in requests.iter().enumerate() {
-            let mut commitments = BTreeMap::new();
-            for (i, c) in &per_spend[k] {
-                commitments.insert(signer_id(*i)?, serde_json::from_value::<SigningCommitments>(c.clone())?);
-            }
-            let package = threshold::signing_package(commitments, &sighash)?;
-            let mut share_map = BTreeMap::new();
-            for (i, s) in &shares {
-                share_map.insert(signer_id(*i)?, serde_json::from_value::<SignatureShare>(s.shares[k].clone())?);
-            }
-            signatures.push((req.action_index, threshold::aggregate(&package, &share_map, &pkp, &req.alpha)?));
-        }
-        let pczt = spend::apply_signatures(pczt, &signatures)?;
+
+        let signed = frost::sign(
+            &self.nodes,
+            &frost::Payload {
+                vault_id: *id,
+                kind: &kind,
+                pczt: &pczt_bytes,
+                sighash,
+                requests: &requests,
+                public_key_package: &pkp,
+            },
+        )
+        .await?;
+        let pczt = spend::apply_signatures(pczt, &signed.signatures)?;
         let tx = spend::extract(pczt)?;
         let raw = spend::serialize(&tx)?;
 
         // Record the payout before broadcasting it: if the broadcast fails or its response is
-        // lost, the same transaction is rebroadcast until it is mined or expires, and nothing
-        // else is built for these claims in the meantime.
-        let withhold = std::fs::remove_file(self.data_dir.join(TEST_WITHHOLD_FLAG)).is_ok();
-        let mut v = v.clone();
+        // lost, the same transaction is rebroadcast until it is mined or provably dead, and
+        // nothing else is built for these claims in the meantime.
+        let withhold = self.take_withhold_flag();
         let (claim_ids, refund_note) = match &kind {
             SignKind::Payout { claim_ids } => (claim_ids.clone(), None),
             SignKind::Refund { note_id } => (vec![], Some(*note_id)),
         };
-        v.inflight = Some(Inflight {
+        let record = Inflight {
             claim_ids,
             refund_note,
             txid: tx.txid().to_string(),
             expiry_height: expiry,
             raw_tx: (!withhold).then(|| hex::encode(&raw)),
-        });
-        self.store.lock().await.save(v.clone())?;
+            inputs: inputs.iter().map(|n| B256::from(n.nullifier.to_bytes())).collect(),
+        };
+        self.update_vault(id, |cur| cur.inflight = Some(record)).await?;
         if withhold {
-            warn!(vault = %short(&v.vault_id), expiry, "TEST: payout withheld; it will expire unmined");
+            warn!(vault = %short(id), "TEST: payout withheld; it will expire unmined");
             return Ok(());
         }
         match self.broadcast(raw).await {
-            Ok(()) => info!(vault = %short(&v.vault_id), signers = ?chosen_ids, "payout broadcast"),
-            Err(e) => warn!(vault = %short(&v.vault_id), "payout broadcast failed, will retry: {e:#}"),
+            Ok(()) => info!(vault = %short(id), signers = ?signed.signers, "payout broadcast"),
+            Err(e) => log_failure(id, "payout broadcast (will retry)", &e),
         }
         Ok(())
     }
@@ -887,90 +1033,184 @@ impl Coordinator {
         spend::broadcast_raw(&mut client, raw).await
     }
 
-    /// Waits for a broadcast payout; confirms it on Base once it has enough confirmations,
-    /// or drops it (to be rebuilt) once it can no longer be mined.
-    async fn check_inflight(&self, mut v: CoordVault, inflight: Inflight, tip: u32) -> Result<()> {
-        let txid = TxId::from_hex(&inflight.txid).context("stored txid")?;
-        let mined = {
-            let mut client = zecured_zcash_ops::lwd::connect(&self.cfg.lightwalletd_url).await?;
-            tx::fetch(&mut client, &NETWORK, &txid).await
+    /// Our own scan's view of the payout's vault inputs.
+    async fn inputs_state(&self, id: &B256, inflight: &Inflight) -> Inputs {
+        let nullifiers = if !inflight.inputs.is_empty() {
+            inflight.inputs.clone()
+        } else {
+            // Records written before `inputs` existed: the transaction's own nullifiers.
+            match inflight.raw_tx.as_deref().map(|raw| inflight::nullifiers_of(raw, &NETWORK, inflight.expiry_height)) {
+                Some(Ok(n)) => n,
+                _ => return Inputs::Unknown,
+            }
         };
-        match mined {
-            Ok((_, height)) => {
-                if classify::confirmations(u32::from(height), tip) < self.cfg.confirmations {
-                    return Ok(());
-                }
-                if !inflight.claim_ids.is_empty() {
-                    self.confirm_on_base(&v, &inflight).await?;
-                    for c in v.claims.iter_mut().filter(|c| inflight.claim_ids.iter().any(|i| i.0 == c.id)) {
-                        c.state = ClaimState::Paid;
-                    }
-                }
-                if let Some(note) = inflight.refund_note {
-                    for r in v.refunds.iter_mut().filter(|r| r.note_id == note) {
-                        r.done = true;
-                    }
-                }
-                if v.status == VaultStatus::Active
-                    && v.outstanding == 0
-                    && v.claims.iter().all(|c| c.state == ClaimState::Paid)
-                {
-                    v.status = VaultStatus::Closed;
-                }
-                v.inflight = None;
-                self.store.lock().await.save(v)?;
-                Ok(())
-            }
-            Err(_) if tip > inflight.expiry_height => {
-                warn!(vault = %short(&v.vault_id), "payout expired unmined; will rebuild");
-                v.inflight = None;
-                self.store.lock().await.save(v)?;
-                Ok(())
-            }
-            Err(_) => {
-                // Not mined yet: make sure it is (still) in the mempool. Rejections such as
-                // "already in the mempool" are expected and harmless.
+        let zcash = self.zcash.lock().await;
+        let Some(scan) = zcash.scan(id) else {
+            return Inputs::Unknown;
+        };
+        let seen: Vec<bool> = nullifiers
+            .iter()
+            .filter_map(|nf| scan.notes.iter().find(|n| n.nullifier.to_bytes() == nf.0).map(|n| n.spent_at.is_some()))
+            .collect();
+        if seen.is_empty() {
+            Inputs::Unknown
+        } else if seen.contains(&true) {
+            Inputs::Spent
+        } else {
+            Inputs::Unspent
+        }
+    }
+
+    /// Follows a broadcast payout: confirms it on Base once it has enough confirmations,
+    /// rebroadcasts it while it can still be mined, and drops it (to be rebuilt) only once it
+    /// is provably dead (I-5).
+    async fn check_inflight(&self, id: &B256, inflight: Inflight, tip: u32) -> Result<()> {
+        let txid = TxId::from_hex(&inflight.txid).context("stored txid")?;
+        let lookup = match zecured_zcash_ops::lwd::connect(&self.cfg.lightwalletd_url).await {
+            Ok(mut client) => inflight::lookup(&mut client, &NETWORK, &txid).await,
+            Err(e) => Err(e),
+        };
+        let inputs = self.inputs_state(id, &inflight).await;
+        let action = inflight::decide(&lookup, tip, inflight.expiry_height, self.cfg.confirmations, inputs);
+        if let Err(e) = &lookup {
+            debug!(vault = %short(id), error = %scrubbed(e), "payout status unknown");
+        }
+        match action {
+            Action::Confirm => self.settle(id, &inflight).await,
+            Action::Wait => Ok(()),
+            Action::Rebroadcast => {
+                // "Already in the mempool" rejections are expected and harmless.
                 if let Some(raw) = inflight.raw_tx.as_deref().and_then(|h| hex::decode(h).ok()) {
                     let _ = self.broadcast(raw).await;
                 }
                 Ok(())
             }
+            Action::Rebuild => {
+                warn!(vault = %short(id), "payout expired unmined; will rebuild");
+                self.update_vault(id, |cur| {
+                    if cur.inflight.as_ref().is_some_and(|f| f.txid == inflight.txid) {
+                        cur.inflight = None;
+                    }
+                })
+                .await
+            }
+            Action::Investigate => {
+                error!(
+                    vault = %short(id),
+                    "payout inputs are spent by a transaction the light wallet server does not report: \
+                     not rebuilding; investigate"
+                );
+                Ok(())
+            }
         }
     }
 
-    async fn confirm_on_base(&self, v: &CoordVault, inflight: &Inflight) -> Result<()> {
-        let path = format!("/v1/vaults/{}/confirm", v.vault_id);
+    /// The mined payout is confirmed on Base (unless it already is) and its record closed.
+    async fn settle(&self, id: &B256, inflight: &Inflight) -> Result<()> {
+        if !inflight.claim_ids.is_empty() {
+            match self.claims_settled(id, &inflight.claim_ids).await? {
+                // H-5: confirmPayout went through but its receipt was lost (or another
+                // coordinator pass sent it): sending it again would revert forever.
+                Settled::All => info!(vault = %short(id), "payout already confirmed on Base"),
+                Settled::None => self.confirm_on_base(id, inflight).await?,
+                Settled::Partial => bail!("the claims of one payout are partly paid on Base; investigate"),
+            }
+        }
+        self.update_vault(id, |v| {
+            for c in v.claims.iter_mut().filter(|c| inflight.claim_ids.iter().any(|i| i.0 == c.id)) {
+                c.state = ClaimState::Paid;
+            }
+            if let Some(note) = inflight.refund_note {
+                for r in v.refunds.iter_mut().filter(|r| r.note_id == note) {
+                    r.done = true;
+                }
+            }
+            if v.status == VaultStatus::Active
+                && v.outstanding == 0
+                && v.claims.iter().all(|c| c.state == ClaimState::Paid)
+            {
+                v.status = VaultStatus::Closed;
+            }
+            if v.inflight.as_ref().is_some_and(|f| f.txid == inflight.txid) {
+                v.inflight = None;
+            }
+        })
+        .await
+    }
+
+    /// Whether the Registry already marks a payout's claims paid (H-5).
+    async fn claims_settled(&self, id: &B256, claim_ids: &[B256]) -> Result<Settled> {
+        let known_paid = {
+            let store = self.store.lock().await;
+            store.vaults.get(id).is_some_and(|v| {
+                claim_ids.iter().all(|c| v.claims.iter().any(|x| x.id == c.0 && x.state == ClaimState::Paid))
+            })
+        };
+        if known_paid {
+            return Ok(Settled::All); // PayoutConfirmed already seen at the safe head
+        }
+        let provider = ProviderBuilder::new().connect_http(self.cfg.base_rpc_url.parse()?);
+        let registry = IRegistryClaims::new(self.cfg.registry, &provider);
+        let mut states = Vec::with_capacity(claim_ids.len());
+        for c in claim_ids {
+            let r = registry.claim(*c).call().await.context("Registry.claim")?;
+            states.push((r.vaultId, r.status));
+        }
+        Ok(inflight::settled(id, &states))
+    }
+
+    async fn confirm_on_base(&self, id: &B256, inflight: &Inflight) -> Result<()> {
+        let path = format!("/v1/vaults/{id}/confirm");
         let body = ConfirmIn {
             claim_ids: inflight.claim_ids.clone(),
             txid: inflight.txid.clone(),
         };
-        let ok: Vec<(u16, ConfirmResponse)> = at_least(
-            self.nodes.post_many(&self.nodes.indices(), &path, &body).await,
-            usize::from(MIN_SIGNERS),
-            "payout confirmation",
-        )?;
+        let answers = self.nodes.post_many::<_, ConfirmResponse>(&self.nodes.indices(), &path, &body).await;
+        let (answers, failed) = split(answers);
         let msg = PayoutConfirmation {
-            vaultId: v.vault_id,
-            claimIdsHash: zecured_base::claim_ids_hash(&inflight.claim_ids),
+            vaultId: *id,
+            claimIdsHash: claim_ids_hash(&inflight.claim_ids),
         };
-        let sigs: Vec<Bytes> = ok.into_iter().map(|(_, r)| r.signature).collect();
-        let sigs = order_signatures(&registry_domain(self.cfg.chain_id, self.cfg.registry), &msg, &sigs)?;
+        let need = usize::from(MIN_SIGNERS);
+        let Some(sigs) = select::confirmation(&self.cfg.nodes, &self.domain(), &msg, &answers, need) else {
+            return Err(if answers.len() >= need {
+                anyhow!("fewer than {need} valid confirmation signatures").context(PublicError::SignersUnavailable)
+            } else {
+                shortfall("payout confirmation", answers.len(), need, &failed)
+            });
+        };
         let provider = ProviderBuilder::new()
             .wallet(EthereumWallet::from(self.gas.clone()))
             .connect_http(self.cfg.base_rpc_url.parse()?);
         let registry = IZecuredRegistry::new(self.cfg.registry, &provider);
-        let call = registry.confirmPayout(v.vault_id, inflight.claim_ids.clone(), sigs);
+        let call = registry.confirmPayout(*id, inflight.claim_ids.clone(), sigs);
         let gas = zecured_base::gas_with_headroom(call.estimate_gas().await.context("estimate confirmPayout")?);
-        let receipt = call.gas(gas).send().await.context("send confirmPayout")?.get_receipt().await?;
+        let receipt = call
+            .gas(gas)
+            .send()
+            .await
+            .context("send confirmPayout")?
+            .with_timeout(Some(RECEIPT_TIMEOUT))
+            .get_receipt()
+            .await
+            .context("confirmPayout receipt")?;
         ensure!(receipt.status(), "confirmPayout reverted");
-        info!(vault = %short(&v.vault_id), "payout confirmed on Base");
+        info!(vault = %short(id), "payout confirmed on Base");
         Ok(())
     }
 }
 
 #[cfg(test)]
 mod tests {
+    use alloy::primitives::Address;
+    use zecured_base::sign_typed;
+    use zecured_policy::ledger::{Claim, ClaimKind};
+
     use super::*;
+    use crate::{
+        nodes::tests::config,
+        store::tests::{TempDir, vault},
+    };
 
     #[test]
     fn zip321_amounts() {
@@ -978,5 +1218,255 @@ mod tests {
         assert_eq!(zip321_uri("utest1x", 5_000_000), "zcash:utest1x?amount=0.05");
         assert_eq!(zip321_uri("utest1x", 100_000_000), "zcash:utest1x?amount=1");
         assert_eq!(zip321_uri("utest1x", 123_456_789), "zcash:utest1x?amount=1.23456789");
+    }
+
+    /// A coordinator whose nodes, light wallet server and RPC are all unreachable: anything
+    /// that reaches them fails, so passing checks prove the request never left.
+    fn offline(tag: &str) -> (Coordinator, TempDir) {
+        let dir = TempDir::new(tag);
+        let urls: Vec<String> = (1..=5).map(|_| "http://127.0.0.1:9".to_owned()).collect();
+        let key = hex::encode(PrivateKeySigner::random().to_bytes());
+        (Coordinator::new(config(&urls), &dir.0, &key).unwrap(), dir)
+    }
+
+    fn claim(id: u8, amount: u64) -> Claim {
+        Claim {
+            id: [id; 32],
+            kind: ClaimKind::Liquidation,
+            amount,
+            commitment: [id; 32],
+            order: (10, u64::from(id)),
+            created_at: 0,
+            partner: None,
+            state: ClaimState::Unpaid,
+        }
+    }
+
+    /// M-9 (coordinator side): re-applying a chunk after a crash must not reset `outstanding`.
+    #[test]
+    fn registry_events_apply_once() {
+        let mut v = vault(1);
+        v.status = VaultStatus::DepositSeen;
+        let activated = RegistryEvent::VaultActivated {
+            account: v.account,
+            amount: 1_000_000,
+        };
+        apply_event(&mut v, activated.clone());
+        apply_event(&mut v, RegistryEvent::Claims(vec![claim(1, 400_000)]));
+        // The same chunk again.
+        apply_event(&mut v, activated);
+        apply_event(&mut v, RegistryEvent::Claims(vec![claim(1, 400_000)]));
+        assert_eq!(v.status, VaultStatus::Active);
+        assert_eq!(v.outstanding, 600_000);
+        assert_eq!(v.claims.len(), 1);
+        apply_event(&mut v, RegistryEvent::Claims(vec![claim(2, 600_000)]));
+        apply_event(&mut v, RegistryEvent::PayoutConfirmed(vec![B256::repeat_byte(1), B256::repeat_byte(2)]));
+        assert_eq!(v.status, VaultStatus::Closed);
+    }
+
+    #[test]
+    fn idle_vaults_are_rescanned_at_a_low_frequency() {
+        let t0 = Instant::now();
+        assert!(idle_scan_due(None, t0), "first pass after a restart");
+        assert!(!idle_scan_due(Some(t0), t0 + Duration::from_secs(30)));
+        assert!(idle_scan_due(Some(t0), t0 + IDLE_SCAN_INTERVAL));
+    }
+
+    /// L-10 / M-10: the view needs neither the Zcash lock nor a scan, and shows the
+    /// refundable notes persisted by the last scan (e.g. of an expired vault after a restart).
+    #[tokio::test]
+    async fn the_view_reads_the_store_only() {
+        let (c, _dir) = offline("view");
+        let mut v = vault(1);
+        v.status = VaultStatus::Expired;
+        v.non_conforming = vec![NoteView {
+            note_id: B256::repeat_byte(9),
+            amount: 20_000,
+        }];
+        c.store.lock().await.save(v).unwrap();
+        let _scan_in_progress = c.zcash.lock().await;
+        let view = tokio::time::timeout(Duration::from_secs(2), c.view(B256::repeat_byte(1)))
+            .await
+            .expect("the view does not wait for the Zcash lock")
+            .unwrap();
+        assert_eq!(view.non_conforming.len(), 1);
+        let e = c.view(B256::repeat_byte(2)).await.unwrap_err();
+        assert_eq!(public_error(&e), Some(PublicError::UnknownVault));
+    }
+
+    fn open_request(owner: &PrivateKeySigner, c: &Coordinator, deadline: u64) -> OpenVaultRequest {
+        let request_id = B256::repeat_byte(3);
+        let msg = OpenVault {
+            owner: owner.address(),
+            account: Address::repeat_byte(0xee),
+            amount: 1_000_000,
+            requestId: request_id,
+            deadline,
+        };
+        OpenVaultRequest {
+            owner: owner.address(),
+            account: msg.account,
+            amount: msg.amount,
+            request_id,
+            deadline,
+            signature: sign_typed(owner, &c.domain(), &msg).unwrap(),
+        }
+    }
+
+    /// M-8: forged, expired or excess vault openings are refused before any DKG work.
+    #[tokio::test]
+    async fn open_vault_refuses_before_reaching_the_signers() {
+        let (c, _dir) = offline("open");
+        let owner = PrivateKeySigner::random();
+
+        let mut forged = open_request(&owner, &c, now() + 600);
+        forged.owner = Address::repeat_byte(0x99);
+        let e = c.open_vault(forged).await.unwrap_err();
+        assert_eq!(public_error(&e), Some(PublicError::NotOwner));
+
+        let e = c.open_vault(open_request(&owner, &c, now() - 1)).await.unwrap_err();
+        assert_eq!(public_error(&e), Some(PublicError::Expired));
+
+        for i in 0..MAX_PENDING_VAULTS {
+            c.store.lock().await.save(vault(u8::try_from(i + 1).unwrap())).unwrap();
+        }
+        let e = c.open_vault(open_request(&owner, &c, now() + 600)).await.unwrap_err();
+        assert_eq!(public_error(&e), Some(PublicError::Busy));
+    }
+
+    /// M-8: an unsigned destination or refund is refused without asking five nodes.
+    #[tokio::test]
+    async fn owner_requests_are_checked_before_forwarding() {
+        let (c, _dir) = offline("owner");
+        let owner = PrivateKeySigner::random();
+        let mut v = vault(1);
+        v.owner = owner.address();
+        c.store.lock().await.save(v).unwrap();
+        let id = B256::repeat_byte(1);
+        // Any valid Ironwood UA will do.
+        let ua = keys::encode_ironwood_ua(&NETWORK, test_address()).unwrap();
+        let stranger = PrivateKeySigner::random();
+        let salt = [5u8; 32];
+        let r = Coordinator::recipient_from_ua(&ua, salt).unwrap();
+        let msg = Destination {
+            vaultId: id,
+            commitment: B256::from(r.commitment()),
+            nonce: 1,
+            deadline: now() + 600,
+        };
+        let sig = sign_typed(&stranger, &c.domain(), &msg).unwrap();
+        let e = c.add_destination(id, &ua, salt, 1, msg.deadline, sig).await.unwrap_err();
+        assert_eq!(public_error(&e), Some(PublicError::NotOwner));
+
+        let e = c.add_destination(id, "not an address", salt, 1, msg.deadline, Bytes::new()).await.unwrap_err();
+        assert_eq!(public_error(&e), Some(PublicError::InvalidReceiver));
+
+        // Correctly signed: it does reach the (unreachable) nodes.
+        let sig = sign_typed(&owner, &c.domain(), &msg).unwrap();
+        let e = c.add_destination(id, &ua, salt, 1, msg.deadline, sig).await.unwrap_err();
+        assert_eq!(public_error(&e), Some(PublicError::SignersUnavailable));
+        assert!(!format!("{e:#}").contains("127.0.0.1"), "no node URL in errors: {e:#}");
+    }
+
+    fn test_address() -> orchard::Address {
+        let sk = (0u8..=255)
+            .map(|i| [i; 32])
+            .find_map(|b| Option::<orchard::keys::SpendingKey>::from(orchard::keys::SpendingKey::from_bytes(b)))
+            .unwrap();
+        FullViewingKey::from(&sk).address_at(0u32, orchard::keys::Scope::External)
+    }
+
+    /// A Base RPC stub whose Registry reports every claim of `vault` with `status`.
+    async fn registry_stub(vault: B256, status: u8) -> String {
+        use axum::{Json, Router, routing::post};
+        let app = Router::new().route(
+            "/",
+            post(move |Json(req): Json<serde_json::Value>| async move {
+                let result = match req["method"].as_str() {
+                    Some("eth_chainId") => serde_json::json!("0x14a34"),
+                    Some("eth_call") => {
+                        // claim(bytes32) returns (vaultId, kind, amount, commitment, status).
+                        let mut ret = vault.to_vec();
+                        ret.extend([0u8; 32]);
+                        ret.extend(alloy::primitives::U256::from(500_000u64).to_be_bytes::<32>());
+                        ret.extend([7u8; 32]);
+                        ret.extend(alloy::primitives::U256::from(status).to_be_bytes::<32>());
+                        serde_json::json!(format!("0x{}", hex::encode(ret)))
+                    }
+                    m => panic!("unexpected {m:?}"),
+                };
+                Json(serde_json::json!({ "jsonrpc": "2.0", "id": req["id"], "result": result }))
+            }),
+        );
+        crate::nodes::tests::serve(app).await
+    }
+
+    fn payout_in_flight(claims: &[u8]) -> Inflight {
+        Inflight {
+            claim_ids: claims.iter().map(|c| B256::repeat_byte(*c)).collect(),
+            refund_note: None,
+            txid: "00".repeat(32),
+            expiry_height: 500,
+            raw_tx: None,
+            inputs: vec![],
+        }
+    }
+
+    /// H-5: a payout whose `confirmPayout` already went through (its receipt was lost) is
+    /// recognized on Base and settled, instead of being re-confirmed forever (the nodes here
+    /// are unreachable: asking them would fail).
+    #[tokio::test]
+    async fn a_payout_already_confirmed_on_base_is_settled() {
+        let id = B256::repeat_byte(1);
+        let (mut c, _dir) = offline("settled");
+        c.cfg.base_rpc_url = registry_stub(id, inflight::CLAIM_PAID).await;
+        let inflight = payout_in_flight(&[1, 2]);
+        let mut v = vault(1);
+        v.status = VaultStatus::Active;
+        v.claims = vec![claim(1, 400_000), claim(2, 600_000)];
+        v.inflight = Some(inflight.clone());
+        c.store.lock().await.save(v).unwrap();
+
+        c.settle(&id, &inflight).await.unwrap();
+        let v = c.vault(&id).await.unwrap();
+        assert!(v.inflight.is_none(), "the vault is not wedged");
+        assert!(v.claims.iter().all(|x| x.state == ClaimState::Paid));
+        assert_eq!(v.status, VaultStatus::Closed);
+    }
+
+    /// H-5: when the claims are not paid yet and confirming fails, the payout stays in flight
+    /// to be confirmed again on the next pass.
+    #[tokio::test]
+    async fn a_failed_confirmation_is_retried_later() {
+        let id = B256::repeat_byte(1);
+        let (mut c, _dir) = offline("retry");
+        c.cfg.base_rpc_url = registry_stub(id, 1).await; // Pending
+        let inflight = payout_in_flight(&[1]);
+        let mut v = vault(1);
+        v.status = VaultStatus::Active;
+        v.outstanding = 600_000;
+        v.claims = vec![claim(1, 400_000)];
+        v.inflight = Some(inflight.clone());
+        c.store.lock().await.save(v).unwrap();
+
+        let e = c.settle(&id, &inflight).await.unwrap_err();
+        assert_eq!(public_error(&e), Some(PublicError::SignersUnavailable));
+        let v = c.vault(&id).await.unwrap();
+        assert!(v.inflight.is_some());
+        assert_eq!(v.claims[0].state, ClaimState::Unpaid);
+    }
+
+    /// L-12: the withhold flag is inert unless the build has the `test-hooks` feature.
+    #[tokio::test]
+    async fn the_withhold_flag_needs_the_test_hooks_feature() {
+        let (c, dir) = offline("hooks");
+        let flag = dir.0.join("test-withhold-next-broadcast");
+        std::fs::write(&flag, b"").unwrap();
+        let taken = c.take_withhold_flag();
+        if cfg!(feature = "test-hooks") {
+            assert!(taken && !flag.exists());
+        } else {
+            assert!(!taken && flag.exists(), "a default build ignores the flag");
+        }
     }
 }

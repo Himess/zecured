@@ -6,6 +6,10 @@
 //! - **non-conforming notes**: everything else received at the external address; each can
 //!   only leave through a P5 refund to its depositor.
 //!
+//! Anything else sent to the vault's internal address (by the borrower, who holds the vault's
+//! viewing key, or by anyone else who learns it) is **foreign**: it is ignored for I10 and
+//! fees, see [`lineage_members`].
+//!
 //! Every Base event that burns zZEC creates claims (one per recipient). Claims are paid in
 //! Base order, one payout transaction at a time, each paying its own ZIP-317 fee out of
 //! the recipient's output. A payout spends the whole conforming lineage and returns the
@@ -162,6 +166,73 @@ pub fn check_i10(lineage_value: u64, outstanding: u64, claims: &[Claim]) -> Resu
     }
 }
 
+/// One note received by a vault (either scope), reduced to what lineage selection needs.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct VaultNote {
+    pub nullifier: [u8; 32],
+    pub value: u64,
+    /// Received at the vault's internal (change) address.
+    pub internal: bool,
+    /// Id of the transaction that created the note.
+    pub created_in: [u8; 32],
+    /// Id of the transaction that spent the note, if it was spent.
+    pub spent_in: Option<[u8; 32]>,
+}
+
+/// Which of a vault's notes belong to the conforming lineage, spent or not (H-2).
+///
+/// The lineage starts at the conforming deposit (`conforming`, by nullifier). An internal note
+/// joins it only if it carries value and the transaction that created it spends a lineage note:
+/// only the vault (three signers) can spend a vault note, and every signer checked that such
+/// a transaction pays the plan exactly, change included. Every other internal note is foreign
+/// (sent by whoever knows the internal address) and is ignored for I10 and for fees, so it can
+/// neither break the books nor inflate the fee of later payouts. The value check against the
+/// payout's planned change is [`retain_planned_change`].
+///
+/// `notes` must be in chain order. Returns one flag per note.
+pub fn lineage_members(conforming: Option<&[u8; 32]>, notes: &[VaultNote]) -> Vec<bool> {
+    let mut member: Vec<bool> = notes.iter().map(|n| Some(&n.nullifier) == conforming).collect();
+    for (i, n) in notes.iter().enumerate() {
+        if member[i] || !n.internal || n.value == 0 {
+            continue;
+        }
+        // The creating transaction must spend a note already in the lineage (always earlier in
+        // chain order: a note is spent after it is created).
+        let joins = notes.iter().zip(&member).any(|(m, &is)| is && m.spent_in == Some(n.created_in));
+        member[i] = joins;
+    }
+    member
+}
+
+/// Keeps, among the unspent lineage notes, the conforming deposit and the change notes worth
+/// exactly `book_value` (H-2).
+///
+/// Every payout spends the whole lineage and returns its planned change to the internal
+/// address; once its claims are marked paid, I10 makes that change equal to the vault's book
+/// value `outstanding + unpaid claims`. Any other internal output of a vault transaction (for
+/// example a payout to the vault's own address, which nodes refuse to register) is not change.
+/// Returns the notes removed from the lineage.
+pub fn retain_planned_change<N>(
+    lineage: &mut Vec<N>,
+    book_value: u64,
+    is_internal: impl Fn(&N) -> bool,
+    value: impl Fn(&N) -> u64,
+) -> Vec<N> {
+    let (keep, drop): (Vec<N>, Vec<N>) =
+        std::mem::take(lineage).into_iter().partition(|n| !is_internal(n) || value(n) == book_value);
+    *lineage = keep;
+    drop
+}
+
+/// The vault's book value: `outstanding` plus every claim not yet paid on Zcash. I10 requires
+/// the conforming lineage to hold exactly this much.
+pub fn book_value(outstanding: u64, claims: &[Claim]) -> u64 {
+    claims
+        .iter()
+        .filter(|c| c.state == ClaimState::Unpaid)
+        .fold(outstanding, |sum, c| sum.saturating_add(c.amount))
+}
+
 /// Decides the next payout for a vault.
 ///
 /// `lineage_value` / `lineage_notes`: the unspent conforming-lineage notes (all are spent).
@@ -179,10 +250,18 @@ pub fn next_payout(
     let by_id = |id: &ClaimId| unpaid.iter().copied().find(|c| &c.id == id);
 
     for claim in &unpaid {
-        // A market maker claim whose borrower claim is still unpaid is handled together
-        // with it; once the borrower is paid it is an ordinary claim.
-        if claim.kind == ClaimKind::CloseMarketMaker && claim.partner.as_ref().and_then(by_id).is_some() {
-            continue;
+        // A market maker claim whose borrower claim is still unpaid is paid together with it
+        // (the borrower bears the pair's fee); once the borrower is paid it is an ordinary
+        // claim. H-3: once the grace period is over, a borrower claim that cannot be paid (its
+        // recipient was never revealed, or it is too small to bear the fee) no longer holds the
+        // market maker hostage: the market maker is paid alone and bears its own fee.
+        if claim.kind == ClaimKind::CloseMarketMaker
+            && let Some(user) = claim.partner.as_ref().and_then(by_id)
+        {
+            let grace_over = now >= user.created_at.saturating_add(MARKET_MAKER_GRACE_SECS);
+            if !grace_over || borrower_payable(user, claim, &recipient, lineage_value, lineage_notes)? {
+                continue;
+            }
         }
         // Without a recipient, a claim is set aside: its value stays in the vault and the
         // queue moves on (docs/ARCHITECTURE.md, payout queue).
@@ -194,11 +273,10 @@ pub fn next_payout(
         if claim.kind == ClaimKind::CloseUser
             && let Some(mm) = claim.partner.as_ref().and_then(by_id)
         {
+            let grace_end = claim.created_at.saturating_add(MARKET_MAKER_GRACE_SECS);
             match recipient(&mm.commitment) {
                 Some(mm_rcpt) => group.push((mm, mm_rcpt)),
-                None if now < claim.created_at + MARKET_MAKER_GRACE_SECS => {
-                    return Ok(NextPayout::WaitUntil(claim.created_at + MARKET_MAKER_GRACE_SECS));
-                }
+                None if now < grace_end => return Ok(NextPayout::WaitUntil(grace_end)),
                 None => {} // grace over: pay the borrower alone
             }
         }
@@ -211,6 +289,25 @@ pub fn next_payout(
         }
     }
     Ok(NextPayout::Nothing)
+}
+
+/// Whether the borrower's claim `user` of a close pair can be paid: its recipient is known and
+/// it can bear the fee of the transaction that would pay it (with the market maker if known).
+fn borrower_payable(
+    user: &Claim,
+    mm: &Claim,
+    recipient: &impl Fn(&Commitment) -> Option<Recipient>,
+    lineage_value: u64,
+    lineage_notes: usize,
+) -> Result<bool, LedgerError> {
+    let Some(user_rcpt) = recipient(&user.commitment) else {
+        return Ok(false);
+    };
+    let mut group = vec![(user, user_rcpt)];
+    if let Some(mm_rcpt) = recipient(&mm.commitment) {
+        group.push((mm, mm_rcpt));
+    }
+    Ok(plan(&group, lineage_value, lineage_notes)?.is_some())
 }
 
 /// Builds the plan paying `group` (one claim, or a close pair with the borrower first).
@@ -475,5 +572,163 @@ mod tests {
         let mut preimage = vec![0x01; 32];
         preimage.extend([0xab; 43]);
         assert_eq!(r.commitment(), <[u8; 32]>::from(Keccak256::digest(&preimage)));
+    }
+
+    // ----- H-3 (security review 2026-10-11): the market maker is paid even if the borrower's
+    // close claim is never revealed or is dust. Adapted from the reviewer's PoCs.
+
+    const SMALL_DEPOSIT: u64 = 1_000_000; // 0.01 TAZ vault
+
+    #[test]
+    fn market_maker_paid_alone_after_grace_if_user_commitment_never_revealed() {
+        let user = claim(3, ClaimKind::CloseUser, 300_000, (11, 0), Some(4));
+        let mm = claim(4, ClaimKind::CloseMarketMaker, 700_000, (11, 0), Some(3));
+        let claims = [user.clone(), mm.clone()];
+        // Within the grace period the market maker waits for the borrower's recipient.
+        for now in [1_000, 1_050, 1_000 + MARKET_MAKER_GRACE_SECS - 1] {
+            assert_eq!(next_payout(&claims, known(&[4]), SMALL_DEPOSIT, 1, now).unwrap(), NextPayout::Nothing);
+        }
+        for now in [1_000 + MARKET_MAKER_GRACE_SECS, 1_200, 10_000, 10_000_000] {
+            let NextPayout::Pay(p) = next_payout(&claims, known(&[4]), SMALL_DEPOSIT, 1, now).unwrap() else {
+                panic!("market maker not paid at {now}");
+            };
+            assert_eq!(p.claims, vec![mm.id]);
+            // It bears its own fee; the borrower's share stays in the vault as change.
+            assert_eq!(p.payments.len(), 1);
+            assert_eq!(p.payments[0].value, 700_000 - FEE_1_IN_2_OUT);
+            assert_eq!(p.payments[0].privacy, OutputPrivacy::NoOvk);
+            assert_eq!(p.change, 300_000);
+        }
+    }
+
+    #[test]
+    fn market_maker_paid_alone_after_grace_if_user_share_is_dust() {
+        for user_amount in [0u64, 5_000, FEE_1_IN_2_OUT] {
+            let user = claim(3, ClaimKind::CloseUser, user_amount, (11, 0), Some(4));
+            let mm = claim(4, ClaimKind::CloseMarketMaker, SMALL_DEPOSIT - user_amount, (11, 0), Some(3));
+            let claims = [user.clone(), mm.clone()];
+            assert_eq!(
+                next_payout(&claims, known(&[3, 4]), SMALL_DEPOSIT, 1, 1_050).unwrap(),
+                NextPayout::Nothing,
+                "user_amount = {user_amount}: within the grace period"
+            );
+            let NextPayout::Pay(p) = next_payout(&claims, known(&[3, 4]), SMALL_DEPOSIT, 1, 10_000).unwrap() else {
+                panic!("market maker not paid, user_amount = {user_amount}");
+            };
+            assert_eq!(p.claims, vec![mm.id]);
+            assert_eq!(p.payments[0].value, SMALL_DEPOSIT - user_amount - FEE_1_IN_2_OUT);
+            assert_eq!(p.change, user_amount);
+            // Once the market maker is paid, I10 still holds with the dust claim unpaid.
+            let mut mm_paid = mm.clone();
+            mm_paid.state = ClaimState::Paid;
+            check_i10(p.change, 0, &[user, mm_paid]).unwrap();
+        }
+    }
+
+    #[test]
+    fn payable_borrower_still_pays_the_close_pair_after_grace() {
+        let user = claim(3, ClaimKind::CloseUser, 300_000, (11, 0), Some(4));
+        let mm = claim(4, ClaimKind::CloseMarketMaker, 700_000, (11, 0), Some(3));
+        let NextPayout::Pay(p) =
+            next_payout(&[mm.clone(), user.clone()], known(&[3, 4]), SMALL_DEPOSIT, 1, 10_000).unwrap()
+        else {
+            panic!()
+        };
+        assert_eq!(p.claims, vec![user.id, mm.id]);
+        assert_eq!(p.payments[0].value, 300_000 - FEE_1_IN_2_OUT);
+        assert_eq!(p.payments[1].value, 700_000);
+    }
+
+    // ----- H-2: only the vault's own change joins the lineage. Adapted from the reviewer's
+    // PoCs `foreign_internal_note_bricks_i10` and
+    // `zero_value_internal_notes_inflate_fee_until_claims_are_dust`.
+
+    fn note(tag: u8, value: u64, internal: bool, created_in: u8, spent_in: Option<u8>) -> VaultNote {
+        VaultNote {
+            nullifier: [tag; 32],
+            value,
+            internal,
+            created_in: [created_in; 32],
+            spent_in: spent_in.map(|t| [t; 32]),
+        }
+    }
+
+    /// The unspent lineage selected from `notes`, then filtered by the planned change.
+    fn unspent_lineage(conforming: u8, notes: &[VaultNote], book: u64) -> Vec<VaultNote> {
+        let member = lineage_members(Some(&[conforming; 32]), notes);
+        let mut lineage: Vec<VaultNote> =
+            notes.iter().zip(member).filter(|(n, is)| *is && n.spent_in.is_none()).map(|(n, _)| *n).collect();
+        retain_planned_change(&mut lineage, book, |n| n.internal, |n| n.value);
+        lineage
+    }
+
+    #[test]
+    fn foreign_internal_note_does_not_join_the_lineage() {
+        // Deposit (tx 1), spent by a liquidation payout (tx 2) whose change is note 11; then
+        // the borrower sends 1 zat to the vault's internal address (tx 9).
+        let liq = claim(2, ClaimKind::Liquidation, 700_000, (10, 1), None);
+        let outstanding = SMALL_DEPOSIT - 700_000;
+        let notes = [
+            note(10, SMALL_DEPOSIT, false, 1, Some(2)),
+            note(11, outstanding, true, 2, None),
+            note(12, 1, true, 9, None),
+        ];
+        let mut liq_paid = liq.clone();
+        liq_paid.state = ClaimState::Paid;
+        let book = book_value(outstanding, std::slice::from_ref(&liq_paid));
+        let lineage = unspent_lineage(10, &notes, book);
+        assert_eq!(lineage, vec![notes[1]], "the 1-zat note is foreign");
+        let value: u64 = lineage.iter().map(|n| n.value).sum();
+        check_i10(value, outstanding, &[liq_paid]).unwrap();
+    }
+
+    #[test]
+    fn zero_value_internal_notes_do_not_inflate_the_fee() {
+        // A first liquidation (tx 2) spent the deposit; its change is note 11. Then 140
+        // zero-value notes reach the internal address: half from strangers (tx 9), half as
+        // extra zero-value outputs of the vault transaction itself (signers only check outputs
+        // that carry value).
+        let mut first = claim(1, ClaimKind::Liquidation, 200_000, (9, 0), None);
+        first.state = ClaimState::Paid;
+        let second = claim(2, ClaimKind::Liquidation, 700_000, (10, 1), None);
+        let change = SMALL_DEPOSIT - 200_000;
+        let mut notes = vec![
+            note(10, SMALL_DEPOSIT, false, 1, Some(2)),
+            note(11, change, true, 2, None),
+        ];
+        notes.extend((0..140u8).map(|i| note(100 + i, 0, true, if i % 2 == 0 { 2 } else { 9 }, None)));
+        let claims = [first, second.clone()];
+        let outstanding = change - 700_000;
+
+        let lineage = unspent_lineage(10, &notes, book_value(outstanding, &claims));
+        assert_eq!(lineage, vec![notes[1]]);
+        let value: u64 = lineage.iter().map(|n| n.value).sum();
+        check_i10(value, outstanding, &claims).unwrap();
+        let NextPayout::Pay(p) = next_payout(&claims, known(&[2]), value, lineage.len(), 2_000).unwrap() else {
+            panic!("the claim must stay payable")
+        };
+        assert_eq!(p.claims, vec![second.id]);
+        assert_eq!(p.fee, FEE_1_IN_2_OUT, "one input, not 141");
+    }
+
+    #[test]
+    fn only_the_planned_change_of_a_vault_transaction_is_lineage() {
+        // A payout (tx 2) spends the deposit and creates two internal notes: the change (worth
+        // the book value once its claim is paid) and a payment to the vault's own internal
+        // address. Later change notes chain through spends of earlier ones (tx 3).
+        let notes = [
+            note(10, SMALL_DEPOSIT, false, 1, Some(2)),
+            note(11, 400_000, true, 2, Some(3)),
+            note(12, 590_000, true, 2, None),
+            note(13, 150_000, true, 3, None),
+        ];
+        let member = lineage_members(Some(&[10; 32]), &notes);
+        assert_eq!(member, vec![true, true, true, true]);
+        assert_eq!(unspent_lineage(10, &notes, 150_000), vec![notes[3]]);
+        // Until the last payout's claims are marked paid, the book value is still the old one:
+        // no note qualifies, so I10 fails and signers refuse to plan another payout.
+        assert!(unspent_lineage(10, &notes, 400_000).is_empty());
+        // No conforming deposit: nothing is lineage.
+        assert!(lineage_members(None, &notes[1..]).iter().all(|m| !m));
     }
 }

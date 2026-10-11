@@ -68,8 +68,10 @@ pub enum Classification {
 }
 
 /// Number of confirmations of a note mined at `height` when the chain tip is `tip`.
+///
+/// Both come from the light wallet server, so the arithmetic never panics (I-4).
 pub fn confirmations(height: u32, tip: u32) -> u32 {
-    tip.checked_sub(height).map_or(0, |d| d + 1)
+    tip.checked_sub(height).map_or(0, |d| d.saturating_add(1))
 }
 
 /// Classifies `notes` (any order) and returns them in P1 order with their classification.
@@ -204,6 +206,15 @@ mod tests {
             }
             previous = now;
         }
+    }
+
+    #[test]
+    fn server_supplied_extremes_do_not_overflow() {
+        assert_eq!(confirmations(0, u32::MAX), u32::MAX);
+        assert_eq!(confirmations(u32::MAX, 0), 0);
+        let n = [note(u32::MAX - 10, u64::MAX, u32::MAX, AMOUNT, true)];
+        assert_eq!(classes(u32::MAX, &n), vec![Classification::NonConforming(NonConformingReason::Late)]);
+        assert_eq!(classes(u32::MAX - 10, &n), vec![Classification::Pending]);
     }
 
     #[test]

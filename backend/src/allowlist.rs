@@ -1,16 +1,23 @@
 //! The paymaster allowlist (docs/INTERFACES.md § 4.1): which UserOps we sponsor.
 //!
-//! A UserOp is sponsored only if (a) its account deployment, if any, is a Safe v1.4.1 created
-//! by the canonical proxy factory, and (b) every call it makes is on the list below, with no
-//! ETH value anywhere. The smart account therefore never needs (or receives) ETH, and the
-//! paymaster cannot be used for anything but Zecured flows.
+//! [`Allowlist::check`] is the pure part. A UserOp passes only if
+//! - it is a v0.7 UserOp (no v0.6 `initCode` / `paymasterAndData`) whose gas fields are below
+//!   sane caps;
+//! - its account deployment, if any, is a Safe v1.4.1 created by the canonical proxy factory
+//!   with the app's exact configuration, **at `sender`** (CREATE2);
+//! - every call it makes is on the list below, with no ETH value anywhere, and a MultiSend
+//!   batch has at most [`MAX_BATCH_CALLS`] calls.
+//!
+//! The proxy (proxy.rs) adds what needs the chain: the sender must be a Zecured account
+//! (`Registry.vaultOf(sender) != 0`, bound by `attestDeposit` before its first UserOp) and, once
+//! deployed, still the canonical SafeProxy with the Safe 4337 module as fallback handler; the
+//! EntryPoint must be v0.7; senders are rate-limited. The smart account therefore never needs
+//! (or receives) ETH, and the paymaster cannot be used for anything but Zecured flows.
+//!
+//! Refusal reasons are fixed public strings (L-2).
 
-use alloy::{
-    primitives::{Address, Bytes, U256, address},
-    sol,
-    sol_types::SolCall,
-};
-use anyhow::{Result, bail, ensure};
+use alloy::primitives::{Address, B256, Bytes, U256, address, b256, hex, keccak256};
+use alloy::{sol, sol_types::SolCall};
 use serde::Deserialize;
 
 /// Canonical Safe v1.4.1 deployments (same on every chain), as used by permissionless.js.
@@ -19,6 +26,33 @@ pub const SAFE_SINGLETON: Address = address!("41675C099F32341bf84BFc5382aF534df5
 pub const MULTI_SEND_CALL_ONLY: Address = address!("9641d764fc13c8B624c04430C7356C1C7C8102e2");
 pub const SAFE_MODULE_SETUP: Address = address!("2dd68b007B46fBe91B9A7c3EDa5A7a1063cB5b47");
 pub const SAFE_4337_MODULE: Address = address!("75cf11467937ce3F2f357CE24ffc3DBF8fD5c226");
+/// ERC-4337 EntryPoint v0.7, the only one the Safe 4337 module v0.3.0 supports.
+pub const ENTRY_POINT_V07: Address = address!("0000000071727De22E5E9d8BAf0edAc6f37da032");
+
+/// `SafeProxyFactory.proxyCreationCode()` of Safe v1.4.1 (identical on Base Sepolia, checked
+/// with `cast call`; also app/lib/safe.ts).
+pub const SAFE_PROXY_CREATION_CODE: &[u8] = &hex!(
+    "608060405234801561001057600080fd5b506040516101e63803806101e68339818101604052602081101561003357600080fd5b8101908080519060200190929190505050600073ffffffffffffffffffffffffffffffffffffffff168173ffffffffffffffffffffffffffffffffffffffff1614156100ca576040517f08c379a00000000000000000000000000000000000000000000000000000000081526004018080602001828103825260228152602001806101c46022913960400191505060405180910390fd5b806000806101000a81548173ffffffffffffffffffffffffffffffffffffffff021916908373ffffffffffffffffffffffffffffffffffffffff1602179055505060ab806101196000396000f3fe608060405273ffffffffffffffffffffffffffffffffffffffff600054167fa619486e0000000000000000000000000000000000000000000000000000000060003514156050578060005260206000f35b3660008037600080366000845af43d6000803e60008114156070573d6000fd5b3d6000f3fea264697066735822122003d1488ee65e08fa41e58e888a9865554c535f2c77126a82cb4c0f917f31441364736f6c63430007060033496e76616c69642073696e676c65746f6e20616464726573732070726f7669646564"
+);
+/// The deployed SafeProxy code: the 0xab bytes the constructor copies from offset 0x119.
+pub const SAFE_PROXY_RUNTIME_CODE: &[u8] = SAFE_PROXY_CREATION_CODE.split_at(0x119).1.split_at(0xab).0;
+/// Safe storage slot of the fallback handler: `keccak256("fallback_manager.handler.address")`.
+pub const FALLBACK_HANDLER_SLOT: B256 = b256!("6c9a6c4a39284e37ed1cf53d337577d14212a4870fb976a4366c693b939918d5");
+
+/// Most calls in one sponsored MultiSend batch (the app's largest batch has 4).
+pub const MAX_BATCH_CALLS: usize = 8;
+/// Execution gas caps per UserOp: generous for the app's UserOps (a Safe deployment plus a
+/// Morpho borrow), small enough to bound the work one sponsored UserOp can do.
+pub const MAX_CALL_GAS: u64 = 3_000_000;
+pub const MAX_VERIFICATION_GAS: u64 = 2_000_000;
+pub const MAX_PAYMASTER_GAS: u64 = 1_000_000;
+/// On Base this carries the L1 data fee divided by the L2 gas price, so it grows when L2 gas is
+/// cheap; the cost cap below is what bounds it in money.
+pub const MAX_PRE_VERIFICATION_GAS: u64 = 50_000_000;
+/// 10 gwei: far above Base's usual fees.
+pub const MAX_FEE_PER_GAS: u64 = 10_000_000_000;
+/// Most one UserOp may cost the paymaster: all its gas limits at `maxFeePerGas` (0.01 ETH).
+pub const MAX_USEROP_COST_WEI: u64 = 10_000_000_000_000_000;
 
 const OPERATION_CALL: u8 = 0;
 const OPERATION_DELEGATECALL: u8 = 1;
@@ -63,8 +97,8 @@ pub struct Allowlist {
     pub lltv: U256,
 }
 
-/// The fields of a v0.7 UserOp the allowlist looks at.
-#[derive(Clone, Debug, Deserialize)]
+/// The fields of a v0.7 UserOp (ERC-7769 JSON) the allowlist looks at.
+#[derive(Clone, Debug, Default, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct UserOpView {
     pub sender: Address,
@@ -73,6 +107,70 @@ pub struct UserOpView {
     #[serde(default)]
     pub factory_data: Option<Bytes>,
     pub call_data: Bytes,
+    /// v0.6 only: never sponsored.
+    #[serde(default)]
+    pub init_code: Option<Bytes>,
+    /// v0.6 only: never sponsored.
+    #[serde(default)]
+    pub paymaster_and_data: Option<Bytes>,
+    #[serde(default)]
+    pub call_gas_limit: Option<U256>,
+    #[serde(default)]
+    pub verification_gas_limit: Option<U256>,
+    #[serde(default)]
+    pub pre_verification_gas: Option<U256>,
+    #[serde(default)]
+    pub max_fee_per_gas: Option<U256>,
+    #[serde(default)]
+    pub max_priority_fee_per_gas: Option<U256>,
+    #[serde(default)]
+    pub paymaster_verification_gas_limit: Option<U256>,
+    #[serde(default)]
+    pub paymaster_post_op_gas_limit: Option<U256>,
+}
+
+/// A refusal: a fixed public reason.
+pub type Check = Result<(), &'static str>;
+
+fn need(ok: bool, reason: &'static str) -> Check {
+    if ok { Ok(()) } else { Err(reason) }
+}
+
+fn decode<C: SolCall>(data: &[u8]) -> Result<C, &'static str> {
+    C::abi_decode(data).map_err(|_| "malformed call data")
+}
+
+fn at_most(value: Option<U256>, max: u64) -> bool {
+    value.is_none_or(|v| v <= U256::from(max))
+}
+
+/// The most `op` can cost: every gas limit it states, at its `maxFeePerGas` (fields still being
+/// estimated count as zero). Saturating: absurd values only make it larger.
+fn max_cost(op: &UserOpView) -> U256 {
+    let gas = [
+        op.call_gas_limit,
+        op.verification_gas_limit,
+        op.pre_verification_gas,
+        op.paymaster_verification_gas_limit,
+        op.paymaster_post_op_gas_limit,
+    ]
+    .into_iter()
+    .flatten()
+    .fold(U256::ZERO, |sum, g| sum.saturating_add(g));
+    gas.saturating_mul(op.max_fee_per_gas.unwrap_or_default())
+}
+
+/// The address `SafeProxyFactory.createProxyWithNonce(singleton, initializer, saltNonce)`
+/// deploys: CREATE2 with salt `keccak256(keccak256(initializer) || saltNonce)` and init code
+/// `proxyCreationCode || abi.encode(singleton)`.
+pub fn safe_address(singleton: Address, initializer: &[u8], salt_nonce: U256) -> Address {
+    let mut salt = keccak256(initializer).to_vec();
+    salt.extend_from_slice(&salt_nonce.to_be_bytes::<32>());
+    let salt = keccak256(salt);
+    let mut init_code = SAFE_PROXY_CREATION_CODE.to_vec();
+    init_code.extend_from_slice(&[0u8; 12]);
+    init_code.extend_from_slice(singleton.as_slice());
+    SAFE_PROXY_FACTORY.create2_from_code(salt, init_code)
 }
 
 impl Allowlist {
@@ -84,25 +182,27 @@ impl Allowlist {
             && m.lltv == self.lltv
     }
 
-    /// Decides whether to sponsor `op`.
-    pub fn check(&self, op: &UserOpView) -> Result<()> {
-        if let Some(factory) = op.factory {
-            ensure!(factory == SAFE_PROXY_FACTORY, "unknown account factory");
-            let data = op.factory_data.as_ref().map(|d| d.as_ref()).unwrap_or_default();
-            let call = createProxyWithNonceCall::abi_decode(data)?;
-            ensure!(call.singleton == SAFE_SINGLETON, "unexpected Safe singleton");
-            // The exact account the app creates: one owner, threshold 1, the 4337 module
-            // enabled through SafeModuleSetup and set as fallback handler, no payment.
-            let s = setupCall::abi_decode(&call.initializer)?;
-            ensure!(s.owners.len() == 1 && s.threshold == U256::from(1u8), "unexpected Safe owners");
-            ensure!(s.to == SAFE_MODULE_SETUP, "unexpected Safe setup target");
-            let modules = enableModulesCall::abi_decode(&s.data)?;
-            ensure!(modules.modules == [SAFE_4337_MODULE], "unexpected Safe modules");
-            ensure!(s.fallbackHandler == SAFE_4337_MODULE, "unexpected fallback handler");
-            ensure!(
-                s.paymentToken == Address::ZERO && s.payment.is_zero() && s.paymentReceiver == Address::ZERO,
-                "Safe setup payment not allowed"
-            );
+    /// Decides whether to sponsor `op` (the parts that need no chain access).
+    pub fn check(&self, op: &UserOpView) -> Check {
+        need(
+            op.init_code.as_ref().is_none_or(|c| c.is_empty())
+                && op.paymaster_and_data.as_ref().is_none_or(|p| p.is_empty()),
+            "only v0.7 UserOperations are sponsored",
+        )?;
+        need(
+            at_most(op.call_gas_limit, MAX_CALL_GAS)
+                && at_most(op.verification_gas_limit, MAX_VERIFICATION_GAS)
+                && at_most(op.pre_verification_gas, MAX_PRE_VERIFICATION_GAS)
+                && at_most(op.paymaster_verification_gas_limit, MAX_PAYMASTER_GAS)
+                && at_most(op.paymaster_post_op_gas_limit, MAX_PAYMASTER_GAS)
+                && at_most(op.max_fee_per_gas, MAX_FEE_PER_GAS)
+                && at_most(op.max_priority_fee_per_gas, MAX_FEE_PER_GAS)
+                && at_most(Some(max_cost(op)), MAX_USEROP_COST_WEI),
+            "gas limits or fees above the sponsorship caps",
+        )?;
+        match op.factory {
+            Some(factory) => self.check_deployment(op, factory)?,
+            None => need(op.factory_data.as_ref().is_none_or(|d| d.is_empty()), "factory data without a factory")?,
         }
         let data = op.call_data.as_ref();
         let (to, value, inner, operation) = if let Ok(c) = executeUserOpCall::abi_decode(data) {
@@ -110,68 +210,90 @@ impl Allowlist {
         } else if let Ok(c) = executeUserOpWithErrorStringCall::abi_decode(data) {
             (c.to, c.value, c.data, c.operation)
         } else {
-            bail!("callData is not a Safe 4337 execution");
+            return Err("callData is not a Safe 4337 execution");
         };
-        ensure!(value.is_zero(), "no ETH value allowed");
+        need(value.is_zero(), "no ETH value allowed")?;
         match operation {
             OPERATION_CALL => self.check_call(op.sender, to, &inner),
             OPERATION_DELEGATECALL if to == MULTI_SEND_CALL_ONLY => {
-                let batch = multiSendCall::abi_decode(&inner)?;
-                for (op_kind, target, value, data) in unpack_multisend(&batch.transactions)? {
-                    ensure!(op_kind == OPERATION_CALL, "batched delegatecall not allowed");
-                    ensure!(value.is_zero(), "no ETH value allowed");
+                let batch = decode::<multiSendCall>(&inner)?;
+                let calls = unpack_multisend(&batch.transactions)?;
+                need(!calls.is_empty() && calls.len() <= MAX_BATCH_CALLS, "batch is empty or too long")?;
+                for (op_kind, target, value, data) in calls {
+                    need(op_kind == OPERATION_CALL, "batched delegatecall not allowed")?;
+                    need(value.is_zero(), "no ETH value allowed")?;
                     self.check_call(op.sender, target, &data)?;
                 }
                 Ok(())
             }
-            _ => bail!("operation not allowed"),
+            _ => Err("operation not allowed"),
         }
     }
 
-    fn check_call(&self, sender: Address, to: Address, data: &[u8]) -> Result<()> {
-        ensure!(data.len() >= 4, "missing selector");
-        let selector: [u8; 4] = data[..4].try_into().expect("checked length");
+    /// The exact account the app creates: one owner, threshold 1, the 4337 module enabled
+    /// through SafeModuleSetup and set as fallback handler, no payment; deployed at `sender`.
+    fn check_deployment(&self, op: &UserOpView, factory: Address) -> Check {
+        need(factory == SAFE_PROXY_FACTORY, "unknown account factory")?;
+        let data = op.factory_data.as_ref().map(|d| d.as_ref()).unwrap_or_default();
+        let call = decode::<createProxyWithNonceCall>(data)?;
+        need(call.singleton == SAFE_SINGLETON, "unexpected Safe singleton")?;
+        let s = decode::<setupCall>(&call.initializer)?;
+        need(s.owners.len() == 1 && s.threshold == U256::from(1u8), "unexpected Safe owners")?;
+        need(s.to == SAFE_MODULE_SETUP, "unexpected Safe setup target")?;
+        let modules = decode::<enableModulesCall>(&s.data)?;
+        need(modules.modules == [SAFE_4337_MODULE], "unexpected Safe modules")?;
+        need(s.fallbackHandler == SAFE_4337_MODULE, "unexpected fallback handler")?;
+        need(
+            s.paymentToken == Address::ZERO && s.payment.is_zero() && s.paymentReceiver == Address::ZERO,
+            "Safe setup payment not allowed",
+        )?;
+        need(
+            safe_address(call.singleton, &call.initializer, call.saltNonce) == op.sender,
+            "the deployment does not create the sender",
+        )
+    }
+
+    fn check_call(&self, sender: Address, to: Address, data: &[u8]) -> Check {
+        need(data.len() >= 4, "missing selector")?;
+        let selector: [u8; 4] = [data[0], data[1], data[2], data[3]];
         if to == self.morpho {
             if selector == setAuthorizationCall::SELECTOR {
-                let c = setAuthorizationCall::abi_decode(data)?;
-                ensure!(
+                let c = decode::<setAuthorizationCall>(data)?;
+                return need(
                     c.authorized == self.registry || c.authorized == self.adapter,
-                    "authorization only for the registry or the adapter"
+                    "authorization only for the registry or the adapter",
                 );
-                return Ok(());
             }
             if selector == borrowCall::SELECTOR {
-                let c = borrowCall::abi_decode(data)?;
-                ensure!(self.is_our_market(&c.marketParams), "not the Zecured market");
-                ensure!(c.onBehalf == sender, "borrow must be for the account itself");
-                return Ok(());
+                let c = decode::<borrowCall>(data)?;
+                need(self.is_our_market(&c.marketParams), "not the Zecured market")?;
+                return need(c.onBehalf == sender, "borrow must be for the account itself");
             }
             if selector == repayCall::SELECTOR {
-                let c = repayCall::abi_decode(data)?;
-                ensure!(self.is_our_market(&c.marketParams), "not the Zecured market");
-                ensure!(c.onBehalf == sender, "repay must be for the account itself");
-                ensure!(c.data.is_empty(), "repay callbacks not allowed");
-                return Ok(());
+                let c = decode::<repayCall>(data)?;
+                need(self.is_our_market(&c.marketParams), "not the Zecured market")?;
+                need(c.onBehalf == sender, "repay must be for the account itself")?;
+                return need(c.data.is_empty(), "repay callbacks not allowed");
             }
         } else if to == self.usdc {
             if selector == approveCall::SELECTOR {
-                ensure!(approveCall::abi_decode(data)?.spender == self.morpho, "approve only to Morpho");
-                return Ok(());
+                return need(decode::<approveCall>(data)?.spender == self.morpho, "approve only to Morpho");
             }
             if selector == transferCall::SELECTOR {
+                decode::<transferCall>(data)?;
                 return Ok(());
             }
         } else if to == self.registry && selector == requestReleaseCall::SELECTOR {
-            requestReleaseCall::abi_decode(data)?;
+            decode::<requestReleaseCall>(data)?;
             return Ok(());
         } else if to == self.registry && selector == requestPartialReleaseCall::SELECTOR {
-            requestPartialReleaseCall::abi_decode(data)?;
+            decode::<requestPartialReleaseCall>(data)?;
             return Ok(());
         } else if to == self.adapter && selector == invalidateNonceCall::SELECTOR {
-            invalidateNonceCall::abi_decode(data)?;
+            decode::<invalidateNonceCall>(data)?;
             return Ok(());
         }
-        bail!("call not on the allowlist")
+        Err("call not on the allowlist")
     }
 }
 
@@ -179,17 +301,18 @@ impl Allowlist {
 type MultiSendEntry = (u8, Address, U256, Vec<u8>);
 
 /// MultiSend packing: operation (1) | to (20) | value (32) | data length (32) | data.
-fn unpack_multisend(mut packed: &[u8]) -> Result<Vec<MultiSendEntry>> {
+fn unpack_multisend(mut packed: &[u8]) -> Result<Vec<MultiSendEntry>, &'static str> {
     const HEADER: usize = 1 + 20 + 32 + 32;
     let mut out = vec![];
     while !packed.is_empty() {
-        ensure!(packed.len() >= HEADER, "truncated multiSend entry");
+        need(out.len() < MAX_BATCH_CALLS, "batch is empty or too long")?;
+        need(packed.len() >= HEADER, "truncated multiSend entry")?;
         let op = packed[0];
         let to = Address::from_slice(&packed[1..21]);
         let value = U256::from_be_slice(&packed[21..53]);
-        let len =
-            usize::try_from(U256::from_be_slice(&packed[53..85])).map_err(|_| anyhow::anyhow!("length overflow"))?;
-        ensure!(packed.len() >= HEADER + len, "truncated multiSend data");
+        let len = usize::try_from(U256::from_be_slice(&packed[53..85])).map_err(|_| "truncated multiSend data")?;
+        // No `HEADER + len`: an attacker-chosen length must not overflow.
+        need(packed.len() - HEADER >= len, "truncated multiSend data")?;
         out.push((op, to, value, packed[HEADER..HEADER + len].to_vec()));
         packed = &packed[HEADER + len..];
     }
@@ -197,11 +320,11 @@ fn unpack_multisend(mut packed: &[u8]) -> Result<Vec<MultiSendEntry>> {
 }
 
 #[cfg(test)]
-mod tests {
+pub(crate) mod tests {
     use super::*;
     use alloy::primitives::B256;
 
-    fn list() -> Allowlist {
+    pub fn list() -> Allowlist {
         Allowlist {
             morpho: Address::repeat_byte(0x11),
             registry: Address::repeat_byte(0x22),
@@ -225,7 +348,7 @@ mod tests {
         }
     }
 
-    fn single(to: Address, data: Vec<u8>) -> Bytes {
+    pub fn single(to: Address, data: Vec<u8>) -> Bytes {
         executeUserOpCall {
             to,
             value: U256::ZERO,
@@ -236,7 +359,7 @@ mod tests {
         .into()
     }
 
-    fn batch(calls: &[(Address, Vec<u8>)]) -> Bytes {
+    fn pack(calls: &[(Address, Vec<u8>)]) -> Vec<u8> {
         let mut packed = vec![];
         for (to, data) in calls {
             packed.push(OPERATION_CALL);
@@ -245,6 +368,10 @@ mod tests {
             packed.extend_from_slice(&U256::from(data.len()).to_be_bytes::<32>());
             packed.extend_from_slice(data);
         }
+        packed
+    }
+
+    fn multisend(packed: Vec<u8>) -> Bytes {
         executeUserOpCall {
             to: MULTI_SEND_CALL_ONLY,
             value: U256::ZERO,
@@ -259,36 +386,47 @@ mod tests {
         .into()
     }
 
-    fn op(sender: Address, call_data: Bytes) -> UserOpView {
+    fn batch(calls: &[(Address, Vec<u8>)]) -> Bytes {
+        multisend(pack(calls))
+    }
+
+    pub fn op(sender: Address, call_data: Bytes) -> UserOpView {
         UserOpView {
             sender,
-            factory: None,
-            factory_data: None,
             call_data,
+            ..Default::default()
         }
     }
 
+    fn set_auth(l: &Allowlist, who: Address) -> (Address, Vec<u8>) {
+        (
+            l.morpho,
+            setAuthorizationCall {
+                authorized: who,
+                newIsAuthorized: true,
+            }
+            .abi_encode(),
+        )
+    }
+
+    fn release() -> Vec<u8> {
+        requestReleaseCall {
+            vaultId: B256::repeat_byte(1),
+            destCommitment: B256::repeat_byte(2),
+        }
+        .abi_encode()
+    }
+
+    /// The app's first UserOp: deploy the Safe, authorize Registry and Adapter, borrow.
     #[test]
     fn first_borrow_batch_is_sponsored() {
         let l = list();
-        let me = Address::repeat_byte(0x99);
+        let owner = Address::repeat_byte(0x01);
+        let (factory, factory_data) = deployment(owner, SAFE_4337_MODULE, U256::ZERO);
+        let me = predicted(owner, U256::ZERO);
         let calls = vec![
-            (
-                l.morpho,
-                setAuthorizationCall {
-                    authorized: l.registry,
-                    newIsAuthorized: true,
-                }
-                .abi_encode(),
-            ),
-            (
-                l.morpho,
-                setAuthorizationCall {
-                    authorized: l.adapter,
-                    newIsAuthorized: true,
-                }
-                .abi_encode(),
-            ),
+            set_auth(&l, l.registry),
+            set_auth(&l, l.adapter),
             (
                 l.morpho,
                 borrowCall {
@@ -301,7 +439,13 @@ mod tests {
                 .abi_encode(),
             ),
         ];
-        l.check(&op(me, batch(&calls))).unwrap();
+        let mut op = op(me, batch(&calls));
+        (op.factory, op.factory_data) = (factory, factory_data);
+        op.call_gas_limit = Some(U256::from(400_000u64));
+        op.verification_gas_limit = Some(U256::from(600_000u64));
+        op.pre_verification_gas = Some(U256::from(120_000u64));
+        op.max_fee_per_gas = Some(U256::from(1_200_000u64));
+        l.check(&op).unwrap();
     }
 
     #[test]
@@ -328,20 +472,24 @@ mod tests {
                 }
                 .abi_encode(),
             ),
-            (
-                l.registry,
-                requestReleaseCall {
-                    vaultId: B256::repeat_byte(1),
-                    destCommitment: B256::repeat_byte(2),
-                }
-                .abi_encode(),
-            ),
+            set_auth(&l, l.registry),
+            (l.registry, release()),
         ];
         l.check(&op(me, batch(&calls))).unwrap();
     }
 
-    fn deployment(owner: Address, module: Address) -> (Option<Address>, Option<Bytes>) {
-        let init = setupCall {
+    fn deployment(owner: Address, module: Address, salt_nonce: U256) -> (Option<Address>, Option<Bytes>) {
+        let data = createProxyWithNonceCall {
+            singleton: SAFE_SINGLETON,
+            initializer: initializer(owner, module).into(),
+            saltNonce: salt_nonce,
+        }
+        .abi_encode();
+        (Some(SAFE_PROXY_FACTORY), Some(data.into()))
+    }
+
+    fn initializer(owner: Address, module: Address) -> Vec<u8> {
+        setupCall {
             owners: vec![owner],
             threshold: U256::from(1u8),
             to: SAFE_MODULE_SETUP,
@@ -351,20 +499,18 @@ mod tests {
             payment: U256::ZERO,
             paymentReceiver: Address::ZERO,
         }
-        .abi_encode();
-        let data = createProxyWithNonceCall {
-            singleton: SAFE_SINGLETON,
-            initializer: init.into(),
-            saltNonce: U256::ZERO,
-        }
-        .abi_encode();
-        (Some(SAFE_PROXY_FACTORY), Some(data.into()))
+        .abi_encode()
+    }
+
+    fn predicted(owner: Address, salt_nonce: U256) -> Address {
+        safe_address(SAFE_SINGLETON, &initializer(owner, SAFE_4337_MODULE), salt_nonce)
     }
 
     #[test]
     fn only_the_apps_safe_configuration_is_deployed() {
         let l = list();
-        let me = Address::repeat_byte(0x99);
+        let owner = Address::repeat_byte(0x01);
+        let me = predicted(owner, U256::ZERO);
         let call = single(
             l.registry,
             requestPartialReleaseCall {
@@ -375,10 +521,52 @@ mod tests {
             .abi_encode(),
         );
         let mut op = op(me, call);
-        (op.factory, op.factory_data) = deployment(Address::repeat_byte(0x01), SAFE_4337_MODULE);
+        (op.factory, op.factory_data) = deployment(owner, SAFE_4337_MODULE, U256::ZERO);
         l.check(&op).unwrap();
-        (op.factory, op.factory_data) = deployment(Address::repeat_byte(0x01), Address::repeat_byte(0x02));
-        assert!(l.check(&op).is_err(), "a different module must be refused");
+        (op.factory, op.factory_data) = deployment(owner, Address::repeat_byte(0x02), U256::ZERO);
+        assert_eq!(l.check(&op), Err("unexpected Safe modules"));
+    }
+
+    /// M-3: the factory data must create exactly `sender`.
+    #[test]
+    fn the_deployment_must_create_the_sender() {
+        let l = list();
+        let owner = Address::repeat_byte(0x01);
+        let mut op = op(Address::repeat_byte(0x99), single(l.registry, release()));
+        (op.factory, op.factory_data) = deployment(owner, SAFE_4337_MODULE, U256::ZERO);
+        assert_eq!(l.check(&op), Err("the deployment does not create the sender"));
+        op.sender = predicted(owner, U256::ZERO);
+        l.check(&op).unwrap();
+        // Another salt nonce is another account.
+        (op.factory, op.factory_data) = deployment(owner, SAFE_4337_MODULE, U256::from(7u8));
+        assert!(l.check(&op).is_err());
+        op.factory_data = None;
+        assert!(l.check(&op).is_err());
+        op.factory = None;
+        op.factory_data = Some(Bytes::from(vec![1u8]));
+        assert_eq!(l.check(&op), Err("factory data without a factory"));
+    }
+
+    /// The CREATE2 derivation against addresses returned by the real SafeProxyFactory
+    /// (`eth_call` of createProxyWithNonce on a Base Sepolia fork), owner 0xf39F…2266.
+    #[test]
+    fn safe_addresses_match_the_factory() {
+        let owner: Address = "0xf39Fd6e51aad88F6F4ce6aB8827279cffFb92266".parse().unwrap();
+        let a: Address = "0x08eA90D108291a05830B25E8eFaF027979dEb8D1".parse().unwrap();
+        let b: Address = "0x8a5D1a934DB9a8940A042f3e378873650e6Ea96A".parse().unwrap();
+        assert_eq!(predicted(owner, U256::ZERO), a);
+        assert_eq!(predicted(owner, U256::from(7u8)), b);
+    }
+
+    #[test]
+    fn safe_constants() {
+        assert_eq!(SAFE_PROXY_CREATION_CODE.len(), 0x1e6);
+        // Code of a deployed Safe v1.4.1 proxy (`cast code` on Base Sepolia).
+        assert_eq!(
+            hex::encode(SAFE_PROXY_RUNTIME_CODE),
+            "608060405273ffffffffffffffffffffffffffffffffffffffff600054167fa619486e0000000000000000000000000000000000000000000000000000000060003514156050578060005260206000f35b3660008037600080366000845af43d6000803e60008114156070573d6000fd5b3d6000f3fea264697066735822122003d1488ee65e08fa41e58e888a9865554c535f2c77126a82cb4c0f917f31441364736f6c63430007060033"
+        );
+        assert_eq!(FALLBACK_HANDLER_SLOT, keccak256("fallback_manager.handler.address"));
     }
 
     #[test]
@@ -387,20 +575,8 @@ mod tests {
         let me = Address::repeat_byte(0x99);
         let stranger = Address::repeat_byte(0xab);
         // authorizing anyone else
-        assert!(
-            l.check(&op(
-                me,
-                single(
-                    l.morpho,
-                    setAuthorizationCall {
-                        authorized: stranger,
-                        newIsAuthorized: true
-                    }
-                    .abi_encode()
-                )
-            ))
-            .is_err()
-        );
+        let (to, data) = set_auth(&l, stranger);
+        assert!(l.check(&op(me, single(to, data))).is_err());
         // borrowing on behalf of someone else
         let b = borrowCall {
             marketParams: market(&l),
@@ -422,20 +598,11 @@ mod tests {
         };
         assert!(l.check(&op(me, single(l.morpho, b.abi_encode()))).is_err());
         // approving a non-Morpho spender
-        assert!(
-            l.check(&op(
-                me,
-                single(
-                    l.usdc,
-                    approveCall {
-                        spender: stranger,
-                        amount: U256::MAX
-                    }
-                    .abi_encode()
-                )
-            ))
-            .is_err()
-        );
+        let a = approveCall {
+            spender: stranger,
+            amount: U256::MAX,
+        };
+        assert!(l.check(&op(me, single(l.usdc, a.abi_encode()))).is_err());
         // arbitrary contract call
         assert!(l.check(&op(me, single(stranger, vec![1, 2, 3, 4]))).is_err());
         // ETH value
@@ -472,6 +639,84 @@ mod tests {
             ),
         );
         deploy.factory = Some(stranger);
-        assert!(l.check(&deploy).is_err());
+        assert_eq!(l.check(&deploy), Err("unknown account factory"));
+    }
+
+    /// M-3: v0.6 UserOps (whose `initCode` this check would not read) are never sponsored.
+    #[test]
+    fn v06_userops_are_refused() {
+        let l = list();
+        let mut op = op(Address::repeat_byte(0x99), single(l.registry, release()));
+        l.check(&op).unwrap();
+        op.init_code = Some(Bytes::from(vec![0xde, 0xad]));
+        assert_eq!(l.check(&op), Err("only v0.7 UserOperations are sponsored"));
+        op.init_code = Some(Bytes::new());
+        l.check(&op).unwrap();
+        op.paymaster_and_data = Some(Bytes::from(vec![1u8; 20]));
+        assert!(l.check(&op).is_err());
+    }
+
+    /// M-3: gas fields above the caps are refused (absent fields, e.g. while estimating, are fine).
+    #[test]
+    fn gas_fields_are_capped() {
+        let l = list();
+        let base = op(Address::repeat_byte(0x99), single(l.registry, release()));
+        let mut op = base.clone();
+        op.call_gas_limit = Some(U256::from(MAX_CALL_GAS));
+        op.max_fee_per_gas = Some(U256::from(1_000_000_000u64)); // 1 gwei: 0.003 ETH at most
+        l.check(&op).unwrap();
+        op.call_gas_limit = None;
+        op.max_fee_per_gas = Some(U256::from(MAX_FEE_PER_GAS));
+        l.check(&op).unwrap();
+        let too_much: [fn(&mut UserOpView); 7] = [
+            |o| o.call_gas_limit = Some(U256::from(MAX_CALL_GAS + 1)),
+            |o| o.verification_gas_limit = Some(U256::from(MAX_VERIFICATION_GAS + 1)),
+            |o| o.pre_verification_gas = Some(U256::from(MAX_PRE_VERIFICATION_GAS + 1)),
+            |o| o.paymaster_verification_gas_limit = Some(U256::from(MAX_PAYMASTER_GAS + 1)),
+            |o| o.paymaster_post_op_gas_limit = Some(U256::MAX),
+            |o| o.max_fee_per_gas = Some(U256::from(MAX_FEE_PER_GAS + 1)),
+            |o| o.max_priority_fee_per_gas = Some(U256::MAX),
+        ];
+        for f in too_much {
+            let mut op = base.clone();
+            f(&mut op);
+            assert_eq!(l.check(&op), Err("gas limits or fees above the sponsorship caps"));
+        }
+        // Within every field cap but too expensive in total: 57M gas at 10 gwei = 0.57 ETH.
+        let mut op = base.clone();
+        op.call_gas_limit = Some(U256::from(MAX_CALL_GAS));
+        op.verification_gas_limit = Some(U256::from(MAX_VERIFICATION_GAS));
+        op.pre_verification_gas = Some(U256::from(MAX_PRE_VERIFICATION_GAS));
+        op.max_fee_per_gas = Some(U256::from(MAX_FEE_PER_GAS));
+        assert_eq!(l.check(&op), Err("gas limits or fees above the sponsorship caps"));
+        // Base-like fees: a large pre-verification gas at a tiny gas price is cheap and fine.
+        op.max_fee_per_gas = Some(U256::from(2_000_000u64));
+        l.check(&op).unwrap();
+        // JSON as the app sends it: hex quantities.
+        let json = serde_json::json!({
+            "sender": Address::repeat_byte(0x99), "callData": base.call_data,
+            "callGasLimit": "0x2dc6c1", "maxFeePerGas": "0x1"
+        });
+        let parsed: UserOpView = serde_json::from_value(json).unwrap();
+        assert_eq!(parsed.call_gas_limit, Some(U256::from(MAX_CALL_GAS + 1)));
+        assert!(l.check(&parsed).is_err());
+    }
+
+    /// M-3: MultiSend batches are capped, and a hostile length cannot overflow.
+    #[test]
+    fn batches_are_capped_and_lengths_checked() {
+        let l = list();
+        let me = Address::repeat_byte(0x99);
+        let call = (l.registry, release());
+        l.check(&op(me, batch(&vec![call.clone(); MAX_BATCH_CALLS]))).unwrap();
+        assert_eq!(
+            l.check(&op(me, batch(&vec![call.clone(); MAX_BATCH_CALLS + 1]))),
+            Err("batch is empty or too long")
+        );
+        assert_eq!(l.check(&op(me, batch(&[]))), Err("batch is empty or too long"));
+
+        let mut hostile = pack(std::slice::from_ref(&call));
+        hostile[53..85].copy_from_slice(&U256::from(u64::MAX).to_be_bytes::<32>());
+        assert_eq!(l.check(&op(me, multisend(hostile))), Err("truncated multiSend data"));
     }
 }

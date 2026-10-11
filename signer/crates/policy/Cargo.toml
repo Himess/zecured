@@ -18,6 +18,7 @@ serde.workspace = true
 hex.workspace = true
 sha3 = "0.10"
 zcash_protocol.workspace = true
+zcash_note_encryption.workspace = true
 
 [dev-dependencies]
 zecured-threshold = { path = "../threshold" }
