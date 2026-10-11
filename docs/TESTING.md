@@ -7,7 +7,7 @@ how to reproduce all of it. Everything here ran on testnets only.
 
 | Layer | Command | Tests | Covers |
 |---|---|---|---|
-| Contracts | `cd contracts && forge test --isolate` | 228 | Unit and fork tests against the real Morpho Blue code; handler-based invariants I1, I2, I3 (Base side), I4–I9 and D14 with attacker actions; fuzzing (D14 LTV rule against an independent computation); EIP-712 golden vectors; the Tier 2 Zcash header relay against real testnet headers fetched over the Zcash P2P network (Equihash, NU7 difficulty rules, reorgs) |
+| Contracts | `cd contracts && forge test --isolate` | 254 | Unit and fork tests against the real Morpho Blue code; handler-based invariants I1, I2, I3 (Base side), I4–I9 and D14 with attacker actions; fuzzing (D14 LTV rule against an independent computation); EIP-712 golden vectors; the Tier 2 Zcash header relay against real testnet headers fetched over the Zcash P2P network (Equihash, NU7 difficulty rules, reorgs); Tier 2 deposit proofs with a real deposit's journal against a relay-verified real header, and vault cancellation |
 | Rust workspace | `cargo test --workspace` (plus `-p zecured-node --features demo`, `-p zecured-backend --features test-hooks`) | 176 | ZIP 2005 key derivation against published vectors; FROST DKG and re-randomized signing; an offline FROST-signed Ironwood spend; P1 classification; the payout ledger (fees, dust, set-aside claims, I10); PCZT verification (an honest payout passes; another recipient, a split payment, a third-party output readable with the vault's OVK, an extra or a missing vault input, an expiry outside the window, a fee mismatch and the wrong vault are refused); EIP-712 parity with Solidity; D16 request authentication and replay protection; node-to-node DKG envelopes bound to the transcript; scanner reorg detection; the paymaster allowlist (account binding, CREATE2 sender, EntryPoint, caps); a regression test for every finding of the [security review](SECURITY_REVIEW.md) (payout misattribution, foreign or zero-value vault notes, undecryptable third-party outputs, forged Registry events, witness disagreement, idempotent confirmations, demo-mode gating, lock and overflow safety) |
 | App | `cd app && pnpm test` | vitest suite | Unified address encoding (F4Jumble), commitments, EIP-712 owner messages, Safe address prediction, call allowlist, Morpho math, API parsing |
 
@@ -37,6 +37,17 @@ own fork gas. The app uses a fresh, gasless Safe instead.
 
 In every run the account's zZEC balance stayed 0 (I2): zZEC only ever sat in Morpho, the
 Registry and the SettlementAdapter.
+
+## 2b. Tier 2 deposit proofs (docs/TIER2.md)
+
+| What | How | Result |
+|---|---|---|
+| History tree from public data | `history-root --tip 4488543` (23,517 V3 leaves from compact blocks, tree states and P2P headers) | Recomputed `hashBlockCommitments` equals the real header's |
+| Witness of a real deposit | `build-witness` for vault 9 (0.01 TAZ at 4,488,543), anchor 4,488,560 | Native `verify` accepts; `VaultOpened` struct hash equal to `cast`'s |
+| The guest on that witness | `zecured-tier2-host execute` | Journal byte for byte equal to the native one; 20.2 M cycles (36.2 M before removing redundant note commitments) |
+| A real proof | `zecured-tier2-host prove` on this 8 GB Apple M2 (CPU only: r0vm has no Metal backend) | A 22.1 M-cycle probe of the same Zcash code produced a verified succinct receipt in 108 min, with the machine swapping heavily. The run on the real deposit's witness (20.2 M cycles) was interrupted when the desktop app froze under that memory pressure; real proofs will be made on an x86 machine, which the Groth16 step needs anyway |
+| On-chain | `DepositProofs.t.sol`: the same journal against header 4,488,560 verified by the relay on-chain, MOCK verifier | Vault activated, 266,300 gas without the verifier call; 25 refusal and cancellation tests |
+| Headers over P2P (Rust) | `update-headers` / `build-witness --update-headers` | 969 new headers from Testnet peers; the rebuilt witness gives the same journal |
 
 ## 3. Robustness scenarios
 
