@@ -7158,6 +7158,18 @@ dependencies = [
 ]
 
 [[package]]
+name = "zcash_history"
+version = "0.6.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "da3dc4f915efe84d479343fb655505cfd26afcfd965f4678ad5ee339353acd62"
+dependencies = [
+ "blake2b_simd",
+ "corez",
+ "primitive-types",
+ "zcash_encoding",
+]
+
+[[package]]
 name = "zcash_keys"
 version = "0.17.0-pre.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -7373,6 +7385,29 @@ dependencies = [
  "zecured-node",
  "zecured-policy",
  "zecured-threshold",
+ "zecured-zcash-ops",
+]
+
+[[package]]
+name = "zecured-deposit-witness"
+version = "0.1.0"
+dependencies = [
+ "anyhow",
+ "blake2b_simd",
+ "clap",
+ "hex",
+ "incrementalmerkletree",
+ "orchard",
+ "primitive-types",
+ "sapling-crypto",
+ "serde",
+ "serde_json",
+ "sha2 0.10.9",
+ "tokio",
+ "zcash_client_backend",
+ "zcash_history",
+ "zcash_primitives",
+ "zcash_protocol",
  "zecured-zcash-ops",
 ]
 

@@ -1,0 +1,9 @@
+# Tier 2: trust-minimized deposit proofs (docs/TIER2.md). A separate workspace so the main
+# build never compiles the zkVM toolchain's crates.
+[workspace]
+resolver = "2"
+members = ["host"]
+
+[workspace.package]
+edition = "2024"
+license = "MIT"
