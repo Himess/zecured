@@ -2,14 +2,15 @@
 
 import Link from "next/link";
 import { useEffect, useState } from "react";
-import { isHex, type Address, type Hex } from "viem";
+import type { Address, Hex } from "viem";
 import { BorrowForm } from "@/components/BorrowForm";
-import { CopyButton, useMounted } from "@/components/client";
+import { CopyButton, MissingVaultId, useMounted } from "@/components/client";
+import { PayoutNotice } from "@/components/PayoutNotice";
 import { Badge, buttonClass, Card, KeyValue, Mono, Notice, Stat } from "@/components/ui";
 import { describeError, type Claim, type Vault } from "@/lib/api";
 import { readVault, type OnchainVault } from "@/lib/chain";
-import { config, configIssues } from "@/lib/config";
-import { useLoanByVault, usePosition, useVault } from "@/lib/hooks";
+import { config } from "@/lib/config";
+import { useLoanByVault, usePosition, useUrlFragment, useVault } from "@/lib/hooks";
 import {
   collateralValue,
   formatBps,
@@ -22,9 +23,11 @@ import {
   maxBorrowAtTargetLtv,
   WAD,
 } from "@/lib/morpho";
+import { vaultHref, vaultIdFromFragment } from "@/lib/routes";
 import { formatTaz } from "@/lib/zcash";
 import { STATUS_LABEL } from "../status";
 import { Exits, PendingClose, SendUsdcForm } from "./Exits";
+import { PartialRelease } from "./PartialRelease";
 
 const CLAIM_LABEL: Record<Claim["kind"], string> = {
   Release: "Release to you",
@@ -51,10 +54,11 @@ function useOnchainVault(vaultId: Hex | undefined, enabled: boolean) {
   return { data, error };
 }
 
-export function PositionView({ vaultId: raw }: { vaultId: string }) {
+/** The vault comes from the URL fragment (`/position#0x…`), never the path (M-6). */
+export function PositionView() {
   const mounted = useMounted();
-  const valid = isHex(raw) && raw.length === 66;
-  const vaultId = valid ? (raw.toLowerCase() as Hex) : undefined;
+  const fragment = useUrlFragment();
+  const vaultId = (fragment && vaultIdFromFragment(fragment)) || undefined;
   const { loan, ready } = useLoanByVault(vaultId);
   const vault = useVault(vaultId, 15_000);
   const onchain = useOnchainVault(vaultId, ready && !loan);
@@ -63,13 +67,8 @@ export function PositionView({ vaultId: raw }: { vaultId: string }) {
     loan?.account ?? (onchain.data && onchain.data.account !== zeroAccount ? onchain.data.account : undefined);
   const position = usePosition(account, 30_000);
 
-  if (!valid) {
-    return (
-      <Notice tone="danger" title="Not a vault id">
-        <p>A vault id is 0x followed by 64 hexadecimal characters.</p>
-      </Notice>
-    );
-  }
+  if (fragment === undefined) return <p className="text-sm text-muted">Loading…</p>;
+  if (!vaultId) return <MissingVaultId fragment={fragment} />;
 
   const v = vault.data;
   const p = position.data;
@@ -92,14 +91,14 @@ export function PositionView({ vaultId: raw }: { vaultId: string }) {
       <div className="flex flex-wrap items-center gap-3">
         <span className="text-sm text-muted">Vault</span>
         <Mono className="text-sm">{vaultId}</Mono>
-        <CopyButton value={vaultId!} label="Copy id" />
+        <CopyButton value={vaultId} label="Copy id" />
         {status ? <Badge tone={status.tone}>{status.text}</Badge> : null}
       </div>
       <nav aria-label="Loan pages" className="flex flex-wrap gap-2 text-sm">
-        <Link href={`/verify/${vaultId}`} className={buttonClass("secondary", "no-underline")}>
+        <Link href={vaultHref("verify", vaultId)} prefetch={false} className={buttonClass("secondary", "no-underline")}>
           Verify vault (viewing key)
         </Link>
-        <Link href={`/refund/${vaultId}`} className={buttonClass("secondary", "no-underline")}>
+        <Link href={vaultHref("refund", vaultId)} prefetch={false} className={buttonClass("secondary", "no-underline")}>
           Refunds{v && v.nonConforming.length ? ` (${v.nonConforming.length})` : ""}
         </Link>
         <Link href="/world" className={buttonClass("ghost", "no-underline")}>
@@ -107,11 +106,6 @@ export function PositionView({ vaultId: raw }: { vaultId: string }) {
         </Link>
       </nav>
 
-      {configIssues().map((issue) => (
-        <Notice key={issue} tone="info" title="Configuration">
-          <p>{issue}</p>
-        </Notice>
-      ))}
       {mounted && ready && !loan ? (
         <Notice tone="info" title="View only">
           <p>
@@ -219,6 +213,11 @@ export function PositionView({ vaultId: raw }: { vaultId: string }) {
             ))}
           </ul>
           {v.payoutInFlight ? <p className="mt-2 text-xs text-muted">A payout transaction is being confirmed on Zcash.</p> : null}
+          {v.claims.some((c) => c.kind === "Release" || c.kind === "CloseUser") ? (
+            <div className="mt-4">
+              <PayoutNotice />
+            </div>
+          ) : null}
         </Card>
       ) : null}
 
@@ -233,6 +232,11 @@ export function PositionView({ vaultId: raw }: { vaultId: string }) {
               <Exits loan={loan} vault={v} snapshot={p} onChanged={refresh} />
             </Card>
           )}
+          {!loan.pendingClose ? (
+            <Card title="Withdraw part of your ZEC">
+              <PartialRelease loan={loan} vault={v} snapshot={p} onChanged={refresh} />
+            </Card>
+          ) : null}
           {borrowRoom && !loan.pendingClose ? (
             <Card title="Borrow more">
               <BorrowForm loan={loan} snapshot={p} onBorrowed={refresh} />

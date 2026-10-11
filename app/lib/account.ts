@@ -6,10 +6,10 @@
  * holds ETH. The browser reaches the bundler and the paymaster only through our backend
  * (`/proxy/bundler`, `/proxy/paymaster`), never a provider directly.
  *
- * Status: the contracts are not deployed and the bundler / paymaster keys are not configured
- * yet (the backend answers "bundler not configured"), so `send()` is wired with viem's
- * ERC-4337 bundler client + ERC-7677 paymaster client against the backend proxy but has not
- * run against a live bundler. See the TODO below.
+ * Whether the backend can sponsor at all comes from `GET /config` (`config.sponsorship`:
+ * bundler, paymaster and allowlist configured); without it `send()` refuses before signing.
+ * Status: `send()` is wired with viem's ERC-4337 bundler client + ERC-7677 paymaster client
+ * against the backend proxy but has not run against a live bundler. See the TODO below.
  */
 import { createClient, http, HttpRequestError, type Address, type Hex, type PublicClient, type Transport } from "viem";
 import { createBundlerClient, createPaymasterClient } from "viem/account-abstraction";
@@ -111,12 +111,22 @@ export function loanAccount(ownerKey: Hex, deps: AccountDeps = {}): LoanAccount 
     isDeployed: () => isDeployedAt(address, chain()),
 
     async signCloseRequest(req) {
+      // The Adapter's domain must be pinned and agree with the backend (H-6).
+      if (!config.contractsDeployed) throw new ContractsNotDeployedError();
       if (!(await isDeployedAt(address, chain()))) throw new AccountNotDeployedError();
       return signCloseRequestAsSafe(ownerKey, config.adapter, address, req);
     },
 
     async send(calls) {
       if (!config.contractsDeployed) throw new ContractsNotDeployedError();
+      // GET /config says whether the backend can sponsor at all: refuse before signing anything.
+      if (!config.sponsorship) {
+        throw new SponsorshipUnavailableError(
+          config.remote === "loaded"
+            ? "the backend has no bundler or paymaster configured"
+            : "the backend's configuration could not be loaded",
+        );
+      }
       // Never ask the paymaster for anything outside the allowlist (INTERFACES § 4.1).
       assertAllowlisted(calls, address, config);
 

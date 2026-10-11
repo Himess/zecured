@@ -1,9 +1,18 @@
 import { describe, expect, it } from "vitest";
 import { concatBytes, keccak256, recoverTypedDataAddress, type Address, type Hex } from "viem";
-import { createApi } from "./api";
+import { DRY_RUN_CONFIG, DRY_RUN_ENV } from "./__fixtures__/deployment";
+import { createApi, parseRemoteConfig } from "./api";
+import { buildConfig } from "./config";
 import { destinationTypedData, openVaultTypedData, refundRequestTypedData, viewKeyRequestTypedData } from "./eip712";
 import { createLoan } from "./keys";
-import { checkVaultAddress, fetchViewingKey, openVault, requestRefund, submitDestination } from "./owner";
+import {
+  checkVaultAddress,
+  fetchViewingKey,
+  openVault,
+  OwnerSigningDisabledError,
+  requestRefund,
+  submitDestination,
+} from "./owner";
 import { encodeUnifiedAddress, TYPECODE_ORCHARD, TYPECODE_SAPLING } from "./ua";
 
 const REGISTRY: Address = "0x1111111111111111111111111111111111111111";
@@ -146,5 +155,32 @@ describe("refund and viewing key", () => {
       signature: b.signature as Hex,
     });
     expect(signer).toBe(loan.owner);
+  });
+});
+
+describe("owner signatures follow the pinned configuration (H-6)", () => {
+  it("signs under the pinned Registry, never one the backend chose", async () => {
+    const loan = createLoan(1_000_000n);
+    const { api, bodies } = backend(() => ({ ufvk: "uviewtest1example" }));
+    const pinned = buildConfig(DRY_RUN_ENV, parseRemoteConfig(DRY_RUN_CONFIG));
+    await fetchViewingKey(loan, VAULT, { api, config: pinned });
+    const b = bodies[0]!;
+    const signer = await recoverTypedDataAddress({
+      ...viewKeyRequestTypedData(DRY_RUN_ENV.NEXT_PUBLIC_REGISTRY, { vaultId: VAULT, nonce: BigInt(b.nonce!), deadline: BigInt(b.deadline!) }),
+      signature: b.signature as Hex,
+    });
+    expect(signer).toBe(loan.owner);
+  });
+
+  it("refuses every owner request while the pins and the backend disagree, before contacting it", async () => {
+    const loan = createLoan(1_000_000n);
+    const { api, bodies } = backend(() => ({}));
+    const config = buildConfig(DRY_RUN_ENV, parseRemoteConfig({ ...DRY_RUN_CONFIG, registry: "0x5555555555555555555555555555555555555555" }));
+    expect(config.ownerSigning).toBe(false);
+    await expect(openVault(loan, { api, config })).rejects.toBeInstanceOf(OwnerSigningDisabledError);
+    await expect(submitDestination(loan, VAULT, destUa, { api, config })).rejects.toBeInstanceOf(OwnerSigningDisabledError);
+    await expect(requestRefund(loan, VAULT, VAULT, destUa, { api, config })).rejects.toBeInstanceOf(OwnerSigningDisabledError);
+    await expect(fetchViewingKey(loan, VAULT, { api, config })).rejects.toThrow(/Owner requests are disabled/);
+    expect(bodies).toHaveLength(0);
   });
 });

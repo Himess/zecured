@@ -15,14 +15,15 @@ import {
 } from "viem";
 import { privateKeyToAccount } from "viem/accounts";
 import { baseSepolia } from "viem/chains";
-import { DRY_RUN_ENV } from "./__fixtures__/deployment";
-import { AccountNotDeployedError, loanAccount } from "./account";
-import { createApi } from "./api";
-import { assertAllowlisted, borrowCalls, transferUsdcCalls, type Call } from "./calls";
+import { DRY_RUN_CONFIG, DRY_RUN_ENV } from "./__fixtures__/deployment";
+import { AccountNotDeployedError, loanAccount, SponsorshipUnavailableError } from "./account";
+import { createApi, parseRemoteConfig } from "./api";
+import { assertAllowlisted, borrowCalls, partialReleaseCalls, transferUsdcCalls, type Call } from "./calls";
 import { buildConfig } from "./config";
 import { predictAccountAddress, SAFE, safeFactoryData } from "./safe";
 
-const config = buildConfig(DRY_RUN_ENV);
+/** The deployment as GET /config reports it, with a bundler and a paymaster configured. */
+const config = buildConfig(DRY_RUN_ENV, parseRemoteConfig(DRY_RUN_CONFIG));
 const KEY: Hex = "0xac0974bec39a17e36ba4a6b4d238ff944bacb478cbed5efcae784d7bf4f2ff80"; // public test key
 const OWNER = privateKeyToAccount(KEY).address;
 const ACCOUNT = predictAccountAddress(OWNER);
@@ -282,6 +283,34 @@ describe("loanAccount.send (ERC-4337 through the backend proxy, faked)", () => {
     backendAllowlistCheck(op);
   });
 
+  it("a partial release (D14) is one sponsored UserOp the backend allowlist accepts", async () => {
+    const { rec, acct } = account({ deployed: true });
+    const calls = partialReleaseCalls({
+      vaultId: `0x${"55".repeat(32)}`,
+      amount: 200_000n,
+      commitment: `0x${"77".repeat(32)}`,
+      registryAuthorized: false,
+      config,
+    });
+    await acct.send(calls);
+    expect(backendAllowlistCheck(rec.sent!)).toEqual(calls.map((c) => ({ to: getAddress(c.to), data: c.data })));
+  });
+
+  it("fails fast without sponsorship (GET /config), before any request or signature", async () => {
+    const fetchSpy = vi.fn();
+    vi.stubGlobal("fetch", fetchSpy);
+    const deps = { api: createApi({ baseUrl: BASE }) };
+    const calls = transferUsdcCalls({ to: ACCOUNT, amount: 1n, config });
+    const noBundler = loanAccount(KEY, { ...deps, config: { ...config, sponsorship: false } });
+    await expect(noBundler.send(calls)).rejects.toBeInstanceOf(SponsorshipUnavailableError);
+    await expect(noBundler.send(calls)).rejects.toThrow(
+      "Sponsored transactions are not available right now (the backend has no bundler or paymaster configured).",
+    );
+    const unreachable = loanAccount(KEY, { ...deps, config: buildConfig(DRY_RUN_ENV, { error: "timeout" }) });
+    await expect(unreachable.send(calls)).rejects.toThrow(/configuration could not be loaded/);
+    expect(fetchSpy).not.toHaveBeenCalled();
+  });
+
   it("never contacts the paymaster for a call outside the allowlist", async () => {
     const { rec, acct } = account();
     await expect(acct.send([{ to: "0x5555555555555555555555555555555555555555", data: "0x" }])).rejects.toThrow(/Not sponsorable/);
@@ -331,6 +360,15 @@ describe("loanAccount.signCloseRequest", () => {
     nonce: 1n,
     deadline: 1n,
   };
+
+  it("refuses to sign for an Adapter that is not pinned or that the backend contradicts (H-6)", async () => {
+    fakeInfra({ deployed: true });
+    const api = createApi({ baseUrl: BASE });
+    const conflicting = buildConfig(DRY_RUN_ENV, parseRemoteConfig({ ...DRY_RUN_CONFIG, adapter: "0x5555555555555555555555555555555555555555" }));
+    for (const cfg of [buildConfig({}), conflicting]) {
+      await expect(loanAccount(KEY, { config: cfg, api }).signCloseRequest(req)).rejects.toThrow(/not deployed or not configured/);
+    }
+  });
 
   it("requires a deployed account (no ERC-6492 wrapping)", async () => {
     const { acct } = account({ deployed: false });

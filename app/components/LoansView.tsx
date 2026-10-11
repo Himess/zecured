@@ -8,6 +8,7 @@ import { STATUS_LABEL } from "./status";
 import { Badge, Button, buttonClass, Card, Mono, Notice } from "./ui";
 import { notifyLoansChanged, useLoans, useVault } from "@/lib/hooks";
 import { importLoan, loanStore, short, type StoredLoan } from "@/lib/keys";
+import { vaultHref } from "@/lib/routes";
 import { formatTaz } from "@/lib/zcash";
 
 export function LoansView() {
@@ -73,7 +74,8 @@ export function LoansView() {
 }
 
 function LoanRow({ loan }: { loan: StoredLoan }) {
-  const vault = useVault(loan.vaultId, 0);
+  // Staggered: the backend should not receive every vault of this browser in one burst (L-11).
+  const vault = useVault(loan.vaultId, 0, { staggered: true });
   const [confirmForget, setConfirmForget] = useState(false);
   const status = vault.data ? STATUS_LABEL[vault.data.status] : null;
   return (
@@ -101,7 +103,7 @@ function LoanRow({ loan }: { loan: StoredLoan }) {
         </div>
         <div className="flex flex-wrap gap-2">
           {loan.vaultId ? (
-            <Link href={`/position/${loan.vaultId}`} className={buttonClass("primary", "no-underline")}>
+            <Link href={vaultHref("position", loan.vaultId)} prefetch={false} className={buttonClass("primary", "no-underline")}>
               Open
             </Link>
           ) : (

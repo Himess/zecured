@@ -146,6 +146,89 @@ export function liquidationIncentiveFactor(lltv: bigint): bigint {
   return lif < MAX_LIQUIDATION_INCENTIVE_FACTOR ? lif : MAX_LIQUIDATION_INCENTIVE_FACTOR;
 }
 
+// ------------------------------------------------------------------ partial release (D14)
+
+/** ZecuredRegistry.MIN_RELEASE: the smallest partial release, and the smallest remainder it may leave (zatoshi). */
+export const MIN_RELEASE = 100_000n;
+/** ZecuredRegistry.MAX_WITHDRAW_LTV_BPS: the highest LTV a partial release may leave. */
+export const MAX_WITHDRAW_LTV_BPS = 5_000n;
+/**
+ * Margin on the debt when computing the largest partial release. Interest accrues between the
+ * position read and the UserOp's inclusion, and the Registry checks the debt at inclusion:
+ * 0.1 % of the debt covers about 9 hours at 100 % APR (far above this market's rate), so a
+ * "max" withdrawal does not revert with ReleaseLtvTooHigh because a few blocks passed.
+ */
+export const PARTIAL_RELEASE_DEBT_MARGIN_BPS = 10n;
+
+export interface PartialReleasePosition {
+  /** zatoshi in the Morpho position (= the vault's outstanding). */
+  collateral: bigint;
+  /** USDC units, rounded up as Morpho does (`borrowAssets`). */
+  debt: bigint;
+  /** USD-per-ZEC × 1e34 */
+  price: bigint;
+  lltv: bigint;
+}
+
+/** Why `requestPartialRelease` reverts: the Registry's errors and Morpho's "insufficient collateral". */
+export type PartialReleaseRejection =
+  | "ReleaseAmountTooSmall"
+  | "ReleaseAmountNotPartial"
+  | "ReleaseRemainderTooSmall"
+  | "InsufficientCollateral"
+  | "ReleaseLtvTooHigh";
+
+/**
+ * Why `requestPartialRelease(amount)` would revert for this position, or null if it would go
+ * through. Mirrors ZecuredRegistry's checks in their order, including Morpho's health check
+ * inside `withdrawCollateral` and the 50 % rule (debt × 10,000 ≤ value × 5,000, with the
+ * value rounded down). `debt` must be the debt at inclusion.
+ */
+export function partialReleaseRejection(p: PartialReleasePosition & { amount: bigint }): PartialReleaseRejection | null {
+  if (p.amount < MIN_RELEASE) return "ReleaseAmountTooSmall";
+  if (p.amount >= p.collateral) return "ReleaseAmountNotPartial";
+  const remaining = p.collateral - p.amount;
+  if (remaining < MIN_RELEASE) return "ReleaseRemainderTooSmall";
+  if (p.debt === 0n) return null;
+  if (maxBorrow(remaining, p.price, p.lltv) < p.debt) return "InsufficientCollateral";
+  if (p.debt * BPS > collateralValue(remaining, p.price) * MAX_WITHDRAW_LTV_BPS) return "ReleaseLtvTooHigh";
+  return null;
+}
+
+/**
+ * The largest partial release (zatoshi) that passes `partialReleaseRejection` with the debt
+ * raised by `marginBps` (default PARTIAL_RELEASE_DEBT_MARGIN_BPS); 0 when none is possible.
+ * Exact, in closed form: the smallest remainder whose rounded-down value meets both the 50 %
+ * rule and Morpho's LLTV, never below MIN_RELEASE.
+ */
+export function maxPartialRelease(p: PartialReleasePosition & { marginBps?: bigint }): bigint {
+  const marginBps = p.marginBps ?? PARTIAL_RELEASE_DEBT_MARGIN_BPS;
+  const debt = p.debt === 0n ? 0n : p.debt + mulDivUp(p.debt, marginBps, BPS);
+  let minRemaining = MIN_RELEASE;
+  if (debt > 0n) {
+    if (p.price === 0n || p.lltv === 0n) return 0n;
+    // Smallest collateral value passing debt × BPS <= value × 5,000 and value × LLTV / WAD >= debt...
+    const ltvValue = mulDivUp(debt, BPS, MAX_WITHDRAW_LTV_BPS);
+    const healthValue = mulDivUp(debt, WAD, p.lltv);
+    const minValue = ltvValue > healthValue ? ltvValue : healthValue;
+    // ...and the smallest remainder reaching it: floor(remainder × price / 1e36) >= minValue.
+    const remainder = mulDivUp(minValue, ORACLE_PRICE_SCALE, p.price);
+    if (remainder > minRemaining) minRemaining = remainder;
+  }
+  return p.collateral >= minRemaining + MIN_RELEASE ? p.collateral - minRemaining : 0n;
+}
+
+/**
+ * The position's LTV (bps) after releasing `amount`, rounded up so a preview never looks
+ * safer than the Registry's check. null when nothing (of value) would remain.
+ */
+export function ltvAfterRelease(p: { collateral: bigint; debt: bigint; price: bigint; amount: bigint }): bigint | null {
+  if (p.amount >= p.collateral) return null;
+  const value = collateralValue(p.collateral - p.amount, p.price);
+  if (value === 0n) return null;
+  return mulDivUp(p.debt, BPS, value);
+}
+
 // ------------------------------------------------------------------ formatting
 
 function trimDecimals(whole: bigint, frac: bigint, decimals: number, minDecimals: number): string {
@@ -169,10 +252,25 @@ export function parseUsdc(input: string): bigint {
   return BigInt(m[1] || "0") * 10n ** BigInt(USDC_DECIMALS) + BigInt((m[2] ?? "").padEnd(USDC_DECIMALS, "0") || "0");
 }
 
+/** MockZecOracle price of one US cent per ZEC (USD-per-ZEC × 1e34 / 100). */
+const USD_CENT_PRICE = 10n ** 32n;
+
 /** Oracle price → "$40.00" (USD per ZEC, cents precision, rounded down). */
 export function formatUsdPrice(price: bigint): string {
-  const cents = price / 10n ** 32n;
+  const cents = price / USD_CENT_PRICE;
   return `$${trimDecimals(cents / 100n, cents % 100n, 2, 2)}`;
+}
+
+/** USD cents per ZEC → MockZecOracle price (what `setPrice` stores). */
+export function oraclePriceFromCents(cents: bigint): bigint {
+  return cents * USD_CENT_PRICE;
+}
+
+/** "40", "$40.5", "40.50" → USD cents. Throws on malformed input or more than 2 decimals. */
+export function parseUsdCents(input: string): bigint {
+  const m = /^\$?(\d*)(?:\.(\d{0,2}))?$/.exec(input.trim());
+  if (!m || (!m[1] && !m[2])) throw new Error("not a USD amount (use up to 2 decimals)");
+  return BigInt(m[1] || "0") * 100n + BigInt((m[2] ?? "").padEnd(2, "0") || "0");
 }
 
 /** WAD → "1.53" (two decimals, rounded down). */

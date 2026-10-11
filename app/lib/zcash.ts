@@ -70,3 +70,11 @@ export function blocksToDuration(blocks: number): string {
 export function formatTaz(zat: bigint): string {
   return `${formatZec(zat)} ${TICKER}`;
 }
+
+/** Collateral sizes for prose: "0.01 or 0.05 TAZ", "0.01, 0.05 or 0.1 TAZ". */
+export function formatDenominations(zats: readonly bigint[]): string {
+  const list = zats.map(formatZec);
+  const last = list.pop();
+  if (last === undefined) return TICKER;
+  return `${list.length ? `${list.join(", ")} or ` : ""}${last} ${TICKER}`;
+}

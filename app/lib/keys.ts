@@ -12,6 +12,7 @@
  */
 import { getAddress, isAddress, isHex, type Address, type Hex } from "viem";
 import { generatePrivateKey, privateKeyToAccount } from "viem/accounts";
+import { config } from "./config";
 import { randomBytes32 } from "./eip712";
 import { predictAccountAddress } from "./safe";
 import { DENOMINATIONS } from "./zcash";
@@ -94,7 +95,10 @@ export function parseLoan(raw: unknown): StoredLoan {
     throw new Error("account address does not match the owner key (different Safe configuration?)");
   }
   const amount = typeof r.amount === "string" && /^\d+$/.test(r.amount) ? r.amount : undefined;
-  if (!amount || !DENOMINATIONS.includes(BigInt(amount))) throw new Error("unsupported collateral amount");
+  // A size the signers accept now (GET /config) or a D7 testnet size, so older backups stay importable.
+  if (!amount || !(config.denominations.includes(BigInt(amount)) || DENOMINATIONS.includes(BigInt(amount)))) {
+    throw new Error("unsupported collateral amount");
+  }
   if (!isBytes32(r.requestId)) throw new Error("missing request id");
   const loan: StoredLoan = {
     v: 1,
@@ -130,9 +134,9 @@ export function parseLoan(raw: unknown): StoredLoan {
   return loan;
 }
 
-/** A new loan: fresh owner key, its Safe address, a random OpenVault request id. */
+/** A new loan: fresh owner key, its Safe address, a random OpenVault request id (any size the signers accept). */
 export function createLoan(amount: bigint, now: number = Date.now()): StoredLoan {
-  if (!DENOMINATIONS.includes(amount)) throw new Error("unsupported collateral amount");
+  if (!config.denominations.includes(amount)) throw new Error("unsupported collateral amount");
   const ownerKey = generatePrivateKey();
   const owner = privateKeyToAccount(ownerKey).address;
   const requestId = randomBytes32();
@@ -146,6 +150,16 @@ export function createLoan(amount: bigint, now: number = Date.now()): StoredLoan
     requestId,
     createdAt: now,
   };
+}
+
+/**
+ * A neutral name for a backup file: nothing in it ties the file to the loan's account, which
+ * is public on Base (security review L-11).
+ */
+export function backupFileName(): string {
+  const b = new Uint8Array(4);
+  globalThis.crypto.getRandomValues(b);
+  return `zecured-loan-backup-${Array.from(b, (x) => x.toString(16).padStart(2, "0")).join("")}.json`;
 }
 
 /** JSON backup of one loan (contains the private key). */

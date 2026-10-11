@@ -4,9 +4,11 @@
  * docs/spikes/SPIKE_C.md). The proxy enforces the allowlist; the app refuses to even ask for
  * anything else, so a bug here fails loudly in the browser instead of at the paymaster.
  */
-import { decodeFunctionData, encodeFunctionData, getAddress, type Address, type Hex } from "viem";
-import { adapterAbi, erc20Abi, morphoAbi, registryAbi } from "./abi";
+import { decodeErrorResult, decodeFunctionData, encodeFunctionData, getAddress, type Address, type Hex } from "viem";
+import { adapterAbi, erc20Abi, morphoAbi, registryAbi, registryErrorsAbi } from "./abi";
 import { config as defaultConfig, marketParams, type AppConfig, type MarketParams } from "./config";
+import { formatUsdc, MIN_RELEASE } from "./morpho";
+import { formatTaz } from "./zcash";
 
 export interface Call {
   to: Address;
@@ -66,6 +68,37 @@ export function releaseCalls(p: {
   calls.push({
     to: c.registry,
     data: encodeFunctionData({ abi: registryAbi, functionName: "requestRelease", args: [p.vaultId, p.commitment] }),
+  });
+  return calls;
+}
+
+const UINT64_MAX = 2n ** 64n - 1n;
+
+/**
+ * D14: releases `amount` zatoshi of the collateral to the pre-validated destination, debt or
+ * not; the vault stays active. Morpho's `withdrawCollateral` inside needs the Registry's
+ * authorization, set first when missing. The Registry also requires at least MIN_RELEASE to
+ * stay in the vault and the LTV after to be <= 50 % (lib/morpho.ts, `maxPartialRelease`).
+ */
+export function partialReleaseCalls(p: {
+  vaultId: Hex;
+  amount: bigint;
+  commitment: Hex;
+  registryAuthorized: boolean;
+  config?: AppConfig;
+}): Call[] {
+  const c = p.config ?? defaultConfig;
+  if (p.amount < MIN_RELEASE) throw new Error(`a partial release is at least ${formatTaz(MIN_RELEASE)}`);
+  if (p.amount > UINT64_MAX) throw new Error("amount out of range");
+  const calls: Call[] = [];
+  if (!p.registryAuthorized) calls.push(setAuthorization(c, c.registry));
+  calls.push({
+    to: c.registry,
+    data: encodeFunctionData({
+      abi: registryAbi,
+      functionName: "requestPartialRelease",
+      args: [p.vaultId, p.amount, p.commitment],
+    }),
   });
   return calls;
 }
@@ -149,9 +182,10 @@ function sameMarket(a: MarketParams, b: MarketParams): boolean {
 
 /**
  * Throws `NotAllowlistedError` unless every call is on the paymaster allowlist:
- * Registry.requestRelease; Adapter.invalidateNonce; Morpho.setAuthorization (Registry or
- * Adapter only), borrow / repay (Zecured market, onBehalf = account, no callback data);
- * MockUSDC.approve (spender = Morpho) and transfer. No ETH value anywhere.
+ * Registry.requestRelease / requestPartialRelease; Adapter.invalidateNonce;
+ * Morpho.setAuthorization (Registry or Adapter only), borrow / repay (Zecured market,
+ * onBehalf = account, no callback data); MockUSDC.approve (spender = Morpho) and transfer.
+ * No ETH value anywhere. Mirrors backend/src/allowlist.rs.
  */
 export function assertAllowlisted(calls: readonly Call[], account: Address, c: AppConfig = defaultConfig): void {
   if (calls.length === 0) throw new NotAllowlistedError("empty batch");
@@ -161,7 +195,9 @@ export function assertAllowlisted(calls: readonly Call[], account: Address, c: A
     const to = getAddress(call.to);
     if (to === getAddress(c.registry)) {
       const d = decode(registryAbi, call.data, "Registry");
-      if (d.functionName !== "requestRelease") throw new NotAllowlistedError(`Registry.${d.functionName}`);
+      if (d.functionName !== "requestRelease" && d.functionName !== "requestPartialRelease") {
+        throw new NotAllowlistedError(`Registry.${d.functionName}`);
+      }
     } else if (to === getAddress(c.adapter)) {
       const d = decode(adapterAbi, call.data, "Adapter");
       if (d.functionName !== "invalidateNonce") throw new NotAllowlistedError(`Adapter.${d.functionName}`);
@@ -190,4 +226,68 @@ export function assertAllowlisted(calls: readonly Call[], account: Address, c: A
       throw new NotAllowlistedError(`call to ${to}`);
     }
   }
+}
+
+// ------------------------------------------------------------------ reverts
+
+/** Hex strings in an error and its causes: viem nests the bundler's revert data in them. */
+function hexCandidates(e: unknown): Hex[] {
+  const found: Hex[] = [];
+  const seen = new Set<unknown>();
+  for (let cur = e; cur && typeof cur === "object" && !seen.has(cur); cur = (cur as { cause?: unknown }).cause) {
+    seen.add(cur);
+    const o = cur as Record<string, unknown>;
+    const data = o.data && typeof o.data === "object" ? (o.data as Record<string, unknown>) : null;
+    for (const field of [o.data, data?.revertData, data?.data, o.details, o.shortMessage, o.message]) {
+      if (typeof field === "string") for (const m of field.matchAll(/0x[0-9a-fA-F]{8,}/g)) found.push(m[0] as Hex);
+    }
+  }
+  return found;
+}
+
+/**
+ * A user-facing explanation of a Registry revert (the D14 limits, the vault's state) or of
+ * Morpho's own checks, found anywhere in `e` (e.g. the bundler's simulation error); null if
+ * there is none. viem cannot decode these: calls go out without their ABI.
+ */
+export function describeRevert(e: unknown): string | null {
+  for (const data of hexCandidates(e)) {
+    let decoded: { errorName: string; args?: readonly unknown[] };
+    try {
+      decoded = decodeErrorResult({ abi: registryErrorsAbi, data });
+    } catch {
+      continue;
+    }
+    const a = decoded.args ?? [];
+    const n = (i: number) => (typeof a[i] === "bigint" ? (a[i] as bigint) : 0n);
+    switch (decoded.errorName) {
+      case "ReleaseAmountTooSmall":
+        return `The Registry refused the withdrawal: it must be at least ${formatTaz(n(1))}.`;
+      case "ReleaseAmountNotPartial":
+        return `The Registry refused the withdrawal: it must be smaller than the collateral (${formatTaz(n(1))}). To take everything, repay and release instead.`;
+      case "ReleaseRemainderTooSmall":
+        return `The Registry refused the withdrawal: at least ${formatTaz(n(1))} must stay in the vault (this would leave ${formatTaz(n(0))}).`;
+      case "ReleaseLtvTooHigh":
+        return `The Registry refused the withdrawal: it would leave ${formatUsdc(n(0))} USDC of debt against ${formatUsdc(n(1))} USDC of collateral, above the 50 % limit. The price or the interest moved: try a smaller amount.`;
+      case "VaultNotActive":
+        return "The Registry refused: this vault is not active on Base.";
+      case "NotVaultAccount":
+        return "The Registry refused: only the vault's own account can do this.";
+      case "ZeroCommitment":
+        return "The Registry refused: the destination commitment is missing.";
+      case "DebtOutstanding":
+        return "The Registry refused: debt remains, so the whole collateral cannot be released yet.";
+      case "CollateralMismatch":
+        return "The Registry refused: the Morpho position and the vault disagree. Nothing was changed.";
+      case "Error":
+        if (a[0] === "insufficient collateral") {
+          return "Morpho refused the withdrawal: the position would no longer be healthy. Try a smaller amount.";
+        }
+        if (a[0] === "unauthorized") {
+          return "Morpho refused the withdrawal: the Registry is not authorized for this account yet. Refresh and try again.";
+        }
+        break;
+    }
+  }
+  return null;
 }

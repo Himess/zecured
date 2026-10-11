@@ -2,30 +2,28 @@
 
 import Link from "next/link";
 import { useState } from "react";
-import { isHex, type Hex } from "viem";
-import { useMounted } from "./client";
+import type { Hex } from "viem";
+import { MissingVaultId, useMounted } from "./client";
 import { destinationError, IronwoodAddressInput } from "./DestinationForm";
+import { PayoutNotice } from "./PayoutNotice";
 import { Badge, Button, Card, Mono, Notice } from "./ui";
 import type { NonConformingNote } from "@/lib/api";
-import { useAction, useLoanByVault, useVault } from "@/lib/hooks";
+import { useAction, useLoanByVault, useUrlFragment, useVault } from "@/lib/hooks";
 import { short, type StoredLoan } from "@/lib/keys";
 import { requestRefund } from "@/lib/owner";
+import { vaultIdFromFragment } from "@/lib/routes";
 import { formatTaz } from "@/lib/zcash";
 
-export function RefundView({ vaultId: raw }: { vaultId: string }) {
+/** The vault comes from the URL fragment (`/refund#0x…`), never the path (M-6). */
+export function RefundView() {
   const mounted = useMounted();
-  const valid = isHex(raw) && raw.length === 66;
-  const vaultId = valid ? (raw.toLowerCase() as Hex) : undefined;
+  const fragment = useUrlFragment();
+  const vaultId = (fragment && vaultIdFromFragment(fragment)) || undefined;
   const { loan, ready } = useLoanByVault(vaultId);
   const vault = useVault(vaultId, 20_000);
 
-  if (!valid) {
-    return (
-      <Notice tone="danger" title="Not a vault id">
-        <p>A vault id is 0x followed by 64 hexadecimal characters.</p>
-      </Notice>
-    );
-  }
+  if (fragment === undefined) return <p className="text-sm text-muted">Loading…</p>;
+  if (!vaultId) return <MissingVaultId fragment={fragment} />;
   const notes = vault.data?.nonConforming ?? [];
 
   return (
@@ -56,7 +54,7 @@ export function RefundView({ vaultId: raw }: { vaultId: string }) {
         </Card>
       ) : null}
       {notes.map((n) => (
-        <RefundCard key={n.noteId} note={n} vaultId={vaultId!} loan={loan} />
+        <RefundCard key={n.noteId} note={n} vaultId={vaultId} loan={loan} />
       ))}
     </div>
   );
@@ -79,9 +77,12 @@ function RefundCard({ note, vaultId, loan }: { note: NonConformingNote; vaultId:
         Note id <Mono>{short(note.noteId, 10, 8)}</Mono>. The refund pays the note minus the Zcash network fee.
       </p>
       {refund.result ? (
-        <Notice tone="ok" title="Refund accepted" live>
-          <p>The signers will pay it to your Ironwood address in the payout queue. It can take a few blocks.</p>
-        </Notice>
+        <div className="space-y-3">
+          <Notice tone="ok" title="Refund accepted" live>
+            <p>The signers will pay it to your Ironwood address in the payout queue. It can take a few blocks.</p>
+          </Notice>
+          <PayoutNotice onBase={false} />
+        </div>
       ) : (
         <div className="space-y-3">
           <IronwoodAddressInput value={ua} onChange={setUa} label="Refund to (unified address)" />

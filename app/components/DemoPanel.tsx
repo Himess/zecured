@@ -9,8 +9,16 @@ import { readPrice } from "@/lib/chain";
 import { config } from "@/lib/config";
 import { useAction, useLoans } from "@/lib/hooks";
 import { short } from "@/lib/keys";
-import { formatUsdPrice } from "@/lib/morpho";
-import { formatTaz } from "@/lib/zcash";
+import {
+  formatBps,
+  formatUsdPrice,
+  liquidationPrice,
+  maxBorrowAtTargetLtv,
+  oraclePriceFromCents,
+  parseUsdCents,
+  TARGET_LTV_BPS,
+} from "@/lib/morpho";
+import { formatTaz, ZATS_PER_ZEC } from "@/lib/zcash";
 
 const TOKEN_KEY = "zecured:demo-token";
 const MODES: { mode: NodeMode; label: string; help: string }[] = [
@@ -102,7 +110,7 @@ export function DemoPanel() {
       ) : null}
 
       <div className="grid gap-4 md:grid-cols-2">
-        <OracleCard />
+        <OracleCard token={token} />
         <Card title="Bots">
           <p className="text-sm text-muted">
             Placeholder. The liquidator and market-maker bots (bots/) will report their status here: watched positions,
@@ -278,21 +286,145 @@ function SweepCard({ token }: { token: string }) {
   );
 }
 
-function OracleCard() {
-  const [price, setPrice] = useState<string | null>(null);
+/** The deployment's price ($40) and one at which loans borrowed at the app's limit are liquidatable. */
+const NORMAL_PRICE_CENTS = 4_000n;
+const PRICE_PRESETS: { cents: bigint; label: string }[] = [
+  { cents: NORMAL_PRICE_CENTS, label: "normal" },
+  { cents: 2_000n, label: "typical loans liquidatable" },
+];
+
+function OracleCard({ token }: { token: string }) {
+  const inputId = useId();
+  const [price, setPrice] = useState<bigint | null>(null);
+  const [error, setError] = useState<string | null>(null);
+  const [draft, setDraft] = useState("");
+  const load = useCallback(async () => {
+    try {
+      // With the token, ask the backend (it reads the oracle itself); otherwise read Base.
+      if (token) setPrice((await api.adminGetOracle(token)).raw);
+      else if (config.contractsDeployed) setPrice(await readPrice());
+      setError(null);
+    } catch (e) {
+      setError(describeError(e));
+    }
+  }, [token]);
   useEffect(() => {
-    if (!config.contractsDeployed) return;
-    readPrice()
-      .then((p) => setPrice(formatUsdPrice(p)))
-      .catch(() => setPrice(null));
-  }, []);
+    void load();
+  }, [load]);
+  const update = useAction(async (cents: bigint) => {
+    const r = await api.adminSetOracle(token, cents);
+    await load();
+    return r;
+  });
+
+  let cents: bigint | null = null;
+  let draftError: string | null = null;
+  if (draft.trim()) {
+    try {
+      cents = parseUsdCents(draft);
+      if (cents === 0n) draftError = "Enter a price above zero.";
+    } catch (e) {
+      draftError = e instanceof Error ? e.message : "Invalid price";
+    }
+  }
+  // A loan borrowed at the app's limit at the normal price, and where it becomes liquidatable.
+  const normal = oraclePriceFromCents(NORMAL_PRICE_CENTS);
+  const threshold = liquidationPrice(ZATS_PER_ZEC, maxBorrowAtTargetLtv(ZATS_PER_ZEC, normal), config.lltv);
+
   return (
-    <Card title="Oracle price (MockZecOracle)">
-      <p className="text-2xl font-semibold tabular-nums">{price ?? "—"}</p>
-      <p className="mt-2 text-sm text-muted">
-        Placeholder. The price is a mock set by its owner with <Mono>setPrice</Mono>; drop it to demonstrate a liquidation.
-        The owner key never touches the browser, so this panel will call a backend demo endpoint once it exists.
+    <Card
+      title={
+        <span className="flex flex-wrap items-center gap-2">
+          ZEC price (MOCK oracle) <Badge tone="warn">MOCK</Badge>
+        </span>
+      }
+      action={
+        <Button variant="ghost" onClick={() => void load()}>
+          Refresh
+        </Button>
+      }
+    >
+      <p className="text-2xl font-semibold tabular-nums" aria-live="polite">
+        {price !== null ? formatUsdPrice(price) : "—"}
       </p>
+      <p className="mt-2 text-sm text-muted">
+        MockZecOracle is a MOCK: its owner sets the price by hand. The owner key stays on the backend; this panel asks the
+        backend to call <Mono>setPrice</Mono>. Drop the price to demonstrate a liquidation.
+      </p>
+      {error ? (
+        <p className="mt-2 text-sm text-danger" role="status">
+          {error}
+        </p>
+      ) : null}
+      {token ? (
+        <form
+          className="mt-4 space-y-3"
+          onSubmit={(e) => {
+            e.preventDefault();
+            if (cents && !draftError) void update.run(cents);
+          }}
+        >
+          <div className="space-y-1">
+            <label htmlFor={inputId} className="block text-sm font-medium">
+              New MOCK price (USD per ZEC)
+            </label>
+            <div className="flex gap-2">
+              <input
+                id={inputId}
+                inputMode="decimal"
+                autoComplete="off"
+                value={draft}
+                onChange={(e) => setDraft(e.target.value)}
+                placeholder="40.00"
+                aria-invalid={draftError ? true : undefined}
+                className="w-full rounded-lg border border-border bg-bg px-3 py-2 tabular-nums text-text focus:border-accent"
+              />
+              <Button type="submit" busy={update.busy} disabled={!cents || Boolean(draftError)}>
+                Set
+              </Button>
+            </div>
+            {draftError ? <p className="text-sm text-danger">{draftError}</p> : null}
+          </div>
+          <div className="flex flex-wrap gap-2" role="group" aria-label="MOCK price presets">
+            {PRICE_PRESETS.map((p) => (
+              <Button
+                key={p.cents.toString()}
+                variant="secondary"
+                className="min-h-9 px-3 text-xs"
+                disabled={update.busy}
+                onClick={() => void update.run(p.cents)}
+              >
+                Set {formatUsdPrice(oraclePriceFromCents(p.cents))} ({p.label})
+              </Button>
+            ))}
+          </div>
+          {threshold ? (
+            <p className="text-xs text-muted">
+              A loan borrowed at the app&apos;s {formatBps(TARGET_LTV_BPS)} limit at {formatUsdPrice(normal)} becomes
+              liquidatable below {formatUsdPrice(threshold)}.
+            </p>
+          ) : null}
+        </form>
+      ) : (
+        <p className="mt-3 text-sm text-muted">Enter the admin token above to change it.</p>
+      )}
+      {update.error ? (
+        <div className="mt-3">
+          <Notice tone="danger" title="Price not changed" live>
+            <p>{update.error}</p>
+          </Notice>
+        </div>
+      ) : null}
+      {update.result ? (
+        <div className="mt-3">
+          <Notice tone="ok" title={`MOCK price set to ${formatUsdPrice(oraclePriceFromCents(update.result.priceUsdCents))}`} live>
+            <p className="flex flex-wrap items-center gap-2">
+              Owner transaction <Mono>{update.result.txHash}</Mono>
+            </p>
+            <p className="text-xs">Positions show it at their next refresh.</p>
+          </Notice>
+        </div>
+      ) : null}
     </Card>
   );
 }

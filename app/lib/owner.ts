@@ -6,7 +6,7 @@
 import type { Address, Hex } from "viem";
 import { api as defaultApi, type Api, type OpenVaultResult } from "./api";
 import { prepareDestination, decodeUnifiedAddress, isIronwoodOnly } from "./commitment";
-import { config } from "./config";
+import { config as appConfig, type AppConfig } from "./config";
 import {
   deadlineIn,
   destinationTypedData,
@@ -22,8 +22,28 @@ import { zip321Uri } from "./zcash";
 
 export interface OwnerContext {
   api?: Api;
+  /** Sign for this Registry instead of the configured one (tests). */
   registry?: Address;
+  config?: AppConfig;
   now?: number;
+}
+
+/** The configuration forbids owner signatures (H-6: pins and backend disagree, or no Registry pin). */
+export class OwnerSigningDisabledError extends Error {
+  constructor() {
+    super(
+      "Owner requests are disabled: this build's pinned Registry is missing or disagrees with the backend (see the configuration notice).",
+    );
+    this.name = "OwnerSigningDisabledError";
+  }
+}
+
+/** The Registry whose EIP-712 domain owner requests are signed under; never one the backend chose. */
+function signingRegistry(ctx: OwnerContext): Address {
+  if (ctx.registry) return ctx.registry;
+  const c = ctx.config ?? appConfig;
+  if (!c.ownerSigning) throw new OwnerSigningDisabledError();
+  return c.registry;
 }
 
 /** Checks of the vault address returned by the backend, before anyone pays it. */
@@ -60,7 +80,7 @@ export function checkVaultAddress(address: string, amount: bigint, backendZip321
 /** POST /vaults with a fresh OpenVault signature. */
 export async function openVault(loan: StoredLoan, ctx: OwnerContext = {}): Promise<OpenVaultResult> {
   const a = ctx.api ?? defaultApi;
-  const registry = ctx.registry ?? config.registry;
+  const registry = signingRegistry(ctx);
   const amount = BigInt(loan.amount);
   const deadline = deadlineIn(REQUEST_TTL_SECONDS, ctx.now);
   const message = { owner: loan.owner, account: loan.account, amount, requestId: loan.requestId, deadline };
@@ -82,7 +102,7 @@ export async function submitDestination(
   ctx: OwnerContext = {},
 ): Promise<{ commitment: Hex; hasOtherReceivers: boolean }> {
   const a = ctx.api ?? defaultApi;
-  const registry = ctx.registry ?? config.registry;
+  const registry = signingRegistry(ctx);
   const dest = prepareDestination(ua, "test");
   const nonce = randomNonce64();
   const deadline = deadlineIn(REQUEST_TTL_SECONDS, ctx.now);
@@ -106,7 +126,7 @@ export async function requestRefund(
   ctx: OwnerContext = {},
 ): Promise<boolean> {
   const a = ctx.api ?? defaultApi;
-  const registry = ctx.registry ?? config.registry;
+  const registry = signingRegistry(ctx);
   const dest = prepareDestination(ua, "test");
   const nonce = randomNonce64();
   const deadline = deadlineIn(REQUEST_TTL_SECONDS, ctx.now);
@@ -120,7 +140,7 @@ export async function requestRefund(
 /** The vault's unified full viewing key (owner only). Never stored by the app. */
 export async function fetchViewingKey(loan: StoredLoan, vaultId: Hex, ctx: OwnerContext = {}): Promise<string> {
   const a = ctx.api ?? defaultApi;
-  const registry = ctx.registry ?? config.registry;
+  const registry = signingRegistry(ctx);
   const nonce = randomNonce64();
   const deadline = deadlineIn(REQUEST_TTL_SECONDS, ctx.now);
   const signature = await signWithOwnerKey(loan.ownerKey, viewKeyRequestTypedData(registry, { vaultId, nonce, deadline }));

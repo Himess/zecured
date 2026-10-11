@@ -8,7 +8,9 @@ import { usePathname } from "next/navigation";
 import qrcode from "qrcode-generator";
 import { useEffect, useMemo, useState } from "react";
 import { api } from "@/lib/api";
-import { cx } from "./ui";
+import { config } from "@/lib/config";
+import { formatDenominations } from "@/lib/zcash";
+import { cx, Notice } from "./ui";
 
 /** Copies `value` to the clipboard; falls back to selecting text when the API is blocked. */
 export function CopyButton({
@@ -145,6 +147,29 @@ export function Nav() {
         })}
       </ul>
     </nav>
+  );
+}
+
+/**
+ * The collateral sizes the signers accept, for prose ("0.01 or 0.05 TAZ"). Rendered below
+ * ConfigGate, so it shows GET /config's list, never a hard-coded copy.
+ */
+export function Denominations() {
+  return <>{formatDenominations(config.denominations)}</>;
+}
+
+/** What a vault page shows when its URL fragment holds no vault id (lib/routes.ts). */
+export function MissingVaultId({ fragment }: { fragment: string }) {
+  return fragment ? (
+    <Notice tone="danger" title="Not a vault id">
+      <p>A vault id is 0x followed by 64 hexadecimal characters, after the # in the address.</p>
+    </Notice>
+  ) : (
+    <Notice tone="info" title="No vault selected">
+      <p>
+        Open a loan from <Link href="/loans">My loans</Link>.
+      </p>
+    </Notice>
   );
 }
 

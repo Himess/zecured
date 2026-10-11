@@ -5,7 +5,7 @@
  * Each reader takes optional dependencies (a viem client and the app config) so tests can run
  * them against a mocked JSON-RPC transport.
  */
-import { createPublicClient, http, type Address, type Hex, type PublicClient } from "viem";
+import { createPublicClient, getAddress, http, parseEventLogs, type Address, type Hex, type PublicClient } from "viem";
 import { baseSepolia } from "viem/chains";
 import {
   adapterAbi,
@@ -43,7 +43,7 @@ export interface ChainDeps {
 
 export class ContractsNotDeployedError extends Error {
   constructor() {
-    super("The Base contracts are not deployed yet (placeholder addresses in the app config).");
+    super("The Base contracts are not deployed or not configured consistently (see the configuration notice).");
     this.name = "ContractsNotDeployedError";
   }
 }
@@ -148,6 +148,29 @@ export async function readPosition(account: Address, d?: ChainDeps): Promise<Pos
     accountDeployed,
     blockTimestamp: block.timestamp,
   };
+}
+
+export interface ReleaseClaim {
+  claimId: Hex;
+  /** zatoshi */
+  amount: bigint;
+}
+
+/**
+ * The Release claim that `transactionHash` created for `vaultId` (its `ReleaseRequested`
+ * event), or null if it has none. The receipt is read through the proxy like every Base read.
+ */
+export async function readReleaseClaim(vaultId: Hex, transactionHash: Hex, d?: ChainDeps): Promise<ReleaseClaim | null> {
+  const { c, cfg } = resolve(d);
+  const receipt = await c.getTransactionReceipt({ hash: transactionHash });
+  const registry = getAddress(cfg.registry);
+  const events = parseEventLogs({
+    abi: registryEventsAbi,
+    eventName: "ReleaseRequested",
+    logs: receipt.logs.filter((l) => getAddress(l.address) === registry),
+  });
+  const ours = events.find((e) => e.args.vaultId.toLowerCase() === vaultId.toLowerCase());
+  return ours ? { claimId: ours.args.claimId.toLowerCase() as Hex, amount: ours.args.amount } : null;
 }
 
 export async function isNonceUsed(account: Address, nonce: bigint, d?: ChainDeps): Promise<boolean> {

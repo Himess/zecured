@@ -2,19 +2,29 @@
 
 import Link from "next/link";
 import { useState } from "react";
-import { isHex, type Hex } from "viem";
-import { CopyButton, useMounted } from "./client";
+import { CopyButton, MissingVaultId, useMounted } from "./client";
 import { Button, Card, Notice } from "./ui";
-import { useAction, useLoanByVault, useVault } from "@/lib/hooks";
+import type { Vault } from "@/lib/api";
+import { config } from "@/lib/config";
+import { useAction, useLoanByVault, useUrlFragment, useVault } from "@/lib/hooks";
 import { fetchViewingKey } from "@/lib/owner";
+import { vaultIdFromFragment } from "@/lib/routes";
 
-/** Blocks before the deposit deadline to start scanning from (well before the vault existed). */
-const SCAN_MARGIN_BLOCKS = 1_000;
+/**
+ * Where a scan of the vault starts: its birthday (the Zcash tip when it was opened), from
+ * GET /vaults/:id, or derived from the deposit deadline (expiry = birthday + vaultExpiryBlocks).
+ */
+function scanStart(vault: Vault | null, expiry: number | undefined): number | undefined {
+  if (vault?.birthdayHeight !== undefined) return vault.birthdayHeight;
+  if (expiry !== undefined && config.vaultExpiryBlocks !== null) return Math.max(0, expiry - config.vaultExpiryBlocks);
+  return undefined;
+}
 
-export function VerifyView({ vaultId: raw }: { vaultId: string }) {
+/** The vault comes from the URL fragment (`/verify#0x…`), never the path (M-6). */
+export function VerifyView() {
   const mounted = useMounted();
-  const valid = isHex(raw) && raw.length === 66;
-  const vaultId = valid ? (raw.toLowerCase() as Hex) : undefined;
+  const fragment = useUrlFragment();
+  const vaultId = (fragment && vaultIdFromFragment(fragment)) || undefined;
   const { loan, ready } = useLoanByVault(vaultId);
   const vault = useVault(vaultId, 0);
   const [ufvk, setUfvk] = useState<string | null>(null);
@@ -25,15 +35,11 @@ export function VerifyView({ vaultId: raw }: { vaultId: string }) {
     return true;
   });
 
-  if (!valid) {
-    return (
-      <Notice tone="danger" title="Not a vault id">
-        <p>A vault id is 0x followed by 64 hexadecimal characters.</p>
-      </Notice>
-    );
-  }
+  if (fragment === undefined) return <p className="text-sm text-muted">Loading…</p>;
+  if (!vaultId) return <MissingVaultId fragment={fragment} />;
   const expiry = vault.data?.expiryHeight ?? loan?.expiryHeight;
-  const from = expiry !== undefined ? Math.max(0, expiry - SCAN_MARGIN_BLOCKS) : undefined;
+  const from = scanStart(vault.data, expiry);
+  const command = `zecured-wallet watch --ufvk <UFVK> --from ${from ?? "<birthday height>"}`;
 
   return (
     <div className="grid gap-6 lg:grid-cols-[minmax(0,1fr)_20rem]">
@@ -41,7 +47,8 @@ export function VerifyView({ vaultId: raw }: { vaultId: string }) {
         <Card title="Your vault's viewing key">
           <p className="mb-4 text-sm text-muted">
             The signers give the vault&apos;s unified full viewing key (UFVK) to its owner only: your request is signed with
-            this loan&apos;s owner key. With it you can watch the vault on Zcash yourself, without trusting us.
+            this loan&apos;s owner key. With it you can watch the vault on Zcash yourself, without trusting us. It shows this
+            vault&apos;s notes and spends only, nothing about your own wallet.
           </p>
           {mounted && ready && !loan ? (
             <Notice tone="info" title="No owner key for this vault in this browser">
@@ -88,9 +95,16 @@ export function VerifyView({ vaultId: raw }: { vaultId: string }) {
           <ol className="list-decimal space-y-3 pl-5 text-sm text-muted">
             <li>
               With the Zecured CLI wallet in this repository (it verifies the note commitment tree against the server):
-              <pre className="mt-2 overflow-x-auto rounded-lg border border-border bg-bg p-3 text-xs text-text">
-                {`zecured-wallet watch --ufvk <UFVK> --from ${from ?? "<height before you opened the vault>"}`}
-              </pre>
+              <pre className="mt-2 overflow-x-auto rounded-lg border border-border bg-bg p-3 text-xs text-text">{command}</pre>
+              <div className="mt-2 flex flex-wrap items-center gap-2">
+                <CopyButton value={command} label="Copy command" />
+              </div>
+              <p className="mt-2">
+                {from !== undefined
+                  ? `--from ${from} is the vault's birthday: the Zcash height when it was opened, so nothing earlier concerns it.`
+                  : "--from is the vault's birthday: the Zcash height when it was opened."}{" "}
+                Put the key in place of &lt;UFVK&gt;; your shell history then holds it, so clear that afterwards.
+              </p>
             </li>
             <li>Or import the key as a view-only account in an Ironwood-capable wallet that accepts a UFVK.</li>
             <li>
@@ -101,16 +115,17 @@ export function VerifyView({ vaultId: raw }: { vaultId: string }) {
         </Card>
       </div>
       <aside className="min-w-0 space-y-4">
-        <Notice tone="warn" title="Keep it private">
+        <Notice tone="warn" title="Treat it as sensitive">
           <p>
-            Anyone with this key sees the vault&apos;s full history. It is shown once and never stored by the app. Do not
-            paste it into websites.
+            Anyone holding this key sees the vault&apos;s whole history: the deposit, the balance and your payouts. It is
+            shown once and never stored by the app. Do not paste it into websites or share it.
           </p>
         </Notice>
         <Notice tone="info" title="What it does not show">
           <p>
-            Payouts to third parties (a liquidator or a market maker) are encrypted without an outgoing viewing key, so the
-            vault key cannot reveal where their ZEC went. Your own payouts remain visible to you.
+            Payouts to third parties (a liquidator or a market maker) are created without an outgoing viewing key, so the
+            vault key shows that ZEC left the vault but not where it went. Your own payouts remain visible to you. Nothing
+            about your wallet or other vaults is in it.
           </p>
         </Notice>
       </aside>

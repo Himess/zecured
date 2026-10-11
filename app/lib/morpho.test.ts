@@ -1,3 +1,5 @@
+import { readFileSync } from "node:fs";
+import { fileURLToPath } from "node:url";
 import { describe, expect, it } from "vitest";
 import { MARKET_LLTV } from "./config";
 import {
@@ -11,16 +13,26 @@ import {
   healthFactor,
   liquidationIncentiveFactor,
   liquidationPrice,
+  ltvAfterRelease,
   ltvBps,
+  MAX_WITHDRAW_LTV_BPS,
   maxBorrow,
   maxBorrowAtTargetLtv,
+  maxPartialRelease,
+  MIN_RELEASE,
+  mulDivUp,
+  oraclePriceFromCents,
+  PARTIAL_RELEASE_DEBT_MARGIN_BPS,
   parseUsdc,
+  parseUsdCents,
+  partialReleaseRejection,
   toAssetsDown,
   toAssetsUp,
   toSharesDown,
   WAD,
   wTaylorCompounded,
   type MarketState,
+  type PartialReleasePosition,
 } from "./morpho";
 
 const PRICE_40 = 40n * 10n ** 34n; // MockZecOracle: $40.00 = 40e34 (contracts DeployZecured default)
@@ -119,6 +131,89 @@ describe("risk", () => {
   });
 });
 
+describe("partial release (D14)", () => {
+  const REGISTRY_SOURCE = readFileSync(
+    fileURLToPath(new URL("../../contracts/src/ZecuredRegistry.sol", import.meta.url)),
+    "utf8",
+  );
+  /** 0.01 ZEC at the app's 40 % LTV limit, $40. */
+  const TYPICAL: PartialReleasePosition = { collateral: ZAT_001, debt: 160_000n, price: PRICE_40, lltv: MARKET_LLTV };
+  const at = (p: PartialReleasePosition, amount: bigint) => partialReleaseRejection({ ...p, amount });
+
+  it("uses the Registry's constants", () => {
+    expect(REGISTRY_SOURCE).toMatch(/uint64 public constant MIN_RELEASE = 100_000;/);
+    expect(REGISTRY_SOURCE).toMatch(/uint256 public constant MAX_WITHDRAW_LTV_BPS = 5_000;/);
+    expect(MIN_RELEASE).toBe(100_000n);
+    expect(MAX_WITHDRAW_LTV_BPS).toBe(5_000n);
+  });
+
+  it("rejects like the Registry, in its order", () => {
+    expect(at(TYPICAL, MIN_RELEASE - 1n)).toBe("ReleaseAmountTooSmall");
+    expect(at({ ...TYPICAL, collateral: 50_000n }, 60_000n)).toBe("ReleaseAmountTooSmall"); // size first
+    expect(at(TYPICAL, ZAT_001)).toBe("ReleaseAmountNotPartial");
+    expect(at(TYPICAL, ZAT_001 + 1n)).toBe("ReleaseAmountNotPartial");
+    expect(at({ ...TYPICAL, debt: 0n }, ZAT_001 - MIN_RELEASE + 1n)).toBe("ReleaseRemainderTooSmall");
+    expect(at({ ...TYPICAL, debt: 0n }, ZAT_001 - MIN_RELEASE)).toBeNull();
+    // Morpho's own health check (62.5 %) fails first when the remainder cannot even carry the debt.
+    expect(at(TYPICAL, 800_000n)).toBe("InsufficientCollateral");
+    expect(at(TYPICAL, 300_000n)).toBe("ReleaseLtvTooHigh");
+  });
+
+  it("the 50 % limit is exact: debt × 10,000 <= value × 5,000 with the value rounded down", () => {
+    // 0.008 ZEC × $40 = 0.32 USDC; 0.16 USDC of debt is exactly 50 %.
+    expect(at(TYPICAL, 200_000n)).toBeNull();
+    expect(at(TYPICAL, 200_001n)).toBe("ReleaseLtvTooHigh");
+    expect(ltvAfterRelease({ ...TYPICAL, amount: 200_000n })).toBe(5_000n);
+    // 799,999 zat are worth 319,999.6 units, rounded down: the preview rounds the LTV up.
+    expect(ltvAfterRelease({ ...TYPICAL, amount: 200_001n })).toBe(5_001n);
+    expect(ltvAfterRelease({ ...TYPICAL, amount: ZAT_001 })).toBeNull();
+    expect(ltvAfterRelease({ ...TYPICAL, debt: 0n, amount: 1n })).toBe(0n);
+  });
+
+  it("max: everything above MIN_RELEASE without debt; the exact LTV bound with debt", () => {
+    expect(maxPartialRelease({ ...TYPICAL, debt: 0n })).toBe(900_000n);
+    expect(maxPartialRelease({ ...TYPICAL, marginBps: 0n })).toBe(200_000n);
+    expect(maxPartialRelease({ ...TYPICAL, collateral: ZAT_005, debt: 800_000n, marginBps: 0n })).toBe(1_000_000n);
+    // Default margin: 0.1 % more debt (160,160) needs a remainder worth 320,320, i.e. 800,800 zat.
+    expect(PARTIAL_RELEASE_DEBT_MARGIN_BPS).toBe(10n);
+    expect(maxPartialRelease(TYPICAL)).toBe(199_200n);
+  });
+
+  it("max: nothing when the vault is too small or the loan already at the limit", () => {
+    expect(maxPartialRelease({ ...TYPICAL, collateral: 2n * MIN_RELEASE, debt: 0n })).toBe(MIN_RELEASE);
+    expect(maxPartialRelease({ ...TYPICAL, collateral: 2n * MIN_RELEASE - 1n, debt: 0n })).toBe(0n);
+    expect(maxPartialRelease({ ...TYPICAL, debt: 200_000n, marginBps: 0n })).toBe(0n); // already at 50 %
+    expect(maxPartialRelease({ ...TYPICAL, price: 0n })).toBe(0n);
+    // A sliver above the floor is not enough either: what is left would be below MIN_RELEASE to take.
+    expect(maxPartialRelease({ ...TYPICAL, debt: 199_000n, marginBps: 0n })).toBe(0n);
+  });
+
+  it("max is the largest accepted amount, also with awkward prices and debts (window search)", () => {
+    const positions: PartialReleasePosition[] = [
+      TYPICAL,
+      { collateral: ZAT_005, debt: 123_457n, price: 37n * 10n ** 34n + 123_456_789_012_345_678_901_234_567n, lltv: MARKET_LLTV },
+      { collateral: 5_000_001n, debt: 1n, price: PRICE_40, lltv: MARKET_LLTV },
+      { collateral: 1_234_567n, debt: 99_999n, price: 25n * 10n ** 34n + 7n, lltv: MARKET_LLTV },
+      // A market whose LLTV is below 50 %: Morpho's health check is the binding one.
+      { collateral: ZAT_001, debt: 100_000n, price: PRICE_40, lltv: 400_000_000_000_000_000n },
+    ];
+    for (const p of positions) {
+      const max = maxPartialRelease({ ...p, marginBps: 0n });
+      expect(max, `${p.debt}`).toBeGreaterThanOrEqual(MIN_RELEASE);
+      for (let a = max - 40n; a <= max + 40n; a++) {
+        if (a < MIN_RELEASE) continue;
+        expect(at(p, a) === null, `amount ${a}, max ${max}`).toBe(a <= max);
+      }
+      // With the default margin the result still passes against a debt 0.1 % higher.
+      const safe = maxPartialRelease(p);
+      expect(safe).toBeLessThanOrEqual(max);
+      expect(at({ ...p, debt: p.debt + mulDivUp(p.debt, PARTIAL_RELEASE_DEBT_MARGIN_BPS, 10_000n) }, safe)).toBeNull();
+    }
+    const lowLltv = positions[4]!;
+    expect(at(lowLltv, maxPartialRelease({ ...lowLltv, marginBps: 0n }) + 1n)).toBe("InsufficientCollateral");
+  });
+});
+
 describe("formatting", () => {
   it("USDC", () => {
     expect(formatUsdc(160_000n)).toBe("0.16");
@@ -134,6 +229,17 @@ describe("formatting", () => {
     expect(() => parseUsdc("")).toThrow();
     expect(() => parseUsdc(".")).toThrow();
     expect(() => parseUsdc("-1")).toThrow();
+  });
+
+  it("USD prices for the MOCK oracle", () => {
+    expect(parseUsdCents("40")).toBe(4_000n);
+    expect(parseUsdCents("$40.5")).toBe(4_050n);
+    expect(parseUsdCents(" 40.50 ")).toBe(4_050n);
+    expect(parseUsdCents(".5")).toBe(50n);
+    expect(parseUsdCents("20.")).toBe(2_000n);
+    for (const bad of ["", ".", "$", "40.123", "-1", "4e1", "forty"]) expect(() => parseUsdCents(bad), bad).toThrow();
+    expect(oraclePriceFromCents(4_000n)).toBe(PRICE_40);
+    expect(formatUsdPrice(oraclePriceFromCents(2_560n))).toBe("$25.60");
   });
 
   it("prices, ratios and percentages", () => {

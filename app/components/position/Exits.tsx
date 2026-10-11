@@ -46,7 +46,7 @@ export function Exits({
         {
           kind: "repay",
           title: "Repay with USDC, then release",
-          body: "Repay the debt with USDC held by your loan account and take all your ZEC back.",
+          body: "Repay the debt with USDC held by your loan account and take all your ZEC back. Topping the account up from an exchange or your main wallet links them publicly.",
         },
       ]
     : [
@@ -204,7 +204,8 @@ function RepayFlow({ loan, vault, snapshot, commitment, onChanged }: FlowProps) 
         <Notice tone="info" title="Not enough USDC in the loan account">
           <p>
             Send at least {formatUsdc(needed - snapshot.usdcBalance)} more MockUSDC to <Mono>{loan.account}</Mono>, then
-            refresh.
+            refresh. That transfer is public: send it from an address with no link to you, or close from collateral
+            instead.
           </p>
         </Notice>
       ) : null}
@@ -431,7 +432,10 @@ export function SendUsdcForm({ loan, snapshot, onChanged }: { loan: StoredLoan; 
   return (
     <div className="space-y-3">
       <Notice tone="warn" title="Where the USDC goes is public">
-        <p>Sending borrowed USDC to an exchange account links the loan to your identity.</p>
+        <p>
+          Sending borrowed USDC straight to an exchange account (KYC) links the loan to your identity: the transfer from this
+          account is public.
+        </p>
       </Notice>
       <div className="grid gap-3 sm:grid-cols-[1fr_10rem]">
         <div className="space-y-1">

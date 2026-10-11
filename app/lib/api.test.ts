@@ -1,5 +1,6 @@
 import { afterEach, describe, expect, it, vi } from "vitest";
-import { ApiError, createApi, describeError, parseVault } from "./api";
+import { DRY_RUN_CONFIG, DRY_RUN_ENV } from "./__fixtures__/deployment";
+import { ApiError, createApi, describeError, parseRemoteConfig, parseVault } from "./api";
 
 const BASE = "http://backend.test";
 const VAULT = `0x${"ab".repeat(32)}` as const;
@@ -104,7 +105,51 @@ describe("owner endpoints", () => {
 });
 
 describe("GET /vaults/:id normalization", () => {
-  it("accepts the INTERFACES.md § 4 shape", () => {
+  it("accepts the canonical INTERFACES.md § 4 shape (heights, outstanding, paid flags)", () => {
+    const v = parseVault({
+      vaultId: VAULT,
+      status: "active",
+      amount: "1000000",
+      address: "utest1vault",
+      expiryHeight: 4_600_288,
+      birthdayHeight: 4_600_000,
+      tipHeight: 4_600_123,
+      outstanding: "800000",
+      payoutInFlight: true,
+      nonConforming: [],
+      claims: [
+        { claimId: VAULT, kind: "Release", amount: "200000", paid: false },
+        { claimId: VAULT, kind: "Liquidation", amount: "150000", paid: true },
+      ],
+    });
+    expect(v).toEqual({
+      vaultId: VAULT,
+      status: "active",
+      amount: 1_000_000n,
+      address: "utest1vault",
+      expiryHeight: 4_600_288,
+      birthdayHeight: 4_600_000,
+      tipHeight: 4_600_123,
+      outstanding: 800_000n,
+      payoutInFlight: true,
+      nonConforming: [],
+      claims: [
+        { claimId: VAULT, kind: "Release", amount: 200_000n, status: "pending" },
+        { claimId: VAULT, kind: "Liquidation", amount: 150_000n, status: "paid" },
+      ],
+    });
+  });
+
+  it("treats height 0 as unknown (the coordinator reports tip 0 before its first pass)", () => {
+    const v = parseVault({ vaultId: VAULT, status: "awaiting_deposit", amount: "1000000", expiryHeight: 9, birthdayHeight: 0, tipHeight: 0 });
+    expect(v.birthdayHeight).toBeUndefined();
+    expect(v.tipHeight).toBeUndefined();
+    expect(() => parseVault({ vaultId: VAULT, status: "active", amount: "1", expiryHeight: 1, birthdayHeight: -5 })).toThrow(
+      /birthdayHeight/,
+    );
+  });
+
+  it("accepts the earlier INTERFACES.md shape (status, confirmations, deposit)", () => {
     const v = parseVault({
       vaultId: VAULT.toUpperCase().replace("0X", "0x"),
       status: "deposit_seen",
@@ -255,6 +300,91 @@ describe("demo control", () => {
     expect(calls[1]!.url).toBe(`${BASE}/admin/nodes/2/mode`);
     expect(calls[1]!.body).toEqual({ mode: "compromised" });
     expect(calls[2]!.body).toEqual({ to: "utest1attacker" });
+  });
+});
+
+describe("GET /config", () => {
+  it("parses the backend's response: checksummed addresses, bigint amounts, sorted denominations", async () => {
+    const { api, calls } = mockFetch(() => json({ ...DRY_RUN_CONFIG, denominations: ["5000000", "1000000", "5000000"] }));
+    const c = await api.getConfig();
+    expect(calls[0]!.url).toBe(`${BASE}/config`);
+    expect(calls[0]!.init.method).toBe("GET");
+    expect((calls[0]!.init.headers as Record<string, string>)["x-admin-token"]).toBeUndefined();
+    expect(c).toEqual({
+      chainId: 84532,
+      registry: "0xbdB942d882882bF795aA9c0Cd20ADe2115c73AAc",
+      adapter: "0xC0a2A554dcFB5a1bd7e5E769A2Ad0c33BA0500fc",
+      contracts: DRY_RUN_CONFIG.contracts,
+      market: { ...DRY_RUN_CONFIG.market, lltv: 625_000_000_000_000_000n },
+      signers: null,
+      denominations: [1_000_000n, 5_000_000n],
+      confirmations: 3,
+      vaultExpiryBlocks: 288,
+      sponsorship: true,
+    });
+  });
+
+  it("accepts a signer set when the backend reports one (sorted), and checks it", () => {
+    const signers = DRY_RUN_ENV.NEXT_PUBLIC_SIGNERS.split(",");
+    expect(parseRemoteConfig({ ...DRY_RUN_CONFIG, signers: [...signers].reverse() }).signers).toEqual(signers);
+    expect(() => parseRemoteConfig({ ...DRY_RUN_CONFIG, signers: signers.slice(1) })).toThrow("(config.signers)");
+    expect(() => parseRemoteConfig({ ...DRY_RUN_CONFIG, signers: [...signers.slice(1), "nope"] })).toThrow("(config.signers)");
+  });
+
+  it("accepts null contracts and market (before deployment)", () => {
+    const c = parseRemoteConfig({ ...DRY_RUN_CONFIG, contracts: null, market: null, sponsorship: false });
+    expect(c.contracts).toBeNull();
+    expect(c.market).toBeNull();
+    expect(c.sponsorship).toBe(false);
+  });
+
+  it("is strict about every field", () => {
+    const broken: [string, Record<string, unknown>][] = [
+      ["config.chainId", { chainId: "base" }],
+      ["config.chainId", { chainId: 0 }],
+      ["config.registry", { registry: "0x1234" }],
+      ["config.adapter", { adapter: undefined }],
+      ["config.contracts.ZZEC", { contracts: { ...DRY_RUN_CONFIG.contracts, ZZEC: "nope" } }],
+      ["config.market.lltv", { market: { ...DRY_RUN_CONFIG.market, lltv: "62.5" } }],
+      ["config.market.marketId", { market: { ...DRY_RUN_CONFIG.market, marketId: "0x12" } }],
+      ["config.denominations", { denominations: [] }],
+      ["config.denominations", { denominations: ["0"] }],
+      ["config.denominations", { denominations: "1000000" }],
+      ["config.confirmations", { confirmations: -1 }],
+      ["config.vaultExpiryBlocks", { vaultExpiryBlocks: 0 }],
+      ["config.sponsorship", { sponsorship: "true" }],
+    ];
+    for (const [what, patch] of broken) {
+      expect(() => parseRemoteConfig({ ...DRY_RUN_CONFIG, ...patch }), what).toThrow(`Unexpected backend response (${what})`);
+    }
+    expect(() => parseRemoteConfig([DRY_RUN_CONFIG])).toThrow(ApiError);
+  });
+});
+
+describe("demo control: MOCK oracle", () => {
+  it("reads and sets the price with the admin token; the price goes out as a JSON number of cents", async () => {
+    const txHash = `0x${"ab".repeat(32)}`;
+    const { api, calls } = mockFetch((_url, init) =>
+      init.method === "POST"
+        ? json({ priceUsdCents: "2000", txHash })
+        : json({ priceUsdCents: "4000", raw: "400000000000000000000000000000000000" }),
+    );
+    expect(await api.adminGetOracle("tok")).toEqual({ priceUsdCents: 4_000n, raw: 40n * 10n ** 34n });
+    expect(await api.adminSetOracle("tok", 2_000n)).toEqual({ priceUsdCents: 2_000n, txHash });
+    expect(calls.map((c) => [c.init.method, c.url])).toEqual([
+      ["GET", `${BASE}/admin/oracle`],
+      ["POST", `${BASE}/admin/oracle`],
+    ]);
+    expect(calls[1]!.body).toEqual({ priceUsdCents: 2000 });
+    for (const c of calls) expect((c.init.headers as Record<string, string>)["x-admin-token"]).toBe("tok");
+  });
+
+  it("refuses non-positive prices before calling the backend, and malformed answers", async () => {
+    const { api, calls } = mockFetch(() => json({ priceUsdCents: "40.5", raw: "1" }));
+    await expect(api.adminSetOracle("tok", 0n)).rejects.toMatchObject({ kind: "invalid" });
+    await expect(api.adminSetOracle("tok", 2n ** 60n)).rejects.toMatchObject({ kind: "invalid" });
+    expect(calls).toHaveLength(0);
+    await expect(api.adminGetOracle("tok")).rejects.toThrow(/priceUsdCents/);
   });
 });
 

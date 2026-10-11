@@ -153,7 +153,7 @@ export function WorldView() {
             ]}
             hidden={[
               "Your identity, wallet or any ZEC outside the vault.",
-              "Your IP address: only our backend sees it, and it logs no addresses, salts, viewing keys or IPs.",
+              "Your IP address: our backend sees it and logs no IPs, addresses, salts or viewing keys; the app's host sees page loads, never a vault id (it stays in the URL fragment).",
             ]}
           />
           <div className="space-y-3 border-t border-border pt-4">
@@ -161,7 +161,7 @@ export function WorldView() {
             {!mounted ? null : withVault.length === 0 ? (
               <p className="text-sm text-muted">No vault keys in this browser.</p>
             ) : (
-              withVault.map((l) => <SignerView key={l.id} vaultId={l.vaultId!} />)
+              withVault.map((l) => <SignerView key={l.id} vaultId={l.vaultId!} staggered />)
             )}
             <label className="block text-sm">
               <span className="text-muted">Inspect a vault id</span>
@@ -208,8 +208,9 @@ export function WorldView() {
   );
 }
 
-function SignerView({ vaultId }: { vaultId: Hex }) {
-  const vault = useVault(vaultId, 0);
+/** `staggered` for this browser's own vaults: not all requested in one burst (L-11). */
+function SignerView({ vaultId, staggered = false }: { vaultId: Hex; staggered?: boolean }) {
+  const vault = useVault(vaultId, 0, { staggered });
   const v = vault.data;
   return (
     <div className="rounded-md border border-border p-3 text-xs">

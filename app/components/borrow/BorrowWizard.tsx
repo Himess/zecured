@@ -7,11 +7,12 @@ import { CopyButton, Qr, useMounted } from "@/components/client";
 import { KeyBackup } from "@/components/KeyBackup";
 import { Badge, Button, buttonClass, Card, cx, KeyValue, Mono, Notice, Steps } from "@/components/ui";
 import type { Vault } from "@/lib/api";
-import { config, configIssues } from "@/lib/config";
+import { config } from "@/lib/config";
 import { notifyLoansChanged, useAction, useLoans, usePosition, useVault } from "@/lib/hooks";
 import { createLoan, loanStore, short, type StoredLoan } from "@/lib/keys";
 import { checkVaultAddress, openVault } from "@/lib/owner";
-import { blocksToDuration, DENOMINATIONS, formatTaz } from "@/lib/zcash";
+import { vaultHref } from "@/lib/routes";
+import { blocksToDuration, formatTaz } from "@/lib/zcash";
 
 const STEPS = ["Amount", "Back up key", "Deposit", "Borrow"];
 
@@ -54,11 +55,6 @@ export function BorrowWizard() {
   return (
     <div className="space-y-6">
       <Steps steps={STEPS} current={stepIndex} />
-      {configIssues().map((issue) => (
-        <Notice key={issue} tone="info" title="Configuration">
-          <p>{issue}</p>
-        </Notice>
-      ))}
       {mounted && !storageAvailable ? (
         <Notice tone="danger" title="This browser cannot store your loan key">
           <p>Local storage is blocked (private mode or site settings). You can continue, but you must download the key backup before closing this tab.</p>
@@ -92,7 +88,7 @@ export function BorrowWizard() {
         <Card title="This loan is already closed">
           <p className="mb-4 text-sm text-muted">Its vault no longer accepts deposits. Start a new loan for new collateral.</p>
           <div className="flex flex-wrap gap-2">
-            <Link href={`/position/${loan.vaultId}`} className={buttonClass("secondary", "no-underline")}>
+            <Link href={vaultHref("position", loan.vaultId!)} prefetch={false} className={buttonClass("secondary", "no-underline")}>
               See its position
             </Link>
             <Button onClick={() => setLoan(null)}>Start a new loan</Button>
@@ -124,7 +120,7 @@ export function BorrowWizard() {
                 </span>
                 <span className="flex gap-2">
                   {l.vaultId ? (
-                    <Link href={`/position/${l.vaultId}`} className={buttonClass("ghost", "no-underline")}>
+                    <Link href={vaultHref("position", l.vaultId)} prefetch={false} className={buttonClass("ghost", "no-underline")}>
                       Position
                     </Link>
                   ) : null}
@@ -153,7 +149,7 @@ function AmountStep({
   onDiscard: () => void;
 }) {
   const groupId = useId();
-  const [amount, setAmount] = useState<bigint>(loan ? BigInt(loan.amount) : DENOMINATIONS[0]!);
+  const [amount, setAmount] = useState<bigint>(loan ? BigInt(loan.amount) : config.denominations[0]!);
   const [ready, setReady] = useState(false);
   const open = useAction(async (current: StoredLoan | null) => {
     // The key is saved *before* the backend is contacted, so a crash never loses it.
@@ -170,7 +166,7 @@ function AmountStep({
       <fieldset className="space-y-3" disabled={Boolean(loan) || open.busy}>
         <legend className="sr-only">Collateral amount</legend>
         <div className="grid gap-3 sm:grid-cols-2">
-          {DENOMINATIONS.map((d) => (
+          {config.denominations.map((d) => (
             <label
               key={d.toString()}
               className={cx(
@@ -186,6 +182,10 @@ function AmountStep({
             </label>
           ))}
         </div>
+        <p className="text-xs text-muted">
+          Fixed sizes are what hide your amount: every vault holds one of these, so your position on Base cannot be told
+          apart from the others of the same size. A custom amount would single you out.
+        </p>
       </fieldset>
       <ul className="mt-4 list-disc space-y-1 pl-5 text-sm text-muted">
         <li>You will pay exactly this amount from Ironwood notes, plus the network fee.</li>
@@ -195,6 +195,17 @@ function AmountStep({
         </li>
         <li>Opening the vault happens off-chain: nothing touches Base until your deposit is attested.</li>
       </ul>
+      <div className="mt-4">
+        <Notice tone="warn" title="Get your ZEC into Ironwood well before this step">
+          <p>
+            Moving exactly {formatTaz(amount)} into Ironwood and depositing right away links the two: the move into
+            Ironwood is public. Move a different amount, and wait hours or days.
+            {config.vaultExpiryBlocks !== null
+              ? ` Once open, the vault accepts the deposit for about ${blocksToDuration(config.vaultExpiryBlocks)} (${config.vaultExpiryBlocks} Zcash blocks).`
+              : null}
+          </p>
+        </Notice>
+      </div>
       <label className="mt-4 flex items-start gap-3 text-sm text-muted">
         <input type="checkbox" checked={ready} onChange={(e) => setReady(e.target.checked)} className="mt-1" />
         <span>
@@ -202,8 +213,15 @@ function AmountStep({
           <Link href="/prepare">why this matters</Link>).
         </span>
       </label>
+      {!config.ownerSigning ? (
+        <div className="mt-4">
+          <Notice tone="danger" title="Opening a vault is disabled">
+            <p>This build cannot sign owner requests right now: see the configuration notice at the top of the page.</p>
+          </Notice>
+        </div>
+      ) : null}
       <div className="mt-4 flex flex-wrap gap-2">
-        <Button onClick={() => open.run(loan)} busy={open.busy} disabled={!ready && !loan}>
+        <Button onClick={() => open.run(loan)} busy={open.busy} disabled={(!ready && !loan) || !config.ownerSigning}>
           {loan ? "Retry opening the vault" : "Create loan and open vault"}
         </Button>
         {loan ? (
@@ -234,6 +252,13 @@ function AmountStep({
 }
 
 // ------------------------------------------------------------------ step 3
+
+/** "2 of 3", or the signers' requirement from GET /config while the vault reports none. */
+function confirmationsText(seen: number | undefined): string {
+  const needed = config.confirmations;
+  if (seen !== undefined) return needed !== null ? `${seen} of ${needed}` : String(seen);
+  return needed !== null ? `${needed} needed before the signers attest` : "—";
+}
 
 const STATUS_STEPS = [
   { status: "awaiting_deposit", label: "Waiting for your Ironwood deposit" },
@@ -311,9 +336,15 @@ function DepositStep({ loan, vault, vaultError }: { loan: StoredLoan; vault: Vau
                   ),
                 ],
                 ["Vault id", <Mono key="v">{loan.vaultId}</Mono>],
-                ["Confirmations", vault?.confirmations !== undefined ? String(vault.confirmations) : "—"],
+                ["Confirmations", confirmationsText(vault?.confirmations)],
               ]}
             />
+            <Notice tone="warn" title="Pay from notes that have waited in Ironwood">
+              <p>
+                Paying right after moving exactly {formatTaz(amount)} into Ironwood links that public move to this loan. If
+                your ZEC is not in Ironwood yet, let this vault expire and start a new loan later.
+              </p>
+            </Notice>
             <Notice tone="warn" title="Only an exact Ironwood → Ironwood payment counts">
               <p>
                 Paying from transparent, Sapling or Orchard funds, a different amount, or after the deadline is not attested:
@@ -339,7 +370,11 @@ function DepositStep({ loan, vault, vaultError }: { loan: StoredLoan; vault: Vau
           <div className="mt-4">
             <Notice tone="warn" title="This vault expired without a valid deposit">
               <p>
-                Anything you sent can be refunded. <Link href={`/refund/${loan.vaultId}`}>Request a refund</Link>, then start
+                Anything you sent can be refunded.{" "}
+                <Link href={vaultHref("refund", loan.vaultId!)} prefetch={false}>
+                  Request a refund
+                </Link>
+                , then start
                 a new loan.
               </p>
             </Notice>
@@ -350,7 +385,10 @@ function DepositStep({ loan, vault, vaultError }: { loan: StoredLoan; vault: Vau
             <Notice tone="warn" title="A deposit did not follow the rules">
               <p>
                 {vault.nonConforming.length} note(s) cannot be attested.{" "}
-                <Link href={`/refund/${loan.vaultId}`}>Get them back</Link>.
+                <Link href={vaultHref("refund", loan.vaultId!)} prefetch={false}>
+                  Get them back
+                </Link>
+                .
               </p>
             </Notice>
           </div>
@@ -389,7 +427,11 @@ function BorrowStep({ loan }: { loan: StoredLoan }) {
         }}
       />
       <div className="mt-6 flex flex-wrap gap-2">
-        <Link href={`/position/${loan.vaultId}`} className={buttonClass(done ? "primary" : "secondary", "no-underline")}>
+        <Link
+          href={vaultHref("position", loan.vaultId!)}
+          prefetch={false}
+          className={buttonClass(done ? "primary" : "secondary", "no-underline")}
+        >
           Go to your position
         </Link>
       </div>

@@ -2,7 +2,7 @@
 
 import { useId, useState } from "react";
 import { notifyLoansChanged, useLoans } from "@/lib/hooks";
-import { exportLoan, loanStore, short, type StoredLoan } from "@/lib/keys";
+import { backupFileName, exportLoan, loanStore, type StoredLoan } from "@/lib/keys";
 import { CopyButton } from "./client";
 import { Button, Notice } from "./ui";
 
@@ -12,7 +12,7 @@ export function downloadBackup(loan: StoredLoan): void {
   const url = URL.createObjectURL(blob);
   const a = document.createElement("a");
   a.href = url;
-  a.download = `zecured-loan-${short(loan.account, 6, 4).replace("…", "-")}.json`;
+  a.download = backupFileName();
   document.body.appendChild(a);
   a.click();
   a.remove();

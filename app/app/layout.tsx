@@ -4,6 +4,7 @@ import { GeistMono } from "geist/font/mono";
 import { GeistSans } from "geist/font/sans";
 import type { ReactNode } from "react";
 import { BackendStatus, Nav } from "@/components/client";
+import { ConfigGate } from "@/components/ConfigGate";
 import "./globals.css";
 
 export const metadata: Metadata = {
@@ -45,7 +46,7 @@ export default function RootLayout({ children }: { children: ReactNode }) {
           </div>
         </header>
         <main id="main" className="mx-auto w-full max-w-5xl px-4 py-8 sm:py-12">
-          {children}
+          <ConfigGate>{children}</ConfigGate>
         </main>
         <footer className="border-t border-border">
           <div className="mx-auto flex max-w-5xl flex-col gap-3 px-4 py-6 text-xs text-faint sm:flex-row sm:items-center sm:justify-between">

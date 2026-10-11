@@ -1,13 +1,17 @@
+import { readFileSync } from "node:fs";
+import { fileURLToPath } from "node:url";
 import { describe, expect, it } from "vitest";
-import { decodeFunctionData, encodeFunctionData, type Address, type Hex } from "viem";
+import { decodeFunctionData, encodeErrorResult, encodeFunctionData, slice, type Address, type Hex } from "viem";
 import { DRY_RUN_ENV } from "./__fixtures__/deployment";
-import { adapterAbi, erc20Abi, morphoAbi, registryAbi } from "./abi";
+import { adapterAbi, erc20Abi, morphoAbi, registryAbi, registryErrorsAbi } from "./abi";
 import {
   assertAllowlisted,
   authorizeAdapterCalls,
   borrowCalls,
+  describeRevert,
   invalidateNonceCalls,
   NotAllowlistedError,
+  partialReleaseCalls,
   releaseCalls,
   repayAndReleaseCalls,
   transferUsdcCalls,
@@ -79,6 +83,30 @@ describe("call batches", () => {
     assertAllowlisted(calls, ACCOUNT, config);
   });
 
+  it("partial release (D14): authorizes the Registry when needed, then requestPartialRelease (0x6990cc7d)", () => {
+    const first = partialReleaseCalls({ vaultId: VAULT, amount: 200_000n, commitment: COMMITMENT, registryAuthorized: false, config });
+    expect(first.map((c) => c.to)).toEqual([config.morpho, config.registry]);
+    expect(decodeFunctionData({ abi: morphoAbi, data: first[0]!.data })).toMatchObject({
+      functionName: "setAuthorization",
+      args: [config.registry, true],
+    });
+    expect(slice(first[1]!.data, 0, 4)).toBe("0x6990cc7d");
+    expect(decodeFunctionData({ abi: registryAbi, data: first[1]!.data })).toMatchObject({
+      functionName: "requestPartialRelease",
+      args: [VAULT, 200_000n, COMMITMENT],
+    });
+    assertAllowlisted(first, ACCOUNT, config);
+    const later = partialReleaseCalls({ vaultId: VAULT, amount: 100_000n, commitment: COMMITMENT, registryAuthorized: true, config });
+    expect(later).toHaveLength(1);
+    assertAllowlisted(later, ACCOUNT, config);
+  });
+
+  it("partial release refuses amounts the Registry or the ABI cannot take", () => {
+    const p = { vaultId: VAULT, commitment: COMMITMENT, registryAuthorized: true, config };
+    expect(() => partialReleaseCalls({ ...p, amount: 99_999n })).toThrow(/at least 0.001 TAZ/);
+    expect(() => partialReleaseCalls({ ...p, amount: 2n ** 64n })).toThrow(/range/);
+  });
+
   it("transfer, invalidateNonce and adapter authorization are allowlisted", () => {
     assertAllowlisted(transferUsdcCalls({ to: STRANGER, amount: 5n, config }), ACCOUNT, config);
     const inv = invalidateNonceCalls({ nonce: 2n ** 100n, config });
@@ -90,6 +118,68 @@ describe("call batches", () => {
   it("rejects empty or non-positive amounts", () => {
     expect(() => borrowCalls({ account: ACCOUNT, assets: 0n, registryAuthorized: true, adapterAuthorized: true, config })).toThrow();
     expect(() => transferUsdcCalls({ to: STRANGER, amount: 0n, config })).toThrow();
+  });
+});
+
+describe("ABI fragments match the compiled ZecuredRegistry (contracts/abi)", () => {
+  const compiled = JSON.parse(
+    readFileSync(fileURLToPath(new URL("../../contracts/abi/ZecuredRegistry.json", import.meta.url)), "utf8"),
+  ) as { type: string; name?: string; inputs?: { type: string }[] }[];
+  const signature = (item: { name?: string; inputs?: readonly { type: string }[] }) =>
+    `${item.name}(${(item.inputs ?? []).map((i) => i.type).join(",")})`;
+  const compiledSignatures = new Set(compiled.filter((i) => i.type === "function" || i.type === "error").map(signature));
+
+  it("every Registry function and error the app encodes or decodes exists with the same types", () => {
+    for (const item of [...registryAbi.filter((i) => i.type === "function"), ...registryErrorsAbi]) {
+      expect(compiledSignatures.has(signature(item)), signature(item)).toBe(true);
+    }
+  });
+});
+
+describe("Registry revert explanations", () => {
+  const encode = (errorName: (typeof registryErrorsAbi)[number]["name"], args: readonly unknown[]) =>
+    encodeErrorResult({ abi: registryErrorsAbi, errorName, args } as never) as Hex;
+
+  it("finds the revert data wherever viem nests the bundler's answer", () => {
+    const data = encode("ReleaseLtvTooHigh", [160_161n, 320_000n]);
+    const expected =
+      "The Registry refused the withdrawal: it would leave 0.160161 USDC of debt against 0.32 USDC of collateral, above the 50 % limit. The price or the interest moved: try a smaller amount.";
+    // In a message, in `data.revertData` deep in the cause chain, or as `data` itself.
+    expect(describeRevert(new Error(`UserOperation reverted during simulation with reason: ${data}`))).toBe(expected);
+    const nested = new Error("Execution reverted", {
+      cause: Object.assign(new Error("RPC Request failed."), { data: { revertData: data } }),
+    });
+    expect(describeRevert(nested)).toBe(expected);
+    expect(describeRevert({ shortMessage: "reverted", data })).toBe(expected);
+  });
+
+  it("explains each D14 limit with the Registry's own numbers", () => {
+    expect(describeRevert(new Error(encode("ReleaseAmountTooSmall", [5n, 100_000n])))).toBe(
+      "The Registry refused the withdrawal: it must be at least 0.001 TAZ.",
+    );
+    expect(describeRevert(new Error(encode("ReleaseAmountNotPartial", [1_000_000n, 1_000_000n])))).toMatch(
+      /smaller than the collateral \(0\.01 TAZ\)/,
+    );
+    expect(describeRevert(new Error(encode("ReleaseRemainderTooSmall", [50_000n, 100_000n])))).toBe(
+      "The Registry refused the withdrawal: at least 0.001 TAZ must stay in the vault (this would leave 0.0005 TAZ).",
+    );
+    expect(describeRevert(new Error(encode("NotVaultAccount", [VAULT, ACCOUNT])))).toMatch(/only the vault's own account/);
+  });
+
+  it("explains Morpho's string reverts and ignores everything else", () => {
+    const morphoError = (reason: string) =>
+      encodeErrorResult({
+        abi: [{ type: "error", name: "Error", inputs: [{ name: "message", type: "string" }] }],
+        errorName: "Error",
+        args: [reason],
+      });
+    expect(describeRevert(new Error(morphoError("insufficient collateral")))).toMatch(/no longer be healthy/);
+    expect(describeRevert(new Error(morphoError("something else")))).toBeNull();
+    expect(describeRevert(new Error(`Not sponsorable: call to ${STRANGER}`))).toBeNull();
+    expect(describeRevert("plain string")).toBeNull();
+    const loop: { message: string; cause?: unknown } = { message: "loop" };
+    loop.cause = loop;
+    expect(describeRevert(loop)).toBeNull();
   });
 });
 

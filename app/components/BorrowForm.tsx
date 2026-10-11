@@ -144,8 +144,8 @@ export function BorrowForm({
             {receiverError ? <p className="text-sm text-danger">{receiverError}</p> : null}
             <Notice tone="warn" title="Think before you send">
               <p>
-                Sending borrowed USDC to an exchange account links the loan to your identity. The receiver appears in the
-                public Morpho Borrow event.
+                Sending borrowed USDC straight to an exchange account (KYC) links the loan to your identity: the receiver
+                appears in Morpho&apos;s public Borrow event. Prefer an address with no link to you.
               </p>
             </Notice>
           </div>

@@ -3,12 +3,22 @@
  *
  * Wire format: camelCase JSON, `0x` hex, amounts / nonces / deadlines as decimal strings.
  * In the app, amounts are bigint (zatoshi or USDC units). Responses are validated and
- * normalized, and tolerate the small differences between INTERFACES.md and the current
- * backend (e.g. claims carry `paid: bool` instead of `status`; the admin drain report is
- * snake_case). Nothing here logs request bodies: they contain addresses and salts.
+ * normalized, and tolerate the documented variants (claims carry `paid: bool` or a `status`;
+ * older vault views lack `address`, `outstanding` and the heights and may carry
+ * `confirmations` / `deposit`; older drain reports are snake_case). Nothing here logs request
+ * bodies: they contain addresses and salts.
  */
 import { isAddress, isHex, getAddress, type Address, type Hex } from "viem";
-import { config } from "./config";
+import {
+  config,
+  parseSigners,
+  RUNTIME_CONFIG_TIMEOUT_MS,
+  runtimeConfigLoader,
+  type AppConfig,
+  type RemoteConfig,
+  type RemoteContracts,
+  type RemoteMarket,
+} from "./config";
 import type { CloseRequestMessage } from "./eip712";
 
 // ------------------------------------------------------------------ types
@@ -42,16 +52,22 @@ export interface Vault {
   amount: bigint;
   /** Last Zcash height at which a deposit is accepted. */
   expiryHeight: number;
-  confirmations?: number;
-  deposit?: { attested: boolean; txHash?: Hex };
   nonConforming: NonConformingNote[];
   claims: Claim[];
-  // Returned by the current backend, not (yet) in INTERFACES.md § 4:
+  // In INTERFACES.md § 4; optional because older backends omit them:
+  /** The vault's Ironwood-only unified address. */
   address?: string;
+  /** zatoshi still locked (the Registry's `outstanding`, as the coordinator last saw it). */
   outstanding?: bigint;
+  /** A payout transaction is being confirmed on Zcash. */
   payoutInFlight?: boolean;
-  /** Current Zcash tip, if the backend reports it (lets the app show blocks remaining). */
+  /** Zcash tip when the vault was opened: where a viewing-key scan of the vault starts. */
+  birthdayHeight?: number;
+  /** Zcash tip at the coordinator's last pass (lets the app show blocks remaining). */
   tipHeight?: number;
+  // Earlier INTERFACES.md variant:
+  confirmations?: number;
+  deposit?: { attested: boolean; txHash?: Hex };
 }
 
 export interface OpenVaultBody {
@@ -123,6 +139,20 @@ export interface DrainReport {
   thresholdReached: boolean;
 }
 
+/** `GET /admin/oracle`: the MOCK oracle's price. */
+export interface OraclePrice {
+  /** USD cents per ZEC (rounded down). */
+  priceUsdCents: bigint;
+  /** `MockZecOracle.price()`: USD per ZEC × 1e34. */
+  raw: bigint;
+}
+
+/** `POST /admin/oracle`: the price set and the owner's `setPrice` transaction. */
+export interface OracleUpdate {
+  priceUsdCents: bigint;
+  txHash: Hex;
+}
+
 export type ApiErrorKind = "unreachable" | "timeout" | "http" | "invalid";
 
 export class ApiError extends Error {
@@ -178,6 +208,13 @@ function int(v: unknown, what: string): number {
   if (typeof v === "number" && Number.isSafeInteger(v)) return v;
   if (typeof v === "string" && /^\d+$/.test(v) && Number.isSafeInteger(Number(v))) return Number(v);
   throw invalid(what);
+}
+
+/** A non-negative integer (heights, counts). */
+function uint(v: unknown, what: string): number {
+  const n = int(v, what);
+  if (n < 0) throw invalid(what);
+  return n;
 }
 
 function hex32(v: unknown, what: string): Hex {
@@ -245,9 +282,83 @@ export function parseVault(raw: unknown): Vault {
   const outstanding = optional(r.outstanding, (x) => big(x, "outstanding"));
   if (outstanding !== undefined) vault.outstanding = outstanding;
   if (typeof r.payoutInFlight === "boolean") vault.payoutInFlight = r.payoutInFlight;
-  const tip = optional(r.tipHeight, (x) => int(x, "tipHeight"));
-  if (tip !== undefined) vault.tipHeight = tip;
+  // 0 means "not known yet" (the coordinator reports tip 0 before its first pass).
+  const birthday = optional(r.birthdayHeight, (x) => uint(x, "birthdayHeight"));
+  if (birthday) vault.birthdayHeight = birthday;
+  const tip = optional(r.tipHeight, (x) => uint(x, "tipHeight"));
+  if (tip) vault.tipHeight = tip;
   return vault;
+}
+
+/**
+ * `GET /config`: strict. Its addresses are only checked against the build's pins (or, in a
+ * development build, fill unpinned ones; lib/config.ts).
+ */
+export function parseRemoteConfig(raw: unknown): RemoteConfig {
+  const r = obj(raw, "config");
+  const chainId = int(r.chainId, "config.chainId");
+  if (chainId <= 0) throw invalid("config.chainId");
+  const confirmations = uint(r.confirmations, "config.confirmations");
+  const vaultExpiryBlocks = uint(r.vaultExpiryBlocks, "config.vaultExpiryBlocks");
+  if (vaultExpiryBlocks === 0) throw invalid("config.vaultExpiryBlocks");
+  if (typeof r.sponsorship !== "boolean") throw invalid("config.sponsorship");
+  if (!Array.isArray(r.denominations) || r.denominations.length === 0) throw invalid("config.denominations");
+  const denominations = [...new Set(r.denominations.map((d) => big(d, "config.denominations")))].sort((a, b) =>
+    a < b ? -1 : a > b ? 1 : 0,
+  );
+  if (denominations[0] === 0n) throw invalid("config.denominations");
+  let contracts: RemoteContracts | null = null;
+  if (r.contracts !== null && r.contracts !== undefined) {
+    const c = obj(r.contracts, "config.contracts");
+    contracts = {
+      MockUSDC: addr(c.MockUSDC, "config.contracts.MockUSDC"),
+      MockZecOracle: addr(c.MockZecOracle, "config.contracts.MockZecOracle"),
+      SettlementAdapter: addr(c.SettlementAdapter, "config.contracts.SettlementAdapter"),
+      ZZEC: addr(c.ZZEC, "config.contracts.ZZEC"),
+      ZecuredRegistry: addr(c.ZecuredRegistry, "config.contracts.ZecuredRegistry"),
+    };
+  }
+  let market: RemoteMarket | null = null;
+  if (r.market !== null && r.market !== undefined) {
+    const m = obj(r.market, "config.market");
+    market = {
+      collateralToken: addr(m.collateralToken, "config.market.collateralToken"),
+      irm: addr(m.irm, "config.market.irm"),
+      lltv: big(m.lltv, "config.market.lltv"),
+      loanToken: addr(m.loanToken, "config.market.loanToken"),
+      marketId: hex32(m.marketId, "config.market.marketId"),
+      morphoBlue: addr(m.morphoBlue, "config.market.morphoBlue"),
+      oracle: addr(m.oracle, "config.market.oracle"),
+    };
+  }
+  let signers: Address[] | null = null;
+  if (r.signers !== null && r.signers !== undefined) {
+    const list = Array.isArray(r.signers) ? r.signers.map((s) => addr(s, "config.signers")) : [];
+    signers = parseSigners(list.join(",")) ?? null;
+    if (!signers) throw invalid("config.signers");
+  }
+  return {
+    chainId,
+    registry: addr(r.registry, "config.registry"),
+    adapter: addr(r.adapter, "config.adapter"),
+    contracts,
+    market,
+    signers,
+    denominations,
+    confirmations,
+    vaultExpiryBlocks,
+    sponsorship: r.sponsorship,
+  };
+}
+
+export function parseOraclePrice(raw: unknown): OraclePrice {
+  const r = obj(raw, "oracle");
+  return { priceUsdCents: big(r.priceUsdCents, "priceUsdCents"), raw: big(r.raw, "raw") };
+}
+
+export function parseOracleUpdate(raw: unknown): OracleUpdate {
+  const r = obj(raw, "oracle update");
+  return { priceUsdCents: big(r.priceUsdCents, "priceUsdCents"), txHash: hex32(r.txHash, "txHash") };
 }
 
 export function parseOpenVault(raw: unknown): OpenVaultResult {
@@ -375,6 +486,11 @@ export function createApi(options: ApiOptions = {}) {
     async health(): Promise<boolean> {
       const r = await call("GET", "/health", undefined, { timeoutMs: 5_000 });
       return Boolean(r && typeof r === "object" && (r as Json).ok === true);
+    },
+
+    /** GET /config — the backend's deployment (checked against the pins), denominations, sponsorship (no auth). */
+    async getConfig(): Promise<RemoteConfig> {
+      return parseRemoteConfig(await call("GET", "/config", undefined, { timeoutMs: RUNTIME_CONFIG_TIMEOUT_MS }));
     },
 
     /** POST /vaults — open a vault off-chain (OpenVault signed by the owner key). */
@@ -516,6 +632,29 @@ export function createApi(options: ApiOptions = {}) {
         ),
       );
     },
+
+    /** GET /admin/oracle — the MOCK oracle's current price. */
+    async adminGetOracle(token: string): Promise<OraclePrice> {
+      return parseOraclePrice(await call("GET", "/admin/oracle", undefined, { headers: { "x-admin-token": token } }));
+    },
+
+    /**
+     * POST /admin/oracle — sets the MOCK oracle's price (the backend holds the owner key and
+     * waits for the transaction). The backend reads `priceUsdCents` as a JSON number.
+     */
+    async adminSetOracle(token: string, priceUsdCents: bigint): Promise<OracleUpdate> {
+      if (priceUsdCents <= 0n || priceUsdCents > BigInt(Number.MAX_SAFE_INTEGER)) {
+        throw new ApiError("invalid", "The price must be a positive number of cents");
+      }
+      return parseOracleUpdate(
+        await call(
+          "POST",
+          "/admin/oracle",
+          { priceUsdCents: Number(priceUsdCents) },
+          { headers: { "x-admin-token": token }, timeoutMs: TIMEOUT.owner },
+        ),
+      );
+    },
   };
 }
 
@@ -523,3 +662,10 @@ export type Api = ReturnType<typeof createApi>;
 
 /** The app's client, bound to NEXT_PUBLIC_BACKEND_URL. */
 export const api: Api = createApi();
+
+/**
+ * Fetches GET /config once (memoized), checks it against the build's pinned addresses and
+ * applies the result to `config` in place (lib/config.ts). components/ConfigGate.tsx awaits it
+ * before rendering any page; it never rejects.
+ */
+export const loadRuntimeConfig: () => Promise<AppConfig> = runtimeConfigLoader(() => api.getConfig());

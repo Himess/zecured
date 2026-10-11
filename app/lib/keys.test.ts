@@ -1,7 +1,9 @@
 import { describe, expect, it } from "vitest";
 import { privateKeyToAccount } from "viem/accounts";
+import { config } from "./config";
 import {
   BACKUP_TYPE,
+  backupFileName,
   createLoan,
   exportLoan,
   importLoan,
@@ -58,9 +60,30 @@ describe("createLoan", () => {
     expect(() => createLoan(2_000_000n)).toThrow(/denomination|amount/);
     expect(() => createLoan(5_000_000n)).not.toThrow();
   });
+
+  it("follows the signers' denominations from GET /config; older backups stay importable", () => {
+    const before = config.denominations;
+    const old = createLoan(1_000_000n);
+    try {
+      config.denominations = [5_000_000n, 10_000_000n];
+      expect(createLoan(10_000_000n).amount).toBe("10000000");
+      expect(() => createLoan(1_000_000n)).toThrow(/amount/);
+      expect(importLoan(exportLoan(old))).toEqual(old);
+    } finally {
+      config.denominations = before;
+    }
+  });
 });
 
 describe("export / import", () => {
+  it("names backup files neutrally: nothing ties them to the account (L-11)", () => {
+    const loan = createLoan(1_000_000n);
+    const a = backupFileName();
+    expect(a).toMatch(/^zecured-loan-backup-[0-9a-f]{8}\.json$/);
+    expect(backupFileName()).not.toBe(a);
+    expect(a.toLowerCase()).not.toContain(loan.account.slice(2, 8).toLowerCase());
+  });
+
   it("round-trips a loan through a JSON backup", () => {
     const loan = {
       ...createLoan(5_000_000n),

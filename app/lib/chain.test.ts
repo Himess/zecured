@@ -16,7 +16,14 @@ import {
 import { baseSepolia } from "viem/chains";
 import { DRY_RUN_ENV } from "./__fixtures__/deployment";
 import { adapterAbi, erc20Abi, irmAbi, morphoAbi, oracleAbi, registryAbi, registryEventsAbi } from "./abi";
-import { ContractsNotDeployedError, LOG_CHUNK, readPosition, readRecentRegistryEvents, readVault } from "./chain";
+import {
+  ContractsNotDeployedError,
+  LOG_CHUNK,
+  readPosition,
+  readRecentRegistryEvents,
+  readReleaseClaim,
+  readVault,
+} from "./chain";
 import { buildConfig, marketParams } from "./config";
 import { borrowAssets, expectedMarket } from "./morpho";
 
@@ -108,6 +115,41 @@ function fakeChain(opts: { failLogsAfter?: number; deployed?: boolean } = {}): {
               transactions: [],
               uncles: [],
             };
+          case "eth_getTransactionReceipt": {
+            const release = registryEventsAbi[1];
+            const releaseLog = (address: Address, vaultId: Hex, claimId: Hex, amount: bigint, logIndex: number) => ({
+              address,
+              topics: encodeEventTopics({ abi: [release], eventName: "ReleaseRequested", args: { vaultId, claimId } }),
+              data: encodeAbiParameters([{ type: "uint64" }, { type: "bytes32" }], [amount, `0x${"cd".repeat(32)}`]),
+              blockNumber: numberToHex(LATEST),
+              blockHash: `0x${"33".repeat(32)}`,
+              transactionHash: p[0],
+              transactionIndex: "0x0",
+              logIndex: numberToHex(logIndex),
+              removed: false,
+            });
+            return {
+              transactionHash: p[0],
+              transactionIndex: "0x0",
+              blockHash: `0x${"33".repeat(32)}`,
+              blockNumber: numberToHex(LATEST),
+              from: "0x0000000000000000000000000000000000000001",
+              to: "0x0000000071727De22E5E9d8BAf0edAc6f37da032",
+              cumulativeGasUsed: "0x1",
+              gasUsed: "0x1",
+              contractAddress: null,
+              logs: [
+                // The same event from another contract, and another vault's release in the same bundle.
+                releaseLog(ACCOUNT, VAULT, `0x${"01".repeat(32)}`, 1n, 0),
+                releaseLog(config.registry, `0x${"ef".repeat(32)}`, `0x${"02".repeat(32)}`, 2n, 1),
+                releaseLog(config.registry, VAULT, `0x${"0A".repeat(32)}`, 200_000n, 2),
+              ],
+              logsBloom: `0x${"00".repeat(256)}`,
+              status: "0x1",
+              effectiveGasPrice: "0x1",
+              type: "0x2",
+            };
+          }
           case "eth_getLogs": {
             const f = p[0] as { fromBlock: Hex; toBlock: Hex };
             calls.logRanges.push([BigInt(f.fromBlock), BigInt(f.toBlock)]);
@@ -182,6 +224,16 @@ describe("readVault", () => {
   it("decodes the Registry's vault view", async () => {
     const { client } = fakeChain();
     expect(await readVault(VAULT, { client, config })).toEqual({ account: ACCOUNT, outstanding: 1_000_000n, status: "Active" });
+  });
+});
+
+describe("readReleaseClaim", () => {
+  it("finds the vault's ReleaseRequested event in the receipt, from the Registry only", async () => {
+    const { client, calls } = fakeChain();
+    const claim = await readReleaseClaim(VAULT, `0x${"77".repeat(32)}`, { client, config });
+    expect(claim).toEqual({ claimId: `0x${"0a".repeat(32)}`, amount: 200_000n });
+    expect(calls.methods).toEqual(["eth_getTransactionReceipt"]);
+    expect(await readReleaseClaim(`0x${"99".repeat(32)}`, `0x${"77".repeat(32)}`, { client, config })).toBeNull();
   });
 });
 

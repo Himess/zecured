@@ -1,5 +1,6 @@
 import type { Metadata } from "next";
 import Link from "next/link";
+import { Denominations } from "@/components/client";
 import { buttonClass, Card, Notice, Page } from "@/components/ui";
 
 export const metadata: Metadata = { title: "Prepare your ZEC" };
@@ -20,8 +21,8 @@ export default function PreparePage() {
                 pools</strong>, it passes a turnstile (ZIP 209) and the <strong>amount becomes public</strong>.
               </p>
               <p>
-                A deposit from Sapling, Orchard or a transparent address would therefore show a public 0.01 or 0.05 ZEC
-                movement at the exact time your vault is funded. Anyone could match it to the loan that appears on Base a
+                A deposit from Sapling, Orchard or a transparent address would therefore show a public movement of exactly
+                the vault&apos;s amount (<Denominations />) at the exact time your vault is funded. Anyone could match it to the loan that appears on Base a
                 few minutes later. An <strong>Ironwood → Ironwood</strong> payment crosses no turnstile and reveals nothing.
               </p>
             </div>
@@ -36,7 +37,7 @@ export default function PreparePage() {
               </li>
               <li>
                 <strong className="text-text">Migrate a different amount than your collateral.</strong> Move, say, 0.125 TAZ
-                rather than exactly 0.01 or 0.05, so the public crossing does not match a loan size.
+                rather than exactly <Denominations />, so the public crossing does not match a loan size.
               </li>
               <li>
                 <strong className="text-text">Wait before depositing.</strong> Hours or days between the migration and the
@@ -52,7 +53,9 @@ export default function PreparePage() {
           <Card title="What counts as a valid deposit">
             <ul className="list-disc space-y-2 pl-5 text-sm text-muted">
               <li>The whole deposit transaction touches only Ironwood: no transparent inputs or outputs, no Sapling spends or outputs, no Orchard-pool actions.</li>
-              <li>Its value is exactly the vault&apos;s denomination (0.01 or 0.05 TAZ on testnet).</li>
+              <li>
+                Its value is exactly the vault&apos;s denomination (<Denominations /> on testnet).
+              </li>
               <li>It is mined at or before the vault&apos;s expiry height, and it is the first such note the vault receives.</li>
             </ul>
             <div className="mt-4">

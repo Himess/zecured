@@ -68,6 +68,62 @@ export const registryEventsAbi = [
   },
 ] as const;
 
+/** Registry errors an account's own calls can hit (IZecuredRegistry), decoded to explain reverts. */
+export const registryErrorsAbi = [
+  { type: "error", name: "VaultNotActive", inputs: [{ name: "vaultId", type: "bytes32" }] },
+  {
+    type: "error",
+    name: "NotVaultAccount",
+    inputs: [
+      { name: "vaultId", type: "bytes32" },
+      { name: "caller", type: "address" },
+    ],
+  },
+  { type: "error", name: "ZeroCommitment", inputs: [] },
+  { type: "error", name: "DebtOutstanding", inputs: [{ name: "vaultId", type: "bytes32" }] },
+  {
+    type: "error",
+    name: "ReleaseAmountTooSmall",
+    inputs: [
+      { name: "amount", type: "uint64" },
+      { name: "minimum", type: "uint64" },
+    ],
+  },
+  {
+    type: "error",
+    name: "ReleaseAmountNotPartial",
+    inputs: [
+      { name: "amount", type: "uint64" },
+      { name: "outstanding", type: "uint64" },
+    ],
+  },
+  {
+    type: "error",
+    name: "ReleaseRemainderTooSmall",
+    inputs: [
+      { name: "remaining", type: "uint64" },
+      { name: "minimum", type: "uint64" },
+    ],
+  },
+  {
+    type: "error",
+    name: "ReleaseLtvTooHigh",
+    inputs: [
+      { name: "debt", type: "uint256" },
+      { name: "collateralValue", type: "uint256" },
+    ],
+  },
+  {
+    type: "error",
+    name: "CollateralMismatch",
+    inputs: [
+      { name: "vaultId", type: "bytes32" },
+      { name: "morphoCollateral", type: "uint256" },
+      { name: "outstanding", type: "uint64" },
+    ],
+  },
+] as const;
+
 export const registryAbi = [
   {
     type: "function",
@@ -75,6 +131,17 @@ export const registryAbi = [
     stateMutability: "nonpayable",
     inputs: [
       { name: "vaultId", type: "bytes32" },
+      { name: "destCommitment", type: "bytes32" },
+    ],
+    outputs: [{ name: "claimId", type: "bytes32" }],
+  },
+  {
+    type: "function",
+    name: "requestPartialRelease",
+    stateMutability: "nonpayable",
+    inputs: [
+      { name: "vaultId", type: "bytes32" },
+      { name: "amount", type: "uint64" },
       { name: "destCommitment", type: "bytes32" },
     ],
     outputs: [{ name: "claimId", type: "bytes32" }],
@@ -111,6 +178,7 @@ export const registryAbi = [
     ],
   },
   ...registryEventsAbi,
+  ...registryErrorsAbi,
 ] as const;
 
 /** Registry `VaultStatus` enum. */
