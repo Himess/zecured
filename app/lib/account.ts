@@ -8,8 +8,9 @@
  *
  * Whether the backend can sponsor at all comes from `GET /config` (`config.sponsorship`:
  * bundler, paymaster and allowlist configured); without it `send()` refuses before signing.
- * Status: `send()` is wired with viem's ERC-4337 bundler client + ERC-7677 paymaster client
- * against the backend proxy but has not run against a live bundler. See the TODO below.
+ * Verified end to end on a fork of Base Sepolia behind the backend proxy, with Pimlico's alto
+ * bundler and mock paymaster (scripts/local-fork.sh): account deployment + authorizations +
+ * borrow in the first UserOp, then a partial release, the account never holding ETH or zZEC.
  */
 import { createClient, http, HttpRequestError, type Address, type Hex, type PublicClient, type Transport } from "viem";
 import { createBundlerClient, createPaymasterClient } from "viem/account-abstraction";
@@ -156,8 +157,6 @@ export function loanAccount(ownerKey: Hex, deps: AccountDeps = {}): LoanAccount 
       // comes from `eth_estimateUserOperationGas`, never hard-coded. permissionless encodes
       // calls as Safe4337Module `executeUserOpWithErrorString` (batches: DELEGATECALL to
       // MultiSendCallOnly), which the proxy's allowlist decoder accepts.
-      // TODO(live): first run against a real bundler + paymaster once BUNDLER_URL /
-      // PAYMASTER_URL are set on the backend and the contracts are deployed.
       const transportOptions = { fetchOptions: { credentials: "omit", referrerPolicy: "no-referrer" } } as const;
       const bundlerTransport = http(api.proxyUrl("bundler"), transportOptions);
       await checkBundler(http(api.proxyUrl("bundler"), { ...transportOptions, retryCount: 0 }));

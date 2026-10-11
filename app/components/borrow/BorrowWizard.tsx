@@ -201,7 +201,7 @@ function AmountStep({
             Moving exactly {formatTaz(amount)} into Ironwood and depositing right away links the two: the move into
             Ironwood is public. Move a different amount, and wait hours or days.
             {config.vaultExpiryBlocks !== null
-              ? ` Once open, the vault accepts the deposit for about ${blocksToDuration(config.vaultExpiryBlocks)} (${config.vaultExpiryBlocks} Zcash blocks).`
+              ? ` Once open, the vault accepts the deposit for ${blocksToDuration(config.vaultExpiryBlocks)} (${config.vaultExpiryBlocks} Zcash blocks).`
               : null}
           </p>
         </Notice>
