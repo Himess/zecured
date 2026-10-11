@@ -26,11 +26,14 @@ Verified end to end on **Zcash testnet (NU7)** with five independent signer proc
 | P2 repay + release | zZEC burned on Base → payout to the borrower's new Ironwood address → `confirmPayout` |
 | P6 close from collateral | Market maker repays on Morpho; market maker and borrower paid in **one** Zcash transaction |
 | P3 liquidation | Bot liquidates after a price drop; liquidator paid with `ovk = None`; the remainder stays the borrower's and is released |
+| Partial release (D14) | Part of the ZEC paid out while the loan stays open (LTV after ≤ 50 %), the rest released later |
+| Failure handling | Payouts with two signers offline, a signer restarted mid-payout, and a payout that expired unmined and was rebuilt |
 | Threshold demo | Two signers switched to "compromised" sign a sweep, three refuse, nothing moves |
 | Vault verification | The borrower scans the vault with its viewing key (UFVK) |
 
-The Base side of P2 / P3 / P6 has been run against a local fork of Base Sepolia (real Morpho
-Blue deployment); the public Base Sepolia deployment follows.
+The Base side of P2 / P3 / P6 / D14 has been run against a local fork of Base Sepolia (real
+Morpho Blue deployment); the public Base Sepolia deployment follows. Evidence (block heights,
+txids) and how to reproduce every run: [docs/TESTING.md](docs/TESTING.md).
 
 ## What is real and what is a mock
 
@@ -48,7 +51,7 @@ Blue deployment); the public Base Sepolia deployment follows.
 
 | Path | What |
 |---|---|
-| `contracts/` | Solidity + Foundry: `ZZEC`, `ZecuredRegistry`, `SettlementAdapter`, mocks, 166 tests |
+| `contracts/` | Solidity + Foundry: `ZZEC`, `ZecuredRegistry`, `SettlementAdapter`, mocks, 178 tests |
 | `signer/crates/zcash-ops` | Ironwood scanning, PCZT build/prove/sign/extract, ZIP 2005 vault keys |
 | `signer/crates/threshold` | FROST DKG and re-randomized signing |
 | `signer/crates/policy` | P1 classification, payout ledger (I10), PCZT verification against the plan |
@@ -59,7 +62,7 @@ Blue deployment); the public Base Sepolia deployment follows.
 | `bots/` | Liquidator and market maker |
 | `cli/` | `zecured-wallet`: Ironwood CLI wallet and borrower actions |
 | `app/` | Next.js app (in progress) |
-| `docs/` | [Architecture](docs/ARCHITECTURE.md), [Interfaces](docs/INTERFACES.md), [Threat model](docs/THREAT_MODEL.md), [Decisions](docs/DECISIONS.md), [Jury FAQ](docs/JURY_FAQ.md), spikes |
+| `docs/` | [Architecture](docs/ARCHITECTURE.md), [Interfaces](docs/INTERFACES.md), [Threat model](docs/THREAT_MODEL.md), [Decisions](docs/DECISIONS.md), [Testing and evidence](docs/TESTING.md), [Jury FAQ](docs/JURY_FAQ.md), spikes |
 
 ## Running it
 
