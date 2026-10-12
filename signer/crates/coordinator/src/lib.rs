@@ -927,6 +927,16 @@ impl Coordinator {
         Ok(())
     }
 
+    /// L23: Zcash blocks between a payout's commitment and its broadcast, drawn per payout.
+    fn payout_delay(&self) -> u32 {
+        let max = self.cfg.payout_delay_max_blocks;
+        if max == 0 {
+            0
+        } else {
+            rand_core_06::RngCore::next_u32(&mut rand_core_06::OsRng) % (max + 1)
+        }
+    }
+
     /// D15: extra confirmations before attesting, drawn once per vault.
     async fn attest_delay(&self, id: &B256, v: &CoordVault) -> Result<u32> {
         if let Some(d) = v.attest_delay {
@@ -1130,6 +1140,12 @@ impl Coordinator {
             SignKind::Payout { claim_ids } => (claim_ids.clone(), None),
             SignKind::Refund { note_id } => (vec![], Some(*note_id)),
         };
+        // L23: a committed payout waits a random number of blocks before its broadcast (refunds
+        // are not committed on Base, so they go at once).
+        let delay = match &kind {
+            SignKind::Payout { .. } => self.payout_delay(),
+            SignKind::Refund { .. } => 0,
+        };
         let record = Inflight {
             claim_ids,
             refund_note,
@@ -1137,10 +1153,15 @@ impl Coordinator {
             expiry_height: expiry,
             raw_tx: (!withhold).then(|| hex::encode(&raw)),
             inputs: inputs.iter().map(|n| B256::from(n.nullifier.to_bytes())).collect(),
+            broadcast_from: if delay == 0 { 0 } else { tip.saturating_add(delay) },
         };
         self.update_vault(id, |cur| cur.inflight = Some(record)).await?;
         if withhold {
             warn!(vault = %short(id), "TEST: payout withheld; it will expire unmined");
+            return Ok(());
+        }
+        if delay > 0 {
+            info!(vault = %short(id), blocks = delay, "payout signed; broadcast held back (L23)");
             return Ok(());
         }
         match self.broadcast(raw).await {
@@ -1200,6 +1221,7 @@ impl Coordinator {
         match action {
             Action::Confirm => self.settle(id, &inflight).await,
             Action::Wait => Ok(()),
+            Action::Rebroadcast if tip < inflight.broadcast_from => Ok(()), // L23: held back
             Action::Rebroadcast => {
                 // "Already in the mempool" rejections are expected and harmless.
                 if let Some(raw) = inflight.raw_tx.as_deref().and_then(|h| hex::decode(h).ok()) {
@@ -1755,6 +1777,7 @@ mod tests {
             expiry_height: 500,
             raw_tx: None,
             inputs: vec![],
+            broadcast_from: 0,
         }
     }
 

@@ -40,6 +40,7 @@ fn node(dir: &std::path::Path) -> Node {
         nodes: vec![],
         coordinator: Some(Address::repeat_byte(0xcc)),
         attest_delay_max_blocks: 0,
+        payout_delay_max_blocks: 0,
     };
     let id = Identity {
         index: 1,

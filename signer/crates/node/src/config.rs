@@ -55,6 +55,10 @@ pub struct NetworkConfig {
     /// Upper bound of the random extra confirmations before a deposit is attested (D15).
     #[serde(default)]
     pub attest_delay_max_blocks: u32,
+    /// L23: upper bound of the random number of Zcash blocks a payout waits between its
+    /// commitment on Base and its broadcast (docs/TIER3.md § 11; 0 broadcasts at once).
+    #[serde(default)]
+    pub payout_delay_max_blocks: u32,
 }
 
 impl NetworkConfig {

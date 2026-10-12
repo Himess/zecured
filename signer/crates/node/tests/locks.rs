@@ -83,6 +83,7 @@ async fn a_hanging_light_wallet_server_does_not_lock_the_store() {
         nodes: vec![],
         coordinator: Some(Address::repeat_byte(0xcc)),
         attest_delay_max_blocks: 0,
+        payout_delay_max_blocks: 0,
     };
     let id = Identity {
         index: 1,

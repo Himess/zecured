@@ -379,6 +379,7 @@ mod tests {
             nodes: vec![],
             coordinator: None,
             attest_delay_max_blocks: 0,
+            payout_delay_max_blocks: 0,
         }
     }
 

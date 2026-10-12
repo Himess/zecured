@@ -54,6 +54,10 @@ pub struct Inflight {
     /// written before this field existed.
     #[serde(default)]
     pub inputs: Vec<B256>,
+    /// L23: the Zcash height from which the payout is broadcast (0: at once). Its commitment is
+    /// on Base before it is signed, so broadcasting right away would point at the next block.
+    #[serde(default)]
+    pub broadcast_from: u32,
 }
 
 /// A refund the owner asked for and the signers accepted.

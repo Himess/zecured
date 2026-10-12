@@ -82,6 +82,7 @@ fn setup() -> (NetworkConfig, Vec<TestNode>) {
         nodes: infos,
         coordinator: None,
         attest_delay_max_blocks: 0,
+        payout_delay_max_blocks: 0,
     };
     (cfg, nodes)
 }

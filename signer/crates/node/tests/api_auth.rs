@@ -64,6 +64,7 @@ fn config(coordinator: Option<Address>) -> NetworkConfig {
             .collect(),
         coordinator,
         attest_delay_max_blocks: 0,
+        payout_delay_max_blocks: 0,
     }
 }
 
