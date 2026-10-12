@@ -2,7 +2,7 @@
 pragma solidity 0.8.28;
 
 import {Test, console} from "forge-std/Test.sol";
-import {ZecuredEIP712, DepositAttestation, CloseRequest} from "../../src/libraries/ZecuredEIP712.sol";
+import {ZecuredEIP712, DepositAttestation, CloseRequest, SpendCommit} from "../../src/libraries/ZecuredEIP712.sol";
 
 /// @notice The EIP-712 type strings of docs/INTERFACES.md § 2 and the struct hashes / digests the contracts compute,
 ///         cross-checked against Foundry's independent EIP-712 implementation (`vm.eip712HashType`,
@@ -23,6 +23,8 @@ contract ZecuredEIP712Test is Test {
     string internal constant REFUND_REQUEST =
         "RefundRequest(bytes32 vaultId,bytes32 noteId,bytes32 commitment,uint64 nonce,uint64 deadline)";
     string internal constant VIEW_KEY_REQUEST = "ViewKeyRequest(bytes32 vaultId,uint64 nonce,uint64 deadline)";
+    string internal constant SPEND_COMMIT =
+        "SpendCommit(bytes32 vaultId,bytes32 inputTag,bytes32[] claimIds,bytes32[] claimRefs,bytes32 payoutRef,bytes32 changeTag,uint64 changeValue)";
 
     // ------------------------------------------------------------------ fixed vector inputs (Base Sepolia)
 
@@ -39,6 +41,12 @@ contract ZecuredEIP712Test is Test {
     uint64 internal constant MIN_USER_AMOUNT = 500_000;
     uint256 internal constant NONCE = 42;
     uint64 internal constant DEADLINE = 1_800_000_000;
+    // SpendCommit (Tier 3): a close pair paid from the deposit, with change.
+    bytes32 internal constant CLAIM_REF_0 = 0x8888888888888888888888888888888888888888888888888888888888888888;
+    bytes32 internal constant CLAIM_REF_1 = 0x9999999999999999999999999999999999999999999999999999999999999999;
+    bytes32 internal constant PAYOUT_REF = 0xaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa;
+    bytes32 internal constant CHANGE_TAG = 0xbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb;
+    uint64 internal constant CHANGE_VALUE = 3_800_000;
 
     bytes32 internal constant DOMAIN_TYPEHASH =
         keccak256("EIP712Domain(string name,string version,uint256 chainId,address verifyingContract)");
@@ -69,6 +77,21 @@ contract ZecuredEIP712Test is Test {
             userCommitment: USER_COMMITMENT,
             nonce: NONCE,
             deadline: DEADLINE
+        });
+    }
+
+    function _spendCommit() internal pure returns (SpendCommit memory c) {
+        bytes32[] memory refs = new bytes32[](2);
+        refs[0] = CLAIM_REF_0;
+        refs[1] = CLAIM_REF_1;
+        c = SpendCommit({
+            vaultId: VAULT_ID,
+            inputTag: DEPOSIT_TAG,
+            claimIds: _claimIds(),
+            claimRefs: refs,
+            payoutRef: PAYOUT_REF,
+            changeTag: CHANGE_TAG,
+            changeValue: CHANGE_VALUE
         });
     }
 
@@ -103,6 +126,7 @@ contract ZecuredEIP712Test is Test {
         assertEq(ZecuredEIP712.DESTINATION_TYPEHASH, keccak256(bytes(DESTINATION)));
         assertEq(ZecuredEIP712.REFUND_REQUEST_TYPEHASH, keccak256(bytes(REFUND_REQUEST)));
         assertEq(ZecuredEIP712.VIEW_KEY_REQUEST_TYPEHASH, keccak256(bytes(VIEW_KEY_REQUEST)));
+        assertEq(ZecuredEIP712.SPEND_COMMIT_TYPEHASH, keccak256(bytes(SPEND_COMMIT)));
     }
 
     function test_typeHashesMatchIndependentImplementation() public pure {
@@ -113,6 +137,7 @@ contract ZecuredEIP712Test is Test {
         assertEq(ZecuredEIP712.DESTINATION_TYPEHASH, vm.eip712HashType(DESTINATION));
         assertEq(ZecuredEIP712.REFUND_REQUEST_TYPEHASH, vm.eip712HashType(REFUND_REQUEST));
         assertEq(ZecuredEIP712.VIEW_KEY_REQUEST_TYPEHASH, vm.eip712HashType(VIEW_KEY_REQUEST));
+        assertEq(ZecuredEIP712.SPEND_COMMIT_TYPEHASH, vm.eip712HashType(SPEND_COMMIT));
     }
 
     // ------------------------------------------------------------------ struct hashes
@@ -148,6 +173,10 @@ contract ZecuredEIP712Test is Test {
                 )
             )
         );
+
+        SpendCommit memory c = _spendCommit();
+        // A struct with dynamic members is ABI-encoded as one dynamic tuple (offset first).
+        assertEq(ZecuredEIP712.hashSpendCommit(c), vm.eip712HashStruct(SPEND_COMMIT, abi.encode(c)));
     }
 
     /// The claim id list is ordered: swapping two ids changes the hash (signers confirm exactly one ordering).
@@ -278,6 +307,83 @@ contract ZecuredEIP712Test is Test {
         assertTrue(ZecuredEIP712.hashCloseRequest(r) != base);
     }
 
+    function test_spendCommitDigest_matchesTypedDataJson() public pure {
+        SpendCommit memory c = _spendCommit();
+        string memory json = string.concat(
+            '{"types":{',
+            DOMAIN_TYPES_JSON,
+            ',"SpendCommit":[{"name":"vaultId","type":"bytes32"},{"name":"inputTag","type":"bytes32"},{"name":"claimIds","type":"bytes32[]"},{"name":"claimRefs","type":"bytes32[]"},{"name":"payoutRef","type":"bytes32"},{"name":"changeTag","type":"bytes32"},{"name":"changeValue","type":"uint64"}]},',
+            '"primaryType":"SpendCommit",',
+            _domainJson("ZecuredRegistry", REGISTRY),
+            _spendCommitMessageJson(c)
+        );
+        bytes32 ours =
+            _digest(_domainSeparator(ZecuredEIP712.REGISTRY_DOMAIN_NAME, REGISTRY), ZecuredEIP712.hashSpendCommit(c));
+        assertEq(ours, vm.eip712HashTypedData(json));
+        assertEq(ours, GOLDEN_SPEND_COMMIT_DIGEST, "golden vector");
+    }
+
+    function _spendCommitMessageJson(SpendCommit memory c) internal pure returns (string memory) {
+        return string.concat(
+            ',"message":{"vaultId":"',
+            vm.toString(c.vaultId),
+            '","inputTag":"',
+            vm.toString(c.inputTag),
+            '","claimIds":["',
+            vm.toString(c.claimIds[0]),
+            '","',
+            vm.toString(c.claimIds[1]),
+            '"],"claimRefs":["',
+            vm.toString(c.claimRefs[0]),
+            '","',
+            vm.toString(c.claimRefs[1]),
+            '"],"payoutRef":"',
+            vm.toString(c.payoutRef),
+            '","changeTag":"',
+            vm.toString(c.changeTag),
+            '","changeValue":"',
+            vm.toString(c.changeValue),
+            '"}}'
+        );
+    }
+
+    /// Every field is covered by the hash, the order of the claims too, and the two arrays cannot be swapped.
+    function test_spendCommitHash_coversEveryField() public pure {
+        bytes32 base = ZecuredEIP712.hashSpendCommit(_spendCommit());
+        SpendCommit memory c;
+        c = _spendCommit();
+        c.vaultId = bytes32(uint256(c.vaultId) ^ 1);
+        assertTrue(ZecuredEIP712.hashSpendCommit(c) != base);
+        c = _spendCommit();
+        c.inputTag = bytes32(uint256(c.inputTag) ^ 1);
+        assertTrue(ZecuredEIP712.hashSpendCommit(c) != base);
+        c = _spendCommit();
+        c.claimIds[1] = bytes32(uint256(c.claimIds[1]) ^ 1);
+        assertTrue(ZecuredEIP712.hashSpendCommit(c) != base);
+        c = _spendCommit();
+        (c.claimIds[0], c.claimIds[1]) = (c.claimIds[1], c.claimIds[0]);
+        assertTrue(ZecuredEIP712.hashSpendCommit(c) != base, "claim order");
+        c = _spendCommit();
+        c.claimRefs[0] = bytes32(uint256(c.claimRefs[0]) ^ 1);
+        assertTrue(ZecuredEIP712.hashSpendCommit(c) != base);
+        c = _spendCommit();
+        (c.claimIds, c.claimRefs) = (c.claimRefs, c.claimIds);
+        assertTrue(ZecuredEIP712.hashSpendCommit(c) != base, "arrays swapped");
+        c = _spendCommit();
+        c.claimRefs = new bytes32[](1);
+        c.claimRefs[0] = CLAIM_REF_0;
+        assertTrue(ZecuredEIP712.hashSpendCommit(c) != base, "a dropped claim ref");
+        c = _spendCommit();
+        c.payoutRef = bytes32(uint256(c.payoutRef) ^ 1);
+        assertTrue(ZecuredEIP712.hashSpendCommit(c) != base);
+        c = _spendCommit();
+        c.changeTag = bytes32(uint256(c.changeTag) ^ 1);
+        assertTrue(ZecuredEIP712.hashSpendCommit(c) != base);
+        c = _spendCommit();
+        c.changeValue ^= 1;
+        assertTrue(ZecuredEIP712.hashSpendCommit(c) != base);
+    }
+
     /// Prints the vectors (run with -vv) so other implementations can copy them.
     function test_printVectors() public pure {
         console.log("chainId 84532, Registry", REGISTRY, "Adapter", ADAPTER);
@@ -291,6 +397,9 @@ contract ZecuredEIP712Test is Test {
         console.logBytes32(GOLDEN_PAYOUT_CONFIRMATION_DIGEST);
         console.log("CloseRequest digest");
         console.logBytes32(GOLDEN_CLOSE_REQUEST_DIGEST);
+        console.log("SpendCommit struct hash and digest");
+        console.logBytes32(ZecuredEIP712.hashSpendCommit(_spendCommit()));
+        console.logBytes32(GOLDEN_SPEND_COMMIT_DIGEST);
     }
 
     // ------------------------------------------------------------------ golden vectors
@@ -308,4 +417,8 @@ contract ZecuredEIP712Test is Test {
         0xf166a0191609bbccd2b7aa9e7527b1553a418f7626902cc10099034b838e4973;
     bytes32 internal constant GOLDEN_CLOSE_REQUEST_DIGEST =
         0x2207e7a8cd1b3966d87015d4b554f9271a760f2854c1c9d37ae0391b885ae8f7;
+    // SpendCommit: inputTag 0x6666..66, claimIds as PayoutConfirmation's, claimRefs [0x8888..88, 0x9999..99],
+    // payoutRef 0xaaaa..aa, changeTag 0xbbbb..bb, changeValue 3,800,000.
+    bytes32 internal constant GOLDEN_SPEND_COMMIT_DIGEST =
+        0x16347216b48a0eb77b4af1738514b09ced87e423e69215bc7aeecefa866fe781;
 }

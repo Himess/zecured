@@ -36,6 +36,28 @@ struct CloseRequest {
     uint64 deadline;
 }
 
+/// @notice Tier 3 payout commitment (docs/TIER3.md § 3), signed by at least 3 signers in FROST round 1, before any of
+///         them releases a signature share, and recorded by the Registry's `commitSpend` under the Registry domain.
+///         Every field is a keyed or salted hash, a Base id or a value Base can compute: nothing links to Zcash.
+/// @param vaultId The paying vault.
+/// @param inputTag `noteTag` of the lineage note the payout spends: the activated deposit, or the change of the
+///        vault's previous committed payout. A payout spends exactly one lineage note.
+/// @param claimIds The claims the payout pays (at least one, all Pending), in plan order; `claimIds[0]` bears the fee.
+/// @param claimRefs `keccak256(salt_i || txid)` of `claimIds[i]` (`salt_i` from its recipient commitment, txid in
+///        internal byte order): lets the claimant, who knows `salt_i` but not the vault's key, find the payout.
+/// @param payoutRef BLAKE2b-256 of the payout's txid keyed with the vault's tag key (`policy::derive::payout_ref`).
+/// @param changeTag `noteTag` of the change note the payout returns to the vault; zero if it returns none.
+/// @param changeValue Zatoshi of that change note; zero if none.
+struct SpendCommit {
+    bytes32 vaultId;
+    bytes32 inputTag;
+    bytes32[] claimIds;
+    bytes32[] claimRefs;
+    bytes32 payoutRef;
+    bytes32 changeTag;
+    uint64 changeValue;
+}
+
 /// @title ZecuredEIP712
 /// @notice Single source of truth for the EIP-712 domains and type hashes of docs/INTERFACES.md § 2. Both
 ///         ZecuredRegistry and SettlementAdapter hash through this library, so they cannot drift apart; the Rust signer
@@ -47,8 +69,8 @@ library ZecuredEIP712 {
     // ------------------------------------------------------------------ domains (§ 2.1)
 
     /// @notice Domain name of ZecuredRegistry: DepositAttestation, PayoutConfirmation, VaultOpened,
-    ///         VaultCancellation and every off-chain owner request (OpenVault, Destination, RefundRequest,
-    ///         ViewKeyRequest).
+    ///         VaultCancellation, SpendCommit and every off-chain owner request (OpenVault, Destination,
+    ///         RefundRequest, ViewKeyRequest).
     string internal constant REGISTRY_DOMAIN_NAME = "ZecuredRegistry";
     /// @notice Domain name of SettlementAdapter: CloseRequest.
     string internal constant ADAPTER_DOMAIN_NAME = "ZecuredSettlementAdapter";
@@ -82,6 +104,13 @@ library ZecuredEIP712 {
     ///      uint64 minUserAmount,bytes32 userCommitment,uint256 nonce,uint64 deadline)") (one line, no spaces).
     bytes32 internal constant CLOSE_REQUEST_TYPEHASH = keccak256(
         "CloseRequest(bytes32 vaultId,address account,address executor,uint16 marginBps,uint64 minUserAmount,bytes32 userCommitment,uint256 nonce,uint64 deadline)"
+    );
+
+    /// @dev keccak256("SpendCommit(bytes32 vaultId,bytes32 inputTag,bytes32[] claimIds,bytes32[] claimRefs,
+    ///      bytes32 payoutRef,bytes32 changeTag,uint64 changeValue)") (one line, no spaces). Tier 3 (docs/TIER3.md):
+    ///      verified by the Registry's `commitSpend` (Deploy 2).
+    bytes32 internal constant SPEND_COMMIT_TYPEHASH = keccak256(
+        "SpendCommit(bytes32 vaultId,bytes32 inputTag,bytes32[] claimIds,bytes32[] claimRefs,bytes32 payoutRef,bytes32 changeTag,uint64 changeValue)"
     );
 
     // ------------------------------------------------------------------ verified off-chain (Registry domain)
@@ -133,6 +162,23 @@ library ZecuredEIP712 {
     /// @notice EIP-712 struct hash of a PayoutConfirmation for `vaultId` and the ordered `claimIds`.
     function hashPayoutConfirmation(bytes32 vaultId, bytes32[] memory claimIds) internal pure returns (bytes32) {
         return keccak256(abi.encode(PAYOUT_CONFIRMATION_TYPEHASH, vaultId, claimIdsHash(claimIds)));
+    }
+
+    /// @notice EIP-712 struct hash of a SpendCommit. Arrays are encoded as EIP-712 requires: the keccak256 of their
+    ///         concatenated 32-byte elements (as `claimIdsHash`).
+    function hashSpendCommit(SpendCommit memory c) internal pure returns (bytes32) {
+        return keccak256(
+            abi.encode(
+                SPEND_COMMIT_TYPEHASH,
+                c.vaultId,
+                c.inputTag,
+                keccak256(abi.encodePacked(c.claimIds)),
+                keccak256(abi.encodePacked(c.claimRefs)),
+                c.payoutRef,
+                c.changeTag,
+                c.changeValue
+            )
+        );
     }
 
     /// @notice EIP-712 struct hash of a CloseRequest.

@@ -93,6 +93,20 @@ sol! {
         bytes32 ufvkHash;
     }
 
+    /// Tier 3 (docs/TIER3.md § 3): signed by signer nodes in FROST round 1, before any share is
+    /// released; recorded by the Registry's `commitSpend` (Deploy 2). `claimIds[0]` bears the fee;
+    /// `claimRefs[i] = keccak256(salt_i || txid)` belongs to `claimIds[i]`.
+    #[derive(Debug, PartialEq, Eq)]
+    struct SpendCommit {
+        bytes32 vaultId;
+        bytes32 inputTag;
+        bytes32[] claimIds;
+        bytes32[] claimRefs;
+        bytes32 payoutRef;
+        bytes32 changeTag;
+        uint64 changeValue;
+    }
+
     /// Signed by the vault owner through the smart account (ERC-1271), verified by the Adapter.
     #[derive(Debug, PartialEq, Eq)]
     struct CloseRequest {
@@ -295,6 +309,39 @@ mod tests {
         assert_eq!(
             VaultOpened::eip712_encode_type(),
             "VaultOpened(bytes32 vaultId,address owner,address account,uint64 amount,uint32 expiryHeight,bytes32 addressHash,bytes32 ufvkHash)"
+        );
+        assert_eq!(
+            SpendCommit::eip712_encode_type(),
+            "SpendCommit(bytes32 vaultId,bytes32 inputTag,bytes32[] claimIds,bytes32[] claimRefs,bytes32 payoutRef,bytes32 changeTag,uint64 changeValue)"
+        );
+    }
+
+    /// The Solidity library's golden vector (contracts/test/unit/ZecuredEIP712.t.sol,
+    /// `GOLDEN_SPEND_COMMIT_DIGEST`, itself checked against Foundry's EIP-712 implementation).
+    #[test]
+    fn spend_commit_golden_vector() {
+        let b = |h: &str| h.parse::<B256>().unwrap();
+        let vault_id = B256::repeat_byte(0x55);
+        let claim_id = |sequence: u64| {
+            let mut encoded = [0u8; 64];
+            encoded[..32].copy_from_slice(vault_id.as_slice());
+            encoded[56..].copy_from_slice(&sequence.to_be_bytes());
+            keccak256(encoded)
+        };
+        let msg = SpendCommit {
+            vaultId: vault_id,
+            inputTag: B256::repeat_byte(0x66),
+            claimIds: vec![claim_id(0), claim_id(1)],
+            claimRefs: vec![B256::repeat_byte(0x88), B256::repeat_byte(0x99)],
+            payoutRef: B256::repeat_byte(0xaa),
+            changeTag: B256::repeat_byte(0xbb),
+            changeValue: 3_800_000,
+        };
+        assert_eq!(msg.eip712_hash_struct(), b("0x25b83714a905e6d4a17e948a1743d118bbc7924c5e1b3da8112450cb233e9856"));
+        let rd = registry_domain(BASE_SEPOLIA_CHAIN_ID, Address::repeat_byte(0x11));
+        assert_eq!(
+            msg.eip712_signing_hash(&rd),
+            b("0x16347216b48a0eb77b4af1738514b09ced87e423e69215bc7aeecefa866fe781")
         );
     }
 

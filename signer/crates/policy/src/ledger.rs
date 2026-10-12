@@ -102,6 +102,16 @@ pub fn commitment(salt: &[u8; 32], receiver: &[u8; 43]) -> Commitment {
     h.finalize().into()
 }
 
+/// Tier 3 `claimRef` (docs/TIER3.md § 2): `keccak256(salt32 || txid32)`, the txid in internal
+/// byte order. Committed next to the claim it pays, it lets the claimant, who knows its salt but
+/// not the vault's key, find the payout and prove a misdirected payment (F3).
+pub fn claim_ref(salt: &[u8; 32], txid: &[u8; 32]) -> [u8; 32] {
+    let mut h = Keccak256::new();
+    h.update(salt);
+    h.update(txid);
+    h.finalize().into()
+}
+
 /// One output of a planned payout.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct PlannedPayment {
@@ -428,6 +438,15 @@ mod tests {
     fn known(ids: &[u8]) -> impl Fn(&Commitment) -> Option<Recipient> {
         let map: HashMap<Commitment, Recipient> = ids.iter().map(|&i| (rcpt(i).commitment(), rcpt(i))).collect();
         move |c| map.get(c).copied()
+    }
+
+    /// `cast keccak` of the 64 bytes `0x11 * 32 || 0x42 * 32`.
+    #[test]
+    fn claim_ref_vector() {
+        assert_eq!(
+            hex::encode(claim_ref(&[0x11; 32], &[0x42; 32])),
+            "51d4b707b5a706e51817d290a91ae40d0363befaad5013b6658f20cd87ddcdd6"
+        );
     }
 
     #[test]

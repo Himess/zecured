@@ -24,7 +24,7 @@ the signers. Salts are never logged.
 
 | Domain | name | version | chainId | verifyingContract | Used for |
 |---|---|---|---|---|---|
-| Registry | `ZecuredRegistry` | `1` | 84532 | ZecuredRegistry | `DepositAttestation`, `PayoutConfirmation`, `VaultCancellation`, `VaultOpened` (checked off-chain by the owner and on-chain by `attestDepositWithProof`), and all off-chain owner requests (`OpenVault`, `Destination`, `RefundRequest`, `ViewKeyRequest`) |
+| Registry | `ZecuredRegistry` | `1` | 84532 | ZecuredRegistry | `DepositAttestation`, `PayoutConfirmation`, `VaultCancellation`, `VaultOpened` (checked off-chain by the owner and on-chain by `attestDepositWithProof`), `SpendCommit` (Tier 3, Registry v2), and all off-chain owner requests (`OpenVault`, `Destination`, `RefundRequest`, `ViewKeyRequest`) |
 | Adapter | `ZecuredSettlementAdapter` | `1` | 84532 | SettlementAdapter | `CloseRequest` |
 
 Every request kind has its own type, so a signature for one kind never verifies as another.
@@ -94,6 +94,22 @@ VaultOpened(bytes32 vaultId,address owner,address account,uint64 amount,uint32 e
   of its network config, by index), never a set obtained from the backend. Only then do they show
   the address or the payment request. They keep `ufvkHash` and show a viewing key only if it
   hashes to it.
+
+### 2.6 Tier 3: signed by signer nodes before they sign a payout (Registry v2, Deploy 2)
+
+```
+SpendCommit(bytes32 vaultId,bytes32 inputTag,bytes32[] claimIds,bytes32[] claimRefs,bytes32 payoutRef,bytes32 changeTag,uint64 changeValue)
+```
+
+- Signed in FROST round 1 and recorded by `commitSpend` before any node releases a round-2
+  share; the full protocol, the Registry state and the violation proofs are in
+  [TIER3.md](TIER3.md). Interfaces: `IZecuredSpendCommits`, `ISignerBond`, `IZecuredSlasher`.
+- `inputTag` and `changeTag` are note tags (`depositTag`'s function, § 2.2) of the lineage note
+  spent and of the change returned; `payoutRef = BLAKE2b-256(key = the same tag key, personal =
+  "Zecured_PayRef__", txid)`; `claimRefs[i] = keccak256(salt_i || txid)` for `claimIds[i]`
+  (`salt_i` of its recipient commitment, § 1). Txids in internal byte order.
+- `claimIds[0]` bears the payout's ZIP 317 fee. Arrays are hashed as EIP-712 requires
+  (`keccak256` of the concatenated elements); signatures as in § 2.2.
 
 ## 3. Contracts (Base Sepolia)
 
