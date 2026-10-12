@@ -2,14 +2,16 @@
 //!
 //! Round 1 goes to every signer not excluded so far; each verifies the PCZT against its own
 //! plan and commits to one nonce pair per vault spend. Three valid committers are chosen for
-//! round 2. A chosen signer that fails round 2, answers with the wrong number of shares or
+//! round 2. Tier 3 (docs/TIER3.md § 5): for a payout, each also signs the payout's commitment,
+//! which goes to Base between the two rounds; the chosen signers then get every signature the
+//! Registry recorded it with, and release their shares only once they see it there. A chosen signer that fails round 2, answers with the wrong number of shares or
 //! unparseable ones, or sends a share that FROST's cheater detection rejects is excluded, and
 //! both rounds run again with the same PCZT: a node's nonces are single-use, so every attempt
 //! is a new session. No answer is indexed before its length is checked.
 
 use std::collections::{BTreeMap, BTreeSet};
 
-use alloy::primitives::B256;
+use alloy::primitives::{B256, Bytes};
 use anyhow::{Context, Result, anyhow, ensure};
 use reddsa::frost::redpallas::{
     CheaterDetection, Identifier,
@@ -20,7 +22,7 @@ use reddsa::frost::redpallas::{
 };
 use serde_json::Value;
 use tracing::{debug, warn};
-use zecured_node::signing::{CommitRequest, CommitResponse, ShareRequest, ShareResponse, SignKind};
+use zecured_node::signing::{CommitRequest, CommitResponse, ShareRequest, ShareResponse, SignKind, SpendCommitRecord};
 use zecured_threshold::{self as threshold, MIN_SIGNERS, signer_id};
 use zecured_zcash_ops::spend::SpendAuthRequest;
 
@@ -54,6 +56,20 @@ struct Committer {
     index: u16,
     raw: Vec<Value>,
     parsed: Vec<SigningCommitments>,
+    /// Tier 3, payouts: the node's commitment of the payout and its signature.
+    spend_commit: Option<(SpendCommitRecord, Bytes)>,
+}
+
+/// Tier 3: puts a payout's commitment on Base between the two rounds.
+pub trait SpendCommitter: Sync {
+    /// Records `record` on Base with round-1 signatures `signed` (node index, signature) and
+    /// waits until the nodes can see it deep enough; returns the signatures the Registry
+    /// recorded, in the order it took them.
+    fn commit(
+        &self,
+        record: &SpendCommitRecord,
+        signed: &[(u16, Bytes)],
+    ) -> impl std::future::Future<Output = Result<Vec<Bytes>>> + Send;
 }
 
 fn parse_commitments(index: u16, c: &CommitResponse, spends: usize) -> Result<Committer> {
@@ -68,6 +84,7 @@ fn parse_commitments(index: u16, c: &CommitResponse, spends: usize) -> Result<Co
     Ok(Committer {
         index,
         raw: c.commitments.clone(),
+        spend_commit: c.spend_commit.as_ref().map(|s| (s.record.clone(), s.signature.clone())),
         parsed,
     })
 }
@@ -140,17 +157,29 @@ fn aggregate(
     Ok(out)
 }
 
+/// The commitment record that at least `need` committers signed, if any (with five signers and a
+/// threshold of three, at most one can be).
+fn agreed_record(committers: &[Committer], need: usize) -> Option<SpendCommitRecord> {
+    let records: Vec<&SpendCommitRecord> =
+        committers.iter().filter_map(|c| c.spend_commit.as_ref().map(|(r, _)| r)).collect();
+    records.iter().find(|r| records.iter().filter(|o| *o == *r).count() >= need).map(|r| (*r).clone())
+}
+
 fn session_id() -> String {
     let mut sid = [0u8; 16];
     rand_core_06::RngCore::fill_bytes(&mut rand_core_06::OsRng, &mut sid);
     hex::encode(sid)
 }
 
-/// Runs both FROST rounds for `p`, retrying without misbehaving signers.
-pub async fn sign(nodes: &Nodes, p: &Payload<'_>) -> Result<Signed> {
+/// Runs both FROST rounds for `p`, retrying without misbehaving signers; a payout's commitment
+/// goes to Base through `committer` between the rounds (once, whatever the retries).
+pub async fn sign<C: SpendCommitter>(nodes: &Nodes, p: &Payload<'_>, committer: &C) -> Result<Signed> {
     let need = usize::from(MIN_SIGNERS);
     let spends = p.requests.len();
     let vault = hex::encode(&p.vault_id[..4]);
+    let payout = matches!(p.kind, SignKind::Payout { .. });
+    // The commitment on Base and the signatures it was recorded with (Tier 3).
+    let mut committed: Option<(SpendCommitRecord, Vec<Bytes>)> = None;
     let mut excluded: BTreeSet<u16> = BTreeSet::new();
     for attempt in 1..=MAX_ATTEMPTS {
         let candidates: Vec<u16> = nodes.indices().into_iter().filter(|i| !excluded.contains(i)).collect();
@@ -178,10 +207,40 @@ pub async fn sign(nodes: &Nodes, p: &Payload<'_>) -> Result<Signed> {
                 }
             }
         }
+        if payout {
+            // Every honest node computes the same commitment from its own view of the same payout:
+            // the record at least `need` committers agree on (the one already on Base after a
+            // retry). A node with another record, or none, disagrees about the payout.
+            let record = committed.as_ref().map(|(r, _)| r.clone()).or_else(|| agreed_record(&committers, need));
+            committers.retain(|c| {
+                let agrees = record.is_some() && c.spend_commit.as_ref().map(|(r, _)| r) == record.as_ref();
+                if !agrees {
+                    debug!(vault = %vault, index = c.index, "round-1 commitment differs or is missing");
+                    excluded.insert(c.index);
+                }
+                agrees
+            });
+        }
         if committers.len() < need {
             return Err(shortfall("signing round 1", committers.len(), need, &failures));
         }
         committers.truncate(need);
+
+        // Tier 3: the payout's commitment goes to Base (once) before any share is asked for.
+        let spend_commit_sigs = match (&committed, payout) {
+            (Some((_, sigs)), _) => sigs.clone(),
+            (None, true) => {
+                let (record, _) = committers[0].spend_commit.clone().context("payout without a commitment")?;
+                let signed: Vec<(u16, Bytes)> = committers
+                    .iter()
+                    .filter_map(|c| c.spend_commit.as_ref().map(|(_, sig)| (c.index, sig.clone())))
+                    .collect();
+                let sigs = committer.commit(&record, &signed).await.context(PublicError::Internal)?;
+                committed = Some((record, sigs.clone()));
+                sigs
+            }
+            (None, false) => vec![],
+        };
 
         // Round 2 on the chosen signers only.
         let chosen: Vec<u16> = committers.iter().map(|c| c.index).collect();
@@ -190,6 +249,7 @@ pub async fn sign(nodes: &Nodes, p: &Payload<'_>) -> Result<Signed> {
             commitments: (0..spends)
                 .map(|k| committers.iter().map(|c| (c.index, c.raw[k].clone())).collect())
                 .collect(),
+            spend_commit_sigs,
         };
         let mut culprits = BTreeSet::new();
         let mut shares = BTreeMap::new();
@@ -239,6 +299,7 @@ mod tests {
         error::public_error,
         nodes::tests::{config, serve},
     };
+    use zecured_node::signing::SignedSpendCommit;
 
     /// How a mock signer node behaves.
     #[derive(Clone, Copy, PartialEq)]
@@ -252,6 +313,10 @@ mod tests {
         ShortShares,
         /// Signs the wrong randomizer: its share is invalid.
         BadShare,
+        /// Tier 3: signs another commitment than the honest nodes (disagrees about the payout).
+        OtherCommitment,
+        /// Tier 3: releases shares without the commitment's signatures (must never be asked).
+        IgnoresCommitment,
     }
 
     struct MockNode {
@@ -274,10 +339,50 @@ mod tests {
         let (nonces, commitments): (Vec<_>, Vec<_>) =
             n.alphas.iter().map(|_| threshold::commit(&n.key_package, &mut OsRng)).unzip();
         n.sessions.lock().unwrap().insert(r.session_id, nonces);
+        let mut record = honest_record();
+        if n.behaviour == Behaviour::OtherCommitment {
+            record.change_value += 1;
+        }
         Ok(Json(CommitResponse {
             index: n.index,
             commitments: commitments.iter().map(|c| serde_json::to_value(c).unwrap()).collect(),
+            spend_commit: Some(SignedSpendCommit {
+                record,
+                signature: Bytes::from(vec![u8::try_from(n.index).unwrap(); 65]),
+            }),
         }))
+    }
+
+    /// The commitment every honest mock node computes.
+    fn honest_record() -> SpendCommitRecord {
+        SpendCommitRecord {
+            vault_id: B256::repeat_byte(1),
+            input_tag: B256::repeat_byte(0x66),
+            claim_ids: vec![B256::repeat_byte(7)],
+            claim_refs: vec![B256::repeat_byte(8)],
+            payout_ref: B256::repeat_byte(0xaa),
+            change_tag: B256::repeat_byte(0xbb),
+            change_value: 3_800_000,
+        }
+    }
+
+    /// Commitments and the (node, signature) pairs they were sent with.
+    type Commits = Vec<(SpendCommitRecord, Vec<(u16, Bytes)>)>;
+
+    /// A Registry in memory: records each commitment once, with the signatures it was given.
+    #[derive(Default)]
+    struct MockRegistry {
+        commits: Mutex<Commits>,
+    }
+
+    impl SpendCommitter for MockRegistry {
+        async fn commit(&self, record: &SpendCommitRecord, signed: &[(u16, Bytes)]) -> Result<Vec<Bytes>> {
+            let mut commits = self.commits.lock().unwrap();
+            assert!(commits.iter().all(|(r, _)| r.payout_ref != record.payout_ref), "committed twice");
+            assert!(signed.len() >= 3);
+            commits.push((record.clone(), signed.to_vec()));
+            Ok(signed.iter().map(|(_, s)| s.clone()).collect())
+        }
     }
 
     async fn share(
@@ -285,6 +390,11 @@ mod tests {
         Json(r): Json<ShareRequest>,
     ) -> Result<Json<ShareResponse>, (StatusCode, Json<Value>)> {
         let nonces = n.sessions.lock().unwrap().remove(&r.session_id).expect("known session");
+        // T3-4: no share without every signature of the commitment on Base.
+        assert!(
+            r.spend_commit_sigs.len() >= 3 || n.behaviour == Behaviour::IgnoresCommitment,
+            "share asked before the commitment"
+        );
         if n.behaviour == Behaviour::FailShare {
             return Err((StatusCode::INTERNAL_SERVER_ERROR, Json(serde_json::json!({ "error": "crashed" }))));
         }
@@ -316,6 +426,7 @@ mod tests {
 
     struct Net {
         nodes: Nodes,
+        registry: MockRegistry,
         mocks: Vec<Arc<MockNode>>,
         pkp: PublicKeyPackage,
         sighash: [u8; 32],
@@ -348,6 +459,7 @@ mod tests {
         }
         Net {
             nodes: Nodes::new(&config(&urls), PrivateKeySigner::random()).unwrap(),
+            registry: MockRegistry::default(),
             mocks,
             pkp: keys.public_key_package,
             sighash,
@@ -374,7 +486,7 @@ mod tests {
             requests: &requests,
             public_key_package: &net.pkp,
         };
-        sign(&net.nodes, &payload).await
+        sign(&net.nodes, &payload, &net.registry).await
     }
 
     /// Every returned signature is a valid RedPallas signature under rk = ak + [alpha] G.
@@ -395,6 +507,63 @@ mod tests {
         let signed = run(&net).await.unwrap();
         assert_valid(&net, &signed);
         assert_eq!(signed.signers, vec![1, 2, 3]);
+        // Tier 3: committed once, by the chosen signers, before round 2.
+        let commits = net.registry.commits.lock().unwrap();
+        assert_eq!(commits.len(), 1);
+        assert_eq!(commits[0].0, honest_record());
+        assert_eq!(commits[0].1.iter().map(|(i, _)| *i).collect::<Vec<_>>(), vec![1, 2, 3]);
+    }
+
+    /// Tier 3: a node that signs another commitment disagrees about the payout and is left out.
+    #[tokio::test]
+    async fn a_node_with_another_commitment_is_left_out() {
+        let net = network([
+            Behaviour::OtherCommitment,
+            Behaviour::Honest,
+            Behaviour::Honest,
+            Behaviour::Honest,
+            Behaviour::Honest,
+        ])
+        .await;
+        let signed = run(&net).await.unwrap();
+        assert_valid(&net, &signed);
+        assert_eq!(signed.signers, vec![2, 3, 4]);
+        let commits = net.registry.commits.lock().unwrap();
+        assert_eq!(commits[0].0, honest_record());
+    }
+
+    /// Tier 3: a retry after a failed round 2 reuses the commitment already on Base, and hands its
+    /// signatures to the new signers.
+    #[tokio::test]
+    async fn a_retry_reuses_the_commitment() {
+        let net = network([
+            Behaviour::Honest,
+            Behaviour::FailShare,
+            Behaviour::Honest,
+            Behaviour::Honest,
+            Behaviour::Honest,
+        ])
+        .await;
+        let signed = run(&net).await.unwrap();
+        assert_valid(&net, &signed);
+        assert_eq!(net.registry.commits.lock().unwrap().len(), 1, "committed once");
+    }
+
+    /// Tier 3: three nodes that agree on another commitment than the rest cannot be outvoted, and
+    /// two that disagree leave too few.
+    #[tokio::test]
+    async fn without_three_agreeing_nodes_nothing_is_committed() {
+        let net = network([
+            Behaviour::OtherCommitment,
+            Behaviour::OtherCommitment,
+            Behaviour::Honest,
+            Behaviour::Honest,
+            Behaviour::RefuseCommit,
+        ])
+        .await;
+        assert!(run(&net).await.is_err());
+        assert!(net.registry.commits.lock().unwrap().is_empty());
+        assert!(net.mocks.iter().all(|m| *m.shares_given.lock().unwrap() == 0), "round 2 never started");
     }
 
     /// M-1: a chosen signer failing round 2 no longer stalls the payout; another subset signs.

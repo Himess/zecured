@@ -13,7 +13,7 @@
 
 use std::{collections::BTreeMap, time::Instant};
 
-use alloy::primitives::B256;
+use alloy::primitives::{B256, Bytes};
 use anyhow::{Context, Result, anyhow, bail, ensure};
 use pczt::Pczt;
 use reddsa::frost::redpallas::{
@@ -22,8 +22,10 @@ use reddsa::frost::redpallas::{
 };
 use serde::{Deserialize, Serialize};
 use zcash_protocol::consensus::{BlockHeight, BranchId, Network};
+use zecured_base::SpendCommit;
 use zecured_policy::{
-    ledger::{self, Commitment, NextPayout, PayoutPlan},
+    derive::{deposit_tag, payout_ref},
+    ledger::{self, Commitment, NextPayout, PayoutPlan, claim_ref},
     verify::{ExpectedInput, TxExpectations, Verified, verify_payout},
 };
 use zecured_threshold::{self as threshold, signer_id};
@@ -64,6 +66,9 @@ pub struct CommitResponse {
     pub index: u16,
     /// One FROST commitment per vault spend, in action order.
     pub commitments: Vec<serde_json::Value>,
+    /// Tier 3, payouts only: the commitment this node signs for the payout it verified.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub spend_commit: Option<SignedSpendCommit>,
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
@@ -71,6 +76,85 @@ pub struct ShareRequest {
     pub session_id: String,
     /// Per vault spend (same order as the commitments): the chosen signers' commitments.
     pub commitments: Vec<BTreeMap<u16, serde_json::Value>>,
+    /// Tier 3, payouts only (T3-4): every signature the Registry's `commitSpend` used, in the
+    /// order it used them. A node releases its shares only if it holds all of them.
+    #[serde(default)]
+    pub spend_commit_sigs: Vec<Bytes>,
+}
+
+/// Tier 3 (docs/TIER3.md § 3): what the signers commit on Base before any of them signs a payout.
+/// Every field is a keyed or salted hash, a Base id or a value Base can compute.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct SpendCommitRecord {
+    pub vault_id: B256,
+    pub input_tag: B256,
+    pub claim_ids: Vec<B256>,
+    pub claim_refs: Vec<B256>,
+    pub payout_ref: B256,
+    pub change_tag: B256,
+    pub change_value: u64,
+}
+
+impl SpendCommitRecord {
+    /// The EIP-712 message signed for this record.
+    pub fn message(&self) -> SpendCommit {
+        SpendCommit {
+            vaultId: self.vault_id,
+            inputTag: self.input_tag,
+            claimIds: self.claim_ids.clone(),
+            claimRefs: self.claim_refs.clone(),
+            payoutRef: self.payout_ref,
+            changeTag: self.change_tag,
+            changeValue: self.change_value,
+        }
+    }
+}
+
+/// A record and the answering node's signature of it.
+#[derive(Clone, Debug, Serialize, Deserialize)]
+pub struct SignedSpendCommit {
+    pub record: SpendCommitRecord,
+    pub signature: Bytes,
+}
+
+/// The commitment of a verified payout (docs/TIER3.md §§ 2, 3), computed by every node from its own
+/// view: the tag of the one lineage note it spends (`input_cmx`), the plan's claims with the salts
+/// of their recipients, references to the verified sighash (the txid of these transactions) and
+/// the tag of the change note the verified PCZT returns to the vault.
+pub fn spend_commit(
+    vault_id: B256,
+    ufvk: &str,
+    input_cmx: &[u8; 32],
+    claims: &[([u8; 32], [u8; 32])],
+    verified: &Verified,
+    change: u64,
+) -> Result<SpendCommitRecord> {
+    let txid = verified.sighash;
+    let change_tag = match (change, verified.change_cmx) {
+        (0, None) => [0u8; 32],
+        (c, Some(cmx)) if c > 0 => deposit_tag(ufvk, &cmx),
+        _ => bail!("the verified change output does not match the plan"),
+    };
+    Ok(SpendCommitRecord {
+        vault_id,
+        input_tag: B256::from(deposit_tag(ufvk, input_cmx)),
+        claim_ids: claims.iter().map(|(id, _)| B256::from(*id)).collect(),
+        claim_refs: claims.iter().map(|(_, salt)| B256::from(claim_ref(salt, &txid))).collect(),
+        payout_ref: B256::from(payout_ref(ufvk, &txid)),
+        change_tag: B256::from(change_tag),
+        change_value: change,
+    })
+}
+
+/// T3-5 (liveness): a payout from a lineage note pays every pending claim already committed
+/// against that note (`bound`), so that none stays bound to a note that is then spent without it.
+pub fn check_bound_claims(plan_claims: &[[u8; 32]], bound: &[[u8; 32]]) -> Result<()> {
+    match bound.iter().find(|c| !plan_claims.contains(c)) {
+        Some(c) => {
+            bail!("claim 0x{} is committed against this lineage note but not in the payout", hex::encode(&c[..4]))
+        }
+        None => Ok(()),
+    }
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
@@ -84,6 +168,8 @@ pub struct Session {
     pub vault_id: B256,
     pub kind: SignKind,
     pub verified: Verified,
+    /// Tier 3: the commitment this node signed in round 1 (payouts only).
+    pub spend_commit: Option<SpendCommitRecord>,
     nonces: Vec<SigningNonces>,
     commitments: Vec<SigningCommitments>,
     /// Nullifiers of the vault notes this payout spends (to confirm it later).
@@ -109,6 +195,7 @@ impl Session {
                 txid: Some(self.verified.sighash),
                 expiry_height: self.verified.expiry_height,
                 change: self.change,
+                spend_commit: None,
             }),
             _ => None,
         }
@@ -257,6 +344,7 @@ pub fn commit_unchecked(vault: &VaultRecord, req: &CommitRequest) -> Result<(Ses
         sighash,
         spends,
         expiry_height,
+        change_cmx: None,
     };
     start_session(vault, req, verified, vec![], 0, None, true)
 }
@@ -279,6 +367,7 @@ fn start_session(
             vault_id: vault.vault_id,
             kind: req.kind.clone(),
             verified,
+            spend_commit: None,
             nonces,
             commitments: commitments.clone(),
             inputs,
@@ -321,6 +410,48 @@ mod tests {
     const TX1: [u8; 32] = [11; 32];
     const TX2: [u8; 32] = [12; 32];
 
+    fn verified(change_cmx: Option<[u8; 32]>) -> Verified {
+        Verified {
+            sighash: TX1,
+            spends: vec![],
+            expiry_height: 1_040,
+            change_cmx,
+        }
+    }
+
+    /// Tier 3: every field of the commitment comes from the node's own derivations (the same
+    /// functions as the violation guest's), and the change must be the verified change output.
+    #[test]
+    fn the_commitment_is_derived_from_the_verified_payout() {
+        let (ufvk, input_cmx, change_cmx, salt) = ("uviewtest1a", [3u8; 32], [4u8; 32], [5u8; 32]);
+        let r =
+            spend_commit(B256::repeat_byte(1), ufvk, &input_cmx, &[(A, salt)], &verified(Some(change_cmx)), 400_000)
+                .unwrap();
+        assert_eq!(r.input_tag, B256::from(deposit_tag(ufvk, &input_cmx)));
+        assert_eq!(r.payout_ref, B256::from(payout_ref(ufvk, &TX1)));
+        assert_eq!(r.claim_ids, vec![B256::from(A)]);
+        assert_eq!(r.claim_refs, vec![B256::from(claim_ref(&salt, &TX1))]);
+        assert_eq!(r.change_tag, B256::from(deposit_tag(ufvk, &change_cmx)));
+        assert_eq!(r.change_value, 400_000);
+        assert_eq!(r.message().changeValue, 400_000);
+
+        let empty = spend_commit(B256::repeat_byte(1), ufvk, &input_cmx, &[(A, salt)], &verified(None), 0).unwrap();
+        assert_eq!(empty.change_tag, B256::ZERO);
+        // A plan with change but no verified change output, or the reverse, is no payout to commit.
+        assert!(spend_commit(B256::repeat_byte(1), ufvk, &input_cmx, &[(A, salt)], &verified(None), 1).is_err());
+        assert!(
+            spend_commit(B256::repeat_byte(1), ufvk, &input_cmx, &[(A, salt)], &verified(Some(change_cmx)), 0).is_err()
+        );
+    }
+
+    /// T3-5: a payout from a lineage note keeps every pending claim committed against that note.
+    #[test]
+    fn a_payout_keeps_the_claims_bound_to_its_input() {
+        check_bound_claims(&[A, B], &[A]).unwrap();
+        check_bound_claims(&[A], &[]).unwrap();
+        assert!(check_bound_claims(&[B], &[A]).is_err());
+    }
+
     fn signed(claims: &[[u8; 32]], txid: [u8; 32]) -> Inflight {
         Inflight {
             claim_ids: claims.to_vec(),
@@ -328,6 +459,7 @@ mod tests {
             txid: Some(txid),
             expiry_height: 1_040,
             change: 400_000,
+            spend_commit: None,
         }
     }
 

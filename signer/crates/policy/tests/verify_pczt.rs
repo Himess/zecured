@@ -34,7 +34,7 @@ use zecured_threshold as threshold;
 use zecured_zcash_ops::{
     keys::{VaultSecret, vault_address},
     scan::{IronwoodWitness, NotePosition, ReceivedNote},
-    spend::{self, OutputPrivacy, Payment, zip317_fee},
+    spend::{self, OutputPrivacy, PAYOUT_EXPIRY_DELTA, Payment, zip317_fee},
 };
 
 const TARGET: u32 = 4_486_600;
@@ -107,7 +107,7 @@ fn expect() -> TxExpectations {
     TxExpectations {
         consensus_branch_id: u32::from(BranchId::Nu7),
         min_expiry: TARGET,
-        max_expiry: TARGET + 40,
+        max_expiry: TARGET + PAYOUT_EXPIRY_DELTA,
     }
 }
 
@@ -174,6 +174,23 @@ fn output_ciphertext(pczt: &pczt::Pczt, to: &Address) -> ([u8; 32], [u8; 580]) {
     found.expect("an output paying this address")
 }
 
+/// The note commitment of the output paying `to`.
+fn output_cmx(pczt: &pczt::Pczt, to: &Address) -> [u8; 32] {
+    let mut found = None;
+    LowLevelSigner::new(pczt.clone())
+        .sign_ironwood_with(|_, bundle, _| -> Result<(), OrchardParseError> {
+            for a in bundle.actions() {
+                let paid = a.output().value().is_some_and(|v| v.inner() > 0);
+                if paid && a.output().recipient().as_ref() == Some(to) {
+                    found = Some(a.output().cmx().to_bytes());
+                }
+            }
+            Ok(())
+        })
+        .unwrap();
+    found.expect("an output paying this address")
+}
+
 /// The PCZT a malicious coordinator would send after rewriting the ephemeral key and note
 /// ciphertext of the output paying `to`. The v2 encoding normally stores an honest ciphertext
 /// as its memo plaintext (re-encrypted and checked when parsed); a rewritten one has to be
@@ -227,6 +244,10 @@ fn honest_pczt_passes_and_yields_one_spend() {
     let v = verify_payout(&pczt, &fvk, &inputs(&[&ns[0]]), &p, &expect()).unwrap();
     assert_eq!(v.spends.len(), 1);
     assert_ne!(v.sighash, [0; 32]);
+    // Tier 3: the change note's commitment, whose tag becomes the vault's next lineage note.
+    let change = fvk.address_at(0u32, Scope::Internal);
+    assert_eq!(v.change_cmx, Some(output_cmx(&pczt, &change)));
+    assert_ne!(v.change_cmx, Some(output_cmx(&pczt, &liq)));
 }
 
 #[test]
@@ -312,7 +333,7 @@ fn expiry_outside_window_is_refused() {
     let p = plan(other(), 3_500_000);
     let pczt = build(&fvk, anchor, &[&ns[0]], &honest_payments(&p));
     let mut tight = expect();
-    tight.max_expiry = TARGET + 5; // builder default expiry is target + 40
+    tight.max_expiry = TARGET + 5; // payouts expire PAYOUT_EXPIRY_DELTA (120) blocks after the target
     assert!(matches!(verify_payout(&pczt, &fvk, &inputs(&[&ns[0]]), &p, &tight), Err(VerifyError::BadExpiry(_))));
 }
 

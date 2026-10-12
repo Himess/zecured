@@ -22,8 +22,10 @@ use std::{
 };
 
 use alloy::{
-    primitives::{B256, Bytes},
+    eips::BlockId,
+    primitives::{Address, B256, Bytes},
     providers::Provider,
+    sol_types::SolStruct,
 };
 use anyhow::{Context, Result, anyhow, bail, ensure};
 use serde::{Deserialize, Serialize};
@@ -33,7 +35,7 @@ use zcash_protocol::TxId;
 use zecured_base::{
     DepositAttestation, Destination, PayoutConfirmation, RefundRequest, VaultCancellation, claim_ids_hash,
     events::{self, IZecuredRegistry, VaultEvent},
-    recover_typed, registry_domain, sign_typed,
+    recover_typed, registry_domain, sign_typed, signer_bitmap,
     verify::{STATUS_NONE, VAULT_CANCELLED, Verdict},
 };
 use zecured_policy::{
@@ -45,7 +47,10 @@ use zecured_policy::{
 use crate::{
     chain::{VaultNotes, ZcashView, owns_receiver, vault_fvk},
     config::{Identity, NetworkConfig},
-    signing::{CommitRequest, CommitResponse, Session, ShareRequest, ShareResponse},
+    signing::{
+        CommitRequest, CommitResponse, Session, ShareRequest, ShareResponse, SignKind, SignedSpendCommit,
+        SpendCommitRecord,
+    },
     store::{ConfirmedPayout, RefundRecord, Store, VaultRecord},
 };
 
@@ -86,6 +91,17 @@ pub struct Inflight {
     /// The change it returns to the vault.
     #[serde(default)]
     pub change: u64,
+    /// Tier 3 (T3-4): the payout's commitment and every signature the Registry recorded it with,
+    /// so that this node can submit it again if Base lost it.
+    #[serde(default)]
+    pub spend_commit: Option<CommittedSpend>,
+}
+
+/// A commitment on Base and the signatures `commitSpend` used, in that order.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct CommittedSpend {
+    pub record: signing::SpendCommitRecord,
+    pub sigs: Vec<Bytes>,
 }
 
 /// Operator settings of a node (beyond the shared network configuration).
@@ -121,6 +137,13 @@ const MAX_LOG_RANGE: u64 = 2_000;
 /// own block is gone (non-archive nodes keep only the last ~128 states).
 const RECENT_STATE_MARGIN: u64 = 2;
 
+/// T3-4: Base blocks a payout's commitment must be under, on every provider, before this node
+/// releases a share for the payout (about 6 seconds).
+pub const COMMIT_DEPTH: u64 = 3;
+
+/// I6: signatures a commitment needs.
+const COMMIT_THRESHOLD: usize = 3;
+
 pub struct Node {
     pub cfg: NetworkConfig,
     pub id: Identity,
@@ -145,6 +168,18 @@ pub fn now() -> u64 {
 }
 
 /// Base64 (standard alphabet) serde helpers for binary fields in the JSON API.
+/// The plan's claims with the salts of their recipients (Tier 3 claim refs), in plan order.
+fn plan_salts(store: &Store, v: &VaultRecord, claims: &[[u8; 32]]) -> Result<Vec<([u8; 32], [u8; 32])>> {
+    claims
+        .iter()
+        .map(|id| {
+            let claim = v.claims.iter().find(|c| c.id == *id).context("a planned claim is unknown")?;
+            let recipient = store.recipient(&claim.commitment).context("a planned claim has no recipient")?;
+            Ok((*id, recipient.salt))
+        })
+        .collect()
+}
+
 pub mod b64 {
     use base64::{Engine, engine::general_purpose::STANDARD};
     use serde::{Deserialize, Deserializer, Serializer};
@@ -578,21 +613,107 @@ impl Node {
                 let v = store.vaults.get(&req.vault_id).context("unknown vault")?;
                 signing::commit_unchecked(v, &req)?
             };
-            return self.start_session(&req, session, &commitments).await;
+            return self.start_session(&req, session, &commitments, None).await;
         }
 
         let (store, v, notes) = self.scan_vault(&req.vault_id).await?;
         let (plan, inputs) = signing::expected_plan(&store, &v, &notes, &req.kind, now())?;
+        // Tier 3: the salts of the plan's recipients, for the claim refs.
+        let salts = match &req.kind {
+            SignKind::Payout { .. } => Some(plan_salts(&store, &v, &plan.claims)?),
+            SignKind::Refund { .. } => None,
+        };
         drop(store);
-        if matches!(req.kind, signing::SignKind::Refund { .. }) {
+        if matches!(req.kind, SignKind::Refund { .. }) {
             for note in &inputs {
                 self.check_refund_on_base(&v, note).await?;
             }
         }
         // H-1 (inside `commit`): no other payout while one this node signed can still be mined.
-        let (session, commitments) =
+        let (mut session, commitments) =
             signing::commit(&v, &plan, &inputs, notes.tip, &req, v.inflight.as_ref(), &notes.unspent)?;
-        self.start_session(&req, session, &commitments).await
+        // Tier 3 (docs/TIER3.md § 5): sign the payout's commitment; the shares wait until Base has it.
+        let spend_commit = match salts {
+            Some(claims) => {
+                let [input] = inputs.as_slice() else {
+                    bail!("a payout spends exactly one lineage note ({} here)", inputs.len());
+                };
+                let input_cmx = orchard::note::ExtractedNoteCommitment::from(input.note.commitment()).to_bytes();
+                let record =
+                    signing::spend_commit(v.vault_id, &v.ufvk, &input_cmx, &claims, &session.verified, plan.change)?;
+                self.check_commit_preconditions(&v, &record).await?;
+                let signature = sign_typed(&self.id.eth, &self.domain(), &record.message())?;
+                session.spend_commit = Some(record.clone());
+                Some(SignedSpendCommit { record, signature })
+            }
+            None => None,
+        };
+        self.start_session(&req, session, &commitments, spend_commit).await
+    }
+
+    /// Tier 3 checks before signing a commitment, on every Base provider: the input is a lineage
+    /// note of this vault on Base (else this node's lineage differs from the Registry's), and the
+    /// payout keeps every pending claim already committed against that note (T3-5).
+    async fn check_commit_preconditions(&self, v: &VaultRecord, record: &SpendCommitRecord) -> Result<()> {
+        let unpaid: Vec<[u8; 32]> = v.claims.iter().filter(|c| c.state == ClaimState::Unpaid).map(|c| c.id).collect();
+        let planned: Vec<[u8; 32]> = record.claim_ids.iter().map(|c| c.0).collect();
+        for provider in self.base_providers()? {
+            let registry = IZecuredRegistry::new(self.cfg.registry, &provider);
+            let lineage = registry.lineageOf(record.input_tag).call().await.context("Registry.lineageOf")?;
+            ensure!(lineage.vaultId == v.vault_id, "the payout's input is not a lineage note of this vault on Base");
+            let mut bound = vec![];
+            for id in &unpaid {
+                let input = registry.claimInput(B256::from(*id)).call().await.context("Registry.claimInput")?;
+                if input == record.input_tag {
+                    bound.push(*id);
+                }
+            }
+            signing::check_bound_claims(&planned, &bound)?;
+        }
+        Ok(())
+    }
+
+    /// T3-4: the shares of a payout leave this node only if it holds every signature its
+    /// commitment was recorded with (so it can submit it again) and every Base provider it uses
+    /// shows that very record, `COMMIT_DEPTH` blocks deep.
+    async fn check_commitment_on_base(&self, record: &SpendCommitRecord, sigs: &[Bytes]) -> Result<()> {
+        let msg = record.message();
+        let domain = self.domain();
+        let mut set: Vec<Address> = self.cfg.nodes.iter().map(|n| n.eth).collect();
+        set.sort();
+        let mut signers: Vec<Address> = Vec::with_capacity(sigs.len());
+        for sig in sigs {
+            let signer = recover_typed(&domain, &msg, sig)?;
+            ensure!(set.contains(&signer), "a commitment signature is not a signer's");
+            ensure!(signers.last().is_none_or(|prev| *prev < signer), "commitment signatures out of signer order");
+            signers.push(signer);
+        }
+        ensure!(signers.len() >= COMMIT_THRESHOLD, "fewer than {COMMIT_THRESHOLD} commitment signatures");
+        let bitmap = signer_bitmap(&set, &signers);
+        let hash = msg.eip712_hash_struct();
+        for provider in self.base_providers()? {
+            let latest = provider.get_block_number().await.context("Base block number")?;
+            let at = BlockId::number(latest.saturating_sub(COMMIT_DEPTH));
+            let on_base = IZecuredRegistry::new(self.cfg.registry, &provider)
+                .spendRecord(record.payout_ref)
+                .block(at)
+                .call()
+                .await
+                .context("Registry.spendRecord")?;
+            ensure!(
+                on_base.recordHash == hash && on_base.vaultId == record.vault_id && on_base.signerBitmap == bitmap,
+                "the payout's commitment is not on Base {COMMIT_DEPTH} blocks deep with these signatures"
+            );
+        }
+        Ok(())
+    }
+
+    fn base_providers(&self) -> Result<Vec<impl Provider + use<>>> {
+        let mut providers = vec![chain::base_provider(&self.cfg.base_rpc_url)?];
+        if let Some(w) = self.base_rpc_witness.as_deref() {
+            providers.push(chain::base_provider(w)?);
+        }
+        Ok(providers)
     }
 
     async fn start_session(
@@ -600,6 +721,7 @@ impl Node {
         req: &CommitRequest,
         session: Session,
         commitments: &[reddsa::frost::redpallas::round1::SigningCommitments],
+        spend_commit: Option<SignedSpendCommit>,
     ) -> Result<CommitResponse> {
         let commitments = commitments.iter().map(serde_json::to_value).collect::<Result<Vec<_>, _>>()?;
         let mut sessions = self.sessions.lock().await;
@@ -608,6 +730,7 @@ impl Node {
         Ok(CommitResponse {
             index: self.id.index,
             commitments,
+            spend_commit,
         })
     }
 
@@ -615,9 +738,20 @@ impl Node {
         let session =
             self.sessions.lock().await.remove(&req.session_id).context("unknown or finished signing session")?;
         ensure!(session.created.elapsed() < SESSION_TTL, "signing session expired");
+        let mut inflight = session.inflight();
+        if inflight.is_some() {
+            // Tier 3 (T3-4), before the store lock: Base calls must never hold it (M-7).
+            let record = session.spend_commit.as_ref().context("payout without a signed commitment")?;
+            self.check_commitment_on_base(record, &req.spend_commit_sigs).await?;
+            if let Some(next) = inflight.as_mut() {
+                next.spend_commit = Some(CommittedSpend {
+                    record: record.clone(),
+                    sigs: req.spend_commit_sigs.clone(),
+                });
+            }
+        }
         let mut store = self.store.lock().await;
         let mut v = store.vaults.get(&session.vault_id).context("unknown vault")?.clone();
-        let inflight = session.inflight();
         if let Some(next) = &inflight {
             // H-1: the payout in flight must still be the one round 1 saw (or this one).
             signing::check_release(v.inflight.as_ref(), session.prior_inflight, session.verified.sighash)?;
@@ -880,6 +1014,7 @@ mod tests {
             txid: Some([txid; 32]),
             expiry_height: 100,
             change: 0,
+            spend_commit: None,
         }
     }
 

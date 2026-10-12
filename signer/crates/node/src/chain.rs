@@ -461,7 +461,7 @@ pub fn to_policy_position(p: &zecured_zcash_ops::scan::NotePosition) -> classify
 }
 
 /// A Base RPC provider whose every request is bounded in time (M-7).
-pub fn base_provider(url: &str) -> Result<impl Provider + Clone> {
+pub fn base_provider(url: &str) -> Result<impl Provider + Clone + use<>> {
     let client = alloy::transports::http::reqwest::Client::builder()
         .connect_timeout(BASE_CONNECT_TIMEOUT)
         .timeout(BASE_REQUEST_TIMEOUT)

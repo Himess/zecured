@@ -17,13 +17,48 @@ use anyhow::{Context, Result, anyhow};
 use zecured_policy::ledger::{Claim, ClaimKind, ClaimState};
 
 sol! {
+    // `SpendCommitted` has eight fields, and so does the constructor sol! generates for it.
     #[sol(rpc)]
+    #[allow(clippy::too_many_arguments)]
     interface IZecuredRegistry {
         struct DepositAttestation {
             bytes32 vaultId;
             address account;
             uint64 amount;
             bytes32 depositTag;
+        }
+
+        // Tier 3 (docs/TIER3.md; contracts/src/interfaces/IZecuredSpendCommits.sol).
+        #[derive(Debug, PartialEq, Eq)]
+        struct SpendCommit {
+            bytes32 vaultId;
+            bytes32 inputTag;
+            bytes32[] claimIds;
+            bytes32[] claimRefs;
+            bytes32 payoutRef;
+            bytes32 changeTag;
+            uint64 changeValue;
+        }
+        #[derive(Debug, PartialEq, Eq)]
+        struct LineageNote {
+            bytes32 vaultId;
+            uint64 value;
+        }
+        #[derive(Debug, PartialEq, Eq)]
+        struct SpendRecord {
+            bytes32 recordHash;
+            bytes32 vaultId;
+            bytes32 inputTag;
+            bytes32 changeTag;
+            uint64 changeValue;
+            uint8 claimCount;
+            uint8 signerBitmap;
+        }
+        #[derive(Debug, PartialEq, Eq)]
+        struct ClaimPayment {
+            bytes32 claimId;
+            bytes32 payoutRef;
+            uint64 expected;
         }
 
         event VaultActivated(bytes32 indexed vaultId, address indexed account, uint64 amount, bytes32 depositTag);
@@ -34,6 +69,7 @@ sol! {
         event CloseRelease(bytes32 indexed vaultId, bytes32 userClaimId, bytes32 mmClaimId, uint64 userAmount, uint64 mmAmount, bytes32 userCommitment, bytes32 mmCommitment);
         event PayoutConfirmed(bytes32 indexed vaultId, bytes32[] claimIds);
         event VaultCancelled(bytes32 indexed vaultId);
+        event SpendCommitted(bytes32 indexed vaultId, bytes32 indexed payoutRef, bytes32 inputTag, bytes32[] claimIds, bytes32[] claimRefs, bytes32 changeTag, uint64 changeValue, uint8 signerBitmap);
 
         function attestDeposit(DepositAttestation att, bytes[] sigs) external;
         function attestDepositWithProof(bytes journal, bytes seal, bytes[] openedSigs) external;
@@ -53,6 +89,14 @@ sol! {
         function vaultOf(address account) external view returns (bytes32 vaultId);
         function vault(bytes32 vaultId) external view returns (address account, uint64 outstanding, uint8 status);
         function claim(bytes32 claimId) external view returns (bytes32 vaultId, uint8 kind, uint64 amount, bytes32 commitment, uint8 status);
+        function commitSpend(SpendCommit c, bytes[] sigs) external;
+        function lineageOf(bytes32 tag) external view returns (LineageNote memory);
+        function spendRecord(bytes32 payoutRef) external view returns (SpendRecord memory);
+        function claimPayment(bytes32 claimRef) external view returns (ClaimPayment memory);
+        function claimInput(bytes32 claimId) external view returns (bytes32);
+        function hashSpendCommit(SpendCommit c) external view returns (bytes32);
+        function openVaultCount() external view returns (uint256);
+        function signerBond() external view returns (address);
     }
 }
 
@@ -168,8 +212,9 @@ pub fn registry_logs(logs: Vec<Log>, registry: Address) -> Vec<Log> {
 /// `MintMode.ProofOnly` (K1).
 pub const MINT_MODE_PROOF_ONLY: u8 = 1;
 
-/// Decodes one Registry log. Unknown logs, and the pending-activation logs (K3: nothing is minted
-/// and nothing changes for the signers until `VaultActivated`), are ignored.
+/// Decodes one Registry log. Unknown logs, the pending-activation logs (K3: nothing is minted and
+/// nothing changes for the signers until `VaultActivated`) and Tier 3 commitments (each node reads
+/// the record it signed straight from the Registry) are ignored.
 pub fn decode(log: &Log, created_at: u64) -> Result<Option<VaultEvent>> {
     use IZecuredRegistry::IZecuredRegistryEvents as E;
     let Ok(decoded) = E::decode_log(&log.inner) else {
@@ -197,7 +242,7 @@ pub fn decode(log: &Log, created_at: u64) -> Result<Option<VaultEvent>> {
                 deposit_tag: e.depositTag,
             },
         ),
-        E::ActivationPending(_) | E::PendingActivationDropped(_) => return Ok(None),
+        E::ActivationPending(_) | E::PendingActivationDropped(_) | E::SpendCommitted(_) => return Ok(None),
         E::ReleaseRequested(e) => (
             e.vaultId,
             RegistryEvent::Claims(vec![claim(e.claimId, ClaimKind::Release, e.amount, e.destCommitment, None)]),

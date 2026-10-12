@@ -266,6 +266,26 @@ pub fn b32(bytes: [u8; 32]) -> B256 {
 }
 
 /// Converts a `uint256` nonce to `u128` when it fits (nonces are random 128-bit values).
+impl From<&SpendCommit> for events::IZecuredRegistry::SpendCommit {
+    fn from(c: &SpendCommit) -> Self {
+        Self {
+            vaultId: c.vaultId,
+            inputTag: c.inputTag,
+            claimIds: c.claimIds.clone(),
+            claimRefs: c.claimRefs.clone(),
+            payoutRef: c.payoutRef,
+            changeTag: c.changeTag,
+            changeValue: c.changeValue,
+        }
+    }
+}
+
+/// Bit `i` set for each signer `i` (index in the sorted set) among `signers`; the Registry records
+/// the same bitmap for a commitment (`SpendRecord.signerBitmap`).
+pub fn signer_bitmap(set: &[Address], signers: &[Address]) -> u8 {
+    set.iter().enumerate().filter(|(_, a)| signers.contains(a)).fold(0u8, |m, (i, _)| m | (1 << i))
+}
+
 pub fn nonce_u128(n: U256) -> Result<u128> {
     u128::try_from(n).map_err(|_| anyhow!("nonce does not fit in 128 bits"))
 }

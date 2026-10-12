@@ -31,7 +31,7 @@ use std::{
 use alloy::{
     network::EthereumWallet,
     primitives::{Address, B256, Bytes},
-    providers::ProviderBuilder,
+    providers::{Provider, ProviderBuilder},
     signers::local::PrivateKeySigner,
     sol_types::{Eip712Domain, SolStruct},
 };
@@ -55,12 +55,12 @@ use zecured_base::{
     verify::VAULT_CANCELLED,
 };
 use zecured_node::{
-    AttestResponse, ConfirmIn, ConfirmResponse, DestinationIn, RecipientIn, RefundIn,
+    AttestResponse, COMMIT_DEPTH, ConfirmIn, ConfirmResponse, DestinationIn, RecipientIn, RefundIn,
     chain::{BaseView, VaultNotes, ZcashView, to_policy_position},
     config::NetworkConfig,
     dkg::{Round1Out, Round2In, Round2Out, Round3In, Round3Out, Sealed, VaultOpen},
     now,
-    signing::{CommitRequest, CommitResponse, SignKind},
+    signing::{CommitRequest, CommitResponse, SignKind, SpendCommitRecord},
 };
 use zecured_policy::{
     classify::{self, Classification, DepositRules, NotePosition},
@@ -1115,6 +1115,7 @@ impl Coordinator {
                 requests: &requests,
                 public_key_package: &pkp,
             },
+            self,
         )
         .await?;
         let pczt = spend::apply_signatures(pczt, &signed.signatures)?;
@@ -1320,6 +1321,52 @@ impl Coordinator {
         Ok(())
     }
 
+    /// Tier 3 (docs/TIER3.md § 5): records a payout's commitment on Base with the round-1
+    /// signatures of the chosen signers, each checked against its node's attestation address and
+    /// sent in signer order, then waits until it is `COMMIT_DEPTH` blocks deep, where the nodes
+    /// read it before they release a share. A commitment already on Base comes from an earlier
+    /// session whose signatures this coordinator no longer has: the payout is built again (a new
+    /// transaction, so a new commitment).
+    async fn commit_spend(&self, record: &SpendCommitRecord, signed: &[(u16, Bytes)]) -> Result<Vec<Bytes>> {
+        let msg = record.message();
+        let domain = self.domain();
+        let valid: Vec<(Address, Bytes)> = signed
+            .iter()
+            .filter_map(|(index, sig)| {
+                let eth = self.cfg.nodes.iter().find(|n| n.index == *index)?.eth;
+                select::signed_by(&domain, &msg, sig, eth).then(|| (eth, sig.clone()))
+            })
+            .collect();
+        let sigs = select::sorted_threshold(valid, usize::from(MIN_SIGNERS))
+            .context("fewer than three valid commitment signatures")?;
+        let provider = ProviderBuilder::new()
+            .wallet(EthereumWallet::from(self.gas.clone()))
+            .connect_http(self.cfg.base_rpc_url.parse()?);
+        let registry = IZecuredRegistry::new(self.cfg.registry, &provider);
+        let existing = registry.spendRecord(record.payout_ref).call().await.context("Registry.spendRecord")?;
+        ensure!(existing.vaultId == B256::ZERO, "this payout was committed by an earlier session; building it again");
+        let call = registry.commitSpend((&msg).into(), sigs.clone());
+        let gas = zecured_base::gas_with_headroom(call.estimate_gas().await.context("estimate commitSpend")?);
+        let receipt = call
+            .gas(gas)
+            .send()
+            .await
+            .context("send commitSpend")?
+            .with_timeout(Some(RECEIPT_TIMEOUT))
+            .get_receipt()
+            .await
+            .context("commitSpend receipt")?;
+        ensure!(receipt.status(), "commitSpend reverted");
+        let block = receipt.block_number.context("commitSpend receipt without a block")?;
+        let started = Instant::now();
+        while provider.get_block_number().await.context("Base block number")? <= block + COMMIT_DEPTH {
+            ensure!(started.elapsed() < RECEIPT_TIMEOUT, "Base did not move past the commitment");
+            tokio::time::sleep(Duration::from_secs(1)).await;
+        }
+        info!(vault = %short(&record.vault_id), "payout committed on Base");
+        Ok(sigs)
+    }
+
     /// D23: gets 3 signers' `VaultCancellation` (each node also records the owner's refund
     /// request, `body`) and submits `cancelVault`.
     async fn cancel_on_base(&self, id: &B256, body: &RefundIn) -> Result<()> {
@@ -1356,6 +1403,12 @@ impl Coordinator {
         ensure!(receipt.status(), "cancelVault reverted");
         info!(vault = %short(id), "vault cancelled on Base");
         Ok(())
+    }
+}
+
+impl frost::SpendCommitter for Coordinator {
+    async fn commit(&self, record: &SpendCommitRecord, signed: &[(u16, Bytes)]) -> Result<Vec<Bytes>> {
+        self.commit_spend(record, signed).await
     }
 }
 

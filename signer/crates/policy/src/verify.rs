@@ -55,6 +55,9 @@ pub struct Verified {
     pub spends: Vec<SpendAuthRequest>,
     /// The transaction's expiry height (within the accepted window).
     pub expiry_height: u32,
+    /// The note commitment of the change output, if the plan has change: its tag is the vault's
+    /// next lineage note on Base (Tier 3 `changeTag`).
+    pub change_cmx: Option<[u8; 32]>,
 }
 
 /// Transaction-level expectations.
@@ -118,6 +121,7 @@ struct FoundOutput {
     action: usize,
     receiver: [u8; 43],
     value: u64,
+    cmx: [u8; 32],
     visible_external: bool,
     visible_internal: bool,
 }
@@ -190,6 +194,7 @@ pub fn verify_payout(
     if wanted.len() != outputs.len() {
         return Err(VerifyError::OutputsMismatch);
     }
+    let mut change_cmx = None;
     for out in &outputs {
         let pos = wanted
             .iter()
@@ -206,6 +211,9 @@ pub fn verify_payout(
         };
         if !ok {
             return Err(VerifyError::WrongOvk(out.action));
+        }
+        if privacy.is_none() {
+            change_cmx = Some(out.cmx);
         }
     }
 
@@ -227,6 +235,7 @@ pub fn verify_payout(
             .map(|(action_index, _, _, alpha)| SpendAuthRequest { action_index, alpha })
             .collect(),
         expiry_height: expiry,
+        change_cmx,
     })
 }
 
@@ -330,6 +339,7 @@ fn inspect(
                 action: i,
                 receiver: recipient.to_raw_address_bytes(),
                 value: out_value,
+                cmx: output.cmx().to_bytes(),
                 visible_external: visible(&ovk_ext)?,
                 visible_internal: visible(&ovk_int)?,
             });
