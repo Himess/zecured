@@ -134,7 +134,8 @@ enum LoanCmd {
     /// the key the signers signed when the vault opened.
     ViewingKey { vault: B256 },
     /// Tier 2: prove the deposit on this machine and activate the vault with the proof, without
-    /// any signer attestation (TEST ONLY submission: the owner EOA pays the Base gas).
+    /// any signer attestation. The backend relays the proof with its own gas (Y10); the Registry
+    /// trusts only the proof.
     Prove {
         vault: B256,
         /// The zkVM host, `tier2/target/release/zecured-tier2-host`.
@@ -152,6 +153,10 @@ enum LoanCmd {
         txid: Option<String>,
         #[arg(long, env = "BASE_SEPOLIA_RPC_URL", default_value = "https://sepolia.base.org")]
         rpc: String,
+        /// TEST ONLY: submit and finalize with the owner EOA, which pays the Base gas, instead of
+        /// handing the proof to the backend.
+        #[arg(long)]
+        self_submit: bool,
     },
     /// TEST ONLY (the app uses a gasless smart account): borrow USDC with the owner EOA as
     /// the account, after authorizing the Registry and the Adapter on Morpho.
@@ -719,27 +724,29 @@ async fn loan(wallet: &Path, lwd_url: &str, backend: &str, cmd: LoanCmd) -> Resu
             summaries,
             txid,
             rpc,
+            self_submit,
         } => {
             let (ufvk, checked) = viewing_key(wallet, backend, &vault).await?;
             ensure!(checked, "a deposit proof needs the viewing key the signers signed (C-4)");
             let l: LoanFile = read_secret_json(&loan_path(wallet, &vault))?;
             let txid = txid.or(l.deposit_txid.clone()).context("no deposit txid: pass --txid")?;
-            prove::prove(
-                &l,
-                &ufvk,
-                &network_params()?,
-                &prove::Paths {
-                    host,
-                    headers,
-                    summaries,
-                    work: wallet.with_file_name(format!("proof-{}", hex::encode(&vault[..8]))),
-                },
-                mock,
-                &txid,
-                lwd_url,
-                &rpc,
-            )
-            .await?;
+            let net = network_params()?;
+            let paths = prove::Paths {
+                host,
+                headers,
+                summaries,
+                work: wallet.with_file_name(format!("proof-{}", hex::encode(&vault[..8]))),
+            };
+            let seal = prove::make_seal(&l, &ufvk, &net, &paths, mock, &txid, lwd_url, &rpc).await?;
+            if self_submit {
+                prove::submit_with_owner(&l, &net, seal, mock, &rpc).await?;
+            } else {
+                post(backend, &format!("/vaults/{vault}/deposit-proof"), serde_json::to_value(&seal)?).await?;
+                println!(
+                    "deposit proof{} handed to the backend; the vault activates once the relay has moved on (K3)",
+                    if mock { " (MOCK seal)" } else { "" }
+                );
+            }
         }
         LoanCmd::Borrow { vault, usdc, rpc } => base_test::borrow(wallet, &vault, usdc, &rpc).await?,
         LoanCmd::RepayRelease { vault, to, rpc } => {

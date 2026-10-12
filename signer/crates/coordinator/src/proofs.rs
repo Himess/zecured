@@ -73,13 +73,14 @@ impl Prover {
     }
 }
 
-/// `zecured-tier2-host`'s output.
-#[derive(Deserialize)]
+/// `zecured-tier2-host`'s output, also what a borrower who proved on their own machine submits
+/// (`POST /vaults/{id}/deposit-proof`, review Y10).
+#[derive(Clone, Debug, Deserialize)]
 #[serde(rename_all = "camelCase")]
-struct SealFile {
-    image_id: B256,
-    journal: Bytes,
-    seal: Bytes,
+pub struct SealFile {
+    pub image_id: B256,
+    pub journal: Bytes,
+    pub seal: Bytes,
 }
 
 /// One background proving job.
@@ -219,6 +220,22 @@ impl Coordinator {
     /// signer address as the Registry requires.
     async fn submit_proof(&self, id: &B256, seal_path: &Path) -> Result<()> {
         let s: SealFile = serde_json::from_slice(&fs::read(seal_path)?)?;
+        self.submit_seal(id, s).await?;
+        let _ = fs::remove_file(seal_path);
+        Ok(())
+    }
+
+    /// Y10: a deposit proof made elsewhere (the borrower's own machine, `zecured-wallet loan
+    /// prove`), submitted with the vault's `VaultOpened` signatures and this coordinator's gas,
+    /// so that proving one's own deposit needs no ETH. The Registry checks everything; this only
+    /// relays. Refused when the vault is not waiting for its deposit.
+    pub async fn submit_external_proof(&self, id: B256, seal: SealFile) -> Result<()> {
+        let v = self.vault(&id).await?;
+        ensure!(v.status == VaultStatus::AwaitingDeposit, "the vault is not waiting for a deposit proof");
+        self.submit_seal(&id, seal).await
+    }
+
+    async fn submit_seal(&self, id: &B256, s: SealFile) -> Result<()> {
         ensure!(s.journal.len() == 192 && s.journal[32..64] == id.0, "the proof is for another vault");
         let provider = ProviderBuilder::new()
             .wallet(EthereumWallet::from(self.gas.clone()))
@@ -226,12 +243,10 @@ impl Coordinator {
         let registry = IZecuredRegistry::new(self.cfg.registry, &provider);
         if registry.vault(*id).call().await.context("Registry.vault")?.status != 0 {
             // Activated meanwhile (a receipt we did not see, or someone else's proof), or cancelled.
-            let _ = fs::remove_file(seal_path);
             return Ok(());
         }
         if registry.pendingActivation(*id).call().await.context("Registry.pendingActivation")?.account != Address::ZERO {
             // K3: a proof (ours, or the borrower's own) already waits for finalization.
-            let _ = fs::remove_file(seal_path);
             return self.mark_proof_pending(id).await;
         }
         ensure!(registry.depositImageId().call().await? == s.image_id, "the Registry expects another deposit guest");
@@ -266,7 +281,6 @@ impl Coordinator {
             cur.attest_tx = Some(receipt.transaction_hash);
         })
         .await?;
-        let _ = fs::remove_file(seal_path);
         info!(vault = %short(id), "deposit proof accepted on Base; activation pending (K3)");
         Ok(())
     }

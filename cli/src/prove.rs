@@ -39,12 +39,12 @@ pub struct Paths {
     pub work: PathBuf,
 }
 
-#[derive(Deserialize)]
+#[derive(Deserialize, serde::Serialize)]
 #[serde(rename_all = "camelCase")]
-struct SealFile {
-    image_id: B256,
-    journal: Bytes,
-    seal: Bytes,
+pub struct SealFile {
+    pub image_id: B256,
+    pub journal: Bytes,
+    pub seal: Bytes,
 }
 
 fn write_private(path: &Path, bytes: &[u8]) -> Result<()> {
@@ -65,8 +65,10 @@ fn host(paths: &Paths, command: &str, args: &[&Path]) -> Result<()> {
     Ok(())
 }
 
+/// Builds the witness on this machine and proves it (or makes a MOCK seal): the seal file the
+/// Registry takes, for the deposit `txid` of the loan `l`.
 #[allow(clippy::too_many_arguments)]
-pub async fn prove(
+pub async fn make_seal(
     l: &LoanFile,
     ufvk: &str,
     net: &NetworkParams,
@@ -75,7 +77,7 @@ pub async fn prove(
     txid: &str,
     lwd_url: &str,
     rpc: &str,
-) -> Result<()> {
+) -> Result<SealFile> {
     let expiry_height = l.expiry_height.context("this loan file has no expiry height (opened before Tier 2)")?;
     ensure!(l.opened_signatures.len() == 5, "this loan file has no VaultOpened signatures (opened before C-4)");
     let txid = TxId::from_hex(txid).context("deposit txid")?;
@@ -120,8 +122,14 @@ pub async fn prove(
     let _ = fs::remove_file(&witness_path);
     sealed?;
     let s: SealFile = serde_json::from_slice(&fs::read(&seal_path)?)?;
+    let _ = fs::remove_file(&seal_path);
+    Ok(s)
+}
 
-    // TEST ONLY: the owner EOA submits (anyone may: the proof is all the Registry trusts).
+/// TEST ONLY: submits the proof with the owner EOA, which pays the Base gas, and finalizes the
+/// activation itself (anyone may do both: the proof is all the Registry trusts). Without
+/// `--self-submit`, the CLI hands the seal to the backend instead (Y10).
+pub async fn submit_with_owner(l: &LoanFile, net: &NetworkParams, s: SealFile, mock: bool, rpc: &str) -> Result<()> {
     let key: PrivateKeySigner = l.owner_key.parse()?;
     let p = ProviderBuilder::new().wallet(EthereumWallet::from(key)).connect_http(rpc.parse()?);
     let registry = IZecuredRegistry::new(net.registry, &p);

@@ -28,7 +28,7 @@ use tracing::{debug, error, info, warn};
 use zecured_coordinator::{
     Coordinator, MIN_SIGNERS, OpenVaultRequest, OpenVaultResponse,
     error::{PublicError, public_error, scrubbed},
-    proofs::DepositProofs,
+    proofs::{DepositProofs, SealFile},
 };
 use zecured_node::config::NetworkConfig;
 
@@ -311,6 +311,14 @@ struct ViewKeyBody {
     nonce: serde_json::Value,
     deadline: serde_json::Value,
     signature: Bytes,
+}
+
+/// Y10: a deposit proof made on the borrower's own machine (`zecured-wallet loan prove`),
+/// relayed with the coordinator's gas: proving one's own deposit needs no ETH. Nothing about it
+/// needs trust: the Registry checks the proof, the anchor and the signatures.
+async fn deposit_proof(State(c): App, Param(id): Param<B256>, Body(b): Body<SealFile>) -> ApiResult {
+    c.submit_external_proof(id, b).await?;
+    Ok(Json(json!({ "accepted": true })))
 }
 
 async fn viewing_key(State(c): App, Param(id): Param<B256>, Body(b): Body<ViewKeyBody>) -> ApiResult {
@@ -696,6 +704,7 @@ fn router(
                 .route("/vaults/{id}/destination", post(destination))
                 .route("/vaults/{id}/refund", post(refund))
                 .route("/vaults/{id}/viewing-key", post(viewing_key))
+                .route("/vaults/{id}/deposit-proof", post(deposit_proof))
                 .route_layer(limited(&limits.owner)),
         )
         .merge(
