@@ -164,6 +164,20 @@ event CloseRelease(bytes32 indexed vaultId, bytes32 userClaimId, bytes32 mmClaim
                    bytes32 userCommitment, bytes32 mmCommitment);
 event PayoutConfirmed(bytes32 indexed vaultId, bytes32[] claimIds);
 event VaultCancelled(bytes32 indexed vaultId);
+
+// Tier 3 (IZecuredSpendCommits, docs/TIER3.md § 4)
+function commitSpend(SpendCommit calldata c, bytes[] calldata sigs) external;
+function lineageOf(bytes32 tag) external view returns (LineageNote memory);             // (vaultId, value)
+function spendRecord(bytes32 payoutRef) external view returns (SpendRecord memory);    // (recordHash, vaultId, inputTag,
+                                                                                        //  changeTag, changeValue, claimCount, signerBitmap)
+function claimPayment(bytes32 claimRef) external view returns (ClaimPayment memory);   // (claimId, payoutRef, expected)
+function claimInput(bytes32 claimId) external view returns (bytes32 inputTag);
+function hashSpendCommit(SpendCommit calldata c) external view returns (bytes32);
+function openVaultCount() external view returns (uint256);
+function lastVaultSettledAt() external view returns (uint64);
+function signerBond() external view returns (ISignerBond);
+event SpendCommitted(bytes32 indexed vaultId, bytes32 indexed payoutRef, bytes32 inputTag, bytes32[] claimIds,
+                     bytes32[] claimRefs, bytes32 changeTag, uint64 changeValue, uint8 signerBitmap);
 ```
 
 - `attestDeposit` registers the vault (`outstanding = amount`, `Active`), mints zZEC to itself
@@ -200,6 +214,13 @@ event VaultCancelled(bytes32 indexed vaultId);
   stays `Active` while `outstanding > 0`.
 - `recordClose`: `mmAmount + userAmount == outstanding` (I7), burns, `Closed`, two claims.
 - `claimId = keccak256(abi.encode(vaultId, claimSequence))`, sequence per vault from 0.
+- Tier 3 (D31): `commitSpend` records a payout before the signers sign it (rules in
+  `IZecuredSpendCommits` and docs/TIER3.md § 4: 3 sorted signer signatures, one lineage input of the
+  vault, 1 to 8 distinct pending claims bound to that input on first commitment, one unused claim ref
+  each, exact conservation, the ZIP 317 fee fixed by the committed shape). `confirmPayout` requires every
+  claim to have been committed. A deposit note is a lineage note from its proof (or attestation) on, and
+  stops being one if its pending activation is dropped. New proofs and activations need the bond
+  contract `fullyBonded()` and not `halted()`.
 
 ### 3.3 `SettlementAdapter`
 
@@ -231,12 +252,39 @@ event NonceInvalidated(address indexed account, uint256 nonce);
   `userAmount = outstanding - mmAmount >= minUserAmount`, withdraws `outstanding` to itself,
   `Registry.recordClose` (I8).
 
-### 3.4 Mocks (labelled MOCK)
+### 3.4 Tier 3: `SignerBond` and `ZecuredSlasher`
+
+```solidity
+// SignerBond (ISignerBond): BOND 0.01 ether, BOUNTY_BPS 1,000, BOUNTY_CAP 0.005 ether
+function deposit() external payable;                                       // a Registry signer, exactly BOND, once
+function slash(bytes32 caseId, uint8 signerBitmap, address beneficiary) external returns (uint256);  // slasher only
+function claimBounty() external;
+function withdraw(address payable to) external;   // no open vault, no open case, window passed since the last settled
+function fullyBonded() external view returns (bool);
+function halted() external view returns (bool);
+
+// ZecuredSlasher (IZecuredSlasher)
+enum ViolationKind { None, Uncommitted, WithheldChange, Misdirected }
+struct ViolationJournal { ViolationKind kind; bytes32 anchor; address beneficiary; bytes32 ref; bytes32 noteTag;
+                          uint64 value; bytes32 destCommitment; }               // abi.encode: 7 words
+function proveViolation(ViolationKind kind, bytes calldata journal, bytes calldata seal) external returns (bytes32 caseId);
+function executeSlash(bytes32 caseId) external;                               // after challengeWindow
+function caseIdOf(ViolationKind kind, bytes32 ref, bytes32 noteTag) external pure returns (bytes32);
+```
+
+- The journal's kinds, the Registry records each is checked against, and the dismissal rules are in
+  docs/TIER3.md § 6; the guest is `tier2/methods/violation` (one image id). The beneficiary is bound in
+  the proof and is never a vault's smart account (smart accounts never receive ETH).
+- Deployment: `script/DeployZecured.s.sol` with `VIOLATION_IMAGE_ID`; the signers then bond with
+  `script/BondSigners.s.sol`. Challenge window: at least a day on the judge deployment, 2 minutes only on
+  the separate theft demo (T3-6).
+
+### 3.5 Mocks (labelled MOCK)
 
 - `MockUSDC` (6 decimals, owner mint).
 - `MockZecOracle`: `price() = ZEC/USD * 1e34`; owner-only `setPrice`.
 
-### 3.5 Market
+### 3.6 Market
 
 zZEC / MockUSDC / MockZecOracle / AdaptiveCurveIRM `0x46415998764C29aB2a25CbeA6254146D50D22687`
 / LLTV `0.625e18`, on Morpho Blue `0xBBBBBbbBBb9cC5e90e3b3Af64bdAF62C37EEFFCb`.

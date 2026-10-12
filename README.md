@@ -39,20 +39,21 @@ txids) and how to reproduce every run: [docs/TESTING.md](docs/TESTING.md).
 
 | Real | Mock |
 |---|---|
-| Shielded Ironwood transactions on Zcash testnet (NU7) | Price oracle (`MockZecOracle`, price set by the demo owner) |
-| 3-of-5 FROST threshold vaults (re-randomized FROST, RedPallas), keys per ZIP 2005 | USDC (`MockUSDC`) |
-| Per-payout policy checks by every signer (P0–P6) | Signer independence (all 5 nodes run by us) |
+| Shielded Ironwood transactions on Zcash testnet (NU7) | ZEC/USD price: `MockZecOracle` (owner-set) until the RedStone feed is wired, behind `DemoShockOracle` (DEMO: an owner-set shock, in public steps, to show a liquidation) |
+| 3-of-5 FROST threshold vaults (re-randomized FROST, RedPallas), keys per ZIP 2005 | `MockUSDC` on the local fork only; Base Sepolia uses Circle's testnet USDC |
+| Per-payout policy checks by every signer (P0–P6) | Signer independence (all 5 nodes run by us); the Tier 3 bonds show the mechanism, not economic security |
 | Morpho Blue market on Base Sepolia (the real Morpho deployment) | |
 | ZZEC / ZecuredRegistry / SettlementAdapter contracts | |
 | Liquidation, close from collateral, refunds of non-conforming deposits | |
 | Own RPC / bundler / paymaster proxy with a sponsorship allowlist | |
 | Tier 2 deposit statement on real Testnet data, run in the RISC Zero zkVM; Zcash header relay with on-chain Equihash | RISC Zero verifier on the local fork (`MockRiscZeroVerifier`, accepts unproven journals) until Groth16 seals are produced on an x86 machine; Base Sepolia uses the real verifier router |
+| Tier 3 ([docs/TIER3.md](docs/TIER3.md)): every payout committed on Base before it is signed; `SignerBond`, `ZecuredSlasher`; the violation statement proven on a real Testnet vault spend and run in the zkVM; the `watch --tier3` watchtower | The theft demonstration runs on its own deployment with a 2-minute challenge window (labelled DEMO), never on the judge deployment |
 
 ## Repository layout
 
 | Path | What |
 |---|---|
-| `contracts/` | Solidity + Foundry: `ZZEC`, `ZecuredRegistry` (attestations, Tier 2 deposit proofs, cancellation), `SettlementAdapter`, mocks, and the Zcash header relay (`src/relay/`); 253 tests |
+| `contracts/` | Solidity + Foundry: `ZZEC`, `ZecuredRegistry` (attestations, Tier 2 deposit proofs, cancellation, Tier 3 spend commitments), `SettlementAdapter`, `SignerBond`, `ZecuredSlasher`, mocks, and the Zcash header relay (`src/relay/`); 313 tests |
 | `signer/crates/zcash-ops` | Ironwood scanning, PCZT build/prove/sign/extract, ZIP 2005 vault keys |
 | `signer/crates/threshold` | FROST DKG and re-randomized signing |
 | `signer/crates/policy` | P1 classification, payout ledger (I10), PCZT verification against the plan |
@@ -60,12 +61,12 @@ txids) and how to reproduce every run: [docs/TESTING.md](docs/TESTING.md).
 | `signer/crates/coordinator` | Keyless orchestrator: DKG relay, attestations, payouts, confirmations |
 | `signer/crates/base-client` | EIP-712 (cross-checked with Solidity), Registry events |
 | `signer/crates/deposit-witness` | Tier 2: the ZIP 221 history tree (V3, Ironwood) from public chain data, and the witness of a deposit proof |
-| `tier2/` | Tier 2: the deposit statement (`statement/`), the RISC Zero guest and host (separate Cargo workspace) |
+| `tier2/` | Tier 2 and 3: the deposit and violation statements (`statement/`), the two RISC Zero guests and the host (separate Cargo workspace) |
 | `backend/` | Public API + privacy proxy (RPC, bundler, paymaster allowlist) |
 | `bots/` | Liquidator and market maker |
 | `cli/` | `zecured-wallet`: Ironwood CLI wallet and borrower actions |
 | `app/` | Next.js app (in progress) |
-| `docs/` | [Architecture](docs/ARCHITECTURE.md), [Interfaces](docs/INTERFACES.md), [Threat model](docs/THREAT_MODEL.md), [Decisions](docs/DECISIONS.md), [Testing and evidence](docs/TESTING.md), [Security review](docs/SECURITY_REVIEW.md), [Tier 2 design](docs/TIER2.md), [Operators](docs/OPERATORS.md), [Jury FAQ](docs/JURY_FAQ.md), spikes |
+| `docs/` | [Architecture](docs/ARCHITECTURE.md), [Interfaces](docs/INTERFACES.md), [Threat model](docs/THREAT_MODEL.md), [Decisions](docs/DECISIONS.md), [Testing and evidence](docs/TESTING.md), [Security review](docs/SECURITY_REVIEW.md), [Tier 2 design](docs/TIER2.md), [Tier 3 design](docs/TIER3.md), [Operators](docs/OPERATORS.md), [Jury FAQ](docs/JURY_FAQ.md), spikes |
 
 ## Running it
 
