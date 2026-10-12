@@ -249,6 +249,39 @@ contract Tier3SlashingTest is ZecuredFixture {
         assertEq(_totalBonds(), 0.05 ether);
     }
 
+    /// Cross-language vector: the journal the Rust statement (tier2/statement, violations.rs) computes for a real
+    /// Testnet payout of the TEST-ONLY vault 9, which spends that vault's deposit note. Activated here under the same
+    /// deposit tag, the vault is slashable with exactly those bytes.
+    function test_F1_theRustStatementsJournalOfARealSpend() public {
+        bytes32 tag = 0xd8ad478d40e42d2acd10a3846eeebc19d3ff0146c406e765654395b778ab813e;
+        bytes32 anchor = 0xe47bcc107dbac24aa6026bdc610e8605642035559a33ec4e1fb6e4423f2a0000;
+        bytes memory journal = bytes.concat(
+            hex"0000000000000000000000000000000000000000000000000000000000000001",
+            anchor,
+            hex"000000000000000000000000bebebebebebebebebebebebebebebebebebebebe",
+            hex"0a20962f2e701d49033b677adf918a7f8a38e3115e52f52ea3567140930e25ba",
+            tag,
+            hex"0000000000000000000000000000000000000000000000000000000000000000",
+            hex"0000000000000000000000000000000000000000000000000000000000000000"
+        );
+        address vault9Account = makeAddr("zecured.tier3.vault9");
+        DepositAttestation memory att = DepositAttestation({
+            vaultId: keccak256("zecured.tier3.vault9"), account: vault9Account, amount: VAULT_001, depositTag: tag
+        });
+        registry.attestDeposit(att, _threeSigs(registry.hashDepositAttestation(att)));
+        relay.setBlock(anchor, true, SLASH_WORK);
+
+        ViolationJournal memory j = abi.decode(journal, (ViolationJournal));
+        assertEq(uint8(j.kind), uint8(ViolationKind.Uncommitted));
+        assertEq(j.beneficiary, address(0xBEbeBeBEbeBebeBeBEBEbebEBeBeBebeBeBebebe));
+        bytes32 caseId = _prove(journal);
+        assertEq(slasher.caseOf(caseId).vaultId, att.vaultId);
+        vm.warp(block.timestamp + WINDOW);
+        slasher.executeSlash(caseId);
+        assertEq(_totalBonds(), 0);
+        assertEq(bond.bountyOf(address(0xBEbeBeBEbeBebeBeBEBEbebEBeBeBebeBeBebebe)), 0.005 ether);
+    }
+
     // ================================================================== F2: withheld change
 
     function test_F2_slashesOnlyTheRecordsSigners() public {

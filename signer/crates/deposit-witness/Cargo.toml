@@ -38,6 +38,10 @@ name = "history-root"
 path = "src/bin/history_root.rs"
 
 [[bin]]
+name = "build-violation"
+path = "src/bin/build_violation.rs"
+
+[[bin]]
 name = "dump-tx"
 path = "src/bin/dump_tx.rs"
 

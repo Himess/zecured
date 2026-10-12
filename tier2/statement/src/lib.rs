@@ -45,6 +45,8 @@ use zcash_note_encryption::{Domain, try_output_recovery_with_pkd_esk};
 use zcash_primitives::transaction::{Authorized, Transaction, TransactionData, TxVersion};
 use zcash_protocol::consensus::{BranchId, NetworkType};
 
+pub mod violation;
+
 /// NU7 consensus branch ID: the epoch whose history tree the proof walks.
 pub const NU7_BRANCH_ID: u32 = 0x77190AD9;
 /// Serialized post-NU5 block header.
@@ -214,10 +216,16 @@ fn blake2b_256(personal: &[u8; 16], key: &[u8], parts: &[&[u8]]) -> [u8; 32] {
     state.finalize().as_bytes().try_into().expect("32 bytes")
 }
 
-/// The deposit tag of note commitment `cmx` in the vault with viewing key `ufvk`.
+/// The vault's tag key: every reference Base sees about the vault's notes and payouts is a PRF
+/// under it (D24).
+fn tag_key(ufvk: &str) -> [u8; 32] {
+    blake2b_256(b"Zecured_TagKey__", &[], &[ufvk.as_bytes()])
+}
+
+/// The deposit tag of note commitment `cmx` in the vault with viewing key `ufvk` (Tier 3 tags
+/// every lineage note with it).
 pub fn deposit_tag(ufvk: &str, cmx: &[u8; 32]) -> [u8; 32] {
-    let key = blake2b_256(b"Zecured_TagKey__", &[], &[ufvk.as_bytes()]);
-    blake2b_256(b"Zecured_DepTag__", &key, &[cmx])
+    blake2b_256(b"Zecured_DepTag__", &tag_key(ufvk), &[cmx])
 }
 
 /// The root of a SHA-256d Merkle path (Bitcoin-style tree, as Zcash's `hashMerkleRoot`).

@@ -94,6 +94,101 @@ async fn summaries(
     Ok(out)
 }
 
+/// A mined transaction and where it is: its block B and B's place in the NU7-epoch history that
+/// header `tip` commits to (the inclusion part of every Tier 2 and Tier 3 witness).
+pub struct Located {
+    pub raw_tx: Vec<u8>,
+    pub height: u32,
+    pub tx_index: usize,
+    pub block_transactions: usize,
+    pub txid_path: Vec<[u8; 32]>,
+    pub block_header: Vec<u8>,
+    pub leaf: Vec<u8>,
+    pub leaf_index: usize,
+    pub leaves: usize,
+    pub mmr_path: Vec<MmrStep>,
+    pub peaks: Vec<Vec<u8>>,
+    pub peak_index: usize,
+    pub tip_header: Vec<u8>,
+    pub tip_auth_data_root: [u8; 32],
+}
+
+impl Located {
+    /// The transaction, parsed.
+    pub fn transaction(&self) -> Result<Transaction> {
+        let branch = BranchId::for_height(&Network::TestNetwork, BlockHeight::from_u32(self.height));
+        Ok(Transaction::read(&self.raw_tx[..], branch)?)
+    }
+}
+
+/// Locates transaction `txid` under header `tip` (after its block; the relay must accept that
+/// header and enough work on top of it).
+pub async fn locate(
+    client: &mut LwdClient,
+    headers_path: &Path,
+    summaries_path: &Path,
+    txid: TxId,
+    tip: u32,
+) -> Result<Located> {
+    let headers = chain::load_headers(headers_path)?;
+    let (raw_tx, height) = lwd::raw_transaction(client, &txid).await?;
+    let height = u32::try_from(height)?;
+    ensure!(height >= history::NU7_ACTIVATION_HEIGHT && height < tip, "transaction at {height}, anchor {tip}");
+
+    let summaries = summaries(client, &headers, summaries_path, tip - 1).await?;
+    let leaves: Vec<_> = summaries.iter().map(|s| history::leaf(history::NU7_BRANCH_ID, s)).collect();
+    let mmr = Mmr::new(leaves.clone())?;
+    let leaf_index = (height - history::NU7_ACTIVATION_HEIGHT) as usize;
+    let (path, peak_index) = mmr.path(leaf_index)?;
+
+    // The transaction's position in its block, and the anchor block's auth data root.
+    let block = chain::compact_blocks(client, height, height).await?.remove(0);
+    let txids: Vec<[u8; 32]> = block.vtx.iter().map(|t| *t.txid().as_ref()).collect();
+    let tx_index = txids.iter().position(|t| t == txid.as_ref()).context("transaction not in its block")?;
+    let txid_path = history::txid_merkle_path(&txids, tx_index)?;
+    let tip_block = chain::compact_blocks(client, tip, tip).await?.remove(0);
+    let branch = BranchId::for_height(&Network::TestNetwork, BlockHeight::from_u32(tip));
+    let mut auth = vec![];
+    for ctx in &tip_block.vtx {
+        let (raw, _) = lwd::raw_transaction(client, &ctx.txid()).await?;
+        auth.push(Transaction::read(&raw[..], branch)?.auth_commitment().as_bytes().try_into()?);
+    }
+    let tip_auth_data_root = history::auth_data_root(&auth)?;
+
+    let mut raw = raw_headers(headers_path, &[height, tip])?;
+    Ok(Located {
+        raw_tx,
+        height,
+        tx_index,
+        block_transactions: txids.len(),
+        txid_path,
+        block_header: raw.remove(&height).expect("checked"),
+        leaf: V3::to_bytes(&leaves[leaf_index]),
+        leaf_index,
+        leaves: leaves.len(),
+        mmr_path: path
+            .iter()
+            .map(|(n, left)| MmrStep {
+                sibling: V3::to_bytes(n),
+                sibling_is_left: *left,
+            })
+            .collect(),
+        peaks: mmr.peaks().iter().map(V3::to_bytes).collect(),
+        peak_index,
+        tip_header: raw.remove(&tip).expect("checked"),
+        tip_auth_data_root,
+    })
+}
+
+/// The Orchard-protocol full viewing key of a Testnet UFVK.
+pub fn ufvk_fvk(ufvk: &str) -> Result<orchard::keys::FullViewingKey> {
+    UnifiedFullViewingKey::decode(&Network::TestNetwork, ufvk)
+        .map_err(|e| anyhow!("UFVK: {e}"))?
+        .orchard()
+        .cloned()
+        .context("UFVK without an Orchard-protocol key")
+}
+
 /// Builds the witness of deposit `txid` into `vault`, anchored at header `tip` (after the
 /// deposit's block; the relay must accept that header and enough work on top of it), and
 /// checks it with the statement.
@@ -105,40 +200,12 @@ pub async fn build(
     vault: &Vault,
     tip: u32,
 ) -> Result<Built> {
-    let headers = chain::load_headers(headers_path)?;
-    let (raw_tx, height) = lwd::raw_transaction(client, &txid).await?;
-    let height = u32::try_from(height)?;
-    ensure!(height >= history::NU7_ACTIVATION_HEIGHT && height < tip, "deposit at {height}, anchor {tip}");
-
-    let summaries = summaries(client, &headers, summaries_path, tip - 1).await?;
-    let leaves: Vec<_> = summaries.iter().map(|s| history::leaf(history::NU7_BRANCH_ID, s)).collect();
-    let mmr = Mmr::new(leaves.clone())?;
-    let leaf_index = (height - history::NU7_ACTIVATION_HEIGHT) as usize;
-    let (path, peak_index) = mmr.path(leaf_index)?;
-
-    // The deposit's position in its block, and the anchor block's auth data root.
-    let block = chain::compact_blocks(client, height, height).await?.remove(0);
-    let txids: Vec<[u8; 32]> = block.vtx.iter().map(|t| *t.txid().as_ref()).collect();
-    let tx_index = txids.iter().position(|t| t == txid.as_ref()).context("deposit not in its block")?;
-    let txid_path = history::txid_merkle_path(&txids, tx_index)?;
-    let tip_block = chain::compact_blocks(client, tip, tip).await?.remove(0);
-    let branch = BranchId::for_height(&Network::TestNetwork, BlockHeight::from_u32(tip));
-    let mut auth = vec![];
-    for ctx in &tip_block.vtx {
-        let (raw, _) = lwd::raw_transaction(client, &ctx.txid()).await?;
-        auth.push(Transaction::read(&raw[..], branch)?.auth_commitment().as_bytes().try_into()?);
-    }
-    let tip_auth_data_root = history::auth_data_root(&auth)?;
+    let at = locate(client, headers_path, summaries_path, txid, tip).await?;
 
     // The deposit note, found with the vault's incoming viewing key.
-    let fvk = UnifiedFullViewingKey::decode(&Network::TestNetwork, &vault.ufvk)
-        .map_err(|e| anyhow!("UFVK: {e}"))?
-        .orchard()
-        .cloned()
-        .context("UFVK without an Orchard-protocol key")?;
+    let fvk = ufvk_fvk(&vault.ufvk)?;
     let ivk = PreparedIncomingViewingKey::new(&fvk.to_ivk(Scope::External));
-    let tx =
-        Transaction::read(&raw_tx[..], BranchId::for_height(&Network::TestNetwork, BlockHeight::from_u32(height)))?;
+    let tx = at.transaction()?;
     let bundle = tx.ironwood_bundle().context("no Ironwood bundle")?;
     let (action_index, note, recipient) = bundle
         .actions()
@@ -151,28 +218,21 @@ pub async fn build(
         })
         .context("no note of the vault's amount to the vault")?;
 
-    let mut raw = raw_headers(headers_path, &[height, tip])?;
     let witness = Witness {
-        tx: raw_tx,
+        tx: at.raw_tx.clone(),
         action_index: u32::try_from(action_index)?,
         note_recipient: recipient.to_raw_address_bytes().to_vec(),
         note_value: note.value().inner(),
         note_rseed: *note.rseed().as_bytes(),
-        tx_index: u32::try_from(tx_index)?,
-        txid_path,
-        block_header: raw.remove(&height).expect("checked"),
-        leaf: V3::to_bytes(&leaves[leaf_index]),
-        mmr_path: path
-            .iter()
-            .map(|(n, left)| MmrStep {
-                sibling: V3::to_bytes(n),
-                sibling_is_left: *left,
-            })
-            .collect(),
-        peaks: mmr.peaks().iter().map(V3::to_bytes).collect(),
-        peak_index: u32::try_from(peak_index)?,
-        tip_header: raw.remove(&tip).expect("checked"),
-        tip_auth_data_root,
+        tx_index: u32::try_from(at.tx_index)?,
+        txid_path: at.txid_path.clone(),
+        block_header: at.block_header.clone(),
+        leaf: at.leaf.clone(),
+        mmr_path: at.mmr_path.clone(),
+        peaks: at.peaks.clone(),
+        peak_index: u32::try_from(at.peak_index)?,
+        tip_header: at.tip_header.clone(),
+        tip_auth_data_root: at.tip_auth_data_root,
         vault_id: vault.vault_id,
         owner: vault.owner,
         account: vault.account,
@@ -184,13 +244,13 @@ pub async fn build(
     Ok(Built {
         witness,
         journal,
-        deposit_height: height,
-        tx_index,
-        block_transactions: txids.len(),
-        leaf_index,
-        leaves: leaves.len(),
-        path_len: path.len(),
-        peak_index,
-        peaks: mmr.peaks().len(),
+        deposit_height: at.height,
+        tx_index: at.tx_index,
+        block_transactions: at.block_transactions,
+        leaf_index: at.leaf_index,
+        leaves: at.leaves,
+        path_len: at.mmr_path.len(),
+        peak_index: at.peak_index,
+        peaks: at.peaks.len(),
     })
 }

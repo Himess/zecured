@@ -86,9 +86,14 @@ pub struct Peer {
 
 impl Peer {
     pub fn connect(addr: SocketAddr) -> Result<Self> {
+        Self::connect_within(addr, TIMEOUT)
+    }
+
+    /// [`Peer::connect`], with reads and writes timing out after `io_timeout`.
+    pub fn connect_within(addr: SocketAddr, io_timeout: Duration) -> Result<Self> {
         let stream = TcpStream::connect_timeout(&addr, CONNECT_TIMEOUT).context("connect")?;
-        stream.set_read_timeout(Some(TIMEOUT))?;
-        stream.set_write_timeout(Some(TIMEOUT))?;
+        stream.set_read_timeout(Some(io_timeout))?;
+        stream.set_write_timeout(Some(io_timeout))?;
         let mut peer = Peer {
             stream,
             buf: vec![],
@@ -194,6 +199,10 @@ impl Peer {
 
 /// Most headers one `headers` message may carry (the protocol's limit).
 const MAX_HEADERS: u64 = 2_000;
+/// Most headers zcashd and Zebra send in one answer (`MAX_HEADERS_RESULTS`,
+/// `MAX_FIND_BLOCK_HEADERS_RESULTS`): a shorter answer ends at the peer's tip, so asking again would
+/// only wait for an answer that does not come.
+const PEER_HEADERS_PER_ANSWER: usize = 160;
 
 /// The 1487-byte headers of a `headers` message (each followed by a zero transaction count).
 fn parse_headers(body: &[u8]) -> Result<Vec<Vec<u8>>> {
@@ -241,6 +250,39 @@ fn display(hash: &[u8; 32]) -> String {
     hex::encode(h)
 }
 
+/// A peer that completed a handshake, and the best height it announced in it.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct Reachable {
+    pub addr: SocketAddr,
+    pub height: u32,
+}
+
+/// Handshake time a probed peer gets: a peer slower than this is no use to a feeder.
+const PROBE_TIMEOUT: Duration = Duration::from_secs(5);
+
+/// Connects to all `peers` at once and returns those that complete a handshake within a few
+/// seconds, highest announced height first. Most seed addresses are unreachable at any time;
+/// probing them in parallel costs one timeout instead of one per address.
+pub fn probe(peers: &[SocketAddr]) -> Vec<Reachable> {
+    let found = std::sync::Mutex::new(Vec::with_capacity(peers.len()));
+    std::thread::scope(|scope| {
+        for addr in peers {
+            let found = &found;
+            scope.spawn(move || {
+                if let Ok(p) = Peer::connect_within(*addr, PROBE_TIMEOUT) {
+                    found.lock().unwrap_or_else(|e| e.into_inner()).push(Reachable {
+                        addr: *addr,
+                        height: p.start_height,
+                    });
+                }
+            });
+        }
+    });
+    let mut out = found.into_inner().unwrap_or_else(|e| e.into_inner());
+    out.sort_by_key(|p| std::cmp::Reverse(p.height));
+    out
+}
+
 /// The highest best height that up to `count` reachable peers announce, among the first
 /// `3 * count` addresses: an estimate of the Zcash tip (each peer's word only), `None` if none
 /// answers.
@@ -257,17 +299,32 @@ pub fn announced_height(peers: &[SocketAddr], count: usize) -> Option<u32> {
 /// Up to `count` headers after the block `(from_height, from_hash)` (internal byte order), each
 /// linked to the previous one; fewer if the peers reach their tip. Tries `peers` in turn.
 pub fn fetch(from_height: u32, from_hash: [u8; 32], count: usize, peers: &[SocketAddr]) -> Result<Vec<HeaderLine>> {
+    fetch_with_peer(from_height, from_hash, count, peers).map(|(lines, _)| lines)
+}
+
+/// [`fetch`], also returning the peer that answered last (a long-running feeder asks it first next
+/// time instead of waiting on unreachable seed addresses again).
+pub fn fetch_with_peer(
+    from_height: u32,
+    from_hash: [u8; 32],
+    count: usize,
+    peers: &[SocketAddr],
+) -> Result<(Vec<HeaderLine>, Option<SocketAddr>)> {
     let mut out = vec![];
     let (mut height, mut locator) = (from_height, from_hash);
     let mut candidates = peers.iter();
-    let mut peer: Option<Peer> = None;
+    let mut peer: Option<(SocketAddr, Peer)> = None;
+    let mut answered = None;
     while out.len() < count {
-        let p = match peer.as_mut() {
-            Some(p) => p,
+        let (addr, p) = match peer.as_mut() {
+            Some((a, p)) => (*a, p),
             None => {
-                let addr = candidates.next().context("ran out of Testnet peers")?;
-                match Peer::connect(*addr) {
-                    Ok(p) => peer.insert(p),
+                let addr = *candidates.next().context("ran out of Testnet peers")?;
+                match Peer::connect(addr) {
+                    Ok(p) => {
+                        let (_, p) = peer.insert((addr, p));
+                        (addr, p)
+                    }
                     Err(_) => continue,
                 }
             }
@@ -280,6 +337,12 @@ pub fn fetch(from_height: u32, from_hash: [u8; 32], count: usize, peers: &[Socke
             }
         };
         if raws.is_empty() {
+            if p.start_height > height {
+                // It announced more blocks, but none after ours: it is on another branch.
+                peer = None;
+                continue;
+            }
+            answered = Some(addr);
             break; // the peer's tip
         }
         if raws[0][4..36] != locator {
@@ -287,6 +350,8 @@ pub fn fetch(from_height: u32, from_hash: [u8; 32], count: usize, peers: &[Socke
             peer = None;
             continue;
         }
+        answered = Some(addr);
+        let at_tip = raws.len() < PEER_HEADERS_PER_ANSWER;
         for raw in raws {
             ensure!(raw[4..36] == locator, "headers not linked at height {}", height + 1);
             let hash = sha256d(&raw);
@@ -301,8 +366,11 @@ pub fn fetch(from_height: u32, from_hash: [u8; 32], count: usize, peers: &[Socke
                 break;
             }
         }
+        if at_tip {
+            break;
+        }
     }
-    Ok(out)
+    Ok((out, answered))
 }
 
 /// Appends to the JSON Lines header file at `path` the headers that follow its last line, up
@@ -338,6 +406,54 @@ pub fn extend_file(path: &Path, peers: &[SocketAddr]) -> Result<u32> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// Live, by hand: two relayer-like fetches from a recent block, the second asking the peer
+    /// that answered the first (`ZECURED_TIP=height:hash` in internal byte order, 0x-prefixed).
+    #[test]
+    #[ignore = "needs Testnet peers"]
+    fn live_relayer_fetch_timing() {
+        let tip = std::env::var("ZECURED_TIP").expect("ZECURED_TIP=height:0xhash");
+        let (height, hash) = tip.split_once(':').unwrap();
+        let hash: [u8; 32] = hex::decode(hash.trim_start_matches("0x")).unwrap().try_into().unwrap();
+        let mut peers = seed_peers();
+        for round in 0..2 {
+            let t = std::time::Instant::now();
+            let (lines, peer) = fetch_with_peer(height.parse().unwrap(), hash, 400, &peers).unwrap();
+            println!("round {round}: {} headers from {peer:?} in {:?}", lines.len(), t.elapsed());
+            if let Some(p) = peer {
+                peers.retain(|a| *a != p);
+                peers.insert(0, p);
+            }
+        }
+    }
+
+    /// Live, by hand: where a header fetch spends its time (`cargo test -p zecured-deposit-witness
+    /// live_fetch_timing -- --ignored --nocapture`).
+    #[test]
+    #[ignore = "needs Testnet peers"]
+    fn live_fetch_timing() {
+        let started = std::time::Instant::now();
+        let peers = seed_peers();
+        println!("{} seed addresses in {:?}", peers.len(), started.elapsed());
+        let mut answered = 0;
+        for addr in &peers {
+            if answered == 3 {
+                break;
+            }
+            let t = std::time::Instant::now();
+            match Peer::connect(*addr) {
+                Ok(mut p) => {
+                    answered += 1;
+                    println!("{addr}: handshake {:?}, agent {}, height {}", t.elapsed(), p.agent, p.start_height);
+                    let t = std::time::Instant::now();
+                    // The genesis of the NU7 epoch is far behind: a full answer comes back.
+                    let r = p.get_headers([0u8; 32]);
+                    println!("{addr}: getheaders {:?} -> {:?}", t.elapsed(), r.map(|h| h.len()));
+                }
+                Err(e) => println!("{addr}: {e} after {:?}", t.elapsed()),
+            }
+        }
+    }
 
     #[test]
     fn compact_sizes_round_trip() {

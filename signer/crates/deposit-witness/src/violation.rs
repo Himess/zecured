@@ -1,0 +1,142 @@
+//! Tier 3 violation witnesses (docs/TIER3.md § 6), built from public chain data plus what the
+//! prover holds: the vault's viewing key (F1, F2) or the claimant's salt, receiver and incoming
+//! viewing key (F3). Each is checked with the statement natively before anything is proven. The
+//! witness contains a viewing key: keep it on the prover's machine.
+
+use std::path::Path;
+
+use anyhow::{Context, Result, bail};
+use orchard::{
+    keys::{PreparedIncomingViewingKey, Scope},
+    note_encryption::IronwoodDomain,
+};
+use zcash_note_encryption::try_note_decryption;
+use zcash_primitives::transaction::Transaction;
+use zcash_protocol::{
+    TxId,
+    consensus::{BlockHeight, BranchId, Network},
+};
+use zecured_deposit_statement::violation::{Detail, Kind, ViolationJournal, ViolationWitness, verify_violation};
+use zecured_zcash_ops::lwd::{self, LwdClient};
+
+use crate::witness::{Located, locate, ufvk_fvk};
+
+fn witness(kind: Kind, beneficiary: [u8; 20], at: Located, detail: Detail) -> Result<ViolationWitness> {
+    Ok(ViolationWitness {
+        kind,
+        beneficiary,
+        tx: at.raw_tx,
+        tx_index: u32::try_from(at.tx_index)?,
+        txid_path: at.txid_path,
+        block_header: at.block_header,
+        leaf: at.leaf,
+        mmr_path: at.mmr_path,
+        peaks: at.peaks,
+        peak_index: u32::try_from(at.peak_index)?,
+        tip_header: at.tip_header,
+        tip_auth_data_root: at.tip_auth_data_root,
+        detail,
+    })
+}
+
+fn checked(w: ViolationWitness) -> Result<(ViolationWitness, ViolationJournal)> {
+    let journal = verify_violation(&w).map_err(|e| anyhow::anyhow!("the statement refuses the witness: {e:?}"))?;
+    Ok((w, journal))
+}
+
+/// F1: transaction `spend_txid` spends a note of the vault (viewing key `ufvk`) that transaction
+/// `note_txid` created. The note is found by trial decryption with both of the vault's incoming
+/// viewing keys, and its nullifier among the spend's actions.
+#[allow(clippy::too_many_arguments)]
+pub async fn uncommitted(
+    client: &mut LwdClient,
+    headers_path: &Path,
+    summaries_path: &Path,
+    ufvk: &str,
+    note_txid: TxId,
+    spend_txid: TxId,
+    tip: u32,
+    beneficiary: [u8; 20],
+) -> Result<(ViolationWitness, ViolationJournal)> {
+    let fvk = ufvk_fvk(ufvk)?;
+    let (raw, height) = lwd::raw_transaction(client, &note_txid).await?;
+    let branch = BranchId::for_height(&Network::TestNetwork, BlockHeight::from_u32(u32::try_from(height)?));
+    let note_tx = Transaction::read(&raw[..], branch)?;
+    let at = locate(client, headers_path, summaries_path, spend_txid, tip).await?;
+    let spent: Vec<[u8; 32]> = at
+        .transaction()?
+        .ironwood_bundle()
+        .context("the spend has no Ironwood bundle")?
+        .actions()
+        .iter()
+        .map(|a| a.nullifier().to_bytes())
+        .collect();
+    let ivks = [Scope::External, Scope::Internal].map(|s| PreparedIncomingViewingKey::new(&fvk.to_ivk(s)));
+    for action in note_tx.ironwood_bundle().context("the note transaction has no Ironwood bundle")?.actions() {
+        for ivk in &ivks {
+            let Some((note, recipient, _)) = try_note_decryption(&IronwoodDomain::for_action(action), ivk, action)
+            else {
+                continue;
+            };
+            let Some(index) = spent.iter().position(|nf| *nf == note.nullifier(&fvk).to_bytes()) else {
+                continue;
+            };
+            let detail = Detail::Uncommitted {
+                vault_ufvk: ufvk.to_owned(),
+                action_index: u32::try_from(index)?,
+                note_recipient: recipient.to_raw_address_bytes().to_vec(),
+                note_value: note.value().inner(),
+                note_rho: note.rho().to_bytes(),
+                note_rseed: *note.rseed().as_bytes(),
+            };
+            return checked(witness(Kind::Uncommitted, beneficiary, at, detail)?);
+        }
+    }
+    bail!("the spend transaction spends no note of the vault that the note transaction created")
+}
+
+/// F2: committed payout `txid` does not return the committed change (`change_tag`,
+/// `change_value`) to the vault (viewing key `ufvk`).
+#[allow(clippy::too_many_arguments)]
+pub async fn withheld_change(
+    client: &mut LwdClient,
+    headers_path: &Path,
+    summaries_path: &Path,
+    ufvk: &str,
+    txid: TxId,
+    change_tag: [u8; 32],
+    change_value: u64,
+    tip: u32,
+    beneficiary: [u8; 20],
+) -> Result<(ViolationWitness, ViolationJournal)> {
+    let at = locate(client, headers_path, summaries_path, txid, tip).await?;
+    let detail = Detail::WithheldChange {
+        vault_ufvk: ufvk.to_owned(),
+        change_tag,
+        change_value,
+    };
+    checked(witness(Kind::WithheldChange, beneficiary, at, detail)?)
+}
+
+/// F3: committed payout `txid` names a claim whose recipient is `(salt, receiver)`; `ivk` (raw,
+/// 64 bytes) is an incoming viewing key of the claimant's wallet.
+#[allow(clippy::too_many_arguments)]
+pub async fn misdirected(
+    client: &mut LwdClient,
+    headers_path: &Path,
+    summaries_path: &Path,
+    txid: TxId,
+    salt: [u8; 32],
+    receiver: [u8; 43],
+    ivk: [u8; 64],
+    tip: u32,
+    beneficiary: [u8; 20],
+) -> Result<(ViolationWitness, ViolationJournal)> {
+    let at = locate(client, headers_path, summaries_path, txid, tip).await?;
+    let detail = Detail::Misdirected {
+        salt,
+        receiver: receiver.to_vec(),
+        ivk: ivk.to_vec(),
+    };
+    checked(witness(Kind::Misdirected, beneficiary, at, detail)?)
+}

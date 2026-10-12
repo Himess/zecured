@@ -8,7 +8,10 @@
 //! A header the other one already submitted is skipped. A relayer logs an alarm when the
 //! relay lags the Zcash tip by `alarm_lag` blocks or more, and when its gas runs low.
 
-use std::time::Duration;
+use std::{
+    net::SocketAddr,
+    time::{Duration, Instant},
+};
 
 use alloy::{
     network::EthereumWallet,
@@ -47,23 +50,39 @@ pub struct Relayer {
     pub every: Duration,
 }
 
+/// Testnet peers are probed again this often, or after a failed pass.
+const PROBE_EVERY: Duration = Duration::from_secs(300);
+
+/// The Testnet peers that answered the last probe, highest announced height first. Most seed
+/// addresses are unreachable at any time, and some reachable peers lag: asking them in turn on
+/// every pass cost a connect timeout each, and a lagging peer's empty answer looked like the tip.
+#[derive(Default)]
+struct PeerBook {
+    reachable: Vec<p2p::Reachable>,
+    probed: Option<Instant>,
+}
+
 /// Runs passes forever; a failed pass is logged and retried at the next interval.
 pub async fn run(r: Relayer) -> Result<()> {
     ensure!(r.batch > 0, "the batch size must be at least 1");
     info!(relay = %r.relay, relayer = %r.key.address(), "relayer running");
+    let mut book = PeerBook::default();
     loop {
-        if let Err(e) = pass(&r).await {
+        if let Err(e) = pass(&r, &mut book).await {
             warn!(error = %e, "relay pass failed");
+            book.probed = None;
         }
         tokio::time::sleep(r.every).await;
     }
 }
 
 /// The headers that follow the relay's best tip, from the peers; from up to `STEP_BACK` blocks
-/// below the tip if the peers do not continue from it. Also returns the relay's tip height.
+/// below the tip if the peers do not continue from it. Also returns the relay's tip height and
+/// the peer that answered.
 async fn headers_after<P: Provider>(
     relay: &IZcashHeaderRelay::IZcashHeaderRelayInstance<P>,
-) -> Result<(Vec<HeaderLine>, u32)> {
+    peers: &[SocketAddr],
+) -> Result<(Vec<HeaderLine>, u32, Option<SocketAddr>)> {
     let tip = relay.bestChainTip().call().await.context("relay.bestChainTip")?;
     let height = u32::try_from(tip.height)?;
     for back in [0, STEP_BACK] {
@@ -73,15 +92,15 @@ async fn headers_after<P: Provider>(
         } else {
             relay.bestBlockHashAt(U256::from(from)).call().await.context("relay.bestBlockHashAt")?
         };
-        let peers = p2p::seed_peers();
-        let fetched = tokio::task::spawn_blocking(move || p2p::fetch(from, hash.0, FETCH, &peers)).await?;
+        let peers = peers.to_vec();
+        let fetched = tokio::task::spawn_blocking(move || p2p::fetch_with_peer(from, hash.0, FETCH, &peers)).await?;
         match fetched {
-            Ok(lines) if !lines.is_empty() => return Ok((lines, height)),
-            Ok(_) if back == 0 => return Ok((vec![], height)), // the relay is at the peers' tip
+            Ok((lines, peer)) if !lines.is_empty() => return Ok((lines, height, peer)),
+            Ok((_, peer)) if back == 0 => return Ok((vec![], height, peer)), // at the peers' tip
             _ => {}
         }
     }
-    Ok((vec![], height))
+    Ok((vec![], height, None))
 }
 
 fn internal_hash(line: &HeaderLine) -> Result<B256> {
@@ -104,10 +123,19 @@ async fn unknown<P: Provider>(
     Ok(out)
 }
 
-async fn pass(r: &Relayer) -> Result<()> {
+async fn pass(r: &Relayer, book: &mut PeerBook) -> Result<()> {
+    let started = Instant::now();
     let provider = ProviderBuilder::new().wallet(EthereumWallet::from(r.key.clone())).connect_http(r.rpc.parse()?);
     let relay = IZcashHeaderRelay::new(r.relay, &provider);
-    let (lines, tip_height) = headers_after(&relay).await?;
+    if book.reachable.is_empty() || book.probed.is_none_or(|t| t.elapsed() > PROBE_EVERY) {
+        book.reachable = tokio::task::spawn_blocking(|| p2p::probe(&p2p::seed_peers())).await?;
+        book.probed = Some(Instant::now());
+        let best = book.reachable.first().map(|p| p.height);
+        info!(reachable = book.reachable.len(), best_height = ?best, "Testnet peers probed");
+    }
+    let peers: Vec<SocketAddr> = book.reachable.iter().map(|p| p.addr).collect();
+    let (lines, tip_height, _) = headers_after(&relay, &peers).await?;
+    let fetch_ms = elapsed_ms(started);
 
     // Headers above the relay's tip are new unless another relayer is racing this one (then the
     // submission's estimate fails and that batch is filtered); only a step back below the tip
@@ -132,22 +160,30 @@ async fn pass(r: &Relayer) -> Result<()> {
         }
     }
 
+    let submit_ms = elapsed_ms(started) - fetch_ms;
+
     // Alarms.
     let relay_height = u32::try_from(relay.bestChainTip().call().await?.height)?;
     let fetched_height = lines.last().map_or(0, |l| l.height);
-    let announced = tokio::task::spawn_blocking(|| p2p::announced_height(&p2p::seed_peers(), 2)).await?;
-    let zcash_tip = fetched_height.max(announced.unwrap_or(0));
+    // The best height peers announced when probed (up to PROBE_EVERY old), or what was fetched.
+    let announced = book.reachable.first().map_or(0, |p| p.height);
+    let zcash_tip = fetched_height.max(announced);
     let lag = zcash_tip.saturating_sub(relay_height);
+    let pass_ms = elapsed_ms(started);
     if lag >= r.alarm_lag {
-        error!(lag, relay_height, zcash_tip, "ALARM: the relay lags the Zcash tip");
+        error!(lag, relay_height, zcash_tip, fetch_ms, submit_ms, pass_ms, "ALARM: the relay lags the Zcash tip");
     } else if submitted > 0 {
-        info!(submitted, relay_height, "relay fed");
+        info!(submitted, relay_height, fetch_ms, submit_ms, pass_ms, "relay fed");
     }
     let balance = provider.get_balance(r.key.address()).await?;
     if balance < U256::from(LOW_BALANCE_WEI) {
         error!(%balance, "ALARM: the relayer's gas balance is low");
     }
     Ok(())
+}
+
+fn elapsed_ms(since: Instant) -> u64 {
+    u64::try_from(since.elapsed().as_millis()).unwrap_or(u64::MAX)
 }
 
 fn raws(lines: &[HeaderLine]) -> Result<Vec<Bytes>> {
