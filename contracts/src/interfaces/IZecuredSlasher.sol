@@ -76,6 +76,10 @@ interface IZecuredSlasher {
     event ViolationDismissed(bytes32 indexed caseId);
     event ViolationExecuted(bytes32 indexed caseId, uint256 slashed);
 
+    error ZeroAddress();
+    error ZeroWindow();
+    error InvalidConfig();
+    error InvalidJournalLength(uint256 length);
     error KindMismatch(ViolationKind argument, ViolationKind journal);
     error UnknownKind();
     error InvalidSealSelector(bytes4 selector);
@@ -86,6 +90,9 @@ interface IZecuredSlasher {
     error UnknownCase(bytes32 caseId);
     error ChallengeWindowOpen(bytes32 caseId, uint64 executableAt);
     error CaseAlreadyExecuted(bytes32 caseId);
+
+    /// @notice Length of an ABI-encoded ViolationJournal: seven words.
+    function JOURNAL_LENGTH() external view returns (uint256);
 
     function proveViolation(ViolationKind kind, bytes calldata journal, bytes calldata seal)
         external

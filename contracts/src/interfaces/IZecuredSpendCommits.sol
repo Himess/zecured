@@ -81,6 +81,7 @@ interface IZecuredSpendCommits {
     error FeeBearerIsDust(bytes32 claimId, uint64 amount, uint64 fee);
     error ClaimNotCommitted(bytes32 claimId);
     error MintingHalted();
+    error SignersNotBonded();
 
     /// @notice Most claims one payout may pay (8; the signers' plans pay one claim or a close pair).
     function MAX_CLAIMS_PER_PAYOUT() external view returns (uint256);
@@ -110,7 +111,7 @@ interface IZecuredSpendCommits {
     /// @notice When `openVaultCount` last dropped to zero (0 if never).
     function lastVaultSettledAt() external view returns (uint64);
 
-    /// @notice The bond contract whose `halted()` stops minting (new proofs and activations revert once halted); zero
-    ///         on deployments without bonds (local fork, tests).
+    /// @notice The bond contract: new proofs and activations need it `fullyBonded()` and not `halted()`; zero on
+    ///         deployments without bonds (local fork, tests).
     function signerBond() external view returns (ISignerBond);
 }

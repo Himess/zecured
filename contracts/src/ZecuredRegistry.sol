@@ -806,7 +806,10 @@ contract ZecuredRegistry is IZecuredRegistry, IZecuredSpendCommits, EIP712 {
         if (open == 0) _lastVaultSettledAt = uint64(block.timestamp);
     }
 
+    /// @dev Minting needs every signer bonded and no slash yet (S5).
     function _checkNotHalted() internal view {
-        if (address(signerBond) != address(0) && signerBond.halted()) revert MintingHalted();
+        if (address(signerBond) == address(0)) return;
+        if (signerBond.halted()) revert MintingHalted();
+        if (!signerBond.fullyBonded()) revert SignersNotBonded();
     }
 }

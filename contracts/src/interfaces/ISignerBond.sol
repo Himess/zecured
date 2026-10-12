@@ -13,9 +13,12 @@ pragma solidity 0.8.28;
 ///      - `slash(caseId, signerBitmap, beneficiary)`: the slasher only. Takes the whole bond of every signer in the
 ///        bitmap; bounty = min(slashed * BOUNTY_BPS / 10,000, BOUNTY_CAP), credited to `beneficiary` (pulled with
 ///        `claimBounty`, so a reverting beneficiary cannot block a slash); the rest goes to the pool; sets `halted`.
-///      - `withdraw(to)`: a signer takes its whole bond back only if not halted, no violation case is open, the
-///        Registry has no open vault (`openVaultCount() == 0`) and `challengeWindow` has passed since
-///        `lastVaultSettledAt()`: the same five signers hold every vault, so "its vaults" are all vaults.
+///      - `withdraw(to)`: a signer takes its whole bond back only if no violation case is open, the Registry has no
+///        open vault (`openVaultCount() == 0`) and `challengeWindow` has passed since `lastVaultSettledAt()`: the same
+///        five signers hold every vault, so "its vaults" are all vaults. After a halt this still lets the signers a
+///        slash did not name take their bonds back once every vault has settled.
+///      - The Registry mints only while `fullyBonded()` and not `halted()`: a vault never opens under fewer than five
+///        bonds.
 ///      - The compensation pool has no exit in this version (paying victims from it is roadmap).
 interface ISignerBond {
     event BondDeposited(uint8 indexed signer, address indexed signerAddress, uint256 amount);
@@ -27,6 +30,8 @@ interface ISignerBond {
 
     error NotASigner(address caller);
     error NotTheSlasher(address caller);
+    error ZeroAddress();
+    error ZeroWindow();
     error WrongBondAmount(uint256 sent, uint256 required);
     error AlreadyBonded(uint8 signer);
     error NoBond(uint8 signer);
@@ -48,6 +53,8 @@ interface ISignerBond {
     function challengeWindow() external view returns (uint64);
 
     function bondOf(uint8 signer) external view returns (uint256);
+    /// @notice Every one of the five signers holds its bond.
+    function fullyBonded() external view returns (bool);
     function halted() external view returns (bool);
     function compensationPool() external view returns (uint256);
     function bountyOf(address beneficiary) external view returns (uint256);
