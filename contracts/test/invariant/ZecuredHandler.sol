@@ -11,7 +11,7 @@ import {ZZEC} from "../../src/ZZEC.sol";
 import {ZecuredRegistry} from "../../src/ZecuredRegistry.sol";
 import {SettlementAdapter} from "../../src/SettlementAdapter.sol";
 import {VaultStatus, ClaimStatus} from "../../src/interfaces/IZecuredRegistry.sol";
-import {DepositAttestation, CloseRequest} from "../../src/libraries/ZecuredEIP712.sol";
+import {DepositAttestation, CloseRequest, SpendCommit} from "../../src/libraries/ZecuredEIP712.sol";
 
 /// @notice Invariant-test handler: drives vault lifecycles (attest, borrow, repay, release, price moves, liquidation,
 ///         close, payout confirmation, time) and attacks that must always fail, against the real Morpho Blue on a
@@ -43,6 +43,8 @@ contract ZecuredHandler is Test {
     bytes32[] public cancelledIds;
     mapping(bytes32 vaultId => uint64) public attested;
     mapping(bytes32 vaultId => bytes32) public tagOf;
+    /// The vault's current lineage note: its deposit, then the change of each committed payout (Tier 3).
+    mapping(bytes32 vaultId => bytes32) public headOf;
     mapping(bytes32 vaultId => uint256) public accountIndexOf;
     uint256 public nextAccount;
     uint256 internal nextNonce;
@@ -154,6 +156,7 @@ contract ZecuredHandler is Test {
         vaultIds.push(att.vaultId);
         attested[att.vaultId] = amount;
         tagOf[att.vaultId] = att.depositTag;
+        headOf[att.vaultId] = att.depositTag;
         accountIndexOf[att.vaultId] = index;
         calls["attest"]++;
     }
@@ -372,17 +375,135 @@ contract ZecuredHandler is Test {
         uint64 count = registry.claimCount(vaultId);
         for (uint64 i; i < count; ++i) {
             bytes32 claimId = registry.claimIdOf(vaultId, i);
-            (,,,, ClaimStatus status) = registry.claim(claimId);
-            if (status != ClaimStatus.Pending) continue;
+            (,, uint64 amount,, ClaimStatus status) = registry.claim(claimId);
+            // Dust (the claim cannot bear the 10,000 zat fee of its payout) stays in the vault: signers never pay it.
+            if (status != ClaimStatus.Pending || amount <= 10_000) continue;
             bytes32[] memory ids = new bytes32[](1);
             ids[0] = claimId;
+            // A payout already committed (and mined, `commitOnly`) is only confirmed.
+            if (registry.claimInput(claimId) == bytes32(0)) _commitSpend(vaultId, ids, signerSeed);
             registry.confirmPayout(vaultId, ids, _threeSigs(registry.hashPayoutConfirmation(vaultId, ids), signerSeed));
             calls["confirm"]++;
             return;
         }
     }
 
+    /// Tier 3: a payout committed (and mined) whose claim is not confirmed yet; the vault's lineage moves on to its
+    /// change.
+    function commitOnly(uint256 vaultSeed, uint256 signerSeed) external {
+        (bool found, bytes32 vaultId,) = _vault(vaultSeed);
+        if (!found) return;
+        uint64 count = registry.claimCount(vaultId);
+        for (uint64 i; i < count; ++i) {
+            bytes32 claimId = registry.claimIdOf(vaultId, i);
+            (,, uint64 amount,, ClaimStatus status) = registry.claim(claimId);
+            if (status != ClaimStatus.Pending || amount <= 10_000 || registry.claimInput(claimId) != bytes32(0)) {
+                continue;
+            }
+            bytes32[] memory ids = new bytes32[](1);
+            ids[0] = claimId;
+            _commitSpend(vaultId, ids, signerSeed);
+            calls["commit only"]++;
+            return;
+        }
+    }
+
+    /// Tier 3: the signers commit the payout of `ids` from the vault's lineage note before they sign it; the rest
+    /// returns to the vault as change, the new lineage note.
+    function _commitSpend(bytes32 vaultId, bytes32[] memory ids, uint256 signerSeed) internal {
+        bytes32 head = headOf[vaultId];
+        uint64 claimed;
+        bytes32[] memory refs = new bytes32[](ids.length);
+        for (uint256 i; i < ids.length; ++i) {
+            (,, uint64 amount,,) = registry.claim(ids[i]);
+            claimed += amount;
+            refs[i] = keccak256(abi.encode("zecured.inv.claimRef", ids[i]));
+        }
+        uint64 change = registry.lineageOf(head).value - claimed;
+        SpendCommit memory c = SpendCommit({
+            vaultId: vaultId,
+            inputTag: head,
+            claimIds: ids,
+            claimRefs: refs,
+            payoutRef: keccak256(abi.encode("zecured.inv.payoutRef", head)),
+            changeTag: change == 0 ? bytes32(0) : keccak256(abi.encode("zecured.inv.change", head)),
+            changeValue: change
+        });
+        registry.commitSpend(c, _threeSigs(registry.hashSpendCommit(c), signerSeed));
+        headOf[vaultId] = c.changeTag;
+        calls["commit"]++;
+    }
+
     // ------------------------------------------------------------------ attacks (must always fail)
+
+    /// Tier 3 claim reuse: a claim committed from one lineage note, mined but not confirmed, is committed again from
+    /// the vault's next lineage note (its change) to be paid twice. Must always fail.
+    function attackClaimReuse(uint256 vaultSeed, uint256 signerSeed) external {
+        (bool found, bytes32 vaultId,) = _vault(vaultSeed);
+        if (!found) return;
+        bytes32 head = headOf[vaultId];
+        if (head == bytes32(0)) return;
+        uint64 count = registry.claimCount(vaultId);
+        for (uint64 i; i < count; ++i) {
+            bytes32 claimId = registry.claimIdOf(vaultId, i);
+            (,,,, ClaimStatus status) = registry.claim(claimId);
+            bytes32 bound = registry.claimInput(claimId);
+            if (status != ClaimStatus.Pending || bound == bytes32(0) || bound == head) continue;
+            (bool possible, SpendCommit memory c) = _reuseCommit(vaultId, head, claimId);
+            if (!possible) return;
+            bytes[] memory sigs = _threeSigs(registry.hashSpendCommit(c), signerSeed);
+            try registry.commitSpend(c, sigs) {
+                attackSucceeded = true;
+            } catch {}
+            calls["attack: claim reuse"]++;
+            return;
+        }
+    }
+
+    /// The commitment of `claimId` from `head` that would conserve value, if the head can cover the claim.
+    function _reuseCommit(bytes32 vaultId, bytes32 head, bytes32 claimId)
+        internal
+        view
+        returns (bool possible, SpendCommit memory c)
+    {
+        (,, uint64 amount,,) = registry.claim(claimId);
+        uint64 lineage = registry.lineageOf(head).value;
+        if (amount > lineage) return (false, c);
+        bytes32[] memory ids = new bytes32[](1);
+        ids[0] = claimId;
+        bytes32[] memory refs = new bytes32[](1);
+        refs[0] = keccak256(abi.encode("zecured.inv.reuseRef", head, claimId));
+        c = SpendCommit({
+            vaultId: vaultId,
+            inputTag: head,
+            claimIds: ids,
+            claimRefs: refs,
+            payoutRef: keccak256(abi.encode("zecured.inv.reusePayout", head, claimId)),
+            changeTag: amount == lineage ? bytes32(0) : keccak256(abi.encode("zecured.inv.reuseChange", head)),
+            changeValue: lineage - amount
+        });
+        possible = true;
+    }
+
+    /// Tier 3: a claim is never confirmed paid without a committed payout. Must always fail.
+    function attackUncommittedConfirm(uint256 vaultSeed, uint256 signerSeed) external {
+        (bool found, bytes32 vaultId,) = _vault(vaultSeed);
+        if (!found) return;
+        uint64 count = registry.claimCount(vaultId);
+        for (uint64 i; i < count; ++i) {
+            bytes32 claimId = registry.claimIdOf(vaultId, i);
+            (,,,, ClaimStatus status) = registry.claim(claimId);
+            if (status != ClaimStatus.Pending || registry.claimInput(claimId) != bytes32(0)) continue;
+            bytes32[] memory ids = new bytes32[](1);
+            ids[0] = claimId;
+            bytes[] memory sigs = _threeSigs(registry.hashPayoutConfirmation(vaultId, ids), signerSeed);
+            try registry.confirmPayout(vaultId, ids, sigs) {
+                attackSucceeded = true;
+            } catch {}
+            calls["attack: uncommitted confirm"]++;
+            return;
+        }
+    }
 
     function attackAccountWithdraw(uint256 vaultSeed, uint256 receiverSeed, uint256 amount) external {
         (bool found, bytes32 vaultId, address account) = _vault(vaultSeed);

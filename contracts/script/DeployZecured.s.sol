@@ -13,6 +13,7 @@ import {MockZecOracle} from "../src/mocks/MockZecOracle.sol";
 import {DemoShockOracle} from "../src/mocks/DemoShockOracle.sol";
 import {ZZEC} from "../src/ZZEC.sol";
 import {ZecuredRegistry} from "../src/ZecuredRegistry.sol";
+import {ISignerBond} from "../src/interfaces/ISignerBond.sol";
 import {SettlementAdapter} from "../src/SettlementAdapter.sol";
 import {DepositProofConfig, MintMode} from "../src/interfaces/IZecuredRegistry.sol";
 import {IRiscZeroVerifier} from "../src/interfaces/IRiscZeroVerifier.sol";
@@ -72,6 +73,8 @@ contract DeployZecured is Script {
     IMorpho internal constant MORPHO = IMorpho(0xBBBBBbbBBb9cC5e90e3b3Af64bdAF62C37EEFFCb);
     address internal constant ADAPTIVE_CURVE_IRM = 0x46415998764C29aB2a25CbeA6254146D50D22687;
     uint256 internal constant LLTV = 0.625e18;
+    /// @dev Until the Tier 3 contracts are deployed with the Registry (Deploy 2): no bond.
+    ISignerBond internal constant NO_BOND = ISignerBond(address(0));
     uint256 internal constant BASE_SEPOLIA_CHAIN_ID = 84532;
     string internal constant OUT_DIR = "deployments";
     /// RISC Zero verifier router on Base Sepolia (docs/TIER2.md § 5).
@@ -169,7 +172,8 @@ contract DeployZecured is Script {
             ADAPTIVE_CURVE_IRM,
             LLTV,
             signerSet,
-            d.proofs
+            d.proofs,
+            NO_BOND
         );
         d.adapter = new SettlementAdapter(d.registry);
         require(address(d.registry) == predictedRegistry, "DeployZecured: registry address mismatch");

@@ -5,6 +5,7 @@ import {MessageHashUtils} from "@openzeppelin/contracts/utils/cryptography/Messa
 import {Position} from "morpho-blue/src/interfaces/IMorpho.sol";
 import {ZZEC} from "../../src/ZZEC.sol";
 import {ZecuredRegistry} from "../../src/ZecuredRegistry.sol";
+import {ISignerBond} from "../../src/interfaces/ISignerBond.sol";
 import {IZecuredRegistry, VaultStatus, DepositProofConfig, MintMode} from "../../src/interfaces/IZecuredRegistry.sol";
 import {IRiscZeroVerifier} from "../../src/interfaces/IRiscZeroVerifier.sol";
 import {DepositAttestation, ZecuredEIP712} from "../../src/libraries/ZecuredEIP712.sol";
@@ -531,20 +532,20 @@ contract DepositProofsTest is ZecuredFixture, RelayFixtures {
             (ZZEC z, address a) = _freshZzec();
             vm.expectRevert(IZecuredRegistry.InvalidDepositProofConfig.selector);
             new ZecuredRegistry(
-                MORPHO, z, a, address(usdc), address(oracle), ADAPTIVE_CURVE_IRM, LLTV, signerSet, bad[i]
+                MORPHO, z, a, address(usdc), address(oracle), ADAPTIVE_CURVE_IRM, LLTV, signerSet, bad[i], NO_BOND
             );
         }
         // The good one deploys.
         (ZZEC z2, address a2) = _freshZzec();
         new ZecuredRegistry(
-            MORPHO, z2, a2, address(usdc), address(oracle), ADAPTIVE_CURVE_IRM, LLTV, signerSet, _goodConfig()
+            MORPHO, z2, a2, address(usdc), address(oracle), ADAPTIVE_CURVE_IRM, LLTV, signerSet, _goodConfig(), NO_BOND
         );
     }
 
     function test_revert_proofsDisabled() public {
         (ZZEC z, address a) = _freshZzec();
         ZecuredRegistry plain = new ZecuredRegistry(
-            MORPHO, z, a, address(usdc), address(oracle), ADAPTIVE_CURVE_IRM, LLTV, signerSet, _noProofs()
+            MORPHO, z, a, address(usdc), address(oracle), ADAPTIVE_CURVE_IRM, LLTV, signerSet, _noProofs(), NO_BOND
         );
         bytes memory journal = _realJournal();
         bytes[] memory sigs = _openedSigs(OPENED);

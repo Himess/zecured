@@ -2,6 +2,7 @@
 pragma solidity 0.8.28;
 
 import {SpendCommit} from "../libraries/ZecuredEIP712.sol";
+import {ISignerBond} from "./ISignerBond.sol";
 
 /// @notice A note of a vault's conforming lineage, as Base knows it: the activated deposit (its `depositTag`) or the
 ///         change of a committed payout (its `changeTag`). Keyed by the note's tag (docs/TIER3.md § 2).
@@ -68,6 +69,7 @@ interface IZecuredSpendCommits {
     );
 
     error NotALineageNote(bytes32 vaultId, bytes32 inputTag);
+    error ZeroPayoutRef();
     error PayoutAlreadyCommitted(bytes32 payoutRef);
     error InvalidClaimCount(uint256 claims, uint256 claimRefs);
     error DuplicateClaim(bytes32 claimId);
@@ -78,6 +80,7 @@ interface IZecuredSpendCommits {
     error InvalidChange(bytes32 changeTag, uint64 changeValue);
     error FeeBearerIsDust(bytes32 claimId, uint64 amount, uint64 fee);
     error ClaimNotCommitted(bytes32 claimId);
+    error MintingHalted();
 
     /// @notice Most claims one payout may pay (8; the signers' plans pay one claim or a close pair).
     function MAX_CLAIMS_PER_PAYOUT() external view returns (uint256);
@@ -107,6 +110,7 @@ interface IZecuredSpendCommits {
     /// @notice When `openVaultCount` last dropped to zero (0 if never).
     function lastVaultSettledAt() external view returns (uint64);
 
-    /// @notice The bond contract whose `halted()` stops minting (`_activate` reverts once halted).
-    function signerBond() external view returns (address);
+    /// @notice The bond contract whose `halted()` stops minting (new proofs and activations revert once halted); zero
+    ///         on deployments without bonds (local fork, tests).
+    function signerBond() external view returns (ISignerBond);
 }

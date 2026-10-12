@@ -8,6 +8,9 @@ import {DepositAttestation} from "../../src/libraries/ZecuredEIP712.sol";
 import {MockRiscZeroVerifier} from "../../src/mocks/MockRiscZeroVerifier.sol";
 import {IZcashHeaderRelay} from "../../src/relay/IZcashHeaderRelay.sol";
 import {MockHeaderRelay} from "../mocks/MockHeaderRelay.sol";
+import {MockSignerBond} from "../mocks/MockSignerBond.sol";
+import {ISignerBond} from "../../src/interfaces/ISignerBond.sol";
+import {IZecuredSpendCommits, LineageNote} from "../../src/interfaces/IZecuredSpendCommits.sol";
 import {ZecuredFixture} from "../utils/ZecuredFixture.sol";
 
 /// @notice K1 (`ProofOnly`: no signer attestation can mint) and K3 (a proven deposit only mints once the relay has
@@ -29,6 +32,7 @@ contract PendingActivationTest is ZecuredFixture {
 
     MockHeaderRelay internal relay;
     MockRiscZeroVerifier internal verifier;
+    MockSignerBond internal bond;
     address internal account = makeAddr("zecured.test.pending.account");
 
     function _depositProofConfig() internal override returns (DepositProofConfig memory) {
@@ -44,6 +48,11 @@ contract PendingActivationTest is ZecuredFixture {
             finalizeDepth: DEPTH,
             finalizeDelay: DELAY
         });
+    }
+
+    function _signerBond() internal override returns (ISignerBond) {
+        bond = new MockSignerBond();
+        return ISignerBond(address(bond));
     }
 
     // ------------------------------------------------------------------ helpers
@@ -173,6 +182,51 @@ contract PendingActivationTest is ZecuredFixture {
         registry.finalizeActivation(VAULT);
         assertEq(uint8(_status(VAULT)), uint8(VaultStatus.Active));
         assertEq(zzec.totalSupply(), VAULT_001);
+    }
+
+    // ------------------------------------------------------------------ Tier 3
+
+    /// The proven note is a lineage note from the proof on (a spend while the activation is pending is already F1)
+    /// and stops being one when the activation is dropped: then it backs nothing.
+    function test_lineage_fromTheProofOn_untilTheDrop() public {
+        _prove(ANCHOR);
+        LineageNote memory l = registry.lineageOf(TAG);
+        assertEq(l.vaultId, VAULT);
+        assertEq(l.value, VAULT_001);
+        assertEq(registry.openVaultCount(), 1);
+
+        relay.setBlock(ANCHOR, false, 0);
+        vm.warp(block.timestamp + 1 days);
+        registry.dropPendingActivation(VAULT);
+        assertEq(registry.lineageOf(TAG).vaultId, bytes32(0));
+        assertEq(registry.openVaultCount(), 0);
+        assertEq(registry.lastVaultSettledAt(), block.timestamp);
+
+        // Proven again on the chain that won: lineage again, through the activation.
+        _prove(ANCHOR_2);
+        _ready();
+        registry.finalizeActivation(VAULT);
+        assertEq(registry.lineageOf(TAG).value, VAULT_001);
+        assertEq(registry.openVaultCount(), 1);
+    }
+
+    /// After a slash (the bond halted), no new deposit proof is accepted and no pending one is activated.
+    function test_halt_stopsProofsAndFinalization() public {
+        _prove(ANCHOR);
+        bond.setHalted(true);
+        _ready();
+        vm.expectRevert(IZecuredSpendCommits.MintingHalted.selector);
+        registry.finalizeActivation(VAULT);
+
+        relay.setBlock(ANCHOR, false, 0);
+        registry.dropPendingActivation(VAULT);
+        relay.setBlock(ANCHOR_2, true, MIN_WORK);
+        bytes memory journal = _journal(ANCHOR_2);
+        bytes memory seal = verifier.mockSeal(IMAGE_ID, sha256(journal));
+        bytes[] memory sigs = _signerSigs(MessageHashUtils.toTypedDataHash(registry.domainSeparator(), OPENED), _all5());
+        vm.expectRevert(IZecuredSpendCommits.MintingHalted.selector);
+        registry.attestDepositWithProof(journal, seal, sigs);
+        assertEq(zzec.totalSupply(), 0);
     }
 
     function test_cancel_refusedWhilePending_allowedAfterTheDrop() public {

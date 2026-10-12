@@ -9,6 +9,8 @@ import {MorphoStorageLib} from "morpho-blue/src/libraries/periphery/MorphoStorag
 import {MorphoBalancesLib} from "morpho-blue/src/libraries/periphery/MorphoBalancesLib.sol";
 import {ZZEC} from "../../src/ZZEC.sol";
 import {ZecuredRegistry} from "../../src/ZecuredRegistry.sol";
+import {ISignerBond} from "../../src/interfaces/ISignerBond.sol";
+import {IZecuredSpendCommits} from "../../src/interfaces/IZecuredSpendCommits.sol";
 import {SettlementAdapter} from "../../src/SettlementAdapter.sol";
 import {IZZEC} from "../../src/interfaces/IZZEC.sol";
 import {IZecuredRegistry, VaultStatus, ClaimKind, ClaimStatus} from "../../src/interfaces/IZecuredRegistry.sol";
@@ -168,7 +170,8 @@ contract ZecuredRegistryTest is ZecuredFixture {
             ADAPTIVE_CURVE_IRM,
             LLTV,
             signerSet,
-            _noProofs()
+            _noProofs(),
+            NO_BOND
         );
         SettlementAdapter adapter2 = new SettlementAdapter(registry2);
         assertEq(address(registry2), predictedRegistry);
@@ -187,7 +190,8 @@ contract ZecuredRegistryTest is ZecuredFixture {
             ADAPTIVE_CURVE_IRM,
             LLTV,
             signerSet,
-            _noProofs()
+            _noProofs(),
+            NO_BOND
         );
         vm.expectRevert(IZecuredRegistry.ZeroAddress.selector);
         new ZecuredRegistry(
@@ -199,19 +203,29 @@ contract ZecuredRegistryTest is ZecuredFixture {
             ADAPTIVE_CURVE_IRM,
             LLTV,
             signerSet,
-            _noProofs()
+            _noProofs(),
+            NO_BOND
         );
         vm.expectRevert(IZecuredRegistry.ZeroAddress.selector);
         new ZecuredRegistry(
-            MORPHO, zzec, address(0), address(usdc), address(oracle), ADAPTIVE_CURVE_IRM, LLTV, signerSet, _noProofs()
+            MORPHO,
+            zzec,
+            address(0),
+            address(usdc),
+            address(oracle),
+            ADAPTIVE_CURVE_IRM,
+            LLTV,
+            signerSet,
+            _noProofs(),
+            NO_BOND
         );
         vm.expectRevert(IZecuredRegistry.ZeroAddress.selector);
         new ZecuredRegistry(
-            MORPHO, zzec, a, address(0), address(oracle), ADAPTIVE_CURVE_IRM, LLTV, signerSet, _noProofs()
+            MORPHO, zzec, a, address(0), address(oracle), ADAPTIVE_CURVE_IRM, LLTV, signerSet, _noProofs(), NO_BOND
         );
         vm.expectRevert(IZecuredRegistry.ZeroAddress.selector);
         new ZecuredRegistry(
-            MORPHO, zzec, a, address(usdc), address(0), ADAPTIVE_CURVE_IRM, LLTV, signerSet, _noProofs()
+            MORPHO, zzec, a, address(usdc), address(0), ADAPTIVE_CURVE_IRM, LLTV, signerSet, _noProofs(), NO_BOND
         );
     }
 
@@ -232,7 +246,8 @@ contract ZecuredRegistryTest is ZecuredFixture {
             ADAPTIVE_CURVE_IRM,
             LLTV,
             signerSet,
-            _noProofs()
+            _noProofs(),
+            NO_BOND
         );
 
         nonce = vm.getNonce(address(this));
@@ -249,7 +264,8 @@ contract ZecuredRegistryTest is ZecuredFixture {
             ADAPTIVE_CURVE_IRM,
             LLTV,
             signerSet,
-            _noProofs()
+            _noProofs(),
+            NO_BOND
         );
 
         nonce = vm.getNonce(address(this));
@@ -267,7 +283,8 @@ contract ZecuredRegistryTest is ZecuredFixture {
             ADAPTIVE_CURVE_IRM,
             LLTV,
             signerSet,
-            _noProofs()
+            _noProofs(),
+            NO_BOND
         );
     }
 
@@ -289,7 +306,7 @@ contract ZecuredRegistryTest is ZecuredFixture {
             (ZZEC z, address a) = _deployZZECForNextRegistry();
             vm.expectRevert(IZecuredRegistry.InvalidSignerSet.selector);
             new ZecuredRegistry(
-                MORPHO, z, a, address(usdc), address(oracle), ADAPTIVE_CURVE_IRM, LLTV, bad[i], _noProofs()
+                MORPHO, z, a, address(usdc), address(oracle), ADAPTIVE_CURVE_IRM, LLTV, bad[i], _noProofs(), NO_BOND
             );
         }
     }
@@ -297,11 +314,13 @@ contract ZecuredRegistryTest is ZecuredFixture {
     function test_constructor_revertsWhenMorphoRefusesTheMarket() public {
         (ZZEC z, address a) = _deployZZECForNextRegistry();
         vm.expectRevert(bytes("IRM not enabled"));
-        new ZecuredRegistry(MORPHO, z, a, address(usdc), address(oracle), stranger, LLTV, signerSet, _noProofs());
+        new ZecuredRegistry(
+            MORPHO, z, a, address(usdc), address(oracle), stranger, LLTV, signerSet, _noProofs(), NO_BOND
+        );
         (z, a) = _deployZZECForNextRegistry();
         vm.expectRevert(bytes("LLTV not enabled"));
         new ZecuredRegistry(
-            MORPHO, z, a, address(usdc), address(oracle), ADAPTIVE_CURVE_IRM, 0.6e18, signerSet, _noProofs()
+            MORPHO, z, a, address(usdc), address(oracle), ADAPTIVE_CURVE_IRM, 0.6e18, signerSet, _noProofs(), NO_BOND
         );
     }
 
@@ -907,6 +926,7 @@ contract ZecuredRegistryTest is ZecuredFixture {
     function test_confirmPayout_marksTheClaimPaid() public {
         (bytes32 vaultId, bytes32 claimId) = _releasedVault(account, VAULT_005);
         bytes32[] memory ids = _ids(claimId);
+        _commitNext(vaultId, ids);
         bytes[] memory sigs = _signerSigs(registry.hashPayoutConfirmation(vaultId, ids), _idx(1, 2, 3));
         vm.expectEmit(address(registry));
         emit IZecuredRegistry.PayoutConfirmed(vaultId, ids);
@@ -918,6 +938,7 @@ contract ZecuredRegistryTest is ZecuredFixture {
     function test_confirmPayout_revertsOnBadSignatureSets() public {
         (bytes32 vaultId, bytes32 claimId) = _releasedVault(account, VAULT_005);
         bytes32[] memory ids = _ids(claimId);
+        _commitNext(vaultId, ids);
         bytes32 digest = registry.hashPayoutConfirmation(vaultId, ids);
 
         vm.expectRevert(abi.encodeWithSelector(IZecuredRegistry.InsufficientSignatures.selector, 2));
@@ -962,6 +983,8 @@ contract ZecuredRegistryTest is ZecuredFixture {
 
         // Already paid, and the same id twice in one call.
         ids = _ids(claimA);
+        _commitNext(vaultA, ids);
+        _commitNext(vaultB, _ids(claimB));
         sigs = _threeSigs(registry.hashPayoutConfirmation(vaultA, ids));
         registry.confirmPayout(vaultA, ids, sigs);
         vm.expectRevert(abi.encodeWithSelector(IZecuredRegistry.ClaimAlreadyPaid.selector, claimA));
@@ -971,6 +994,18 @@ contract ZecuredRegistryTest is ZecuredFixture {
         vm.expectRevert(abi.encodeWithSelector(IZecuredRegistry.ClaimAlreadyPaid.selector, claimB));
         registry.confirmPayout(vaultB, ids, sigs);
         _assertClaim(claimB, vaultB, ClaimKind.Release, VAULT_001, RELEASE_COMMITMENT, ClaimStatus.Pending);
+    }
+
+    /// Tier 3: a claim is confirmed paid only once a payout of it was committed, which its claimant can check (F3).
+    function test_confirmPayout_revertsOnAnUncommittedClaim() public {
+        (bytes32 vaultId, bytes32 claimId) = _releasedVault(account, VAULT_005);
+        bytes32[] memory ids = _ids(claimId);
+        bytes[] memory sigs = _threeSigs(registry.hashPayoutConfirmation(vaultId, ids));
+        vm.expectRevert(abi.encodeWithSelector(IZecuredSpendCommits.ClaimNotCommitted.selector, claimId));
+        registry.confirmPayout(vaultId, ids, sigs);
+        _commitNext(vaultId, ids);
+        registry.confirmPayout(vaultId, ids, sigs);
+        _assertClaim(claimId, vaultId, ClaimKind.Release, VAULT_005, RELEASE_COMMITMENT, ClaimStatus.Paid);
     }
 
     // ================================================================== views

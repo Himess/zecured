@@ -20,7 +20,9 @@ import {
     DepositProofConfig,
     MintMode
 } from "./interfaces/IZecuredRegistry.sol";
-import {ZecuredEIP712, DepositAttestation} from "./libraries/ZecuredEIP712.sol";
+import {ZecuredEIP712, DepositAttestation, SpendCommit} from "./libraries/ZecuredEIP712.sol";
+import {IZecuredSpendCommits, LineageNote, SpendRecord, ClaimPayment} from "./interfaces/IZecuredSpendCommits.sol";
+import {ISignerBond} from "./interfaces/ISignerBond.sol";
 
 /// @title ZecuredRegistry
 /// @notice Book-keeping for Zecured vaults on Base (docs/INTERFACES.md § 3.2):
@@ -36,12 +38,14 @@ import {ZecuredEIP712, DepositAttestation} from "./libraries/ZecuredEIP712.sol";
 ///           long as the position's LTV stays <= 50 % afterwards and at least MIN_RELEASE stays in the vault;
 ///         - `recordLiquidation` / `recordClose`: the SettlementAdapter reports seized / closed collateral, which the
 ///           Registry burns (I7, I9);
-///         - every burn creates a claim (payout instruction for the signers, I3); `confirmPayout` marks claims paid.
+///         - every burn creates a claim (payout instruction for the signers, I3); `confirmPayout` marks claims paid;
+///         - Tier 3 (docs/TIER3.md): `commitSpend` records every payout of a lineage note before the signers sign it,
+///           so that a theft is provable (`ZecuredSlasher`); a slash halts minting through the bond contract.
 /// @dev Morpho authorization is all-or-nothing: an account that authorizes the Registry lets it do anything on its
 ///      behalf. This contract therefore calls exactly two Morpho functions: `supplyCollateral` (needs no authorization)
 ///      and `withdrawCollateral` (only inside the account's own `requestRelease` / `requestPartialRelease`, to the
 ///      Registry). It has no code path that borrows or withdraws loan assets, and it is not upgradeable and has no admin.
-contract ZecuredRegistry is IZecuredRegistry, EIP712 {
+contract ZecuredRegistry is IZecuredRegistry, IZecuredSpendCommits, EIP712 {
     using MarketParamsLib for MarketParams;
     using SharesMathLib for uint256;
 
@@ -56,6 +60,15 @@ contract ZecuredRegistry is IZecuredRegistry, EIP712 {
     uint256 private constant BPS = 10_000;
     /// @inheritdoc IZecuredRegistry
     uint256 public constant JOURNAL_LENGTH = 6 * 32;
+    /// @inheritdoc IZecuredSpendCommits
+    uint256 public constant MAX_CLAIMS_PER_PAYOUT = 8;
+    /// @dev ZIP 317: 5,000 zatoshi per logical action, at least 2 actions; a payout spends one lineage note, so its
+    ///      actions are its outputs (claims plus change). The signers' plans charge exactly this
+    ///      (`zecured_zcash_ops::spend::zip317_fee`).
+    uint64 private constant ZIP317_MARGINAL_FEE = 5_000;
+    uint256 private constant ZIP317_GRACE_ACTIONS = 2;
+    /// @dev All five signers: an uncommitted spend is signed by three of them, and FROST does not tell which.
+    uint8 private constant ALL_SIGNERS = 0x1f;
 
     /// @inheritdoc IZecuredRegistry
     IMorpho public immutable morpho;
@@ -82,6 +95,8 @@ contract ZecuredRegistry is IZecuredRegistry, EIP712 {
     uint64 public immutable finalizeDepth;
     /// @inheritdoc IZecuredRegistry
     uint64 public immutable finalizeDelay;
+    /// @inheritdoc IZecuredSpendCommits
+    ISignerBond public immutable signerBond;
 
     // MarketParams cannot be an immutable struct: its fields are stored one by one (collateral token = zzec).
     address private immutable _loanToken;
@@ -101,6 +116,7 @@ contract ZecuredRegistry is IZecuredRegistry, EIP712 {
         uint64 outstanding; // zatoshi still locked (= zZEC supplied to Morpho for this vault)
         VaultStatus status;
         uint64 claimCount; // sequence number of the next claim
+        uint64 unpaidClaims; // claims not yet confirmed paid (the vault is open while any is left)
     }
 
     /// @dev The journal of a deposit proof (tier2/statement `Journal::abi_encode`).
@@ -138,6 +154,15 @@ contract ZecuredRegistry is IZecuredRegistry, EIP712 {
     /// @inheritdoc IZecuredRegistry
     mapping(bytes32 depositTag => bool used) public depositTagUsed;
 
+    // Tier 3 (docs/TIER3.md § 4).
+    mapping(bytes32 tag => LineageNote) private _lineage;
+    mapping(bytes32 payoutRef => SpendRecord) private _spends;
+    mapping(bytes32 claimRef => ClaimPayment) private _claimPayments;
+    /// @inheritdoc IZecuredSpendCommits
+    mapping(bytes32 claimId => bytes32 inputTag) public claimInput;
+    uint256 private _openVaults;
+    uint64 private _lastVaultSettledAt;
+
     modifier onlyAdapter() {
         _checkAdapter();
         _;
@@ -154,6 +179,8 @@ contract ZecuredRegistry is IZecuredRegistry, EIP712 {
     /// @param signers_ The 5 signer addresses, strictly increasing.
     /// @param proofs_ Tier 2 deposit proofs: verifier, guest image id, header relay, minimum confirmation work, mint mode
     ///        (K1), seal selector (Y1) and finalization depth and delay (K3); all zero (`SignerAttested`) to disable them.
+    /// @param signerBond_ Tier 3: the signers' bond contract (its predicted address), whose halt stops minting; zero
+    ///        for a deployment without bonds (local fork, tests).
     /// @dev Creates the zZEC market on Morpho unless it already exists (market creation is permissionless, so someone
     ///      may have created it between the zZEC deployment and this one).
     constructor(
@@ -165,7 +192,8 @@ contract ZecuredRegistry is IZecuredRegistry, EIP712 {
         address irm_,
         uint256 lltv_,
         address[5] memory signers_,
-        DepositProofConfig memory proofs_
+        DepositProofConfig memory proofs_,
+        ISignerBond signerBond_
     ) EIP712(ZecuredEIP712.REGISTRY_DOMAIN_NAME, ZecuredEIP712.DOMAIN_VERSION) {
         if (
             address(morpho_) == address(0) || address(zzec_) == address(0) || adapter_ == address(0)
@@ -201,6 +229,7 @@ contract ZecuredRegistry is IZecuredRegistry, EIP712 {
         depositSealSelector = proofs_.sealSelector;
         finalizeDepth = proofs_.finalizeDepth;
         finalizeDelay = proofs_.finalizeDelay;
+        signerBond = signerBond_;
 
         MarketParams memory params = MarketParams({
             loanToken: loanToken_, collateralToken: address(zzec_), oracle: oracle_, irm: irm_, lltv: lltv_
@@ -217,6 +246,7 @@ contract ZecuredRegistry is IZecuredRegistry, EIP712 {
         if (mintMode == MintMode.ProofOnly) revert MintRequiresProof();
         _checkNewVault(att.vaultId, att.account, att.amount, att.depositTag);
         _verifySignerSignatures(_hashTypedDataV4(ZecuredEIP712.hashDepositAttestation(att)), sigs, THRESHOLD);
+        _open(att.vaultId, att.amount, att.depositTag);
         _activate(att.vaultId, att.account, att.amount, att.depositTag);
     }
 
@@ -264,9 +294,11 @@ contract ZecuredRegistry is IZecuredRegistry, EIP712 {
         if (p.account == address(0)) revert NoPendingActivation(vaultId);
         if (relay.isInBestChain(p.anchor)) revert AnchorStillOnBestChain(vaultId);
         delete _pending[vaultId];
-        // Nothing was minted: the note may be proven again against the chain that won.
+        // Nothing was minted: the note may be proven again against the chain that won, and it backs nothing.
         depositTagUsed[p.depositTag] = false;
         delete _vaultOf[p.account];
+        delete _lineage[p.depositTag];
+        _settle();
         emit PendingActivationDropped(vaultId);
     }
 
@@ -392,14 +424,37 @@ contract ZecuredRegistry is IZecuredRegistry, EIP712 {
             _hashTypedDataV4(ZecuredEIP712.hashPayoutConfirmation(vaultId, claimIds)), sigs, THRESHOLD
         );
 
+        Vault storage v = _vaults[vaultId];
         for (uint256 i; i < claimIds.length; ++i) {
             Claim storage c = _claims[claimIds[i]];
             if (c.status == ClaimStatus.None) revert UnknownClaim(claimIds[i]);
             if (c.vaultId != vaultId) revert ClaimVaultMismatch(claimIds[i], vaultId);
             if (c.status == ClaimStatus.Paid) revert ClaimAlreadyPaid(claimIds[i]); // also rejects duplicate ids
+            // Tier 3: a claim is paid by a committed payout only, which its claimant can check (F3).
+            if (claimInput[claimIds[i]] == bytes32(0)) revert ClaimNotCommitted(claimIds[i]);
             c.status = ClaimStatus.Paid;
         }
+        v.unpaidClaims -= uint64(claimIds.length);
         emit PayoutConfirmed(vaultId, claimIds);
+        if (v.status == VaultStatus.Closed && v.unpaidClaims == 0) _settle();
+    }
+
+    // ------------------------------------------------------------------ Tier 3: spend commitments
+
+    /// @inheritdoc IZecuredSpendCommits
+    function commitSpend(SpendCommit calldata c, bytes[] calldata sigs) external {
+        uint64 inputValue = _checkSpendShape(c);
+        bytes32 recordHash = ZecuredEIP712.hashSpendCommit(c);
+        uint8 signerBitmap = _verifySignerSignatures(_hashTypedDataV4(recordHash), sigs, THRESHOLD);
+
+        uint256 n = c.claimIds.length;
+        uint64 fee = ZIP317_MARGINAL_FEE * uint64(Math.max(ZIP317_GRACE_ACTIONS, c.changeValue != 0 ? n + 1 : n));
+        uint256 claimed;
+        for (uint256 i; i < n; ++i) {
+            claimed += _commitClaim(c, i, fee);
+        }
+        if (claimed + c.changeValue != inputValue) revert ConservationBroken(inputValue, claimed, c.changeValue);
+        _recordSpend(c, recordHash, signerBitmap);
     }
 
     // ------------------------------------------------------------------ views
@@ -482,6 +537,36 @@ contract ZecuredRegistry is IZecuredRegistry, EIP712 {
         return (p.account, p.amount, p.depositTag, p.anchor, p.readyHeight, p.readyTime);
     }
 
+    /// @inheritdoc IZecuredSpendCommits
+    function lineageOf(bytes32 tag) external view returns (LineageNote memory) {
+        return _lineage[tag];
+    }
+
+    /// @inheritdoc IZecuredSpendCommits
+    function spendRecord(bytes32 payoutRef) external view returns (SpendRecord memory) {
+        return _spends[payoutRef];
+    }
+
+    /// @inheritdoc IZecuredSpendCommits
+    function claimPayment(bytes32 claimRef) external view returns (ClaimPayment memory) {
+        return _claimPayments[claimRef];
+    }
+
+    /// @inheritdoc IZecuredSpendCommits
+    function hashSpendCommit(SpendCommit calldata c) external view returns (bytes32) {
+        return _hashTypedDataV4(ZecuredEIP712.hashSpendCommit(c));
+    }
+
+    /// @inheritdoc IZecuredSpendCommits
+    function openVaultCount() external view returns (uint256) {
+        return _openVaults;
+    }
+
+    /// @inheritdoc IZecuredSpendCommits
+    function lastVaultSettledAt() external view returns (uint64) {
+        return _lastVaultSettledAt;
+    }
+
     // ------------------------------------------------------------------ internal
 
     /// @dev Proofs disabled: everything zero and `SignerAttested` (nothing could mint in `ProofOnly`). Enabled: a relay,
@@ -511,6 +596,8 @@ contract ZecuredRegistry is IZecuredRegistry, EIP712 {
     /// @dev K3: reserves the vault id, tag and account of a proven deposit until `finalizeActivation` or
     ///      `dropPendingActivation`.
     function _pend(DepositJournal memory j) internal {
+        _checkNotHalted();
+        _open(j.vaultId, j.amount, j.depositTag);
         depositTagUsed[j.depositTag] = true;
         _vaultOf[j.account] = j.vaultId;
         (, uint256 height,) = relay.bestChainTip();
@@ -550,9 +637,11 @@ contract ZecuredRegistry is IZecuredRegistry, EIP712 {
 
     /// @dev Registers the vault, mints its zZEC and supplies it to Morpho on behalf of the account (I1).
     function _activate(bytes32 vaultId, address account, uint64 amount, bytes32 depositTag) internal {
+        _checkNotHalted();
         depositTagUsed[depositTag] = true;
         _vaultOf[account] = vaultId;
-        _vaults[vaultId] = Vault({account: account, outstanding: amount, status: VaultStatus.Active, claimCount: 0});
+        _vaults[vaultId] =
+            Vault({account: account, outstanding: amount, status: VaultStatus.Active, claimCount: 0, unpaidClaims: 0});
         emit VaultActivated(vaultId, account, amount, depositTag);
 
         // The Registry holds the zZEC only within this call: Morpho pulls exactly `amount` from it.
@@ -605,27 +694,119 @@ contract ZecuredRegistry is IZecuredRegistry, EIP712 {
         uint64 sequence = v.claimCount;
         claimId = claimIdOf(vaultId, sequence);
         v.claimCount = sequence + 1;
+        v.unpaidClaims += 1;
         _claims[claimId] =
             Claim({vaultId: vaultId, commitment: commitment, amount: amount, kind: kind, status: ClaimStatus.Pending});
     }
 
     /// @dev I6: at least `required` (>= THRESHOLD) signatures; every one must be a valid, non-malleable ECDSA signature
     ///      (OpenZeppelin ECDSA rejects high-s and bad v) of a signer, and the recovered signers must be strictly
-    ///      increasing, so the same signer can never be counted twice.
-    function _verifySignerSignatures(bytes32 digest, bytes[] calldata sigs, uint256 required) internal view {
+    ///      increasing, so the same signer can never be counted twice. Returns who signed: bit i for signer i.
+    function _verifySignerSignatures(bytes32 digest, bytes[] calldata sigs, uint256 required)
+        internal
+        view
+        returns (uint8 signerBitmap)
+    {
         if (sigs.length < required) revert InsufficientSignatures(sigs.length);
         address previous = address(0);
         for (uint256 i; i < sigs.length; ++i) {
             address recovered = ECDSA.recoverCalldata(digest, sigs[i]);
-            if (!_isSigner(recovered)) revert UnknownSigner(recovered);
+            uint256 index = _signerIndex(recovered);
+            if (index == SIGNER_COUNT) revert UnknownSigner(recovered);
             if (recovered <= previous) revert SignaturesNotSorted(i);
             previous = recovered;
+            // index < SIGNER_COUNT: one of the five low bits, which fit in a uint8.
+            // forge-lint: disable-next-line(incorrect-shift,unsafe-typecast)
+            signerBitmap |= uint8(1 << index);
         }
     }
 
-    function _isSigner(address account) internal view returns (bool) {
-        return
-            account == _signer0 || account == _signer1 || account == _signer2 || account == _signer3
-                || account == _signer4;
+    /// @dev The signer's index in the sorted set, or SIGNER_COUNT for any other address.
+    function _signerIndex(address account) internal view returns (uint256) {
+        if (account == _signer0) return 0;
+        if (account == _signer1) return 1;
+        if (account == _signer2) return 2;
+        if (account == _signer3) return 3;
+        if (account == _signer4) return 4;
+        return SIGNER_COUNT;
+    }
+
+    /// @dev The parts of a commitment that need no claim lookup: a new, non-zero payout ref; an input that is a lineage
+    ///      note of the vault; 1 to MAX_CLAIMS_PER_PAYOUT claims with one ref each; a change tag exactly when there is
+    ///      change, not already a lineage note. Returns the input's value.
+    function _checkSpendShape(SpendCommit calldata c) internal view returns (uint64) {
+        if (c.payoutRef == bytes32(0)) revert ZeroPayoutRef();
+        if (_spends[c.payoutRef].vaultId != bytes32(0)) revert PayoutAlreadyCommitted(c.payoutRef);
+        LineageNote memory input = _lineage[c.inputTag];
+        if (c.vaultId == bytes32(0) || input.vaultId != c.vaultId) revert NotALineageNote(c.vaultId, c.inputTag);
+        uint256 n = c.claimIds.length;
+        if (n == 0 || n > MAX_CLAIMS_PER_PAYOUT || c.claimRefs.length != n) {
+            revert InvalidClaimCount(n, c.claimRefs.length);
+        }
+        bool withChange = c.changeValue != 0;
+        if (withChange != (c.changeTag != bytes32(0)) || (withChange && _lineage[c.changeTag].vaultId != bytes32(0))) {
+            revert InvalidChange(c.changeTag, c.changeValue);
+        }
+        return input.value;
+    }
+
+    /// @dev Records a checked commitment; its change becomes a lineage note of the vault.
+    function _recordSpend(SpendCommit calldata c, bytes32 recordHash, uint8 signerBitmap) internal {
+        _spends[c.payoutRef] = SpendRecord({
+            recordHash: recordHash,
+            vaultId: c.vaultId,
+            inputTag: c.inputTag,
+            changeTag: c.changeTag,
+            changeValue: c.changeValue,
+            claimCount: uint8(c.claimIds.length),
+            signerBitmap: signerBitmap
+        });
+        if (c.changeValue != 0) _lineage[c.changeTag] = LineageNote({vaultId: c.vaultId, value: c.changeValue});
+        emit SpendCommitted(
+            c.vaultId, c.payoutRef, c.inputTag, c.claimIds, c.claimRefs, c.changeTag, c.changeValue, signerBitmap
+        );
+    }
+
+    /// @dev One claim of a commitment (docs/TIER3.md § 4): distinct, of the vault, pending, bound to this input (the
+    ///      first commitment binds it), with an unused claim ref, which records what the claimant must receive.
+    ///      `claimIds[0]` bears the fee. Returns the claim's amount.
+    function _commitClaim(SpendCommit calldata c, uint256 i, uint64 fee) internal returns (uint64 amount) {
+        bytes32 id = c.claimIds[i];
+        for (uint256 k; k < i; ++k) {
+            if (c.claimIds[k] == id) revert DuplicateClaim(id);
+        }
+        Claim storage cl = _claims[id];
+        if (cl.vaultId != c.vaultId || cl.status != ClaimStatus.Pending) revert ClaimNotPayable(id);
+        bytes32 bound = claimInput[id];
+        if (bound == bytes32(0)) claimInput[id] = c.inputTag;
+        else if (bound != c.inputTag) revert ClaimBoundToAnotherInput(id, bound);
+
+        bytes32 ref = c.claimRefs[i];
+        if (ref == bytes32(0) || _claimPayments[ref].claimId != bytes32(0)) revert ClaimRefAlreadyUsed(ref);
+        amount = cl.amount;
+        uint64 expected = amount;
+        if (i == 0) {
+            if (amount <= fee) revert FeeBearerIsDust(id, amount, fee);
+            expected = amount - fee;
+        }
+        _claimPayments[ref] = ClaimPayment({claimId: id, payoutRef: c.payoutRef, expected: expected});
+    }
+
+    /// @dev A vault's deposit note becomes its first lineage note as soon as the vault is pending or activated: from
+    ///      then on, spending it without a commitment is F1. The vault stays open until it is closed and every claim is
+    ///      confirmed paid (or its pending activation is dropped).
+    function _open(bytes32 vaultId, uint64 amount, bytes32 depositTag) internal {
+        _lineage[depositTag] = LineageNote({vaultId: vaultId, value: amount});
+        _openVaults += 1;
+    }
+
+    function _settle() internal {
+        uint256 open = _openVaults - 1;
+        _openVaults = open;
+        if (open == 0) _lastVaultSettledAt = uint64(block.timestamp);
+    }
+
+    function _checkNotHalted() internal view {
+        if (address(signerBond) != address(0) && signerBond.halted()) revert MintingHalted();
     }
 }

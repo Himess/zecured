@@ -2,12 +2,12 @@
 pragma solidity 0.8.28;
 
 import {console} from "forge-std/console.sol";
-import {VaultStatus} from "../../src/interfaces/IZecuredRegistry.sol";
+import {VaultStatus, ClaimStatus} from "../../src/interfaces/IZecuredRegistry.sol";
 import {ZecuredFixture} from "../utils/ZecuredFixture.sol";
 import {ZecuredHandler} from "./ZecuredHandler.sol";
 
-/// @notice Handler-based invariant tests of CLAUDE.md I1, I2, I3 (on-chain part), I4 to I9 and the review's I11 to I14
-///         (I13 on-chain part) against the real Morpho Blue on a Base Sepolia fork. Runs/depth:
+/// @notice Handler-based invariant tests of CLAUDE.md I1, I2, I3 (on-chain part), I4 to I9, the review's I11 to I14
+///         (I13 on-chain part) and Tier 3's I15 to I17 against the real Morpho Blue on a Base Sepolia fork. Runs/depth:
 ///         [profile.default.invariant] in foundry.toml.
 contract ZecuredInvariantsTest is ZecuredFixture {
     ZecuredHandler internal handler;
@@ -18,7 +18,7 @@ contract ZecuredInvariantsTest is ZecuredFixture {
         usdc.transferOwnership(address(handler)); // MOCK mint for the handler's actors
         oracle.transferOwnership(address(handler)); // MOCK price moves
 
-        bytes4[] memory selectors = new bytes4[](19);
+        bytes4[] memory selectors = new bytes4[](22);
         selectors[0] = ZecuredHandler.attest.selector;
         selectors[1] = ZecuredHandler.attest.selector; // weighted: vaults first
         selectors[2] = ZecuredHandler.borrow.selector;
@@ -38,6 +38,9 @@ contract ZecuredInvariantsTest is ZecuredFixture {
         selectors[16] = ZecuredHandler.attackPartialRelease.selector;
         selectors[17] = ZecuredHandler.cancel.selector;
         selectors[18] = ZecuredHandler.attackCancellation.selector;
+        selectors[19] = ZecuredHandler.commitOnly.selector;
+        selectors[20] = ZecuredHandler.attackClaimReuse.selector;
+        selectors[21] = ZecuredHandler.attackUncommittedConfirm.selector;
         targetSelector(FuzzSelector({addr: address(handler), selectors: selectors}));
         targetContract(address(handler));
         // The handler pranks its own actors, so the caller does not matter. A fixed caller matters on a fork: every
@@ -136,6 +139,57 @@ contract ZecuredInvariantsTest is ZecuredFixture {
         }
     }
 
+    /// I15 (Tier 3, Base side of I10): a vault's current lineage note holds what Base still owes from the vault: its
+    /// outstanding plus the claims no payout was committed for. A claim committed against an earlier note is paid by
+    /// that payout, not by the current note.
+    function invariant_I15_lineageHoldsWhatBaseOwes() public view {
+        for (uint256 i; i < handler.vaultCount(); ++i) {
+            bytes32 vaultId = handler.vaultIds(i);
+            (, uint64 outstanding,) = registry.vault(vaultId);
+            uint256 owed = outstanding;
+            for (uint64 j; j < registry.claimCount(vaultId); ++j) {
+                bytes32 claimId = registry.claimIdOf(vaultId, j);
+                (,, uint64 amount,, ClaimStatus status) = registry.claim(claimId);
+                if (status == ClaimStatus.Pending && registry.claimInput(claimId) == bytes32(0)) owed += amount;
+            }
+            bytes32 head = handler.headOf(vaultId);
+            uint64 lineage = head == bytes32(0) ? 0 : registry.lineageOf(head).value;
+            assertEq(lineage, owed, "I15: lineage == outstanding + uncommitted claims");
+            if (head != bytes32(0)) assertEq(registry.lineageOf(head).vaultId, vaultId, "I15: lineage of the vault");
+        }
+    }
+
+    /// I16 (Tier 3): every claim confirmed paid was committed, against a lineage note of its own vault.
+    function invariant_I16_paidClaimsWereCommitted() public view {
+        for (uint256 i; i < handler.vaultCount(); ++i) {
+            bytes32 vaultId = handler.vaultIds(i);
+            for (uint64 j; j < registry.claimCount(vaultId); ++j) {
+                bytes32 claimId = registry.claimIdOf(vaultId, j);
+                (,,,, ClaimStatus status) = registry.claim(claimId);
+                bytes32 input = registry.claimInput(claimId);
+                if (status == ClaimStatus.Paid) assertTrue(input != bytes32(0), "I16: paid without a commitment");
+                if (input != bytes32(0)) assertEq(registry.lineageOf(input).vaultId, vaultId, "I16: foreign input");
+            }
+        }
+    }
+
+    /// I17 (Tier 3, S5): the open-vault count the bonds wait on is the number of vaults that are active, or closed with
+    /// a claim not yet confirmed paid.
+    function invariant_I17_openVaultCount() public view {
+        uint256 open;
+        for (uint256 i; i < handler.vaultCount(); ++i) {
+            bytes32 vaultId = handler.vaultIds(i);
+            (,, VaultStatus status) = registry.vault(vaultId);
+            bool unpaid;
+            for (uint64 j; j < registry.claimCount(vaultId); ++j) {
+                (,,,, ClaimStatus s) = registry.claim(registry.claimIdOf(vaultId, j));
+                if (s == ClaimStatus.Pending) unpaid = true;
+            }
+            if (status == VaultStatus.Active || unpaid) ++open;
+        }
+        assertEq(registry.openVaultCount(), open, "I17");
+    }
+
     /// I2 / I6 / I8 / I14: no attack ever succeeded (account self-withdrawal, direct Morpho liquidation, zZEC flash loan,
     /// attestation with < 3 distinct signers, close request executed by a stranger or after its deadline, partial
     /// release by anyone but the account, activation of a cancelled vault, cancellation of an activated one).
@@ -144,7 +198,7 @@ contract ZecuredInvariantsTest is ZecuredFixture {
     }
 
     function afterInvariant() external view {
-        string[21] memory names = [
+        string[25] memory names = [
             "attest",
             "borrow",
             "repay",
@@ -165,7 +219,11 @@ contract ZecuredInvariantsTest is ZecuredFixture {
             "attack: close request",
             "attack: partial release",
             "cancel",
-            "attack: cancellation"
+            "attack: cancellation",
+            "commit",
+            "commit only",
+            "attack: claim reuse",
+            "attack: uncommitted confirm"
         ];
         for (uint256 i; i < names.length; ++i) {
             console.log(names[i], handler.calls(names[i]));

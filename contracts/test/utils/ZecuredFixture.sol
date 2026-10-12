@@ -9,8 +9,9 @@ import {MockUSDC} from "../../src/mocks/MockUSDC.sol";
 import {MockZecOracle} from "../../src/mocks/MockZecOracle.sol";
 import {ZZEC} from "../../src/ZZEC.sol";
 import {ZecuredRegistry} from "../../src/ZecuredRegistry.sol";
+import {ISignerBond} from "../../src/interfaces/ISignerBond.sol";
 import {SettlementAdapter} from "../../src/SettlementAdapter.sol";
-import {DepositAttestation, CloseRequest} from "../../src/libraries/ZecuredEIP712.sol";
+import {DepositAttestation, CloseRequest, SpendCommit} from "../../src/libraries/ZecuredEIP712.sol";
 import {VaultStatus, ClaimKind, ClaimStatus, DepositProofConfig} from "../../src/interfaces/IZecuredRegistry.sol";
 
 /// @notice Shared fixture of the fork tests: a fork of Base Sepolia with the REAL Morpho Blue and AdaptiveCurveIRM, plus
@@ -27,6 +28,8 @@ abstract contract ZecuredFixture is Test {
     IMorpho internal constant MORPHO = IMorpho(0xBBBBBbbBBb9cC5e90e3b3Af64bdAF62C37EEFFCb);
     address internal constant ADAPTIVE_CURVE_IRM = 0x46415998764C29aB2a25CbeA6254146D50D22687;
     uint256 internal constant LLTV = 0.625e18;
+    /// @dev Tier 3 bonds disabled (the Tier 3 tests deploy a SignerBond of their own).
+    ISignerBond internal constant NO_BOND = ISignerBond(address(0));
     uint256 internal constant BASE_SEPOLIA_CHAIN_ID = 84532;
     string internal constant DEFAULT_RPC_URL = "https://sepolia.base.org";
     uint256 internal constant DEFAULT_FORK_BLOCK = 47_948_000;
@@ -102,6 +105,11 @@ abstract contract ZecuredFixture is Test {
     /// deploy contracts; it runs before the ZZEC / Registry / Adapter addresses are predicted).
     function _depositProofConfig() internal virtual returns (DepositProofConfig memory) {}
 
+    /// The Registry's bond contract: none by default; Tier 3 tests override it.
+    function _signerBond() internal virtual returns (ISignerBond) {
+        return NO_BOND;
+    }
+
     /// Deposit proofs disabled (all zero).
     function _noProofs() internal pure returns (DepositProofConfig memory none) {}
 
@@ -110,13 +118,23 @@ abstract contract ZecuredFixture is Test {
         usdc = new MockUSDC(address(this));
         oracle = new MockZecOracle(address(this), PRICE_40);
         DepositProofConfig memory proofs = _depositProofConfig();
+        ISignerBond bond = _signerBond();
 
         uint64 nonce = vm.getNonce(address(this));
         address predictedRegistry = vm.computeCreateAddress(address(this), nonce + 1);
         address predictedAdapter = vm.computeCreateAddress(address(this), nonce + 2);
         zzec = new ZZEC(predictedRegistry, predictedAdapter, address(MORPHO));
         registry = new ZecuredRegistry(
-            MORPHO, zzec, predictedAdapter, address(usdc), address(oracle), ADAPTIVE_CURVE_IRM, LLTV, signerSet, proofs
+            MORPHO,
+            zzec,
+            predictedAdapter,
+            address(usdc),
+            address(oracle),
+            ADAPTIVE_CURVE_IRM,
+            LLTV,
+            signerSet,
+            proofs,
+            bond
         );
         adapter = new SettlementAdapter(registry);
         assertEq(address(registry), predictedRegistry, "registry address prediction");
@@ -195,6 +213,58 @@ abstract contract ZecuredFixture is Test {
         DepositAttestation memory att = _attestation(account, amount);
         registry.attestDeposit(att, _threeSigs(registry.hashDepositAttestation(att)));
         return att.vaultId;
+    }
+
+    // ------------------------------------------------------------------ Tier 3 commitments
+
+    /// A commitment of a payout of `claimIds` (claims of `vaultId`) from the lineage note `inputTag`, returning the
+    /// rest to the vault as change (conservation). References and tags are derived from `salt`.
+    function _spendCommit(bytes32 vaultId, bytes32 inputTag, bytes32[] memory claimIds, bytes32 salt)
+        internal
+        view
+        returns (SpendCommit memory c)
+    {
+        uint64 claimed;
+        bytes32[] memory refs = new bytes32[](claimIds.length);
+        for (uint256 i; i < claimIds.length; ++i) {
+            (,, uint64 amount,,) = registry.claim(claimIds[i]);
+            claimed += amount;
+            refs[i] = keccak256(abi.encode("zecured.test.claimRef", salt, i));
+        }
+        uint64 change = registry.lineageOf(inputTag).value - claimed;
+        c = SpendCommit({
+            vaultId: vaultId,
+            inputTag: inputTag,
+            claimIds: claimIds,
+            claimRefs: refs,
+            payoutRef: keccak256(abi.encode("zecured.test.payoutRef", salt)),
+            changeTag: change == 0 ? bytes32(0) : keccak256(abi.encode("zecured.test.changeTag", salt)),
+            changeValue: change
+        });
+    }
+
+    /// Commits the payout of `claimIds` from `inputTag` (signers 0, 2, 4); returns the commitment.
+    function _commit(bytes32 vaultId, bytes32 inputTag, bytes32[] memory claimIds)
+        internal
+        returns (SpendCommit memory c)
+    {
+        c = _spendCommit(vaultId, inputTag, claimIds, keccak256(abi.encode(vaultId, inputTag, claimIds)));
+        registry.commitSpend(c, _threeSigs(registry.hashSpendCommit(c)));
+    }
+
+    /// The vault's current lineage note, as the tests' payouts moved it (zero: still the deposit).
+    mapping(bytes32 vaultId => bytes32 tag) internal lineageHead;
+
+    /// Commits the next payout of `vaultId`, paying `claimIds` from its current lineage note (the deposit of a vault
+    /// attested with `_attest`, then each payout's change), as the signers would before signing it.
+    function _commitNext(bytes32 vaultId, bytes32[] memory claimIds) internal returns (SpendCommit memory c) {
+        bytes32 head = lineageHead[vaultId];
+        if (head == bytes32(0)) {
+            (address account,,) = registry.vault(vaultId);
+            head = _depositTagFor(account);
+        }
+        c = _commit(vaultId, head, claimIds);
+        lineageHead[vaultId] = c.changeTag;
     }
 
     /// The account's first UserOp: authorize Registry and Adapter on Morpho.
