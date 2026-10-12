@@ -1,12 +1,23 @@
 # Tier 3: theft of collateral is provable on Base and slashes bonds
 
-Status (2026-10-12): **interface locked, implementation in progress** (Deploy 2). This document fixes
-what the contracts, the signers and the violation guest must agree on before Deploy 2, whose
-Registry is immutable: the message the signers sign, the state the Registry keeps, the three
-violation statements and the bond rules. It follows the review's decisions T3-1 to T3-7 and S4 to
-S6. The locked interfaces are `contracts/src/libraries/ZecuredEIP712.sol` (`SpendCommit`),
-`contracts/src/interfaces/IZecuredSpendCommits.sol`, `ISignerBond.sol` and `IZecuredSlasher.sol`;
-the derivations are `zecured_policy::derive::payout_ref` and `zecured_policy::ledger::claim_ref`.
+Status (2026-10-12): **implemented, not yet deployed** (Deploy 2). Contracts: Registry v2
+(`commitSpend`), `SignerBond`, `ZecuredSlasher`. Signers: the commitment in FROST round 1 and the
+round-2 checks (T3-4, T3-5). The violation statement, its zkVM guest and `build-violation`
+(F1, F2) are done; still to come are the watchtower, F3 witnesses from the app, and the theft demo
+deployment. This document fixes what the contracts, the signers and the violation guest agree on:
+- the message the signers sign;
+- the state the Registry keeps;
+- the three violation statements;
+- the bond rules.
+
+It follows the review's decisions T3-1 to T3-7 and S4 to S6 (D31). The interfaces are:
+- `contracts/src/libraries/ZecuredEIP712.sol` (`SpendCommit`);
+- `contracts/src/interfaces/IZecuredSpendCommits.sol`;
+- `ISignerBond.sol`;
+- `IZecuredSlasher.sol`.
+
+The derivations are `zecured_policy::derive::payout_ref` and `zecured_policy::ledger::claim_ref`, and
+the same functions in `tier2/statement` (`violation.rs`).
 
 ## 1. The idea
 
@@ -130,7 +141,7 @@ coordinator crash, since `commitSpend` needs no permission.
   is therefore never committed to two payouts that could both land.
 
 **Refunds of non-conforming notes (P5)** need no commitment. Those notes are never lineage notes, so
-no zZEC rests on them (§ 9).
+no zZEC rests on them (§ 10).
 
 ## 6. The violation statements: one guest, one entry point (T3-3)
 
@@ -224,7 +235,15 @@ and so is each claimant for its own claims.
 
 The theft demo never runs on the judge deployment (T3-6).
 
-## 9. Out of scope, said plainly (T3-7)
+## 9. Measurements on real Testnet data
+
+| What | Result |
+|---|---|
+| A real vault spend | the first payout of the disposable vault 9 (local-fork runs of 2026-10-11, Testnet height 4,488,561) spends the vault's deposit note: `build-violation uncommitted` builds the F1 witness (anchor 4,488,600), the statement proves it with the deposit tag the Registry activated the vault with (`TEST-ONLY_vault9_f1_witness.json`), and `ZecuredSlasher` slashes with exactly that journal (`test_F1_theRustStatementsJournalOfARealSpend`) |
+| Statement tests | 15 (`tier2/statement/tests/violations.rs`): each kind on real transactions (F2 against the real payout's internal-scope change, F3 with the vault as claimant), every field of the F1 opening and the viewing key bound, the inclusion checks, the journal ABI |
+| zkVM | violation guest image id `0x1b42b287c7e90bcc008c8a62158baf623856fcb64d6daf48b5b44718853b04d5` (2026-10-12 build); F1 on the real spend: **26.2 M cycles** (28 segments), journal identical to the native computation; 10 changes (opening, action, kind, inclusion, an F2 on the same payout) give the same outcome natively and in the executor (`zecured-tier2-host violation parity`) |
+
+## 10. Out of scope, said plainly (T3-7)
 
 - **Non-conforming notes** (over- or late payments) are the depositor's refund, not zZEC backing.
   Their theft is not provable yet (F4, roadmap).
@@ -241,7 +260,7 @@ The theft demo never runs on the judge deployment (T3-6).
   activation is pending), but the zZEC may already be minted when the case executes: slashing is
   after the fact.
 
-## 10. Privacy
+## 11. Privacy
 
 A commitment shows only:
 - PRF outputs under the UFVK's key (tags, `payoutRef`);
