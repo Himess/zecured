@@ -9,6 +9,7 @@ publish.workspace = true
 [dependencies]
 zecured-zcash-ops = { path = "../signer/crates/zcash-ops" }
 zecured-base = { path = "../signer/crates/base-client" }
+zecured-policy = { path = "../signer/crates/policy" }
 zecured-deposit-witness = { path = "../signer/crates/deposit-witness" }
 orchard.workspace = true
 pczt.workspace = true

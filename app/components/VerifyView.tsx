@@ -39,7 +39,7 @@ export function VerifyView() {
   if (!vaultId) return <MissingVaultId fragment={fragment} />;
   const expiry = vault.data?.expiryHeight ?? loan?.expiryHeight;
   const from = scanStart(vault.data, expiry);
-  const command = `zecured-wallet watch --ufvk <UFVK> --from ${from ?? "<birthday height>"}`;
+  const command = `zecured-wallet watch --ufvk-file ufvk.txt --from ${from ?? "<birthday height>"} --tier3`;
 
   return (
     <div className="grid gap-6 lg:grid-cols-[minmax(0,1fr)_20rem]">

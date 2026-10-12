@@ -36,6 +36,7 @@ use zecured_zcash_ops::{
 
 mod base_test;
 mod prove;
+mod watch;
 
 const NETWORK: Network = Network::TestNetwork;
 const ZATS_PER_ZEC: f64 = 100_000_000.0;
@@ -84,13 +85,21 @@ enum Cmd {
         amount: f64,
     },
     /// Watch any vault (or wallet) with its unified full viewing key: shows the notes it
-    /// received and spent. This is how a borrower verifies their vault independently.
+    /// received and spent. This is how a borrower verifies their vault independently. With
+    /// `--tier3`, also checks every spend of the vault's lineage against its commitment on Base
+    /// and reports what a violation proof can show (F1 uncommitted spend, F2 withheld change).
     Watch {
+        /// File holding the unified full viewing key (never on the command line).
         #[arg(long)]
-        ufvk: String,
+        ufvk_file: PathBuf,
         /// First block to scan (e.g. the vault's birthday).
         #[arg(long)]
         from: u32,
+        /// Check the lineage against the Registry's Tier 3 records (docs/TIER3.md).
+        #[arg(long)]
+        tier3: bool,
+        #[arg(long, env = "BASE_SEPOLIA_RPC_URL", default_value = "https://sepolia.base.org")]
+        rpc: String,
     },
     #[command(subcommand)]
     Loan(LoanCmd),
@@ -582,7 +591,16 @@ async fn main() -> Result<()> {
             let w = load_wallet(&cli.wallet)?;
             println!("broadcast {}", send(&w, &cli.lwd, &to, zats(amount)?).await?);
         }
-        Cmd::Watch { ufvk, from } => {
+        Cmd::Watch {
+            ufvk_file,
+            from,
+            tier3,
+            rpc,
+        } => {
+            let ufvk = fs::read_to_string(&ufvk_file)
+                .with_context(|| format!("read {}", ufvk_file.display()))?
+                .trim()
+                .to_owned();
             let fvk = zcash_keys::keys::UnifiedFullViewingKey::decode(&NETWORK, &ufvk)
                 .map_err(|e| anyhow!("invalid UFVK: {e}"))?
                 .orchard()
@@ -603,6 +621,11 @@ async fn main() -> Result<()> {
                 );
             }
             println!("unspent {} zat (scanned {from}..={tip}, tree root verified)", state.balance());
+            if tier3 {
+                let net = network_params()?;
+                let findings = watch::check_lineage(&ufvk, &state.notes, net.registry, &rpc).await?;
+                watch::report(&findings);
+            }
         }
         Cmd::Loan(cmd) => loan(&cli.wallet, &cli.lwd, &cli.backend, cmd).await?,
     }

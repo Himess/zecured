@@ -88,7 +88,8 @@ scripts/signer-network.sh start    # 5 signer nodes + backend (logs in signer/da
 ./target/debug/zecured-wallet loan open --amount 0.01    # opens a vault, prints the ZIP-321 URI
 ./target/debug/zecured-wallet loan deposit <vault-id>
 ./target/debug/zecured-wallet loan status <vault-id>
-./target/debug/zecured-wallet watch --ufvk "$(./target/debug/zecured-wallet loan viewing-key <vault-id>)" --from <height>
+./target/debug/zecured-wallet loan viewing-key <vault-id> > ufvk.txt   # keep it local
+./target/debug/zecured-wallet watch --ufvk-file ufvk.txt --from <height> --tier3
 ```
 
 ### Local Base fork
