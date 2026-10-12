@@ -32,7 +32,9 @@ use tracing::{debug, info, warn};
 use zecured_base::events::{self, RegistryEvent};
 use zecured_zcash_ops::spend::zip317_fee;
 
-use crate::chain::{CloseRequest, Deployment, IRegistryView, ISettlementAdapter, ORACLE_PRICE_SCALE};
+use crate::chain::{
+    CloseRequest, DeleverageRequest, Deployment, IRegistryView, ISettlementAdapter, ORACLE_PRICE_SCALE,
+};
 
 #[derive(Parser)]
 #[command(about = "Zecured demo bots")]
@@ -229,6 +231,8 @@ struct Mm {
     /// (contracts review L-2: the borrower may borrow more after signing) and takes at least the
     /// quoted ZEC minus `PRICE_SLACK_BPS` (Y7: the price may rise before the close lands).
     quotes: std::sync::Mutex<std::collections::HashMap<B256, Quote>>,
+    /// S18: deleverage quotes given, by vault.
+    deleverage_quotes: std::sync::Mutex<std::collections::HashMap<B256, Quote>>,
 }
 
 #[derive(Clone, Copy, Debug)]
@@ -296,6 +300,11 @@ impl ApiError {
         Self::refuse("user_amount_too_small", "The borrower's share would not cover the Zcash payout fee.");
     const QUOTE_MISMATCH: Self = Self::refuse("quote_mismatch", "The request does not match our quote.");
     const CLOSE_REJECTED: Self = Self::refuse("close_rejected", "The close would revert.");
+    const REPAY_ABOVE_DEBT: Self = Self::refuse("repay_above_debt", "The repayment exceeds the debt.");
+    const DELEVERAGE_TOO_SMALL: Self =
+        Self::refuse("deleverage_too_small", "The collateral for that repayment is below the 0.001 ZEC minimum.");
+    const DELEVERAGE_TOO_LARGE: Self =
+        Self::refuse("deleverage_too_large", "That would leave less than 0.001 ZEC in the vault: close it instead.");
 }
 
 impl IntoResponse for ApiError {
@@ -336,8 +345,14 @@ async fn market_maker(
         receiver,
         margin_bps,
         quotes: Default::default(),
+        deleverage_quotes: Default::default(),
     });
-    let app = Router::new().route("/quote/{vault_id}", get(quote)).route("/close", post(close)).with_state(mm);
+    let app = Router::new()
+        .route("/quote/{vault_id}", get(quote))
+        .route("/close", post(close))
+        .route("/deleverage-quote/{vault_id}", get(deleverage_quote))
+        .route("/deleverage", post(deleverage))
+        .with_state(mm);
     info!(%bind, "market maker listening");
     axum::serve(tokio::net::TcpListener::bind(bind).await?, app).await?;
     Ok(())
@@ -387,6 +402,157 @@ async fn quote(
         "userAmount": user_amount.to_string(),
         "expiresAt": expires_at,
     })))
+}
+
+/// The Adapter's D11 floor (`SettlementAdapter.MIN_SEIZE`): a deleverage takes at least this
+/// much collateral and leaves at least this much in the vault.
+const MIN_SEIZE: u64 = 100_000;
+
+/// The collateral the Adapter gives for `repay` (INTERFACES § 3.3), in zatoshi.
+fn collateral_for(repay: u128, margin_bps: u16, price: u128) -> Result<u64> {
+    let mm = mul_div_up(
+        U256::from(repay) * U256::from(10_000u32 + u32::from(margin_bps)),
+        U256::from(ORACLE_PRICE_SCALE),
+        U256::from(10_000u32) * U256::from(price),
+    );
+    u64::try_from(mm).map_err(|_| anyhow!("amount overflow"))
+}
+
+/// S18: whether a deleverage taking `mm_amount` of `outstanding` zatoshi for `repay` of `debt`
+/// is one the Adapter accepts.
+fn check_deleverage(repay: u128, debt: u128, mm_amount: u64, outstanding: u64) -> Result<(), ApiError> {
+    if repay == 0 || repay > debt {
+        return Err(ApiError::REPAY_ABOVE_DEBT);
+    }
+    if mm_amount < MIN_SEIZE {
+        return Err(ApiError::DELEVERAGE_TOO_SMALL);
+    }
+    if mm_amount.saturating_add(MIN_SEIZE) > outstanding {
+        return Err(ApiError::DELEVERAGE_TOO_LARGE);
+    }
+    Ok(())
+}
+
+#[derive(Deserialize)]
+struct RepayQuery {
+    repay: String,
+}
+
+/// S18: a quote for repaying `repay` (loan-token units) of the vault's debt.
+async fn deleverage_quote(
+    State(mm): State<Arc<Mm>>,
+    vault_id: Result<Path<B256>, PathRejection>,
+    query: Result<axum::extract::Query<RepayQuery>, axum::extract::rejection::QueryRejection>,
+) -> Result<Json<serde_json::Value>, ApiError> {
+    let (Ok(Path(vault_id)), Ok(axum::extract::Query(q))) = (vault_id, query) else {
+        return Err(ApiError::BAD_REQUEST);
+    };
+    let repay: u128 = q.repay.parse().map_err(|_| ApiError::BAD_REQUEST)?;
+    let p = ProviderBuilder::new().connect_http(mm.rpc.parse().map_err(anyhow::Error::from)?);
+    let v = IRegistryView::new(mm.d.registry, &p).vault(vault_id).call().await.map_err(anyhow::Error::from)?;
+    let pos = chain::position(&p, &mm.d, v.account).await?;
+    if pos.debt == 0 {
+        return Err(ApiError::NO_DEBT);
+    }
+    let mm_amount = collateral_for(repay, mm.margin_bps, pos.price)?;
+    check_deleverage(repay, pos.debt, mm_amount, v.outstanding)?;
+    let expires_at = zecured_now() + 600;
+    mm.deleverage_quotes.lock().map_err(|_| anyhow!("quote book poisoned"))?.insert(
+        vault_id,
+        Quote {
+            debt: repay,
+            mm_amount,
+            expires_at,
+        },
+    );
+    Ok(Json(json!({
+        "executor": mm.key.address(),
+        "marginBps": mm.margin_bps,
+        "repayAssets": repay.to_string(),
+        "mmAmount": mm_amount.to_string(),
+        "remaining": (v.outstanding - mm_amount).to_string(),
+        "expiresAt": expires_at,
+    })))
+}
+
+#[derive(Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct DeleverageBody {
+    request: DeleverageRequestJson,
+    signature: Bytes,
+}
+
+#[derive(Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct DeleverageRequestJson {
+    vault_id: B256,
+    account: Address,
+    executor: Address,
+    margin_bps: u16,
+    repay_assets: serde_json::Value,
+    max_collateral: serde_json::Value,
+    nonce: serde_json::Value,
+    deadline: serde_json::Value,
+}
+
+/// S18: executes a deleverage the borrower signed for our quote: repays exactly the quoted amount
+/// and takes at least the quoted collateral less PRICE_SLACK_BPS.
+async fn deleverage(
+    State(mm): State<Arc<Mm>>,
+    body: Result<Json<DeleverageBody>, JsonRejection>,
+) -> Result<Json<serde_json::Value>, ApiError> {
+    let Ok(Json(b)) = body else {
+        return Err(ApiError::BAD_REQUEST);
+    };
+    let r = &b.request;
+    if r.executor != mm.key.address() || r.margin_bps != mm.margin_bps {
+        return Err(ApiError::QUOTE_MISMATCH);
+    }
+    let field = |v: &serde_json::Value| num(v).map_err(|_| ApiError::BAD_REQUEST);
+    let small = |v: U256| u64::try_from(v).map_err(|_| ApiError::BAD_REQUEST);
+    let req = DeleverageRequest {
+        vaultId: r.vault_id,
+        account: r.account,
+        executor: r.executor,
+        marginBps: r.margin_bps,
+        repayAssets: field(&r.repay_assets)?,
+        maxCollateral: small(field(&r.max_collateral)?)?,
+        nonce: field(&r.nonce)?,
+        deadline: small(field(&r.deadline)?)?,
+    };
+    let quoted = mm.deleverage_quotes.lock().map_err(|_| anyhow!("quote book poisoned"))?.get(&r.vault_id).copied();
+    let Some(quote) = quoted else {
+        return Err(ApiError::QUOTE_MISMATCH);
+    };
+    if zecured_now() > quote.expires_at || req.repayAssets != U256::from(quote.debt) {
+        return Err(ApiError::QUOTE_MISMATCH);
+    }
+    let mm_commitment = chain::fresh_commitment(&mm.backend, &mm.zaddr, &mm.receiver).await?;
+    let p = ProviderBuilder::new()
+        .wallet(EthereumWallet::from(mm.key.clone()))
+        .connect_http(mm.rpc.parse().map_err(anyhow::Error::from)?);
+    let adapter = ISettlementAdapter::new(mm.d.adapter, &p);
+    let call =
+        adapter.deleverageWithCollateral(req, b.signature.clone(), mm_commitment, min_mm_amount(quote.mm_amount));
+    if let Err(e) = call.call().await {
+        debug!("deleverage would revert: {e}");
+        return Err(ApiError::CLOSE_REJECTED);
+    }
+    let gas = zecured_base::gas_with_headroom(call.estimate_gas().await.map_err(anyhow::Error::from)?);
+    let receipt = call
+        .gas(gas)
+        .send()
+        .await
+        .map_err(anyhow::Error::from)?
+        .with_timeout(Some(Duration::from_secs(120)))
+        .get_receipt()
+        .await
+        .map_err(anyhow::Error::from)?;
+    if !receipt.status() {
+        return Err(ApiError::CLOSE_REJECTED);
+    }
+    info!(tx = %receipt.transaction_hash, "deleveraged from collateral");
+    Ok(Json(json!({ "txHash": receipt.transaction_hash })))
 }
 
 /// H-3: refuses a close whose borrower share would be dust for the signers.
@@ -499,6 +665,20 @@ mod tests {
 
     /// H-3: a borrower share that would be dust for the signers is refused, at quote time
     /// and on the signed minimum at execution time.
+    /// S18: the bot quotes only deleverages the Adapter accepts, with the Adapter's formula: at
+    /// $40 per ZEC, 0.5 USDC plus 1 % is 1,262,500 zat (contracts' fork test).
+    #[test]
+    fn deleverage_quotes_follow_the_adapter() {
+        let price = 40u128 * 10u128.pow(34);
+        assert_eq!(collateral_for(500_000, 100, price).unwrap(), 1_262_500);
+        assert!(check_deleverage(500_000, 1_100_000, 1_262_500, 5_000_000).is_ok());
+        assert_eq!(check_deleverage(0, 1_100_000, 1_262_500, 5_000_000), Err(ApiError::REPAY_ABOVE_DEBT));
+        assert_eq!(check_deleverage(1_100_001, 1_100_000, 1_262_500, 5_000_000), Err(ApiError::REPAY_ABOVE_DEBT));
+        assert_eq!(check_deleverage(39_999, 1_100_000, 99_998, 5_000_000), Err(ApiError::DELEVERAGE_TOO_SMALL));
+        assert_eq!(check_deleverage(230_000, 240_000, 966_000, 1_000_000), Err(ApiError::DELEVERAGE_TOO_LARGE));
+        assert!(check_deleverage(230_000, 240_000, 900_000, 1_000_000).is_ok());
+    }
+
     #[test]
     fn dust_borrower_shares_are_refused() {
         assert_eq!(min_close_user_amount(), 15_000);

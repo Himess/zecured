@@ -33,6 +33,18 @@ sol! {
         uint64 deadline;
     }
 
+    /// S18 self-deleverage (Adapter domain), signed by the borrower's smart account.
+    struct DeleverageRequest {
+        bytes32 vaultId;
+        address account;
+        address executor;
+        uint16 marginBps;
+        uint256 repayAssets;
+        uint64 maxCollateral;
+        uint256 nonce;
+        uint64 deadline;
+    }
+
     #[sol(rpc)]
     interface IMorpho {
         function position(bytes32 id, address user) external view returns (uint256 supplyShares, uint128 borrowShares, uint128 collateral);
@@ -56,6 +68,7 @@ sol! {
     interface ISettlementAdapter {
         function liquidate(address borrower, uint256 seizedAssets, uint256 repaidShares, bytes32 liquidatorCommitment) external returns (uint256 seized, uint256 repaid);
         function closeWithCollateral(CloseRequest req, bytes userSig, bytes32 mmCommitment, uint256 maxRepayAssets, uint64 minMmAmount) external;
+        function deleverageWithCollateral(DeleverageRequest req, bytes userSig, bytes32 mmCommitment, uint64 minMmAmount) external returns (uint64 mmAmount);
     }
 
     #[sol(rpc)]

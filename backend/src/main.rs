@@ -482,6 +482,13 @@ fn market_maker_error(code: &str) -> ApiError {
         "close_rejected" => {
             refused("close_rejected", "The close would fail on Base (expired, already used, or the position changed).")
         }
+        "repay_above_debt" => refused("repay_above_debt", "The repayment is more than the debt."),
+        "deleverage_too_small" => {
+            refused("deleverage_too_small", "The collateral for that repayment is below the 0.001 ZEC minimum.")
+        }
+        "deleverage_too_large" => {
+            refused("deleverage_too_large", "That would leave less than 0.001 ZEC in the vault: close it instead.")
+        }
         "bad_request" => ApiError::bad_request(),
         _ => ApiError::MM_REFUSED,
     }
@@ -501,6 +508,32 @@ async fn mm_forward(req: reqwest::RequestBuilder) -> ApiResult {
 
 async fn close_quote(axum::Extension(mm): axum::Extension<MarketMaker>, Param(id): Param<B256>) -> ApiResult {
     mm_forward(mm.http.get(format!("{}/quote/{id}", mm.url))).await
+}
+
+#[derive(serde::Deserialize)]
+struct RepayQuery {
+    repay: String,
+}
+
+/// S18: a market maker quote for repaying part of the debt from collateral.
+async fn deleverage_quote(
+    axum::Extension(mm): axum::Extension<MarketMaker>,
+    Param(id): Param<B256>,
+    query: Result<axum::extract::Query<RepayQuery>, axum::extract::rejection::QueryRejection>,
+) -> ApiResult {
+    let Ok(axum::extract::Query(q)) = query else {
+        return Err(ApiError::bad_request());
+    };
+    // Only a decimal amount is passed on.
+    let repay: u128 = q.repay.parse().map_err(|_| ApiError::bad_request())?;
+    mm_forward(mm.http.get(format!("{}/deleverage-quote/{id}?repay={repay}", mm.url))).await
+}
+
+async fn deleverage_submit(
+    axum::Extension(mm): axum::Extension<MarketMaker>,
+    Body(b): Body<serde_json::Value>,
+) -> ApiResult {
+    mm_forward(mm.http.post(format!("{}/deleverage", mm.url)).json(&b)).await
 }
 
 async fn close_submit(
@@ -798,6 +831,8 @@ fn router(
             Router::new()
                 .route("/quotes/close/{id}", get(close_quote))
                 .route("/closes", post(close_submit))
+                .route("/quotes/deleverage/{id}", get(deleverage_quote))
+                .route("/deleverages", post(deleverage_submit))
                 .route_layer(limited(&limits.market_maker)),
         )
         .layer(axum::Extension(w.public_config))
@@ -1065,6 +1100,7 @@ mod tests {
         let api = ApiError::from(anyhow!("permission denied (os error 13) at /var/lib/zecured"));
         assert_eq!((api.code, api.message), ("internal", "Internal error."));
         assert_eq!(market_maker_error("no_debt").code, "no_debt");
+        assert_eq!(market_maker_error("deleverage_too_large").code, "deleverage_too_large");
         assert_eq!(market_maker_error("close would revert: 0xdeadbeef ...").code, "market_maker_refused");
         assert_eq!(salt("0x12"), Err(ApiError::bad_request()));
         assert_eq!(num(&json!("12x")), Err(ApiError::bad_request()));
