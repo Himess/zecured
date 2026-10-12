@@ -72,6 +72,13 @@ CloseRequest(bytes32 vaultId,address account,address executor,uint16 marginBps,u
 `marginBps` is the market maker's quoted margin (adapter caps it); `minUserAmount` protects
 the user against price moves; `deadline` is a short Unix-time expiry (≈ 10 min).
 
+```
+DeleverageRequest(bytes32 vaultId,address account,address executor,uint16 marginBps,uint256 repayAssets,uint64 maxCollateral,uint256 nonce,uint64 deadline)
+```
+
+Self-deleverage (S18, D33): the executor repays exactly `repayAssets` of the debt and is paid in
+collateral, at most `maxCollateral` (price-move protection); the nonce space is the CloseRequest's.
+
 ### 2.5 Signed by signer nodes, verified off-chain by the vault owner (app, CLI)
 
 ```
@@ -229,6 +236,8 @@ function liquidate(address borrower, uint256 seizedAssets, uint256 repaidShares,
     external returns (uint256 seized, uint256 repaid);
 function closeWithCollateral(CloseRequest calldata req, bytes calldata userSig, bytes32 mmCommitment, uint256 maxRepayAssets,
     uint64 minMmAmount) external;
+function deleverageWithCollateral(DeleverageRequest calldata req, bytes calldata userSig, bytes32 mmCommitment,
+    uint64 minMmAmount) external returns (uint64 mmAmount);       // S18
 function invalidateNonce(uint256 nonce) external;                 // msg.sender = account
 function nonceUsed(address account, uint256 nonce) external view returns (bool);
 
@@ -251,6 +260,13 @@ event NonceInvalidated(address indexed account, uint256 nonce);
   `mmAmount >= minMmAmount` (Y7: chosen by the executor, the price may rise after it quoted),
   `userAmount = outstanding - mmAmount >= minUserAmount`, withdraws `outstanding` to itself,
   `Registry.recordClose` (I8).
+- `deleverageWithCollateral` (S18): the same checks as a close (executor, deadline, nonce, margin cap,
+  ERC-1271, the account's own Active vault) plus `repayAssets > 0`; repays exactly `repayAssets`
+  (USDC pulled from the executor in `onMorphoRepay`); `mmAmount` by the close formula, with
+  `mmAmount <= maxCollateral`, `mmAmount >= MIN_SEIZE`, `outstanding - mmAmount >= MIN_SEIZE` (taking the rest is
+  a close) and `mmAmount >= minMmAmount`; withdraws `mmAmount` (Morpho checks the health of the reduced position)
+  and calls `Registry.recordLiquidation`, so the executor's payment is an ordinary third-party claim
+  (`LiquidationRelease` on Base). The vault stays Active; its LTV falls whenever `LTV * (1 + margin) < 1`.
 
 ### 3.4 Tier 3: `SignerBond` and `ZecuredSlasher`
 
