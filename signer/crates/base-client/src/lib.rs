@@ -107,6 +107,20 @@ sol! {
         uint64 changeValue;
     }
 
+    /// S18 self-deleverage: signed by the vault owner through the smart account (ERC-1271),
+    /// verified by the Adapter's `deleverageWithCollateral`.
+    #[derive(Debug, PartialEq, Eq)]
+    struct DeleverageRequest {
+        bytes32 vaultId;
+        address account;
+        address executor;
+        uint16 marginBps;
+        uint256 repayAssets;
+        uint64 maxCollateral;
+        uint256 nonce;
+        uint64 deadline;
+    }
+
     /// Signed by the vault owner through the smart account (ERC-1271), verified by the Adapter.
     #[derive(Debug, PartialEq, Eq)]
     struct CloseRequest {
@@ -333,6 +347,30 @@ mod tests {
         assert_eq!(
             SpendCommit::eip712_encode_type(),
             "SpendCommit(bytes32 vaultId,bytes32 inputTag,bytes32[] claimIds,bytes32[] claimRefs,bytes32 payoutRef,bytes32 changeTag,uint64 changeValue)"
+        );
+    }
+
+    /// The Solidity library's golden vector (`GOLDEN_DELEVERAGE_REQUEST_DIGEST`).
+    #[test]
+    fn deleverage_request_golden_vector() {
+        assert_eq!(
+            DeleverageRequest::eip712_encode_type(),
+            "DeleverageRequest(bytes32 vaultId,address account,address executor,uint16 marginBps,uint256 repayAssets,uint64 maxCollateral,uint256 nonce,uint64 deadline)"
+        );
+        let msg = DeleverageRequest {
+            vaultId: B256::repeat_byte(0x55),
+            account: Address::repeat_byte(0x33),
+            executor: Address::repeat_byte(0x44),
+            marginBps: 100,
+            repayAssets: U256::from(500_000),
+            maxCollateral: 1_262_500,
+            nonce: U256::from(42),
+            deadline: 1_800_000_000,
+        };
+        let ad = adapter_domain(BASE_SEPOLIA_CHAIN_ID, Address::repeat_byte(0x22));
+        assert_eq!(
+            msg.eip712_signing_hash(&ad),
+            "0x54c59f01064cf8a39e3c1036566f3e83c7cd9c5b21d3256c70f4adc4f1297211".parse::<B256>().unwrap()
         );
     }
 

@@ -16,7 +16,7 @@ import {ORACLE_PRICE_SCALE} from "morpho-blue/src/libraries/ConstantsLib.sol";
 import {IZZEC} from "./interfaces/IZZEC.sol";
 import {IZecuredRegistry, VaultStatus} from "./interfaces/IZecuredRegistry.sol";
 import {ISettlementAdapter} from "./interfaces/ISettlementAdapter.sol";
-import {ZecuredEIP712, CloseRequest} from "./libraries/ZecuredEIP712.sol";
+import {ZecuredEIP712, CloseRequest, DeleverageRequest} from "./libraries/ZecuredEIP712.sol";
 
 /// @title SettlementAdapter
 /// @notice The only way, besides the account's own `requestRelease`, for zZEC collateral to leave Morpho
@@ -24,7 +24,8 @@ import {ZecuredEIP712, CloseRequest} from "./libraries/ZecuredEIP712.sol";
 ///         - `liquidate`: a permissionless Morpho liquidation routed through this Adapter; the liquidator pays USDC in
 ///           Morpho's callback and is paid in ZEC on Zcash through a Liquidation claim (dust floor D11);
 ///         - `closeWithCollateral`: a market maker (the request's `executor`) repays the whole debt in USDC and is paid
-///           in ZEC from the vault; the borrower's remainder goes to their own commitment (I7, I8).
+///           in ZEC from the vault; the borrower's remainder goes to their own commitment (I7, I8);
+///         - `deleverageWithCollateral` (S18): the same for part of the debt; the vault stays open with a lower LTV.
 /// @dev Morpho authorization is all-or-nothing, so this contract calls only `liquidate`, `repay` and
 ///      `withdrawCollateral` (the latter only for a valid signed CloseRequest whose executor is the caller, I8). It has no
 ///      code path that borrows or withdraws loan assets, no admin and no upgrade path.
@@ -164,6 +165,41 @@ contract SettlementAdapter is ISettlementAdapter, EIP712, ReentrancyGuardTransie
         registry.recordClose(req.vaultId, mmAmount, userAmount, mmCommitment, req.userCommitment);
     }
 
+    // ------------------------------------------------------------------ self-deleverage (S18)
+
+    /// @inheritdoc ISettlementAdapter
+    function deleverageWithCollateral(
+        DeleverageRequest calldata req,
+        bytes calldata userSig,
+        bytes32 mmCommitment,
+        uint64 minMmAmount
+    ) external nonReentrant returns (uint64 mmAmount) {
+        uint64 outstanding = _checkDeleverageRequest(req, userSig, mmCommitment);
+        _nonceUsed[req.account][req.nonce] = true;
+
+        // 1. Repay exactly the signed debt with the executor's USDC.
+        _op = OP_CLOSE;
+        _payer = msg.sender; // the executor (checked == req.executor)
+        (uint256 repaidAssets,) = morpho.repay(_marketParams(), req.repayAssets, 0, req.account, abi.encode(OP_CLOSE));
+        _op = OP_NONE;
+        _payer = address(0);
+
+        // 2. The executor's collateral: the repaid value plus margin, within what the borrower signed and the floors.
+        uint256 mm = _marketMakerAmount(repaidAssets, req.marginBps);
+        if (mm > req.maxCollateral) revert DeleverageAboveMaximum(mm, req.maxCollateral);
+        if (mm < MIN_SEIZE) revert SeizeBelowMinimum(mm, MIN_SEIZE);
+        if (mm + MIN_SEIZE > outstanding) {
+            revert DeleverageRemainderTooSmall(outstanding - Math.min(mm, outstanding), MIN_SEIZE);
+        }
+        mmAmount = SafeCast.toUint64(mm); // < outstanding, a uint64
+        if (mmAmount < minMmAmount) revert MarketMakerAmountBelowMinimum(mmAmount, minMmAmount);
+
+        // 3. Withdraw it (Morpho checks the position's health after the repayment) and record it: the Registry burns it
+        //    and creates the executor's claim (I8, I9).
+        _withdrawCollateralToSelf(req.account, mmAmount);
+        registry.recordLiquidation(req.vaultId, mmAmount, mmCommitment);
+    }
+
     /// @inheritdoc IMorphoRepayCallback
     function onMorphoRepay(uint256 repaidAssets, bytes calldata) external {
         if (msg.sender != address(morpho)) revert OnlyMorpho();
@@ -189,6 +225,11 @@ contract SettlementAdapter is ISettlementAdapter, EIP712, ReentrancyGuardTransie
     /// @inheritdoc ISettlementAdapter
     function hashCloseRequest(CloseRequest calldata req) external view returns (bytes32) {
         return _hashTypedDataV4(ZecuredEIP712.hashCloseRequest(req));
+    }
+
+    /// @inheritdoc ISettlementAdapter
+    function hashDeleverageRequest(DeleverageRequest calldata req) external view returns (bytes32) {
+        return _hashTypedDataV4(ZecuredEIP712.hashDeleverageRequest(req));
     }
 
     /// @inheritdoc ISettlementAdapter
@@ -218,6 +259,29 @@ contract SettlementAdapter is ISettlementAdapter, EIP712, ReentrancyGuardTransie
         if (status != VaultStatus.Active) revert VaultNotActive(req.vaultId);
         // ERC-1271 for the (deployed) smart account; plain ECDSA if the account has no code.
         bytes32 digest = _hashTypedDataV4(ZecuredEIP712.hashCloseRequest(req));
+        if (!SignatureChecker.isValidSignatureNowCalldata(req.account, digest, userSig)) revert InvalidUserSignature();
+    }
+
+    /// @dev The checks of a DeleverageRequest, as `_checkCloseRequest`'s (I8: a valid, unexpired, unused request signed by
+    ///      the account, executed by its executor), plus a non-zero repayment.
+    function _checkDeleverageRequest(DeleverageRequest calldata req, bytes calldata userSig, bytes32 mmCommitment)
+        internal
+        view
+        returns (uint64 outstanding)
+    {
+        if (msg.sender != req.executor) revert NotExecutor(msg.sender, req.executor);
+        if (block.timestamp > req.deadline) revert RequestExpired(req.deadline);
+        if (_nonceUsed[req.account][req.nonce]) revert NonceAlreadyUsed(req.account, req.nonce);
+        if (req.marginBps > MAX_MARGIN_BPS) revert MarginTooHigh(req.marginBps, MAX_MARGIN_BPS);
+        if (mmCommitment == bytes32(0)) revert ZeroCommitment();
+        if (req.repayAssets == 0) revert ZeroRepay();
+        if (req.vaultId == bytes32(0) || registry.vaultOf(req.account) != req.vaultId) {
+            revert VaultAccountMismatch(req.vaultId, req.account);
+        }
+        VaultStatus status;
+        (, outstanding, status) = registry.vault(req.vaultId);
+        if (status != VaultStatus.Active) revert VaultNotActive(req.vaultId);
+        bytes32 digest = _hashTypedDataV4(ZecuredEIP712.hashDeleverageRequest(req));
         if (!SignatureChecker.isValidSignatureNowCalldata(req.account, digest, userSig)) revert InvalidUserSignature();
     }
 

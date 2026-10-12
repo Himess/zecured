@@ -36,6 +36,28 @@ struct CloseRequest {
     uint64 deadline;
 }
 
+/// @notice Self-deleverage request (S18) signed by the vault owner through the smart account (ERC-1271), verified
+///         on-chain by `SettlementAdapter.deleverageWithCollateral` under the Adapter domain: the executor repays part of
+///         the debt and is paid in collateral, and the vault stays open with a lower LTV.
+/// @param vaultId The vault.
+/// @param account The vault's smart account (ERC-1271 signer).
+/// @param executor The only address allowed to execute the request (the quoting market maker).
+/// @param marginBps The market maker's quoted margin in basis points (capped by `SettlementAdapter.MAX_MARGIN_BPS`).
+/// @param repayAssets The debt the executor repays, in loan-token units.
+/// @param maxCollateral The most zatoshi the borrower gives for it (price-move protection).
+/// @param nonce Per-account nonce, shared with CloseRequest; each value is usable once.
+/// @param deadline Unix timestamp; the request is valid while block.timestamp <= deadline.
+struct DeleverageRequest {
+    bytes32 vaultId;
+    address account;
+    address executor;
+    uint16 marginBps;
+    uint256 repayAssets;
+    uint64 maxCollateral;
+    uint256 nonce;
+    uint64 deadline;
+}
+
 /// @notice Tier 3 payout commitment (docs/TIER3.md § 3), signed by at least 3 signers in FROST round 1, before any of
 ///         them releases a signature share, and recorded by the Registry's `commitSpend` under the Registry domain.
 ///         Every field is a keyed or salted hash, a Base id or a value Base can compute: nothing links to Zcash.
@@ -72,7 +94,7 @@ library ZecuredEIP712 {
     ///         VaultCancellation, SpendCommit and every off-chain owner request (OpenVault, Destination,
     ///         RefundRequest, ViewKeyRequest).
     string internal constant REGISTRY_DOMAIN_NAME = "ZecuredRegistry";
-    /// @notice Domain name of SettlementAdapter: CloseRequest.
+    /// @notice Domain name of SettlementAdapter: CloseRequest and DeleverageRequest.
     string internal constant ADAPTER_DOMAIN_NAME = "ZecuredSettlementAdapter";
     /// @notice Domain version of both domains.
     string internal constant DOMAIN_VERSION = "1";
@@ -104,6 +126,12 @@ library ZecuredEIP712 {
     ///      uint64 minUserAmount,bytes32 userCommitment,uint256 nonce,uint64 deadline)") (one line, no spaces).
     bytes32 internal constant CLOSE_REQUEST_TYPEHASH = keccak256(
         "CloseRequest(bytes32 vaultId,address account,address executor,uint16 marginBps,uint64 minUserAmount,bytes32 userCommitment,uint256 nonce,uint64 deadline)"
+    );
+
+    /// @dev keccak256("DeleverageRequest(bytes32 vaultId,address account,address executor,uint16 marginBps,
+    ///      uint256 repayAssets,uint64 maxCollateral,uint256 nonce,uint64 deadline)") (one line, no spaces). S18.
+    bytes32 internal constant DELEVERAGE_REQUEST_TYPEHASH = keccak256(
+        "DeleverageRequest(bytes32 vaultId,address account,address executor,uint16 marginBps,uint256 repayAssets,uint64 maxCollateral,uint256 nonce,uint64 deadline)"
     );
 
     /// @dev keccak256("SpendCommit(bytes32 vaultId,bytes32 inputTag,bytes32[] claimIds,bytes32[] claimRefs,
@@ -177,6 +205,23 @@ library ZecuredEIP712 {
                 c.payoutRef,
                 c.changeTag,
                 c.changeValue
+            )
+        );
+    }
+
+    /// @notice EIP-712 struct hash of a DeleverageRequest.
+    function hashDeleverageRequest(DeleverageRequest memory req) internal pure returns (bytes32) {
+        return keccak256(
+            abi.encode(
+                DELEVERAGE_REQUEST_TYPEHASH,
+                req.vaultId,
+                req.account,
+                req.executor,
+                req.marginBps,
+                req.repayAssets,
+                req.maxCollateral,
+                req.nonce,
+                req.deadline
             )
         );
     }

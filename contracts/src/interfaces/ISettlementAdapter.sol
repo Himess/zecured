@@ -2,7 +2,7 @@
 pragma solidity 0.8.28;
 
 import {IMorphoLiquidateCallback, IMorphoRepayCallback} from "morpho-blue/src/interfaces/IMorphoCallbacks.sol";
-import {CloseRequest} from "../libraries/ZecuredEIP712.sol";
+import {CloseRequest, DeleverageRequest} from "../libraries/ZecuredEIP712.sol";
 
 /// @title ISettlementAdapter
 /// @notice Liquidation and close-from-collateral for Zecured vault accounts (docs/INTERFACES.md § 3.3).
@@ -48,6 +48,12 @@ interface ISettlementAdapter is IMorphoLiquidateCallback, IMorphoRepayCallback {
     error OnlyMorpho();
     /// @notice A Morpho callback arrived outside the matching Adapter operation.
     error UnexpectedCallback();
+    /// @notice S18: the market maker's collateral exceeds what the borrower signed for.
+    error DeleverageAboveMaximum(uint256 mmAmount, uint64 maxCollateral);
+    /// @notice S18: a deleverage must leave at least MIN_SEIZE in the vault (taking everything is a close).
+    error DeleverageRemainderTooSmall(uint256 remaining, uint256 minimum);
+    /// @notice S18: nothing to repay.
+    error ZeroRepay();
 
     // ------------------------------------------------------------------ functions (docs/INTERFACES.md § 3.3)
 
@@ -76,6 +82,21 @@ interface ISettlementAdapter is IMorphoLiquidateCallback, IMorphoRepayCallback {
         uint64 minMmAmount
     ) external;
 
+    /// @notice S18, self-deleverage: executes a signed DeleverageRequest. The executor (`msg.sender`) repays
+    ///         `req.repayAssets` of the account's debt with USDC pulled inside `onMorphoRepay`; the Adapter withdraws the
+    ///         repaid value plus the quoted margin in collateral (rounded up, at most `req.maxCollateral`, at least
+    ///         MIN_SEIZE, leaving at least MIN_SEIZE in the vault) and records it as a Liquidation claim of the
+    ///         executor's commitment, paid like any third-party payout. The vault stays Active; its LTV falls whenever
+    ///         LTV * (1 + margin) < 1, which holds for every healthy position at margins up to MAX_MARGIN_BPS.
+    /// @param minMmAmount The fewest zatoshi the executor accepts (the price may have risen since it quoted).
+    /// @return mmAmount The collateral withdrawn for the executor, in zatoshi.
+    function deleverageWithCollateral(
+        DeleverageRequest calldata req,
+        bytes calldata userSig,
+        bytes32 mmCommitment,
+        uint64 minMmAmount
+    ) external returns (uint64 mmAmount);
+
     /// @notice Cancels a CloseRequest nonce of `msg.sender` (the account). Idempotent: it never reverts, also for a
     ///         nonce that is already used or invalidated, and emits `NonceInvalidated` on every call.
     function invalidateNonce(uint256 nonce) external;
@@ -92,6 +113,8 @@ interface ISettlementAdapter is IMorphoLiquidateCallback, IMorphoRepayCallback {
     function MAX_MARGIN_BPS() external view returns (uint16);
     /// @notice The EIP-712 digest (Adapter domain) of `req`, i.e. the hash the account must validate via ERC-1271.
     function hashCloseRequest(CloseRequest calldata req) external view returns (bytes32);
+    /// @notice The EIP-712 digest (Adapter domain) of a DeleverageRequest.
+    function hashDeleverageRequest(DeleverageRequest calldata req) external view returns (bytes32);
     /// @notice The Adapter's EIP-712 domain separator.
     function domainSeparator() external view returns (bytes32);
 }

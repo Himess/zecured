@@ -2,7 +2,13 @@
 pragma solidity 0.8.28;
 
 import {Test, console} from "forge-std/Test.sol";
-import {ZecuredEIP712, DepositAttestation, CloseRequest, SpendCommit} from "../../src/libraries/ZecuredEIP712.sol";
+import {
+    ZecuredEIP712,
+    DepositAttestation,
+    CloseRequest,
+    SpendCommit,
+    DeleverageRequest
+} from "../../src/libraries/ZecuredEIP712.sol";
 
 /// @notice The EIP-712 type strings of docs/INTERFACES.md § 2 and the struct hashes / digests the contracts compute,
 ///         cross-checked against Foundry's independent EIP-712 implementation (`vm.eip712HashType`,
@@ -23,6 +29,8 @@ contract ZecuredEIP712Test is Test {
     string internal constant REFUND_REQUEST =
         "RefundRequest(bytes32 vaultId,bytes32 noteId,bytes32 commitment,uint64 nonce,uint64 deadline)";
     string internal constant VIEW_KEY_REQUEST = "ViewKeyRequest(bytes32 vaultId,uint64 nonce,uint64 deadline)";
+    string internal constant DELEVERAGE_REQUEST =
+        "DeleverageRequest(bytes32 vaultId,address account,address executor,uint16 marginBps,uint256 repayAssets,uint64 maxCollateral,uint256 nonce,uint64 deadline)";
     string internal constant SPEND_COMMIT =
         "SpendCommit(bytes32 vaultId,bytes32 inputTag,bytes32[] claimIds,bytes32[] claimRefs,bytes32 payoutRef,bytes32 changeTag,uint64 changeValue)";
 
@@ -80,6 +88,19 @@ contract ZecuredEIP712Test is Test {
         });
     }
 
+    function _deleverageRequest() internal pure returns (DeleverageRequest memory) {
+        return DeleverageRequest({
+            vaultId: VAULT_ID,
+            account: ACCOUNT,
+            executor: EXECUTOR,
+            marginBps: MARGIN_BPS,
+            repayAssets: 500_000,
+            maxCollateral: 1_262_500,
+            nonce: NONCE,
+            deadline: DEADLINE
+        });
+    }
+
     function _spendCommit() internal pure returns (SpendCommit memory c) {
         bytes32[] memory refs = new bytes32[](2);
         refs[0] = CLAIM_REF_0;
@@ -127,6 +148,7 @@ contract ZecuredEIP712Test is Test {
         assertEq(ZecuredEIP712.REFUND_REQUEST_TYPEHASH, keccak256(bytes(REFUND_REQUEST)));
         assertEq(ZecuredEIP712.VIEW_KEY_REQUEST_TYPEHASH, keccak256(bytes(VIEW_KEY_REQUEST)));
         assertEq(ZecuredEIP712.SPEND_COMMIT_TYPEHASH, keccak256(bytes(SPEND_COMMIT)));
+        assertEq(ZecuredEIP712.DELEVERAGE_REQUEST_TYPEHASH, keccak256(bytes(DELEVERAGE_REQUEST)));
     }
 
     function test_typeHashesMatchIndependentImplementation() public pure {
@@ -138,6 +160,7 @@ contract ZecuredEIP712Test is Test {
         assertEq(ZecuredEIP712.REFUND_REQUEST_TYPEHASH, vm.eip712HashType(REFUND_REQUEST));
         assertEq(ZecuredEIP712.VIEW_KEY_REQUEST_TYPEHASH, vm.eip712HashType(VIEW_KEY_REQUEST));
         assertEq(ZecuredEIP712.SPEND_COMMIT_TYPEHASH, vm.eip712HashType(SPEND_COMMIT));
+        assertEq(ZecuredEIP712.DELEVERAGE_REQUEST_TYPEHASH, vm.eip712HashType(DELEVERAGE_REQUEST));
     }
 
     // ------------------------------------------------------------------ struct hashes
@@ -384,6 +407,49 @@ contract ZecuredEIP712Test is Test {
         assertTrue(ZecuredEIP712.hashSpendCommit(c) != base);
     }
 
+    function test_deleverageRequestDigest_matchesTypedDataJson() public pure {
+        DeleverageRequest memory req = _deleverageRequest();
+        assertEq(
+            ZecuredEIP712.hashDeleverageRequest(req),
+            vm.eip712HashStruct(
+                DELEVERAGE_REQUEST,
+                abi.encode(
+                    req.vaultId,
+                    req.account,
+                    req.executor,
+                    req.marginBps,
+                    req.repayAssets,
+                    req.maxCollateral,
+                    req.nonce,
+                    req.deadline
+                )
+            )
+        );
+        string memory json = string.concat(
+            '{"types":{',
+            DOMAIN_TYPES_JSON,
+            ',"DeleverageRequest":[{"name":"vaultId","type":"bytes32"},{"name":"account","type":"address"},{"name":"executor","type":"address"},{"name":"marginBps","type":"uint16"},{"name":"repayAssets","type":"uint256"},{"name":"maxCollateral","type":"uint64"},{"name":"nonce","type":"uint256"},{"name":"deadline","type":"uint64"}]},',
+            '"primaryType":"DeleverageRequest",',
+            _domainJson("ZecuredSettlementAdapter", ADAPTER),
+            string.concat(
+                ',"message":{"vaultId":"',
+                vm.toString(VAULT_ID),
+                '","account":"',
+                vm.toString(ACCOUNT),
+                '","executor":"',
+                vm.toString(EXECUTOR),
+                '","marginBps":"100","repayAssets":"500000","maxCollateral":"1262500","nonce":"42","deadline":"',
+                vm.toString(DEADLINE),
+                '"}}'
+            )
+        );
+        bytes32 ours = _digest(
+            _domainSeparator(ZecuredEIP712.ADAPTER_DOMAIN_NAME, ADAPTER), ZecuredEIP712.hashDeleverageRequest(req)
+        );
+        assertEq(ours, vm.eip712HashTypedData(json));
+        assertEq(ours, GOLDEN_DELEVERAGE_REQUEST_DIGEST, "golden vector");
+    }
+
     /// Prints the vectors (run with -vv) so other implementations can copy them.
     function test_printVectors() public pure {
         console.log("chainId 84532, Registry", REGISTRY, "Adapter", ADAPTER);
@@ -397,6 +463,8 @@ contract ZecuredEIP712Test is Test {
         console.logBytes32(GOLDEN_PAYOUT_CONFIRMATION_DIGEST);
         console.log("CloseRequest digest");
         console.logBytes32(GOLDEN_CLOSE_REQUEST_DIGEST);
+        console.log("DeleverageRequest digest");
+        console.logBytes32(GOLDEN_DELEVERAGE_REQUEST_DIGEST);
         console.log("SpendCommit struct hash and digest");
         console.logBytes32(ZecuredEIP712.hashSpendCommit(_spendCommit()));
         console.logBytes32(GOLDEN_SPEND_COMMIT_DIGEST);
@@ -417,6 +485,9 @@ contract ZecuredEIP712Test is Test {
         0xf166a0191609bbccd2b7aa9e7527b1553a418f7626902cc10099034b838e4973;
     bytes32 internal constant GOLDEN_CLOSE_REQUEST_DIGEST =
         0x2207e7a8cd1b3966d87015d4b554f9271a760f2854c1c9d37ae0391b885ae8f7;
+    // DeleverageRequest: marginBps 100, repayAssets 500,000, maxCollateral 1,262,500, nonce 42, deadline as above.
+    bytes32 internal constant GOLDEN_DELEVERAGE_REQUEST_DIGEST =
+        0x54c59f01064cf8a39e3c1036566f3e83c7cd9c5b21d3256c70f4adc4f1297211;
     // SpendCommit: inputTag 0x6666..66, claimIds as PayoutConfirmation's, claimRefs [0x8888..88, 0x9999..99],
     // payoutRef 0xaaaa..aa, changeTag 0xbbbb..bb, changeValue 3,800,000.
     bytes32 internal constant GOLDEN_SPEND_COMMIT_DIGEST =

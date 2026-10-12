@@ -11,7 +11,7 @@ import {ZZEC} from "../../src/ZZEC.sol";
 import {ZecuredRegistry} from "../../src/ZecuredRegistry.sol";
 import {SettlementAdapter} from "../../src/SettlementAdapter.sol";
 import {VaultStatus, ClaimStatus} from "../../src/interfaces/IZecuredRegistry.sol";
-import {DepositAttestation, CloseRequest, SpendCommit} from "../../src/libraries/ZecuredEIP712.sol";
+import {DepositAttestation, CloseRequest, SpendCommit, DeleverageRequest} from "../../src/libraries/ZecuredEIP712.sol";
 
 /// @notice Invariant-test handler: drives vault lifecycles (attest, borrow, repay, release, price moves, liquidation,
 ///         close, payout confirmation, time) and attacks that must always fail, against the real Morpho Blue on a
@@ -289,7 +289,7 @@ contract ZecuredHandler is Test {
             uint256 seized, uint256
         ) {
             calls["liquidate"]++;
-            _checkLiquidation(vaultId, claimsBefore, outstandingBefore, seized);
+            _checkLiquidation(account, vaultId, claimsBefore, outstandingBefore, seized);
         } catch {
             calls["liquidate (reverted)"]++;
         }
@@ -317,13 +317,18 @@ contract ZecuredHandler is Test {
     }
 
     /// I9 (and D11) at the moment of a successful liquidation.
-    function _checkLiquidation(bytes32 vaultId, uint64 claimsBefore, uint64 outstandingBefore, uint256 seized)
-        internal
-    {
+    function _checkLiquidation(
+        address account,
+        bytes32 vaultId,
+        uint64 claimsBefore,
+        uint64 outstandingBefore,
+        uint256 seized
+    ) internal {
         (, uint64 outstandingAfter,) = registry.vault(vaultId);
         (,, uint64 claimed,,) = registry.claim(registry.claimIdOf(vaultId, claimsBefore));
-        // D11: at least MIN_SEIZE, or the whole remaining outstanding.
-        bool belowFloor = seized < adapter.MIN_SEIZE() && seized != outstandingBefore;
+        // D11: at least MIN_SEIZE, or the whole remaining outstanding, or a seizure that clears the whole debt (L-1).
+        bool debtCleared = morpho.position(marketId, account).borrowShares == 0;
+        bool belowFloor = seized < adapter.MIN_SEIZE() && seized != outstandingBefore && !debtCleared;
         if (
             seized > outstandingBefore || claimed != seized || outstandingAfter != outstandingBefore - seized
                 || belowFloor
@@ -367,6 +372,63 @@ contract ZecuredHandler is Test {
         } catch {
             calls["close (reverted)"]++;
         }
+    }
+
+    /// S18: the market maker repays part of the debt and takes the value in collateral; the vault stays open.
+    function deleverage(uint256 vaultSeed, uint256 repaySeed, uint256 marginBps, uint256 ltvSeed) external {
+        (bool found, bytes32 vaultId, address account) = _vault(vaultSeed);
+        if (!found) return;
+        (bool active, uint64 outstandingBefore) = _active(vaultId);
+        if (!active || !_ensureDebt(account, outstandingBefore, ltvSeed)) return;
+        _authorize(account);
+        DeleverageRequest memory req = _deleverageRequest(vaultId, account, repaySeed, marginBps, outstandingBefore);
+        bytes memory sig = _sign(accountKeys[accountIndexOf[vaultId]], adapter.hashDeleverageRequest(req));
+        _fund(marketMaker, address(adapter), req.repayAssets);
+        uint64 claimsBefore = registry.claimCount(vaultId);
+        uint256 supplyBefore = zzec.totalSupply();
+
+        vm.prank(marketMaker);
+        try adapter.deleverageWithCollateral(req, sig, keccak256("zecured.inv.marketMaker"), 0) returns (uint64 mm) {
+            calls["deleverage"]++;
+            _checkDeleverage(vaultId, outstandingBefore, claimsBefore, supplyBefore, mm);
+        } catch {
+            calls["deleverage (reverted)"]++;
+        }
+    }
+
+    function _deleverageRequest(
+        bytes32 vaultId,
+        address account,
+        uint256 repaySeed,
+        uint256 marginBps,
+        uint64 outstanding
+    ) internal returns (DeleverageRequest memory) {
+        return DeleverageRequest({
+            vaultId: vaultId,
+            account: account,
+            executor: marketMaker,
+            marginBps: uint16(bound(marginBps, 0, 500)),
+            repayAssets: bound(repaySeed, 1, morpho.expectedBorrowAssets(params, account)),
+            maxCollateral: outstanding,
+            nonce: nextNonce++,
+            deadline: uint64(block.timestamp + 10 minutes)
+        });
+    }
+
+    /// I9 and conservation for a deleverage: one claim of exactly what left the vault, which stays open.
+    function _checkDeleverage(
+        bytes32 vaultId,
+        uint64 outstandingBefore,
+        uint64 claimsBefore,
+        uint256 supplyBefore,
+        uint64 mm
+    ) internal {
+        (bool stillActive, uint64 outstandingAfter) = _active(vaultId);
+        (,, uint64 claimed,,) = registry.claim(registry.claimIdOf(vaultId, claimsBefore));
+        if (
+            !stillActive || outstandingAfter + mm != outstandingBefore || claimed != mm
+                || supplyBefore - zzec.totalSupply() != mm || registry.claimCount(vaultId) != claimsBefore + 1
+        ) i9Violated = true;
     }
 
     function confirm(uint256 vaultSeed, uint256 signerSeed) external {
@@ -605,6 +667,34 @@ contract ZecuredHandler is Test {
     }
 
     /// I8: a valid signed request executed by someone else, or after its deadline, never withdraws collateral.
+    /// I8: a deleverage request executed by anyone but its executor, or after its deadline, never withdraws.
+    function attackDeleverage(uint256 vaultSeed, bool expired) external {
+        (bool found, bytes32 vaultId, address account) = _vault(vaultSeed);
+        if (!found) return;
+        DeleverageRequest memory req = DeleverageRequest({
+            vaultId: vaultId,
+            account: account,
+            executor: marketMaker,
+            marginBps: 100,
+            repayAssets: 1e6,
+            maxCollateral: type(uint64).max,
+            nonce: type(uint256).max - nextNonce++,
+            deadline: uint64(block.timestamp + 10 minutes)
+        });
+        bytes memory sig = _sign(accountKeys[accountIndexOf[vaultId]], adapter.hashDeleverageRequest(req));
+        _fund(stranger, address(adapter), 100 * 1e6);
+        address caller = stranger;
+        if (expired) {
+            vm.warp(uint256(req.deadline) + 1);
+            caller = marketMaker;
+        }
+        vm.prank(caller);
+        try adapter.deleverageWithCollateral(req, sig, keccak256("zecured.inv.marketMaker"), 0) {
+            attackSucceeded = true;
+        } catch {}
+        calls["attack: deleverage"]++;
+    }
+
     function attackCloseRequest(uint256 vaultSeed, bool expired) external {
         (bool found, bytes32 vaultId, address account) = _vault(vaultSeed);
         if (!found) return;

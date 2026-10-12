@@ -15,7 +15,7 @@ import {
 import {MorphoBalancesLib} from "morpho-blue/src/libraries/periphery/MorphoBalancesLib.sol";
 import {IZecuredRegistry, VaultStatus, ClaimKind, ClaimStatus} from "../../src/interfaces/IZecuredRegistry.sol";
 import {ISettlementAdapter} from "../../src/interfaces/ISettlementAdapter.sol";
-import {CloseRequest} from "../../src/libraries/ZecuredEIP712.sol";
+import {CloseRequest, DeleverageRequest} from "../../src/libraries/ZecuredEIP712.sol";
 import {ZecuredFixture} from "../utils/ZecuredFixture.sol";
 
 /// @notice SettlementAdapter against the real Morpho Blue on a Base Sepolia fork: liquidation (both Morpho paths,
@@ -61,6 +61,42 @@ contract SettlementAdapterTest is ZecuredFixture {
     function _close(CloseRequest memory req, bytes memory sig) internal {
         vm.prank(req.executor);
         adapter.closeWithCollateral(req, sig, MM_COMMITMENT, type(uint256).max, 0);
+    }
+
+    function _deleverageRequest(
+        bytes32 vaultId,
+        uint16 marginBps,
+        uint256 repayAssets,
+        uint64 maxCollateral,
+        uint256 nonce
+    ) internal view returns (DeleverageRequest memory) {
+        return DeleverageRequest({
+            vaultId: vaultId,
+            account: account,
+            executor: marketMaker,
+            marginBps: marginBps,
+            repayAssets: repayAssets,
+            maxCollateral: maxCollateral,
+            nonce: nonce,
+            deadline: uint64(block.timestamp + 10 minutes)
+        });
+    }
+
+    function _signDeleverage(DeleverageRequest memory req) internal view returns (bytes memory) {
+        return _sign(accountKey, adapter.hashDeleverageRequest(req));
+    }
+
+    function _expectDeleverageRevert(DeleverageRequest memory req, bytes memory sig, bytes memory err) internal {
+        vm.prank(marketMaker);
+        vm.expectRevert(err);
+        adapter.deleverageWithCollateral(req, sig, MM_COMMITMENT, 0);
+    }
+
+    /// LTV in basis points: debt over collateral value at the oracle price.
+    function _ltvBps(address acct) internal view returns (uint256) {
+        Position memory p = _position(acct);
+        uint256 value = uint256(p.collateral) * oracle.price() / ORACLE_PRICE_SCALE;
+        return MORPHO.expectedBorrowAssets(params, acct) * 10_000 / value;
     }
 
     // ================================================================== liquidate
@@ -361,6 +397,128 @@ contract SettlementAdapterTest is ZecuredFixture {
         assertEq(usdc.balanceOf(borrowReceiver), 160_000, "the borrower keeps the loan");
         assertTrue(adapter.nonceUsed(account, 1));
         _assertZZECOnlyInMorpho(_list(account, marketMaker));
+    }
+
+    // ================================================================== self-deleverage (S18)
+
+    /// The executor repays part of the debt and is paid in collateral with its margin; the vault stays open with a
+    /// lower LTV, and the payment is an ordinary third-party claim.
+    function test_deleverage_repaysPartOfTheDebtAndLowersTheLtv() public {
+        (bytes32 vaultId,) = _openLoan(account, VAULT_005, 5_500); // 1.1 USDC on 2 USDC of collateral
+        uint256 ltvBefore = _ltvBps(account);
+        uint256 debtBefore = MORPHO.expectedBorrowAssets(params, account);
+        uint256 repay = 500_000; // 0.5 USDC
+        uint16 margin = 100;
+        uint256 mmAmount = _expectedMmAmount(repay, margin);
+        assertEq(mmAmount, 1_262_500, "0.5 USDC at $40 plus 1 %");
+        DeleverageRequest memory req = _deleverageRequest(vaultId, margin, repay, uint64(mmAmount), 7);
+        bytes memory sig = _signDeleverage(req);
+        _fundAndApproveAdapter(marketMaker, repay); // exact approval: any over-pull would revert
+        bytes32 claimId = registry.claimIdOf(vaultId, 0);
+
+        vm.expectEmit(address(registry));
+        emit IZecuredRegistry.LiquidationRelease(vaultId, claimId, uint64(mmAmount), MM_COMMITMENT);
+        vm.prank(marketMaker);
+        assertEq(adapter.deleverageWithCollateral(req, sig, MM_COMMITMENT, uint64(mmAmount)), uint64(mmAmount));
+
+        assertEq(uint8(_status(vaultId)), uint8(VaultStatus.Active), "the vault stays open");
+        assertEq(_outstanding(vaultId), VAULT_005 - mmAmount);
+        assertEq(_position(account).collateral, VAULT_005 - mmAmount);
+        assertApproxEqAbs(MORPHO.expectedBorrowAssets(params, account), debtBefore - repay, 1);
+        assertLt(_ltvBps(account), ltvBefore, "LTV falls");
+        assertEq(zzec.totalSupply(), VAULT_005 - mmAmount, "I1");
+        _assertClaim(claimId, vaultId, ClaimKind.Liquidation, uint64(mmAmount), MM_COMMITMENT, ClaimStatus.Pending);
+        assertEq(usdc.balanceOf(marketMaker), 0, "paid exactly the signed repayment");
+        assertEq(usdc.allowance(address(adapter), address(MORPHO)), 0);
+        assertTrue(adapter.nonceUsed(account, 7));
+        _assertZZECOnlyInMorpho(_list(account, marketMaker));
+    }
+
+    /// I8 and the request's own bounds: only its executor, before its deadline, once (the nonce is shared with
+    /// closes), within the margin cap, with a commitment and a repayment, for the account's own vault, signed by the
+    /// account; the collateral within what the borrower signed and the executor accepts; the D11 floor.
+    function test_deleverage_revertsOutsideTheRequest() public {
+        (bytes32 vaultId,) = _openLoan(account, VAULT_005, 5_500);
+        _fundAndApproveAdapter(marketMaker, 2 * USDC);
+        DeleverageRequest memory req = _deleverageRequest(vaultId, 100, 500_000, 1_262_500, 1);
+        bytes memory sig = _signDeleverage(req);
+
+        vm.prank(stranger);
+        vm.expectRevert(abi.encodeWithSelector(ISettlementAdapter.NotExecutor.selector, stranger, marketMaker));
+        adapter.deleverageWithCollateral(req, sig, MM_COMMITMENT, 0);
+
+        DeleverageRequest memory r = _deleverageRequest(vaultId, 100, 500_000, 1_262_500, 1);
+        r.deadline = uint64(block.timestamp - 1);
+        _expectDeleverageRevert(
+            r, _signDeleverage(r), abi.encodeWithSelector(ISettlementAdapter.RequestExpired.selector, r.deadline)
+        );
+        r = _deleverageRequest(vaultId, 501, 500_000, 2_000_000, 1);
+        _expectDeleverageRevert(
+            r, _signDeleverage(r), abi.encodeWithSelector(ISettlementAdapter.MarginTooHigh.selector, 501, 500)
+        );
+        r = _deleverageRequest(vaultId, 100, 0, 2_000_000, 1);
+        _expectDeleverageRevert(r, _signDeleverage(r), abi.encodeWithSelector(ISettlementAdapter.ZeroRepay.selector));
+        vm.prank(marketMaker);
+        vm.expectRevert(ISettlementAdapter.ZeroCommitment.selector);
+        adapter.deleverageWithCollateral(req, sig, bytes32(0), 0);
+        r = _deleverageRequest(keccak256("another vault"), 100, 500_000, 1_262_500, 1);
+        _expectDeleverageRevert(
+            r,
+            _signDeleverage(r),
+            abi.encodeWithSelector(ISettlementAdapter.VaultAccountMismatch.selector, r.vaultId, account)
+        );
+
+        // Signed by someone else, or over another request (here: a higher maximum).
+        bytes memory foreign = _sign(signerKeys[0], adapter.hashDeleverageRequest(req));
+        _expectDeleverageRevert(req, foreign, abi.encodeWithSelector(ISettlementAdapter.InvalidUserSignature.selector));
+        r = _deleverageRequest(vaultId, 100, 500_000, 1_262_501, 1);
+        _expectDeleverageRevert(r, sig, abi.encodeWithSelector(ISettlementAdapter.InvalidUserSignature.selector));
+
+        // More collateral than the borrower signed for (a price drop since signing), or less than the executor accepts.
+        r = _deleverageRequest(vaultId, 100, 500_000, 1_262_499, 1);
+        _expectDeleverageRevert(
+            r,
+            _signDeleverage(r),
+            abi.encodeWithSelector(ISettlementAdapter.DeleverageAboveMaximum.selector, 1_262_500, 1_262_499)
+        );
+        vm.prank(marketMaker);
+        vm.expectRevert(
+            abi.encodeWithSelector(ISettlementAdapter.MarketMakerAmountBelowMinimum.selector, 1_262_500, 1_262_501)
+        );
+        adapter.deleverageWithCollateral(req, sig, MM_COMMITMENT, 1_262_501);
+        // Below the D11 floor.
+        r = _deleverageRequest(vaultId, 0, 39_999, 2_000_000, 1); // 99,998 zat (rounded up)
+        _expectDeleverageRevert(
+            r,
+            _signDeleverage(r),
+            abi.encodeWithSelector(ISettlementAdapter.SeizeBelowMinimum.selector, 99_998, 100_000)
+        );
+
+        // The nonce: used once, and shared with closes.
+        vm.prank(marketMaker);
+        adapter.deleverageWithCollateral(req, sig, MM_COMMITMENT, 0);
+        _expectDeleverageRevert(
+            req, sig, abi.encodeWithSelector(ISettlementAdapter.NonceAlreadyUsed.selector, account, 1)
+        );
+        CloseRequest memory close = _closeRequest(vaultId, account, 100, 0, 1);
+        bytes memory closeSig = _signClose(accountKey, close);
+        vm.prank(marketMaker);
+        vm.expectRevert(abi.encodeWithSelector(ISettlementAdapter.NonceAlreadyUsed.selector, account, 1));
+        adapter.closeWithCollateral(close, closeSig, MM_COMMITMENT, type(uint256).max, 0);
+    }
+
+    /// A deleverage must leave at least MIN_SEIZE in the vault: taking (almost) everything is a close.
+    function test_deleverage_revertsWhenItWouldEmptyTheVault() public {
+        (bytes32 vaultId,) = _openLoan(account, VAULT_001, 6_000); // 0.24 USDC on 0.4 USDC of collateral
+        _fundAndApproveAdapter(marketMaker, 1 * USDC);
+        // 0.24 USDC at 5 %: 630,000 zat, leaving 370,000: allowed. 0.36 USDC worth would not be, but the debt is only
+        // 0.24 USDC; so with a lower price: at $25 the same 0.24 USDC is 1,008,000 zat, more than the vault.
+        oracle.setPrice(25e34);
+        DeleverageRequest memory r = _deleverageRequest(vaultId, 500, 230_000, VAULT_001, 1); // 966,000 zat
+        bytes memory sig = _signDeleverage(r);
+        _expectDeleverageRevert(
+            r, sig, abi.encodeWithSelector(ISettlementAdapter.DeleverageRemainderTooSmall.selector, 34_000, 100_000)
+        );
     }
 
     /// The mmAmount formula at both ends of the margin range (0 and MAX_MARGIN_BPS), rounded up.

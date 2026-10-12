@@ -18,7 +18,7 @@ contract ZecuredInvariantsTest is ZecuredFixture {
         usdc.transferOwnership(address(handler)); // MOCK mint for the handler's actors
         oracle.transferOwnership(address(handler)); // MOCK price moves
 
-        bytes4[] memory selectors = new bytes4[](22);
+        bytes4[] memory selectors = new bytes4[](24);
         selectors[0] = ZecuredHandler.attest.selector;
         selectors[1] = ZecuredHandler.attest.selector; // weighted: vaults first
         selectors[2] = ZecuredHandler.borrow.selector;
@@ -41,6 +41,8 @@ contract ZecuredInvariantsTest is ZecuredFixture {
         selectors[19] = ZecuredHandler.commitOnly.selector;
         selectors[20] = ZecuredHandler.attackClaimReuse.selector;
         selectors[21] = ZecuredHandler.attackUncommittedConfirm.selector;
+        selectors[22] = ZecuredHandler.deleverage.selector;
+        selectors[23] = ZecuredHandler.attackDeleverage.selector;
         targetSelector(FuzzSelector({addr: address(handler), selectors: selectors}));
         targetContract(address(handler));
         // The handler pranks its own actors, so the caller does not matter. A fixed caller matters on a fork: every
@@ -198,7 +200,7 @@ contract ZecuredInvariantsTest is ZecuredFixture {
     }
 
     function afterInvariant() external view {
-        string[25] memory names = [
+        string[28] memory names = [
             "attest",
             "borrow",
             "repay",
@@ -223,7 +225,10 @@ contract ZecuredInvariantsTest is ZecuredFixture {
             "commit",
             "commit only",
             "attack: claim reuse",
-            "attack: uncommitted confirm"
+            "attack: uncommitted confirm",
+            "deleverage",
+            "deleverage (reverted)",
+            "attack: deleverage"
         ];
         for (uint256 i; i < names.length; ++i) {
             console.log(names[i], handler.calls(names[i]));
