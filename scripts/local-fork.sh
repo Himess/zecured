@@ -103,7 +103,11 @@ cmd_start() {
     echo "local AA already running"
   else
     [[ -d "$ROOT/tools/local-aa/node_modules" ]] || (cd "$ROOT/tools/local-aa" && pnpm install --frozen-lockfile --ignore-scripts)
-    node "$ROOT/tools/local-aa/start.mjs" > "$STATE/aa.log" 2>&1 &
+    # alto and the mock paymaster are third-party code: they get a clean environment, never the
+    # .env secrets this script exported (start.mjs needs only these variables).
+    env -i PATH="$PATH" HOME="$HOME" ANVIL_RPC="$RPC" BUNDLER_PORT="${BUNDLER_PORT:-4337}" \
+      PAYMASTER_PORT="${PAYMASTER_PORT:-4338}" ALTO_LOG_LEVEL="${ALTO_LOG_LEVEL:-warn}" \
+      node "$ROOT/tools/local-aa/start.mjs" > "$STATE/aa.log" 2>&1 &
     echo $! > "$STATE/aa.pid"
     wait_for "local AA" "grep -q 'local AA ready' '$STATE/aa.log'"
     tail -1 "$STATE/aa.log"
