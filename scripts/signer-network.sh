@@ -137,7 +137,12 @@ cmd_start() {
     echo $! > "$PIDS/node-$i"
   done
   if ! { [[ -f "$PIDS/backend" ]] && kill -0 "$(cat "$PIDS/backend")" 2>/dev/null; }; then
-    DEMO_ADMIN_TOKEN="$token" ZECURED_NETWORK_CONFIG="$NETWORK" ZECURED_COORDINATOR_DATA="$DATA/coordinator" \
+    # With an external paymaster (PAYMASTER_URL: the local fork's mock), the backend does not run
+    # our own paymaster (RQ-05), so it does not get that paymaster's signer key either.
+    local own_paymaster=()
+    [[ -n "${PAYMASTER_URL:-}" ]] && own_paymaster=(-u PAYMASTER_ADDRESS -u PAYMASTER_SIGNER_PRIVATE_KEY)
+    env ${own_paymaster[@]+"${own_paymaster[@]}"} \
+      DEMO_ADMIN_TOKEN="$token" ZECURED_NETWORK_CONFIG="$NETWORK" ZECURED_COORDINATOR_DATA="$DATA/coordinator" \
       ZECURED_DEPLOYMENTS="${ZECURED_DEPLOYMENTS:-$ROOT/contracts/deployments/base-sepolia.json}" \
       nohup "$BIN/zecured-backend" > "$LOGS/backend.log" 2>&1 &
     echo $! > "$PIDS/backend"
