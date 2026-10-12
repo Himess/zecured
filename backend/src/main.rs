@@ -79,7 +79,8 @@ struct Cli {
     /// The market maker's quote service (close from collateral).
     #[arg(long, env = "MARKET_MAKER_URL", default_value = "http://127.0.0.1:8090")]
     market_maker_url: String,
-    /// Owner key of the MOCK price oracle, for the demo control panel's price slider.
+    /// Owner key of the market's DemoShockOracle (and of the base MockZecOracle, if the base is a
+    /// MOCK), for the demo control panel.
     #[arg(long, env = "DEPLOYER_PRIVATE_KEY", hide_env_values = true, default_value = "")]
     oracle_owner_key: String,
     /// Token protecting the demo control endpoints (empty = disabled).
@@ -504,12 +505,16 @@ async fn close_submit(
     mm_forward(mm.http.post(format!("{}/close", mm.url)).json(&b)).await
 }
 
-// ------------------------------------------------------------------------- MOCK oracle
+// ------------------------------------------------------------------------- demo price controls
 
+/// RQ-06: the market's oracle is a DemoShockOracle (MOCK / DEMO) around a base ZEC/USD price.
 #[derive(Clone)]
 struct Oracle {
     rpc: String,
-    address: Option<Address>,
+    /// The market's oracle (DemoShockOracle).
+    market: Option<Address>,
+    /// The base oracle, when it is the owner-set MockZecOracle (local fork, or no real feed yet).
+    base_mock: Option<Address>,
     owner_key: String,
 }
 
@@ -518,6 +523,14 @@ alloy::sol! {
     interface IMockZecOracle {
         function price() external view returns (uint256);
         function setPrice(uint256 newPrice) external;
+    }
+
+    #[sol(rpc)]
+    interface IDemoShockOracle {
+        function price() external view returns (uint256);
+        function base() external view returns (address);
+        function shockBps() external view returns (uint256);
+        function setShock(uint256 newShockBps) external;
     }
 }
 
@@ -534,11 +547,22 @@ async fn admin_get_oracle(
     headers: HeaderMap,
 ) -> ApiResult {
     check_admin(&t, &headers)?;
-    let address = o.address.ok_or(ApiError::NOT_CONFIGURED)?;
+    let market = o.market.ok_or(ApiError::NOT_CONFIGURED)?;
     let p = alloy::providers::ProviderBuilder::new().connect_http(o.rpc.parse().map_err(chain_error)?);
-    let raw = IMockZecOracle::new(address, &p).price().call().await.map_err(chain_error)?;
-    let cents = raw / alloy::primitives::U256::from(ORACLE_SCALE_PER_CENT);
-    Ok(Json(json!({ "priceUsdCents": cents.to_string(), "raw": raw.to_string() })))
+    let shock = IDemoShockOracle::new(market, &p);
+    let effective = shock.price().call().await.map_err(chain_error)?;
+    let base_address = shock.base().call().await.map_err(chain_error)?;
+    let base = IMockZecOracle::new(base_address, &p).price().call().await.map_err(chain_error)?;
+    let shock_bps = shock.shockBps().call().await.map_err(chain_error)?;
+    let cents = |raw: alloy::primitives::U256| (raw / alloy::primitives::U256::from(ORACLE_SCALE_PER_CENT)).to_string();
+    Ok(Json(json!({
+        // The market's price, which Morpho uses.
+        "priceUsdCents": cents(effective),
+        "raw": effective.to_string(),
+        "basePriceUsdCents": cents(base),
+        "baseIsMock": o.base_mock.is_some(),
+        "shockBps": shock_bps.to_string(),
+    })))
 }
 
 #[derive(Deserialize)]
@@ -547,6 +571,14 @@ struct OracleBody {
     price_usd_cents: u64,
 }
 
+fn owner_provider(o: &Oracle) -> Result<impl alloy::providers::Provider, ApiError> {
+    let key: alloy::signers::local::PrivateKeySigner = o.owner_key.parse().map_err(|_| ApiError::NOT_CONFIGURED)?;
+    Ok(alloy::providers::ProviderBuilder::new()
+        .wallet(alloy::network::EthereumWallet::from(key))
+        .connect_http(o.rpc.parse().map_err(chain_error)?))
+}
+
+/// MOCK base price (only when the base oracle is the MockZecOracle).
 async fn admin_set_oracle(
     axum::Extension(t): axum::Extension<AdminToken>,
     axum::Extension(o): axum::Extension<Oracle>,
@@ -554,11 +586,12 @@ async fn admin_set_oracle(
     Body(b): Body<OracleBody>,
 ) -> ApiResult {
     check_admin(&t, &headers)?;
-    let address = o.address.ok_or(ApiError::NOT_CONFIGURED)?;
-    let key: alloy::signers::local::PrivateKeySigner = o.owner_key.parse().map_err(|_| ApiError::NOT_CONFIGURED)?;
-    let p = alloy::providers::ProviderBuilder::new()
-        .wallet(alloy::network::EthereumWallet::from(key))
-        .connect_http(o.rpc.parse().map_err(chain_error)?);
+    let address = o.base_mock.ok_or(ApiError::new(
+        StatusCode::CONFLICT,
+        "real_price",
+        "The base price is a real feed: shock it with /admin/shock instead.",
+    ))?;
+    let p = owner_provider(&o)?;
     let raw = alloy::primitives::U256::from(b.price_usd_cents) * alloy::primitives::U256::from(ORACLE_SCALE_PER_CENT);
     let receipt = IMockZecOracle::new(address, &p)
         .setPrice(raw)
@@ -573,6 +606,43 @@ async fn admin_set_oracle(
         return Err(ApiError::new(StatusCode::BAD_GATEWAY, "reverted", "setPrice reverted."));
     }
     Ok(Json(json!({ "priceUsdCents": b.price_usd_cents.to_string(), "txHash": receipt.transaction_hash })))
+}
+
+#[derive(Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct ShockBody {
+    shock_bps: u64,
+}
+
+/// DEMO: the market's shock (DemoShockOracle.setShock: a lowering keeps at least 75 % of the
+/// current shock and comes at least two minutes after the last one).
+async fn admin_set_shock(
+    axum::Extension(t): axum::Extension<AdminToken>,
+    axum::Extension(o): axum::Extension<Oracle>,
+    headers: HeaderMap,
+    Body(b): Body<ShockBody>,
+) -> ApiResult {
+    check_admin(&t, &headers)?;
+    let market = o.market.ok_or(ApiError::NOT_CONFIGURED)?;
+    let p = owner_provider(&o)?;
+    let shock = IDemoShockOracle::new(market, &p);
+    let call = shock.setShock(alloy::primitives::U256::from(b.shock_bps));
+    // A refused step (too deep, too soon) is the contract's answer, not an outage.
+    call.call().await.map_err(|_| {
+        ApiError::new(StatusCode::CONFLICT, "shock_refused", "Shock refused: at most 25 % lower per step, two minutes apart.")
+    })?;
+    let receipt = call
+        .send()
+        .await
+        .map_err(chain_error)?
+        .with_timeout(Some(Duration::from_secs(120)))
+        .get_receipt()
+        .await
+        .map_err(chain_error)?;
+    if !receipt.status() {
+        return Err(ApiError::new(StatusCode::BAD_GATEWAY, "reverted", "setShock reverted."));
+    }
+    Ok(Json(json!({ "shockBps": b.shock_bps.to_string(), "txHash": receipt.transaction_hash })))
 }
 
 // ------------------------------------------------------------------------- config and wiring
@@ -634,6 +704,12 @@ fn signer_sets_agree(cfg: &NetworkConfig, dep: &serde_json::Value) -> bool {
 }
 
 /// Reads the allowlist parameters from the deployment file written by the deploy script.
+/// `contracts.<name>` of the deployment file, if present.
+fn deployment_contract(path: &std::path::Path, name: &str) -> Option<Address> {
+    let raw: serde_json::Value = serde_json::from_slice(&std::fs::read(path).ok()?).ok()?;
+    raw.get("contracts")?.get(name)?.as_str()?.parse().ok()
+}
+
 fn load_allowlist(path: &std::path::Path) -> Option<allowlist::Allowlist> {
     let raw: serde_json::Value = serde_json::from_slice(&std::fs::read(path).ok()?).ok()?;
     let contract = |name: &str| raw.get("contracts")?.get(name)?.as_str()?.parse::<Address>().ok();
@@ -642,7 +718,8 @@ fn load_allowlist(path: &std::path::Path) -> Option<allowlist::Allowlist> {
         morpho: market("morphoBlue")?.parse().ok()?,
         registry: contract("ZecuredRegistry")?,
         adapter: contract("SettlementAdapter")?,
-        usdc: contract("MockUSDC")?,
+        // RQ-06: Circle's testnet USDC on Base Sepolia, a MockUSDC on the local fork.
+        usdc: contract("LoanToken").or_else(|| contract("MockUSDC"))?,
         loan_token: market("loanToken")?.parse().ok()?,
         collateral_token: market("collateralToken")?.parse().ok()?,
         oracle: market("oracle")?.parse().ok()?,
@@ -697,6 +774,7 @@ fn router(
         .route("/admin/nodes/{index}/mode", post(admin_mode))
         .route("/admin/vaults/{id}/drain", post(admin_drain))
         .route("/admin/oracle", get(admin_get_oracle).post(admin_set_oracle))
+        .route("/admin/shock", post(admin_set_shock))
         .merge(Router::new().route("/vaults", post(open_vault)).route_layer(limited(&limits.open_vault)))
         .merge(Router::new().route("/recipients", post(recipients)).route_layer(limited(&limits.recipients)))
         .merge(
@@ -829,7 +907,8 @@ async fn main() -> Result<()> {
         modes,
         oracle: Oracle {
             rpc: coordinator.cfg.base_rpc_url.clone(),
-            address: allowlist_oracle,
+            market: allowlist_oracle,
+            base_mock: deployment_contract(&cli.deployments, "MockZecOracle"),
             owner_key: cli.oracle_owner_key.clone(),
         },
         market_maker: MarketMaker {
@@ -1057,7 +1136,8 @@ mod tests {
             modes: ModePolicy::parse("4,5", &[1, 2, 3, 4, 5]).unwrap(),
             oracle: Oracle {
                 rpc: "http://127.0.0.1:9".into(),
-                address: None,
+                market: None,
+                base_mock: None,
                 owner_key: String::new(),
             },
             market_maker: MarketMaker {

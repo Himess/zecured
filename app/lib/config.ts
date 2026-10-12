@@ -108,8 +108,10 @@ export interface RemoteConfig {
 }
 
 export interface RemoteContracts {
-  MockUSDC: Address;
-  MockZecOracle: Address;
+  /** The market's loan token: Circle's testnet USDC on Base Sepolia, a MockUSDC (MOCK) on the local fork. */
+  LoanToken: Address;
+  /** The market's oracle: the DemoShockOracle (MOCK / DEMO) around the base price (older deployments: MockZecOracle). */
+  MarketOracle: Address;
   SettlementAdapter: Address;
   ZZEC: Address;
   ZecuredRegistry: Address;
@@ -234,8 +236,8 @@ function backendReports(r: RemoteConfig): Record<PinField, { value: Hex; what: s
   if (c) {
     out.registry.push({ value: c.ZecuredRegistry, what: "deployed ZecuredRegistry" });
     out.adapter.push({ value: c.SettlementAdapter, what: "deployed SettlementAdapter" });
-    out.usdc.push({ value: c.MockUSDC, what: "MockUSDC" });
-    out.oracle.push({ value: c.MockZecOracle, what: "MockZecOracle" });
+    out.usdc.push({ value: c.LoanToken, what: "deployed loan token" });
+    out.oracle.push({ value: c.MarketOracle, what: "deployed market oracle" });
     out.zzec.push({ value: c.ZZEC, what: "ZZEC" });
   }
   return out;

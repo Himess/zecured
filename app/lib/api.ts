@@ -329,9 +329,10 @@ export function parseRemoteConfig(raw: unknown): RemoteConfig {
   let contracts: RemoteContracts | null = null;
   if (r.contracts !== null && r.contracts !== undefined) {
     const c = obj(r.contracts, "config.contracts");
+    // RQ-06: LoanToken and DemoShockOracle; deployments made before them name only the mocks.
     contracts = {
-      MockUSDC: addr(c.MockUSDC, "config.contracts.MockUSDC"),
-      MockZecOracle: addr(c.MockZecOracle, "config.contracts.MockZecOracle"),
+      LoanToken: addr(c.LoanToken ?? c.MockUSDC, "config.contracts.LoanToken"),
+      MarketOracle: addr(c.DemoShockOracle ?? c.MockZecOracle, "config.contracts.DemoShockOracle"),
       SettlementAdapter: addr(c.SettlementAdapter, "config.contracts.SettlementAdapter"),
       ZZEC: addr(c.ZZEC, "config.contracts.ZZEC"),
       ZecuredRegistry: addr(c.ZecuredRegistry, "config.contracts.ZecuredRegistry"),

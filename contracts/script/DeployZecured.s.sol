@@ -5,8 +5,12 @@ import {Script, console} from "forge-std/Script.sol";
 import {VmSafe} from "forge-std/Vm.sol";
 import {IMorpho, MarketParams, Id} from "morpho-blue/src/interfaces/IMorpho.sol";
 import {MarketParamsLib} from "morpho-blue/src/libraries/MarketParamsLib.sol";
+import {IERC20} from "@openzeppelin/contracts/token/ERC20/IERC20.sol";
+import {IERC20Metadata} from "@openzeppelin/contracts/token/ERC20/extensions/IERC20Metadata.sol";
+import {IOracle} from "morpho-blue/src/interfaces/IOracle.sol";
 import {MockUSDC} from "../src/mocks/MockUSDC.sol";
 import {MockZecOracle} from "../src/mocks/MockZecOracle.sol";
+import {DemoShockOracle} from "../src/mocks/DemoShockOracle.sol";
 import {ZZEC} from "../src/ZZEC.sol";
 import {ZecuredRegistry} from "../src/ZecuredRegistry.sol";
 import {SettlementAdapter} from "../src/SettlementAdapter.sol";
@@ -17,7 +21,9 @@ import {IZcashHeaderRelay} from "../src/relay/IZcashHeaderRelay.sol";
 
 /// @title DeployZecured
 /// @notice Deploys the Zecured contracts on Base Sepolia:
-///         1. MockUSDC + MockZecOracle (MOCK), or reuses them (MOCK_USDC / MOCK_ZEC_ORACLE);
+///         1. the market's assets (RQ-06): the loan token (Circle's testnet USDC on Base Sepolia, a fresh MockUSDC on
+///            the local fork), the ZEC/USD base oracle (BASE_ORACLE, or a fresh MockZecOracle, MOCK) and the
+///            DemoShockOracle (MOCK / DEMO) around it, which is the market's oracle;
 ///         2. ZZEC, ZecuredRegistry and SettlementAdapter at the deployer's next three CREATE addresses (predicted
 ///            first, because each contract needs the others' addresses as immutables; the constructors verify the
 ///            wiring). The Registry constructor creates the zZEC / MockUSDC / MockZecOracle / AdaptiveCurveIRM / 62.5 %
@@ -28,9 +34,13 @@ import {IZcashHeaderRelay} from "../src/relay/IZcashHeaderRelay.sol";
 /// @dev Environment (the repo-root .env is loaded by forge):
 ///        DEPLOYER_PRIVATE_KEY  deployer key (never logged)
 ///        SIGNER_ADDRESSES      the 5 signer addresses, comma-separated, strictly increasing
-///        ZEC_USD_PRICE_CENTS   initial MockZecOracle price when the oracle is deployed (default 4000 = $40.00)
-///        MOCK_USDC, MOCK_ZEC_ORACLE   optional: reuse already deployed mocks
-///        LENDER_SEED_USDC      optional: whole MockUSDC to supply as demo lender (default 0 = none)
+///        LOAN_TOKEN            optional: the market's loan token, 6 decimals (default: Circle's testnet USDC on Base
+///                              Sepolia; a fresh MockUSDC with DEPLOYMENT_NAME=anvil)
+///        BASE_ORACLE           optional: the ZEC/USD price oracle the DemoShockOracle wraps (Morpho scale); default:
+///                              a fresh MockZecOracle (MOCK) at ZEC_USD_PRICE_CENTS
+///        ZEC_USD_PRICE_CENTS   initial MockZecOracle price when one is deployed (default 126500 = $1,265.00)
+///        LENDER_SEED_USDC      optional: whole USDC to supply as demo lender (default 0 = none); minted when the loan
+///                              token is the MockUSDC, otherwise taken from the deployer's balance
 ///        DEPLOYMENT_NAME       optional: output file name (default base-sepolia; scripts/local-fork.sh uses anvil)
 ///        DEPOSIT_IMAGE_ID      optional: image id of the deposit guest (tier2/); enables attestDepositWithProof
 ///        ZCASH_RELAY           with DEPOSIT_IMAGE_ID: the ZcashHeaderRelay to anchor proofs to (script/DeployRelay.s.sol)
@@ -75,14 +85,16 @@ contract DeployZecured is Script {
 
     struct Deployment {
         address deployer;
-        MockUSDC usdc;
-        MockZecOracle oracle;
-        bool mocksReused;
+        address loanToken;
+        bool loanTokenIsMock;
+        IOracle baseOracle;
+        bool baseOracleIsMock;
+        DemoShockOracle oracle;
         ZZEC zzec;
         ZecuredRegistry registry;
         SettlementAdapter adapter;
         Id marketId;
-        uint256 lenderSeed; // MockUSDC units (6 decimals)
+        uint256 lenderSeed; // USDC units (6 decimals)
         bool dryRun;
         DepositProofConfig proofs;
         bool verifierIsMock;
@@ -100,7 +112,7 @@ contract DeployZecured is Script {
         d.lenderSeed = vm.envOr("LENDER_SEED_USDC", uint256(0)) * 1e6;
 
         vm.startBroadcast(deployerKey);
-        _mocks(d);
+        _marketAssets(d);
         _core(d, signerSet);
         if (d.lenderSeed != 0) _seedLender(d);
         vm.stopBroadcast();
@@ -111,22 +123,32 @@ contract DeployZecured is Script {
 
     // ------------------------------------------------------------------ steps
 
-    function _mocks(Deployment memory d) internal {
-        address usdc = vm.envOr("MOCK_USDC", address(0));
-        address oracle = vm.envOr("MOCK_ZEC_ORACLE", address(0));
-        require((usdc == address(0)) == (oracle == address(0)), "DeployZecured: set both MOCK_USDC and MOCK_ZEC_ORACLE");
-        if (usdc != address(0)) {
-            require(usdc.code.length > 0 && oracle.code.length > 0, "DeployZecured: mock address without code");
-            d.usdc = MockUSDC(usdc);
-            d.oracle = MockZecOracle(oracle);
-            require(d.usdc.decimals() == 6, "DeployZecured: MOCK_USDC is not 6 decimals");
-            require(d.oracle.price() != 0, "DeployZecured: MOCK_ZEC_ORACLE has no price");
-            d.mocksReused = true;
+    /// Circle's testnet USDC on Base Sepolia (developers.circle.com/stablecoins/usdc-contract-addresses).
+    address internal constant CIRCLE_USDC = 0x036CbD53842c5426634e7929541eC2318f3dCF7e;
+
+    /// RQ-06: the loan token and the price. MarketParams are immutable, so this is fixed for the deployment.
+    function _marketAssets(Deployment memory d) internal {
+        bool localFork = keccak256(bytes(vm.envOr("DEPLOYMENT_NAME", string("")))) == keccak256("anvil");
+        d.loanToken = vm.envOr("LOAN_TOKEN", localFork ? address(0) : CIRCLE_USDC);
+        if (d.loanToken == address(0)) {
+            d.loanToken = address(new MockUSDC(d.deployer));
+            d.loanTokenIsMock = true;
         } else {
-            uint256 priceCents = vm.envOr("ZEC_USD_PRICE_CENTS", uint256(4000));
-            d.usdc = new MockUSDC(d.deployer);
-            d.oracle = new MockZecOracle(d.deployer, priceCents * 1e32); // cents * 1e32 = USD * 1e34
+            require(d.loanToken.code.length > 0, "DeployZecured: LOAN_TOKEN has no code");
         }
+        require(IERC20Metadata(d.loanToken).decimals() == 6, "DeployZecured: the loan token is not 6 decimals");
+
+        address baseOracle = vm.envOr("BASE_ORACLE", address(0));
+        if (baseOracle == address(0)) {
+            uint256 priceCents = vm.envOr("ZEC_USD_PRICE_CENTS", uint256(126_500));
+            baseOracle = address(new MockZecOracle(d.deployer, priceCents * 1e32)); // cents * 1e32 = USD * 1e34
+            d.baseOracleIsMock = true;
+        } else {
+            require(baseOracle.code.length > 0, "DeployZecured: BASE_ORACLE has no code");
+        }
+        d.baseOracle = IOracle(baseOracle);
+        require(d.baseOracle.price() != 0, "DeployZecured: the base oracle has no price");
+        d.oracle = new DemoShockOracle(d.deployer, d.baseOracle);
     }
 
     /// ZZEC needs the Registry and the Adapter, the Registry needs ZZEC and the Adapter, the Adapter needs the
@@ -142,7 +164,7 @@ contract DeployZecured is Script {
             MORPHO,
             d.zzec,
             predictedAdapter,
-            address(d.usdc),
+            d.loanToken,
             address(d.oracle),
             ADAPTIVE_CURVE_IRM,
             LLTV,
@@ -224,10 +246,16 @@ contract DeployZecured is Script {
     }
 
     function _seedLender(Deployment memory d) internal {
-        require(d.usdc.owner() == d.deployer, "DeployZecured: the deployer does not own MockUSDC");
         MarketParams memory params = d.registry.marketParams();
-        d.usdc.mint(d.deployer, d.lenderSeed);
-        d.usdc.approve(address(MORPHO), d.lenderSeed);
+        if (d.loanTokenIsMock) {
+            require(MockUSDC(d.loanToken).owner() == d.deployer, "DeployZecured: the deployer does not own MockUSDC");
+            MockUSDC(d.loanToken).mint(d.deployer, d.lenderSeed);
+        } else {
+            require(
+                IERC20(d.loanToken).balanceOf(d.deployer) >= d.lenderSeed, "DeployZecured: the deployer lacks the USDC"
+            );
+        }
+        IERC20(d.loanToken).approve(address(MORPHO), d.lenderSeed);
         MORPHO.supply(params, d.lenderSeed, 0, d.deployer, "");
     }
 
@@ -246,14 +274,15 @@ contract DeployZecured is Script {
     function _log(Deployment memory d) internal pure {
         console.log(d.dryRun ? "DRY RUN (simulation, nothing broadcast)" : "BROADCAST");
         console.log("deployer:", d.deployer);
-        console.log("MockUSDC (MOCK):", address(d.usdc), d.mocksReused ? "(reused)" : "(new)");
-        console.log("MockZecOracle (MOCK):", address(d.oracle), d.mocksReused ? "(reused)" : "(new)");
+        console.log("loan token:", d.loanToken, d.loanTokenIsMock ? "(MockUSDC, MOCK)" : "");
+        console.log("base oracle:", address(d.baseOracle), d.baseOracleIsMock ? "(MockZecOracle, MOCK)" : "");
+        console.log("market oracle (DemoShockOracle, MOCK/DEMO):", address(d.oracle));
         console.log("ZZEC:", address(d.zzec));
         console.log("ZecuredRegistry:", address(d.registry));
         console.log("SettlementAdapter:", address(d.adapter));
         console.log("Morpho market id:");
         console.logBytes32(Id.unwrap(d.marketId));
-        console.log("demo lender supply (MockUSDC units):", d.lenderSeed);
+        console.log("demo lender supply (USDC units):", d.lenderSeed);
         if (address(d.proofs.verifier) == address(0)) {
             console.log("deposit proofs: disabled; mint mode: signer-attested");
         } else {
@@ -267,18 +296,29 @@ contract DeployZecured is Script {
         }
     }
 
+    /// What is a MOCK in this deployment, for README "What is real and what is a mock".
+    function _mockNote(Deployment memory d) internal pure returns (string memory note) {
+        note = "DemoShockOracle is a MOCK / DEMO control (owner-set shock on top of the base price, public ShockSet events)";
+        if (d.loanTokenIsMock) note = string.concat(note, "; MockUSDC is a MOCK (owner-minted)");
+        if (d.baseOracleIsMock) note = string.concat(note, "; MockZecOracle is a MOCK (owner-set price)");
+        if (d.verifierIsMock) note = string.concat(note, "; MockRiscZeroVerifier is a MOCK (accepts unproven deposit journals)");
+    }
+
     function _writeJson(Deployment memory d, address[5] memory signerSet) internal {
         string memory contracts = "contracts";
         vm.serializeAddress(contracts, "ZZEC", address(d.zzec));
         vm.serializeAddress(contracts, "ZecuredRegistry", address(d.registry));
         vm.serializeAddress(contracts, "SettlementAdapter", address(d.adapter));
-        vm.serializeAddress(contracts, "MockUSDC", address(d.usdc));
-        contracts = vm.serializeAddress(contracts, "MockZecOracle", address(d.oracle));
+        vm.serializeAddress(contracts, "LoanToken", d.loanToken);
+        if (d.loanTokenIsMock) vm.serializeAddress(contracts, "MockUSDC", d.loanToken);
+        vm.serializeAddress(contracts, "BaseOracle", address(d.baseOracle));
+        if (d.baseOracleIsMock) vm.serializeAddress(contracts, "MockZecOracle", address(d.baseOracle));
+        contracts = vm.serializeAddress(contracts, "DemoShockOracle", address(d.oracle));
 
         string memory market = "market";
         vm.serializeAddress(market, "morphoBlue", address(MORPHO));
         vm.serializeBytes32(market, "marketId", Id.unwrap(d.marketId));
-        vm.serializeAddress(market, "loanToken", address(d.usdc));
+        vm.serializeAddress(market, "loanToken", d.loanToken);
         vm.serializeAddress(market, "collateralToken", address(d.zzec));
         vm.serializeAddress(market, "oracle", address(d.oracle));
         vm.serializeAddress(market, "irm", ADAPTIVE_CURVE_IRM);
@@ -325,15 +365,10 @@ contract DeployZecured is Script {
         vm.serializeUint(root, "minSeize", d.adapter.MIN_SEIZE());
         vm.serializeUint(root, "maxMarginBps", d.adapter.MAX_MARGIN_BPS());
         vm.serializeString(root, "oraclePrice", vm.toString(d.oracle.price())); // USD * 1e34, decimal string
-        vm.serializeBool(root, "mocksReused", d.mocksReused);
+        vm.serializeBool(root, "loanTokenIsMock", d.loanTokenIsMock);
+        vm.serializeBool(root, "baseOracleIsMock", d.baseOracleIsMock);
         vm.serializeUint(root, "lenderSeedUsdcUnits", d.lenderSeed);
-        string memory json = vm.serializeString(
-            root,
-            "mocks",
-            d.verifierIsMock
-                ? "MockUSDC and MockZecOracle are MOCKS (testnet stand-ins, owner-controlled); MockRiscZeroVerifier is a MOCK (accepts unproven deposit journals)"
-                : "MockUSDC and MockZecOracle are MOCKS (testnet stand-ins, owner-controlled)"
-        );
+        string memory json = vm.serializeString(root, "mocks", _mockNote(d));
 
         vm.createDir(OUT_DIR, true);
         string memory name = vm.envOr("DEPLOYMENT_NAME", string("base-sepolia"));

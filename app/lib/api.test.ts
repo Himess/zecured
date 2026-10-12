@@ -346,7 +346,14 @@ describe("GET /config", () => {
       chainId: 84532,
       registry: "0xbdB942d882882bF795aA9c0Cd20ADe2115c73AAc",
       adapter: "0xC0a2A554dcFB5a1bd7e5E769A2Ad0c33BA0500fc",
-      contracts: DRY_RUN_CONFIG.contracts,
+      // A deployment from before RQ-06 names only the mocks: they are its loan token and oracle.
+      contracts: {
+        LoanToken: DRY_RUN_CONFIG.contracts.MockUSDC,
+        MarketOracle: DRY_RUN_CONFIG.contracts.MockZecOracle,
+        SettlementAdapter: DRY_RUN_CONFIG.contracts.SettlementAdapter,
+        ZZEC: DRY_RUN_CONFIG.contracts.ZZEC,
+        ZecuredRegistry: DRY_RUN_CONFIG.contracts.ZecuredRegistry,
+      },
       market: { ...DRY_RUN_CONFIG.market, lltv: 625_000_000_000_000_000n },
       signers: null,
       denominations: [1_000_000n, 5_000_000n],
@@ -354,6 +361,17 @@ describe("GET /config", () => {
       vaultExpiryBlocks: 288,
       sponsorship: true,
     });
+  });
+
+  it("reads the loan token and the shock oracle of an RQ-06 deployment first", () => {
+    const usdc = "0x036CbD53842c5426634e7929541eC2318f3dCF7e";
+    const shock = "0x1111111111111111111111111111111111111111";
+    const c = parseRemoteConfig({
+      ...DRY_RUN_CONFIG,
+      contracts: { ...DRY_RUN_CONFIG.contracts, MockUSDC: undefined, LoanToken: usdc, DemoShockOracle: shock },
+    });
+    expect(c.contracts?.LoanToken).toBe(usdc);
+    expect(c.contracts?.MarketOracle).toBe(shock);
   });
 
   it("accepts a signer set when the backend reports one (sorted), and checks it", () => {

@@ -101,7 +101,7 @@ impl Deployment {
         Ok(Self {
             registry: c("ZecuredRegistry")?,
             adapter: c("SettlementAdapter")?,
-            usdc: c("MockUSDC")?,
+            usdc: m("loanToken")?.parse()?, // Circle USDC on Base Sepolia, MockUSDC on the local fork
             morpho: m("morphoBlue")?.parse()?,
             market_id: m("marketId")?.parse()?,
             market: MarketParams {
