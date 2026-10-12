@@ -7565,6 +7565,7 @@ dependencies = [
  "zcash_protocol",
  "zecured-base",
  "zecured-deposit-witness",
+ "zecured-policy",
  "zecured-zcash-ops",
 ]
 
