@@ -14,6 +14,8 @@ import {DemoShockOracle} from "../src/mocks/DemoShockOracle.sol";
 import {ZZEC} from "../src/ZZEC.sol";
 import {ZecuredRegistry} from "../src/ZecuredRegistry.sol";
 import {ISignerBond} from "../src/interfaces/ISignerBond.sol";
+import {SignerBond} from "../src/SignerBond.sol";
+import {ZecuredSlasher} from "../src/ZecuredSlasher.sol";
 import {SettlementAdapter} from "../src/SettlementAdapter.sol";
 import {DepositProofConfig, MintMode} from "../src/interfaces/IZecuredRegistry.sol";
 import {IRiscZeroVerifier} from "../src/interfaces/IRiscZeroVerifier.sol";
@@ -30,8 +32,11 @@ import {IZcashHeaderRelay} from "../src/relay/IZcashHeaderRelay.sol";
 ///            wiring). The Registry constructor creates the zZEC / MockUSDC / MockZecOracle / AdaptiveCurveIRM / 62.5 %
 ///            market on Morpho Blue;
 ///            With DEPOSIT_IMAGE_ID set, the Registry also accepts Tier 2 deposit proofs (docs/TIER2.md);
-///         3. optionally a demo lender supply (the deployer supplies LENDER_SEED_USDC freshly minted MockUSDC);
-///         4. writes deployments/base-sepolia.json (broadcast) or deployments/base-sepolia.dry-run.json (simulation).
+///         3. with VIOLATION_IMAGE_ID, Tier 3 (docs/TIER3.md): SignerBond and ZecuredSlasher at the next two
+///            addresses (the Registry names the bond, the bond the slasher); the Registry then mints only once all five
+///            signers have bonded (script/BondSigners.s.sol);
+///         4. optionally a demo lender supply (the deployer supplies LENDER_SEED_USDC freshly minted MockUSDC);
+///         5. writes deployments/base-sepolia.json (broadcast) or deployments/base-sepolia.dry-run.json (simulation).
 /// @dev Environment (the repo-root .env is loaded by forge):
 ///        DEPLOYER_PRIVATE_KEY  deployer key (never logged)
 ///        SIGNER_ADDRESSES      the 5 signer addresses, comma-separated, strictly increasing
@@ -58,6 +63,13 @@ import {IZcashHeaderRelay} from "../src/relay/IZcashHeaderRelay.sol";
 ///                              MOCK verifier always pins its own 0xffffffff
 ///        FINALIZE_DEPTH        with DEPOSIT_IMAGE_ID: relay headers to wait for after a proof (K3; default 6)
 ///        FINALIZE_DELAY        with DEPOSIT_IMAGE_ID: seconds to wait after a proof (K3; default 150, six 25 s blocks)
+///        VIOLATION_IMAGE_ID    optional, needs DEPOSIT_IMAGE_ID: image id of the violation guest; deploys Tier 3
+///        CHALLENGE_WINDOW      with VIOLATION_IMAGE_ID: seconds between a violation proof and its slash (default and
+///                              minimum 86,400; THEFT_DEMO=true allows 120, T3-6)
+///        SLASH_CONFIRMATION_WORK with VIOLATION_IMAGE_ID: relay work above a violation's anchor (default 38,000,000:
+///                              about 100 normal Testnet blocks, S4; at least 30,000,000 outside the local fork)
+///        THEFT_DEMO            true: the separate theft-demonstration deployment (T3-6): a 2-minute window allowed,
+///                              and DEPLOYMENT_NAME must contain "theft-demo"; never the judge deployment
 ///      Dry run (simulation only, sends nothing):
 ///        forge script script/DeployZecured.s.sol --rpc-url https://sepolia.base.org
 ///      Real deployment (only once the deployer is funded):
@@ -73,8 +85,6 @@ contract DeployZecured is Script {
     IMorpho internal constant MORPHO = IMorpho(0xBBBBBbbBBb9cC5e90e3b3Af64bdAF62C37EEFFCb);
     address internal constant ADAPTIVE_CURVE_IRM = 0x46415998764C29aB2a25CbeA6254146D50D22687;
     uint256 internal constant LLTV = 0.625e18;
-    /// @dev Until the Tier 3 contracts are deployed with the Registry (Deploy 2): no bond.
-    ISignerBond internal constant NO_BOND = ISignerBond(address(0));
     uint256 internal constant BASE_SEPOLIA_CHAIN_ID = 84532;
     string internal constant OUT_DIR = "deployments";
     /// RISC Zero verifier router on Base Sepolia (docs/TIER2.md § 5).
@@ -85,6 +95,10 @@ contract DeployZecured is Script {
     bytes4 internal constant GROTH16_SELECTOR = 0x73c457ba;
     uint64 internal constant DEFAULT_FINALIZE_DEPTH = 6;
     uint64 internal constant DEFAULT_FINALIZE_DELAY = 150;
+    uint64 internal constant JUDGE_CHALLENGE_WINDOW = 1 days;
+    uint64 internal constant DEMO_CHALLENGE_WINDOW = 2 minutes;
+    uint256 internal constant DEFAULT_SLASH_CONFIRMATION_WORK = 38_000_000;
+    uint256 internal constant FLOOR_SLASH_CONFIRMATION_WORK = 30_000_000;
 
     struct Deployment {
         address deployer;
@@ -101,6 +115,13 @@ contract DeployZecured is Script {
         bool dryRun;
         DepositProofConfig proofs;
         bool verifierIsMock;
+        // Tier 3 (zero without VIOLATION_IMAGE_ID)
+        SignerBond bond;
+        ZecuredSlasher slasher;
+        bytes32 violationImageId;
+        uint64 challengeWindow;
+        uint256 slashConfirmationWork;
+        bool theftDemo;
     }
 
     function run() external returns (Deployment memory d) {
@@ -158,9 +179,14 @@ contract DeployZecured is Script {
     /// Registry: all three are created back to back at the deployer's next nonces, whose addresses are known upfront.
     function _core(Deployment memory d, address[5] memory signerSet) internal {
         _depositProofs(d);
+        _tier3Config(d);
         uint64 nonce = vm.getNonce(d.deployer);
         address predictedRegistry = vm.computeCreateAddress(d.deployer, nonce + 1);
         address predictedAdapter = vm.computeCreateAddress(d.deployer, nonce + 2);
+        // Tier 3: the bond and the slasher right after the Adapter.
+        address predictedBond =
+            d.violationImageId == bytes32(0) ? address(0) : vm.computeCreateAddress(d.deployer, nonce + 3);
+        address predictedSlasher = vm.computeCreateAddress(d.deployer, nonce + 4);
 
         d.zzec = new ZZEC(predictedRegistry, predictedAdapter, address(MORPHO));
         d.registry = new ZecuredRegistry(
@@ -173,11 +199,27 @@ contract DeployZecured is Script {
             LLTV,
             signerSet,
             d.proofs,
-            NO_BOND
+            ISignerBond(predictedBond)
         );
         d.adapter = new SettlementAdapter(d.registry);
         require(address(d.registry) == predictedRegistry, "DeployZecured: registry address mismatch");
         require(address(d.adapter) == predictedAdapter, "DeployZecured: adapter address mismatch");
+        if (predictedBond != address(0)) {
+            d.bond = new SignerBond(address(d.registry), predictedSlasher, d.challengeWindow);
+            // The slasher's constructor checks that the Registry, the bond and itself name each other.
+            d.slasher = new ZecuredSlasher(
+                address(d.registry),
+                address(d.bond),
+                address(d.proofs.relay),
+                address(d.proofs.verifier),
+                d.violationImageId,
+                d.proofs.sealSelector,
+                d.slashConfirmationWork,
+                d.challengeWindow
+            );
+            require(address(d.bond) == predictedBond, "DeployZecured: bond address mismatch");
+            require(address(d.slasher) == predictedSlasher, "DeployZecured: slasher address mismatch");
+        }
         d.marketId = d.registry.marketId();
         require(MORPHO.market(d.marketId).lastUpdate != 0, "DeployZecured: market not created");
     }
@@ -235,6 +277,36 @@ contract DeployZecured is Script {
             finalizeDepth: uint64(vm.envOr("FINALIZE_DEPTH", uint256(DEFAULT_FINALIZE_DEPTH))),
             finalizeDelay: uint64(vm.envOr("FINALIZE_DELAY", uint256(DEFAULT_FINALIZE_DELAY)))
         });
+    }
+
+    /// Tier 3 configuration (docs/TIER3.md § 8). The theft demo is its own deployment (T3-6): only there may the
+    /// challenge window be shorter than a day.
+    function _tier3Config(Deployment memory d) internal view {
+        d.violationImageId = vm.envOr("VIOLATION_IMAGE_ID", bytes32(0));
+        string memory name = vm.envOr("DEPLOYMENT_NAME", string("base-sepolia"));
+        bool localFork = keccak256(bytes(name)) == keccak256("anvil");
+        d.theftDemo = vm.envOr("THEFT_DEMO", false);
+        if (d.violationImageId == bytes32(0)) {
+            require(!d.theftDemo, "DeployZecured: THEFT_DEMO needs VIOLATION_IMAGE_ID");
+            return;
+        }
+        require(address(d.proofs.verifier) != address(0), "DeployZecured: VIOLATION_IMAGE_ID needs DEPOSIT_IMAGE_ID");
+        if (d.theftDemo) {
+            require(
+                vm.contains(name, "theft-demo"), "DeployZecured: THEFT_DEMO needs a DEPLOYMENT_NAME with theft-demo"
+            );
+        }
+        d.challengeWindow =
+            uint64(vm.envOr("CHALLENGE_WINDOW", uint256(d.theftDemo ? DEMO_CHALLENGE_WINDOW : JUDGE_CHALLENGE_WINDOW)));
+        require(
+            d.theftDemo || localFork || d.challengeWindow >= JUDGE_CHALLENGE_WINDOW,
+            "DeployZecured: a challenge window under a day is for the theft demo only (T3-6)"
+        );
+        d.slashConfirmationWork = vm.envOr("SLASH_CONFIRMATION_WORK", DEFAULT_SLASH_CONFIRMATION_WORK);
+        require(
+            localFork || d.slashConfirmationWork >= FLOOR_SLASH_CONFIRMATION_WORK,
+            "DeployZecured: SLASH_CONFIRMATION_WORK below the floor"
+        );
     }
 
     /// K1: proof-only unless signer attestations are asked for explicitly (and allowed outside the local fork).
@@ -298,6 +370,14 @@ contract DeployZecured is Script {
             );
             console.log("finalize depth / delay (s):", d.proofs.finalizeDepth, d.proofs.finalizeDelay);
         }
+        if (address(d.bond) == address(0)) {
+            console.log("Tier 3: not deployed (no bonds: the Registry mints without them)");
+        } else {
+            console.log("Tier 3: SignerBond", address(d.bond), "ZecuredSlasher", address(d.slasher));
+            console.log("Tier 3: challenge window (s)", d.challengeWindow, d.theftDemo ? "(THEFT DEMO)" : "");
+            console.log("Tier 3: slash confirmation work", d.slashConfirmationWork);
+            console.log("Tier 3: minting waits for all five bonds (script/BondSigners.s.sol)");
+        }
     }
 
     /// What is a MOCK in this deployment, for README "What is real and what is a mock".
@@ -307,7 +387,12 @@ contract DeployZecured is Script {
         if (d.loanTokenIsMock) note = string.concat(note, "; MockUSDC is a MOCK (owner-minted)");
         if (d.baseOracleIsMock) note = string.concat(note, "; MockZecOracle is a MOCK (owner-set price)");
         if (d.verifierIsMock) {
-            note = string.concat(note, "; MockRiscZeroVerifier is a MOCK (accepts unproven deposit journals)");
+            note = string.concat(
+                note, "; MockRiscZeroVerifier is a MOCK (accepts unproven deposit and violation journals)"
+            );
+        }
+        if (d.theftDemo) {
+            note = string.concat(note, "; THEFT DEMO deployment (T3-6): 2-minute challenge window, demo signer keys");
         }
     }
 
@@ -320,6 +405,10 @@ contract DeployZecured is Script {
         if (d.loanTokenIsMock) vm.serializeAddress(contracts, "MockUSDC", d.loanToken);
         vm.serializeAddress(contracts, "BaseOracle", address(d.baseOracle));
         if (d.baseOracleIsMock) vm.serializeAddress(contracts, "MockZecOracle", address(d.baseOracle));
+        if (address(d.bond) != address(0)) {
+            vm.serializeAddress(contracts, "SignerBond", address(d.bond));
+            vm.serializeAddress(contracts, "ZecuredSlasher", address(d.slasher));
+        }
         contracts = vm.serializeAddress(contracts, "DemoShockOracle", address(d.oracle));
 
         string memory market = "market";
@@ -351,6 +440,13 @@ contract DeployZecured is Script {
         vm.serializeUint(proofs, "finalizeDelay", d.proofs.finalizeDelay);
         proofs = vm.serializeString(proofs, "minConfirmationWork", vm.toString(d.proofs.minConfirmationWork));
 
+        string memory tier3 = "tier3";
+        vm.serializeBool(tier3, "enabled", address(d.bond) != address(0));
+        vm.serializeBytes32(tier3, "violationImageId", d.violationImageId);
+        vm.serializeUint(tier3, "challengeWindow", d.challengeWindow);
+        vm.serializeString(tier3, "slashConfirmationWork", vm.toString(d.slashConfirmationWork));
+        tier3 = vm.serializeBool(tier3, "theftDemo", d.theftDemo);
+
         address[] memory signerList = new address[](5);
         for (uint256 i; i < 5; ++i) {
             signerList[i] = signerSet[i];
@@ -367,6 +463,7 @@ contract DeployZecured is Script {
         vm.serializeString(root, "market", market);
         vm.serializeString(root, "eip712", eip712);
         vm.serializeString(root, "depositProofs", proofs);
+        vm.serializeString(root, "tier3", tier3);
         vm.serializeAddress(root, "signers", signerList);
         vm.serializeUint(root, "threshold", d.registry.THRESHOLD());
         vm.serializeUint(root, "minSeize", d.adapter.MIN_SEIZE());
