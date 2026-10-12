@@ -63,7 +63,12 @@ struct Cli {
     /// its signer key, the backend answers ERC-7677 itself instead of forwarding to PAYMASTER_URL.
     #[arg(long, env = "PAYMASTER_ADDRESS", default_value = "")]
     paymaster_address: String,
-    #[arg(long, env = "PAYMASTER_SIGNER_PRIVATE_KEY", hide_env_values = true, default_value = "")]
+    #[arg(
+        long,
+        env = "PAYMASTER_SIGNER_PRIVATE_KEY",
+        hide_env_values = true,
+        default_value = ""
+    )]
     paymaster_signer_key: String,
     /// Base RPC behind the public `/proxy/rpc` (its own key and quota); empty = the network
     /// config's RPC, which the coordinator uses.
@@ -629,7 +634,11 @@ async fn admin_set_shock(
     let call = shock.setShock(alloy::primitives::U256::from(b.shock_bps));
     // A refused step (too deep, too soon) is the contract's answer, not an outage.
     call.call().await.map_err(|_| {
-        ApiError::new(StatusCode::CONFLICT, "shock_refused", "Shock refused: at most 25 % lower per step, two minutes apart.")
+        ApiError::new(
+            StatusCode::CONFLICT,
+            "shock_refused",
+            "Shock refused: at most 25 % lower per step, two minutes apart.",
+        )
     })?;
     let receipt = call
         .send()
@@ -1128,7 +1137,8 @@ mod tests {
         let key = hex::encode(alloy::signers::local::PrivateKeySigner::random().to_bytes());
         let coordinator = Arc::new(Coordinator::new(cfg, &dir, &key).unwrap());
         let proxy = Arc::new(
-            proxy::Proxy::new("http://127.0.0.1:9".into(), "http://127.0.0.1:9".into(), None, None, None, None).unwrap(),
+            proxy::Proxy::new("http://127.0.0.1:9".into(), "http://127.0.0.1:9".into(), None, None, None, None)
+                .unwrap(),
         );
         let wiring = Wiring {
             public_config: PublicConfig(Arc::new(json!({}))),

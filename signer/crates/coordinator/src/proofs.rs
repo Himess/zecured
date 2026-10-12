@@ -245,7 +245,8 @@ impl Coordinator {
             // Activated meanwhile (a receipt we did not see, or someone else's proof), or cancelled.
             return Ok(());
         }
-        if registry.pendingActivation(*id).call().await.context("Registry.pendingActivation")?.account != Address::ZERO {
+        if registry.pendingActivation(*id).call().await.context("Registry.pendingActivation")?.account != Address::ZERO
+        {
             // K3: a proof (ours, or the borrower's own) already waits for finalization.
             return self.mark_proof_pending(id).await;
         }
@@ -319,7 +320,8 @@ impl Coordinator {
         let relay = IZcashHeaderRelay::new(registry.relay().call().await.context("Registry.relay")?, &provider);
         if !relay.isInBestChain(pending.anchor).call().await.context("relay.isInBestChain")? {
             let call = registry.dropPendingActivation(*id);
-            let gas = zecured_base::gas_with_headroom(call.estimate_gas().await.context("estimate dropPendingActivation")?);
+            let gas =
+                zecured_base::gas_with_headroom(call.estimate_gas().await.context("estimate dropPendingActivation")?);
             let receipt = call
                 .gas(gas)
                 .send()

@@ -31,8 +31,7 @@ use zecured_zcash_ops::{
     keys::VaultSecret,
     lwd::{self, LwdClient},
     scan::{ReceivedNote, ScanState},
-    tx,
-    witness,
+    tx, witness,
 };
 
 use crate::store::{Store, VaultRecord};
@@ -689,7 +688,10 @@ mod tests {
     fn the_lineage_starts_at_the_note_base_activated_the_vault_with() {
         // P1 decided the first note conforms; the Registry minted against the second (a deposit
         // proof needs no signer, and P1 may have been fed bad data).
-        let notes = [deposit(200, 1_000_000, 1, CONFORMING), deposit(210, 1_000_000, 2, SECOND)];
+        let notes = [
+            deposit(200, 1_000_000, 1, CONFORMING),
+            deposit(210, 1_000_000, 2, SECOND),
+        ];
         assert_eq!(lineage_root(&notes, &base(false, None)), Root::Note(0), "before activation: P1");
         assert_eq!(lineage_root(&notes, &base(false, Some(2))), Root::Note(1), "after: the activated note");
         assert_eq!(lineage_root(&notes, &base(false, Some(1))), Root::Note(0));
@@ -709,7 +711,10 @@ mod tests {
     #[test]
     fn the_note_that_backs_the_vault_is_never_refundable() {
         let tip = 300;
-        let notes = [deposit(200, 1_000_000, 1, CONFORMING), deposit(210, 1_000_000, 2, SECOND)];
+        let notes = [
+            deposit(200, 1_000_000, 1, CONFORMING),
+            deposit(210, 1_000_000, 2, SECOND),
+        ];
         // Activated with the second note: it roots the lineage (never offered for refund), and
         // P1's "conforming" first note is now an extra payment, refundable once deep enough.
         let b = base(false, Some(2));

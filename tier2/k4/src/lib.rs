@@ -34,7 +34,9 @@ pub fn vault_fvk(w: &Witness) -> FullViewingKey {
 /// A revision-0 unified address with these receivers.
 pub fn ua(network: NetworkType, receivers: Vec<Receiver>) -> String {
     let items = receivers.into_iter().map(unified::Uitem::Data).collect();
-    unified::Address::try_from_items(unified::Revision::R0, items).expect("a valid address").encode(&network)
+    unified::Address::try_from_items(unified::Revision::R0, items)
+        .expect("a valid address")
+        .encode(&network)
 }
 
 fn with_leaf(w: &mut Witness, change: impl FnOnce(&mut zcash_history::NodeDataV3)) {
@@ -72,18 +74,30 @@ pub fn mutations() -> Vec<Mutation> {
         ),
         m("action index out of range", |w| w.action_index = 99, NoSuchAction),
         // 2. Block B in T's chain history (ZIP 221).
-        m("block header one byte short", |w| {
+        m(
+            "block header one byte short",
+            |w| {
                 w.block_header.pop();
-            }, Header),
+            },
+            Header,
+        ),
         m("tip header one byte long", |w| w.tip_header.push(0), Header),
         m("txid path changed", |w| w.txid_path[0][0] ^= 1, TxidNotInBlock),
         m("transaction index changed", |w| w.tx_index ^= 1, TxidNotInBlock),
-        m("txid path one step short", |w| {
+        m(
+            "txid path one step short",
+            |w| {
                 w.txid_path.pop();
-            }, TxidNotInBlock),
+            },
+            TxidNotInBlock,
+        ),
         m("another Merkle root in B", |w| w.block_header[40] ^= 1, TxidNotInBlock),
         m("leaf spans two blocks", |w| with_leaf(w, |l| l.v2.v1.start_height -= 1), LeafIsNotTheBlock),
-        m("leaf of another block", |w| with_leaf(w, |l| l.v2.v1.subtree_commitment = [0; 32]), LeafIsNotTheBlock),
+        m(
+            "leaf of another block",
+            |w| with_leaf(w, |l| l.v2.v1.subtree_commitment = [0; 32]),
+            LeafIsNotTheBlock,
+        ),
         m("another block B", |w| w.block_header[1000] ^= 1, LeafIsNotTheBlock),
         m(
             "leaf of another epoch (V2 node)",
@@ -95,9 +109,13 @@ pub fn mutations() -> Vec<Mutation> {
         ),
         m("history path on the wrong side", |w| w.mmr_path[0].sibling_is_left ^= true, HistoryPath),
         m("history path sibling changed", |w| w.mmr_path[0].sibling[0] ^= 1, HistoryPath),
-        m("history path one step short", |w| {
+        m(
+            "history path one step short",
+            |w| {
                 w.mmr_path.pop();
-            }, HistoryPath),
+            },
+            HistoryPath,
+        ),
         m("peak index out of range", |w| w.peak_index = 99, HistoryPath),
         m("another peak", |w| w.peak_index -= 1, HistoryPath),
         m("an earlier peak changed", |w| w.peaks[0][0] ^= 1, HistoryNotCommitted),

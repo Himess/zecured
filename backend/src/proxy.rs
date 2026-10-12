@@ -30,12 +30,12 @@ use serde_json::{Value, json};
 use std::sync::Arc;
 
 use crate::{
-    paymaster::OwnPaymaster,
     allowlist::{
         Allowlist, ENTRY_POINT_V07, FALLBACK_HANDLER_SLOT, SAFE_4337_MODULE, SAFE_PROXY_RUNTIME_CODE, SAFE_SINGLETON,
         UserOpView,
     },
     limits::{KeyedBuckets, Rate},
+    paymaster::OwnPaymaster,
 };
 
 /// Read-only Base RPC methods the app uses.
@@ -619,7 +619,8 @@ mod tests {
     /// Sponsorship fails closed when the chain cannot be read.
     #[tokio::test]
     async fn sponsorship_checks_fail_closed() {
-        let p = Proxy::new("http://127.0.0.1:9".into(), "http://127.0.0.1:9".into(), None, None, None, Some(list())).unwrap();
+        let p = Proxy::new("http://127.0.0.1:9".into(), "http://127.0.0.1:9".into(), None, None, None, Some(list()))
+            .unwrap();
         let req = request("pm_getPaymasterData", release_op(Address::repeat_byte(1)), ENTRY_POINT_V07);
         assert_eq!(p.check(&req, PAYMASTER_METHODS).await, Err(CHECK_UNAVAILABLE));
     }

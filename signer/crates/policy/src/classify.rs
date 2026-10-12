@@ -250,7 +250,10 @@ mod tests {
         let n = [elsewhere, note(905, 0, 0, AMOUNT, true)];
         assert_eq!(
             classes(1_000, &n),
-            vec![Classification::NonConforming(NonConformingReason::WrongReceiver), Classification::Conforming]
+            vec![
+                Classification::NonConforming(NonConformingReason::WrongReceiver),
+                Classification::Conforming
+            ]
         );
     }
 

@@ -112,7 +112,8 @@ async fn pass(r: &Relayer) -> Result<()> {
     // Headers above the relay's tip are new unless another relayer is racing this one (then the
     // submission's estimate fails and that batch is filtered); only a step back below the tip
     // brings headers the relay already has.
-    let (below, above): (Vec<HeaderLine>, Vec<HeaderLine>) = lines.iter().cloned().partition(|l| l.height <= tip_height);
+    let (below, above): (Vec<HeaderLine>, Vec<HeaderLine>) =
+        lines.iter().cloned().partition(|l| l.height <= tip_height);
     let mut fresh = unknown(&relay, &below).await?;
     fresh.extend(above);
     let mut submitted = 0;
@@ -155,7 +156,10 @@ fn raws(lines: &[HeaderLine]) -> Result<Vec<Bytes>> {
 
 /// Submits `headers` (parents first) in one transaction, or in halves while the estimate would
 /// not fit under the per-transaction gas cap.
-async fn submit<P: Provider>(relay: &IZcashHeaderRelay::IZcashHeaderRelayInstance<P>, headers: Vec<Bytes>) -> Result<()> {
+async fn submit<P: Provider>(
+    relay: &IZcashHeaderRelay::IZcashHeaderRelayInstance<P>,
+    headers: Vec<Bytes>,
+) -> Result<()> {
     let call = relay.submitHeaders(headers.clone());
     let estimate = call.estimate_gas().await.context("estimate submitHeaders")?;
     if estimate > MAX_BATCH_GAS && headers.len() > 1 {

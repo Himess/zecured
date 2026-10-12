@@ -91,7 +91,13 @@ fn u128_word(high: U256, low: U256) -> Result<B256> {
 
 /// The v0.7 packed form of `op` with `paymasterAndData = paymaster ‖ validation gas ‖ post-op gas
 /// ‖ data`, as the EntryPoint and the paymaster's `getHash` see it.
-pub fn packed(op: &UserOpView, nonce: U256, signature: Bytes, paymaster: Address, data: &[u8]) -> Result<PackedUserOperation> {
+pub fn packed(
+    op: &UserOpView,
+    nonce: U256,
+    signature: Bytes,
+    paymaster: Address,
+    data: &[u8],
+) -> Result<PackedUserOperation> {
     let gas = |v: Option<U256>, what: &str| v.with_context(|| format!("the UserOp has no {what}"));
     let init_code = match (op.factory, &op.factory_data) {
         (Some(factory), data) => [factory.as_slice(), data.as_ref().map_or(&[][..], |d| d.as_ref())].concat(),
@@ -154,11 +160,8 @@ impl OwnPaymaster {
     pub async fn data(&self, op_json: &Value, now: u64) -> Result<Value> {
         let op: UserOpView = serde_json::from_value(op_json.clone()).context("UserOp")?;
         let nonce: U256 = serde_json::from_value(op_json.get("nonce").cloned().context("the UserOp has no nonce")?)?;
-        let signature: Bytes = op_json
-            .get("signature")
-            .map(|s| serde_json::from_value(s.clone()))
-            .transpose()?
-            .unwrap_or_default();
+        let signature: Bytes =
+            op_json.get("signature").map(|s| serde_json::from_value(s.clone())).transpose()?.unwrap_or_default();
         let unsigned = unsigned_data(now + VALID_FOR.as_secs(), 0);
         let packed = packed(&op, nonce, signature, self.address, &unsigned)?;
         let hash = self.paymaster_hash(packed).await?;
@@ -263,7 +266,12 @@ mod tests {
         let op: UserOpView = serde_json::from_value(op_json).unwrap();
         let validate = |op: &UserOpView| {
             let packed = packed(op, U256::ZERO, Bytes::new(), own.address, &data).unwrap();
-            validatePaymasterUserOpCall { userOp: packed, userOpHash: B256::ZERO, maxCost: U256::ZERO }.abi_encode()
+            validatePaymasterUserOpCall {
+                userOp: packed,
+                userOpHash: B256::ZERO,
+                maxCost: U256::ZERO,
+            }
+            .abi_encode()
         };
         let call = |calldata: Vec<u8>| {
             let own = &own;

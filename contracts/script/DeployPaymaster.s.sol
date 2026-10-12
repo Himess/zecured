@@ -37,7 +37,8 @@ contract DeployPaymaster is Script {
 
     function run() external returns (address paymaster) {
         // forge-lint: disable-next-line(unsafe-cheatcode)
-        bytes memory creation = vm.parseBytes(vm.trim(vm.readFile("script/artifacts/SingletonPaymasterV7.creation.hex")));
+        bytes memory creation =
+            vm.parseBytes(vm.trim(vm.readFile("script/artifacts/SingletonPaymasterV7.creation.hex")));
         require(sha256(creation) == 0xf79f7dce4390a01de5e6efd0d9fe0fb0c58a9c544d26a5a2d5fef36b66bdcf54, "creation code");
         address signer = vm.envAddress("PAYMASTER_SIGNER_ADDRESS");
         uint256 key = vm.envUint("DEPLOYER_PRIVATE_KEY");

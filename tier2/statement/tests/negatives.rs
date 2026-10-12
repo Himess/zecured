@@ -29,7 +29,10 @@ fn the_real_deposit_proves_the_journal_the_contracts_test_submits() {
     let j = verify(&witness()).expect("the real deposit proves");
     assert_eq!(j.tip_hash, h32("a27b5e3c30e3dc292138c751bf10c85fd842fb759be90c7e9397d0477d0b0000"));
     assert_eq!(j.vault_id, h32("482ea83b696ec7530c5ab23f7d9727bc9370f47884e63a19b6fa54ad3272d23b"));
-    assert_eq!(j.account.to_vec(), h32("000000000000000000000000fb928f182ad07d2d95d9592390556df7bfb6ed5f")[12..].to_vec());
+    assert_eq!(
+        j.account.to_vec(),
+        h32("000000000000000000000000fb928f182ad07d2d95d9592390556df7bfb6ed5f")[12..].to_vec()
+    );
     assert_eq!(j.amount, 1_000_000);
     assert_eq!(j.tag, h32("d8ad478d40e42d2acd10a3846eeebc19d3ff0146c406e765654395b778ab813e"));
     assert_eq!(j.vault_opened_hash, h32("385c78ae562975cc3c03af28374fd4e9d9e3f3405a18fbf81fe16d4f9e28c0f5"));

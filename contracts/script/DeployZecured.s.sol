@@ -298,10 +298,13 @@ contract DeployZecured is Script {
 
     /// What is a MOCK in this deployment, for README "What is real and what is a mock".
     function _mockNote(Deployment memory d) internal pure returns (string memory note) {
-        note = "DemoShockOracle is a MOCK / DEMO control (owner-set shock on top of the base price, public ShockSet events)";
+        note =
+            "DemoShockOracle is a MOCK / DEMO control (owner-set shock on top of the base price, public ShockSet events)";
         if (d.loanTokenIsMock) note = string.concat(note, "; MockUSDC is a MOCK (owner-minted)");
         if (d.baseOracleIsMock) note = string.concat(note, "; MockZecOracle is a MOCK (owner-set price)");
-        if (d.verifierIsMock) note = string.concat(note, "; MockRiscZeroVerifier is a MOCK (accepts unproven deposit journals)");
+        if (d.verifierIsMock) {
+            note = string.concat(note, "; MockRiscZeroVerifier is a MOCK (accepts unproven deposit journals)");
+        }
     }
 
     function _writeJson(Deployment memory d, address[5] memory signerSet) internal {

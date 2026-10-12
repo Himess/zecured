@@ -58,7 +58,9 @@ contract DemoShockOracle is IOracle, Ownable {
         uint256 old = shockBps;
         if (newShockBps < old) {
             if (newShockBps * BPS < old * MIN_STEP_BPS) revert StepTooDeep(old, newShockBps);
-            if (block.timestamp < lastLoweredAt + MIN_STEP_INTERVAL) revert StepTooSoon(lastLoweredAt + MIN_STEP_INTERVAL);
+            if (block.timestamp < lastLoweredAt + MIN_STEP_INTERVAL) {
+                revert StepTooSoon(lastLoweredAt + MIN_STEP_INTERVAL);
+            }
             lastLoweredAt = block.timestamp;
         }
         shockBps = newShockBps;
