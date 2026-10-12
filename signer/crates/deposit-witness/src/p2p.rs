@@ -34,8 +34,9 @@ const MAX_MESSAGE: usize = 8_000_000;
 const CONNECT_TIMEOUT: Duration = Duration::from_secs(5);
 const TIMEOUT: Duration = Duration::from_secs(30);
 /// A peer that keeps the connection alive (pings, inventory) but never answers `getheaders`
-/// must not hold the caller forever: give up on the answer after this long.
-const HEADERS_DEADLINE: Duration = Duration::from_secs(45);
+/// must not hold the caller forever: give up on the answer after this long (a responsive peer
+/// answers in about a second).
+const HEADERS_DEADLINE: Duration = Duration::from_secs(15);
 
 /// One line of a header file: `{ height, hash (display order), raw (hex) }`.
 #[derive(Clone, Debug, Serialize, Deserialize)]

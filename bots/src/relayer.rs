@@ -162,8 +162,10 @@ async fn pass(r: &Relayer, book: &mut PeerBook) -> Result<()> {
 
     let submit_ms = elapsed_ms(started) - fetch_ms;
 
-    // Alarms.
-    let relay_height = u32::try_from(relay.bestChainTip().call().await?.height)?;
+    // Alarms. A load-balanced RPC endpoint may answer from a node that has not seen the
+    // submission's block yet: the relay holds at least what this pass submitted.
+    let submitted_top = fresh.last().map_or(0, |l| l.height);
+    let relay_height = u32::try_from(relay.bestChainTip().call().await?.height)?.max(submitted_top);
     let fetched_height = lines.last().map_or(0, |l| l.height);
     // The best height peers announced when probed (up to PROBE_EVERY old), or what was fetched.
     let announced = book.reachable.first().map_or(0, |p| p.height);
