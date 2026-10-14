@@ -27,6 +27,15 @@ jobs:
       - name: Rust toolchain (rust-toolchain.toml)
         run: rustup show active-toolchain || rustup toolchain install
 
+      # risc0-build asks rzup for the guest toolchain's version even when Docker builds the guests
+      # (it picks a rustc flag by version); the guests themselves are compiled inside the image.
+      - name: rzup and the risc0 Rust toolchain
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          curl -sSfL https://risczero.com/install | bash
+          "$HOME/.risc0/bin/rzup" install rust 1.97.0
+
       - name: Host with both guests built in RISC Zero's guest-builder image
         working-directory: tier2
         env:

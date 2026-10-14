@@ -126,7 +126,8 @@ with Docker), checked by RISC Zero's verifier router on Base Sepolia.
 The Registry pins the deposit guest's image id and the slasher the violation guest's. Both come
 from a reproducible build: the guests are compiled in RISC Zero's pinned guest-builder image
 (`risczero/risc0-guest-builder:r0.1.97.0`) with `tier2/` as the build context, as the `guests`
-workflow does on every change. With Docker installed:
+workflow does on every change. With Docker and rzup's Rust toolchain (`rzup install rust`; risc0-build
+asks it for its version even when Docker compiles the guests):
 
 ```bash
 cd tier2
