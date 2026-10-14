@@ -70,6 +70,8 @@ import {IZcashHeaderRelay} from "../src/relay/IZcashHeaderRelay.sol";
 ///                              about 100 normal Testnet blocks, S4; at least 30,000,000 outside the local fork)
 ///        THEFT_DEMO            true: the separate theft-demonstration deployment (T3-6): a 2-minute window allowed,
 ///                              and DEPLOYMENT_NAME must contain "theft-demo"; never the judge deployment
+///        JUDGE_SIGNER_ADDRESSES  with THEFT_DEMO: the judge network's five signers, none of which the theft demo
+///                              may use
 ///      Dry run (simulation only, sends nothing):
 ///        forge script script/DeployZecured.s.sol --rpc-url https://sepolia.base.org
 ///      Real deployment (only once the deployer is funded):
@@ -336,16 +338,15 @@ contract DeployZecured is Script {
         MORPHO.supply(params, d.lenderSeed, 0, d.deployer, "");
     }
 
-    /// T3-6: the theft demo runs on its own five keys. Its signer set never shares an address with the judge network's
-    /// signers (SIGNER_1_PRIVATE_KEY .. SIGNER_5_PRIVATE_KEY, when the environment has them).
+    /// T3-6: the theft demo runs on its own five keys. Its signer set never shares an address with the judge
+    /// network's, which THEFT_DEMO requires in JUDGE_SIGNER_ADDRESSES (the judge's SIGNER_ADDRESSES).
     function _requireOwnSigners(address[5] memory signerSet) internal view {
-        for (uint256 n = 1; n <= 5; ++n) {
-            uint256 key = vm.envOr(string.concat("SIGNER_", vm.toString(n), "_PRIVATE_KEY"), uint256(0)); // never logged
-            if (key == 0) continue;
-            address judgeSigner = vm.addr(key);
+        address[] memory judge = vm.envOr("JUDGE_SIGNER_ADDRESSES", ",", new address[](0));
+        require(judge.length == 5, "DeployZecured: THEFT_DEMO needs the judge network's JUDGE_SIGNER_ADDRESSES");
+        for (uint256 j; j < 5; ++j) {
             for (uint256 i; i < 5; ++i) {
                 require(
-                    signerSet[i] != judgeSigner, "DeployZecured: the theft demo shares a signer with the judge network"
+                    signerSet[i] != judge[j], "DeployZecured: the theft demo shares a signer with the judge network"
                 );
             }
         }

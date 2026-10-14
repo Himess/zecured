@@ -13,7 +13,7 @@
 # "compromised" for the threshold demo. "offline" works on every node. Never deploy this build.
 #
 # THEFT_DEMO=1 runs the separate theft demo's network instead (review T3-6, docs/TIER3.md § 8):
-# its own data (signer/data-theft-demo/), keys (THEFT_DEMO_SIGNER_n_PRIVATE_KEY,
+# its own data (signer/data-theft-demo/), keys (fresh node keys or THEFT_DEMO_SIGNER_n_PRIVATE_KEY,
 # THEFT_DEMO_COORDINATOR_PRIVATE_KEY and _ADDRESS), deployment
 # (contracts/deployments/base-sepolia-theft-demo.json), ports (nodes 920n, backend 8180) and build
 # (`demo-tier3`, in target/theft-demo/), where nodes 3, 4 and 5 can be compromised. Those binaries
@@ -118,10 +118,6 @@ cmd_init() {
   for i in 1 2 3 4 5; do
     local dir="$DATA/node-$i"
     local key_var="${KEY_PREFIX}SIGNER_${i}_PRIVATE_KEY"
-    if [[ -n "$THEFT_DEMO" && -z "${!key_var:-}" ]]; then
-      echo "$key_var is not set: the theft demo's five signers have their own keys" >&2
-      exit 1
-    fi
     if [[ ! -f "$dir/identity.json" ]]; then
       NODE_ETH_PRIVATE_KEY="${!key_var:-}" "$BIN/zecured-node" init --index "$i" --data "$dir" \
         --url "http://127.0.0.1:$PORT_PREFIX$i" > "$dir.public.json"
