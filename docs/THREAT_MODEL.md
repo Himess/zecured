@@ -112,7 +112,7 @@ review and their status are in [SECURITY_REVIEW.md](SECURITY_REVIEW.md).
 - [ ] Demo control panel authenticated; `setPrice` owner-only
 - [ ] Browser network tab: no third-party RPC / bundler / paymaster calls
 - [ ] No address, viewing key, salt or IP in any log or watchdog alarm
-- [ ] The whole git history passes a secret scanner (gitleaks or trufflehog) before the repository goes public
+- [ ] The whole git history passes a secret scanner before the repository goes public: `gitleaks git .` (clean on 2026-10-14, 136 commits, after allowing five reviewed public test values in `.gitleaksignore`; run it again on the final history)
 - [ ] Backend and node logs: no addresses, viewing keys, salts or IPs
 - [ ] Demo video: no real personal addresses
 - [ ] README "What is real and what is a mock" up to date

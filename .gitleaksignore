@@ -1,0 +1,9 @@
+# gitleaks: findings reviewed and allowed (2026-10-14). Each is public, not a secret:
+# - app/lib/__fixtures__/deployment.ts: contract addresses of a test fixture (public on-chain data);
+# - tools/local-aa/start.mjs: anvil's well-known development keys #8 and #9 (local fork only);
+# - app/lib/safe.test.ts: anvil's well-known development key #0 (a unit test).
+1d33b2dc2d24557cf9cfa2ee30948ba4835aac2b:app/lib/__fixtures__/deployment.ts:generic-api-key:41
+1d33b2dc2d24557cf9cfa2ee30948ba4835aac2b:app/lib/__fixtures__/deployment.ts:generic-api-key:44
+7c4801a8d0d0821ca210db7abc5dda0fa89f32e8:app/lib/safe.test.ts:generic-api-key:16
+b92b3009adf165cbfe3cc7c8bc23a0544ef7cf75:tools/local-aa/start.mjs:generic-api-key:22
+b92b3009adf165cbfe3cc7c8bc23a0544ef7cf75:tools/local-aa/start.mjs:generic-api-key:23
