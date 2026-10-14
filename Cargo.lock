@@ -7329,6 +7329,7 @@ dependencies = [
  "tower-http",
  "tracing",
  "tracing-subscriber",
+ "zecured-base",
  "zecured-coordinator",
  "zecured-node",
 ]
