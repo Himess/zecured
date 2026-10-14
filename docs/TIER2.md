@@ -215,9 +215,10 @@ A prover built anywhere else (the GPU machine's host has the CUDA prover compile
 workflow (`.github/workflows/guests.yml`) runs that build on every change to the statement, the guests or the vendored
 crate and publishes the ids and the two ELFs; the commands to reproduce them are in the README. The statement crate and
 both guests are frozen once the deployed ids are taken from that build. Two runs on fresh runners (2026-10-14, the
-same source) gave the same ids: deposit `0x5d3d33d47450ee764eb184e8c226cf46c80ea97c55bf6495da33b07c07d7c979`, violation
-`0x9eea17986b98859a57ee1b7c8821eec273f8496f75e182dcc755167e79f92ffb`. They change with the statement crate until it is
-frozen.
+same source) gave the same ids. After the red-team fixes the reproducible ids are deposit
+`0x62feed13b2948aa427275fb6003e717ccc88945d033b99b196936ca99a80cdf5` and violation
+`0x7d8c9dd23e813e0e44ffea2b18ec9ec451b52a8a7b634ae998583d49b73cc526`, with both parity suites passing on those guests
+in CI. They change with the statement crate until it is frozen.
 
 ## 9. Tier 3 directions
 

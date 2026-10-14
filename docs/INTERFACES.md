@@ -140,7 +140,7 @@ SpendCommit(bytes32 vaultId,bytes32 inputTag,bytes32[] claimIds,bytes32[] claimR
 ```solidity
 enum VaultStatus { None, Active, Closed, Cancelled }
 enum ClaimKind   { Release, Liquidation, CloseUser, CloseMarketMaker }
-enum ClaimStatus { None, Pending, Paid }
+enum ClaimStatus { None, Pending, Paid, WrittenOff }                                                             // WrittenOff: dust (RT-8)
 enum MintMode    { SignerAttested, ProofOnly }                                                                     // K1, immutable
 
 function attestDeposit(DepositAttestation calldata att, bytes[] calldata sigs) external;                            // not in ProofOnly
@@ -154,6 +154,8 @@ function recordLiquidation(bytes32 vaultId, uint64 seized, bytes32 liquidatorCom
 function recordClose(bytes32 vaultId, uint64 mmAmount, uint64 userAmount, bytes32 mmCommitment, bytes32 userCommitment)
     external returns (bytes32 userClaimId, bytes32 mmClaimId);                                                             // adapter only
 function confirmPayout(bytes32 vaultId, bytes32[] calldata claimIds, bytes[] calldata sigs) external;
+function writeOffDust(bytes32 claimId) external;                                                                    // RT-8: anyone
+function DUST_LIMIT() external view returns (uint64);                                                               // 10,000 zat
 
 function vaultOf(address account) external view returns (bytes32 vaultId);
 function vault(bytes32 vaultId) external view returns (address account, uint64 outstanding, VaultStatus status);
@@ -182,6 +184,8 @@ function spendRecord(bytes32 payoutRef) external view returns (SpendRecord memor
 function claimPayment(bytes32 claimRef) external view returns (ClaimPayment memory);   // (claimId, payoutRef, expected,
                                                                                         //  outputIndex)
 function claimInput(bytes32 claimId) external view returns (bytes32 inputTag);
+function inputClaimSet(bytes32 inputTag) external view returns (bytes32);                // RT-4: the note's claim list hash
+function claimRefOf(bytes32 payoutRef, bytes32 commitment) external view returns (bytes32);  // F4 (RT-1)
 function hashSpendCommit(SpendCommit calldata c) external view returns (bytes32);
 function openVaultCount() external view returns (uint256);
 function lastVaultSettledAt() external view returns (uint64);
@@ -206,8 +210,13 @@ event SpendCommitted(bytes32 indexed vaultId, bytes32 indexed payoutRef, bytes32
 - `finalizeActivation` (anyone): the relay's tip height `>= readyHeight`, `block.timestamp >=
   readyTime`, and the anchor still on the best chain under `minConfirmationWork`; then the same
   effects as `attestDeposit`, emitting `VaultActivated`.
-- `dropPendingActivation` (anyone): only once the anchor is off the relay's best chain; frees the
-  vault id, the tag and the account (nothing was minted).
+- `dropPendingActivation` (anyone): only once the anchor is off the relay's best chain, or at any time
+  once a slash has halted minting (RT-6: the activation can never finalize, and the vault must still
+  be cancellable and its deposit refundable); frees the vault id, the tag and the account (nothing
+  was minted).
+- `writeOffDust` (anyone, RT-8): a `Pending` claim of a `Closed` vault, never committed, of at most
+  `DUST_LIMIT` zat (it could never bear a payout's fee), becomes `WrittenOff`, emitting
+  `DustWrittenOff(vaultId, claimId, amount)`; the vault settles when it was its last unpaid claim.
 - `VaultActivated.depositTag` names the note that backs the vault: the signers root its lineage
   there and never refund it (K2-a, D27).
 - `cancelVault` (D23): 3 signer signatures over `VaultCancellation(vaultId)`; only a vault that
@@ -226,9 +235,10 @@ event SpendCommitted(bytes32 indexed vaultId, bytes32 indexed payoutRef, bytes32
 - `claimId = keccak256(abi.encode(vaultId, claimSequence))`, sequence per vault from 0.
 - Tier 3 (D31): `commitSpend` records a payout before the signers sign it (rules in
   `IZecuredSpendCommits` and docs/TIER3.md § 4: 3 sorted signer signatures, one lineage input of the
-  vault, 1 to 8 distinct pending claims bound to that input on first commitment, one unused claim ref
-  and one distinct output index each, exact conservation, the ZIP 317 fee fixed by the committed
-  shape). `confirmPayout` requires every claim to have been committed. A deposit note is a lineage
+  vault, 1 to 8 distinct pending claims bound to that input on first commitment, one unused claim ref,
+  one distinct output index and one distinct recipient commitment each, the claim list of the note's
+  first commitment if any (RT-4), exact conservation, the ZIP 317 fee fixed by the committed shape).
+  Each claim's reference is kept under its recipient commitment (`claimRefOf`) for F4. `confirmPayout` requires every claim to have been committed. A deposit note is a lineage
   note from its proof (or attestation) on, and stops being one if its pending activation is dropped.
   New proofs and activations need the bond contract `fullyBonded()` and not `halted()`;
   `finalizeActivation` also reverts with `ViolationCaseOpen(vaultId)` while the slasher has a case open
@@ -285,7 +295,7 @@ function fullyBonded() external view returns (bool);
 function halted() external view returns (bool);
 
 // ZecuredSlasher (IZecuredSlasher)
-enum ViolationKind { None, Uncommitted, WithheldChange, Misdirected }
+enum ViolationKind { None, Uncommitted, WithheldChange, Misdirected, WrongClaimRef }  // F1..F4
 struct ViolationJournal { ViolationKind kind; bytes32 anchor; address beneficiary; bytes32 ref; bytes32 noteTag;
                           uint64 value; bytes32 destCommitment; uint8 outputIndex; }  // abi.encode: 8 words
 function proveViolation(ViolationKind kind, bytes calldata journal, bytes calldata seal) external returns (bytes32 caseId);
@@ -296,7 +306,8 @@ function openCasesOf(bytes32 vaultId) external view returns (uint256);        //
 ```
 
 - The journal's kinds, the Registry records each is checked against, and the dismissal rules are in
-  docs/TIER3.md § 6; the guest is `tier2/methods/violation` (one image id). The beneficiary is bound in
+  docs/TIER3.md § 6 (F4: `ref` is the payout's `payoutRef`, `noteTag` the claim reference an honest
+  commitment gives, `keccak256(salt || txid)`, and `destCommitment` the claim's recipient commitment); the guest is `tier2/methods/violation` (one image id). The beneficiary is bound in
   the proof and is never a vault's smart account (smart accounts never receive ETH).
 - Deployment: `script/DeployZecured.s.sol` with `VIOLATION_IMAGE_ID`; the signers then bond with
   `script/BondSigners.s.sol`. Challenge window: at least a day on the judge deployment, 2 minutes only on

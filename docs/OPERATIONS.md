@@ -77,7 +77,23 @@ shows:
 - the Zcash tip;
 - each node's mode.
 
-## 6. Soak test (G6)
+## 6. Audits the operator runs (Tier 3)
+
+- **Each signer, for every vault:**
+  1. `zecured-node export-audit --data <node dir> --vault <id> --out <dir>` writes the vault's
+     viewing key and every claim's salt and receiver, in files only the operator can read.
+  2. `zecured-wallet watch --ufvk-file <..>.ufvk --from <birthday> --tier3 --destinations
+     <..>-destinations.json` reports an uncommitted spend (F1), a withheld change (F2) and a claim
+     committed under a wrong reference (F4), with the command that builds the proof.
+
+  This is the honest minority's job: with three colluding signers, the other two can still prove
+  any of these.
+- **The bots:** `zecured-wallet --wallet <bot wallet> watch-claims --destinations <bot's
+  destinations file> --from <height> --base-from <block>` checks every payment of the liquidator's
+  and the market maker's claims (F3). The destination files hold salts: back them up, never share
+  them.
+
+## 7. Soak test (G6)
 
 Before the submission, the full deployment runs untouched for at least 48 hours, with the
 watchdog on and nothing restarted by hand. We record:
