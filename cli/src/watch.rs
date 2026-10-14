@@ -18,7 +18,8 @@ use std::path::Path;
 
 use alloy::{
     primitives::{Address, B256},
-    providers::ProviderBuilder,
+    providers::{Provider, ProviderBuilder},
+    rpc::types::Filter,
 };
 use anyhow::{Context, Result, anyhow};
 use orchard::{
@@ -179,6 +180,10 @@ pub fn own_recipient(salt: &str, receiver: &str, fvk: &FullViewingKey) -> Result
 
 /// What a claimant found about one committed payment of its claims (F3, F4).
 pub enum ClaimFinding {
+    /// A commitment names the claim, but no Zcash transaction searched has its reference: the
+    /// payout is not mined yet, or the reference is wrong (F4, which only the vault's borrower or
+    /// an honest signer can prove: they know the vault's viewing key).
+    Unmatched { claim_id: B256 },
     /// F4: the commitment of `payout` names the claim of this destination under a foreign
     /// reference, so that its claimant could never find the payout.
     WrongClaimRef { payout: TxId, evidence: ClaimEvidence },
@@ -194,6 +199,80 @@ pub enum ClaimFinding {
         value: u64,
         evidence: ClaimEvidence,
     },
+}
+
+/// RT-2: a claimant without the vault's viewing key (a liquidator, a market maker) finds each
+/// payout of its claims on its own. Every `SpendCommitted` on Base that names a claim of one of
+/// its destinations gives the claim's reference; the payout is the Zcash transaction X with
+/// `keccak256(salt || txid_X)` equal to it (Zcash blocks `zcash_from..=zcash_to`); the committed
+/// output of X is then decrypted with the claimant's own key, as in [`check_claims`].
+pub async fn check_third_party(
+    client: &mut LwdClient,
+    own: &[OwnRecipient],
+    registry_address: Address,
+    rpc: &str,
+    base_from: u64,
+    zcash_from: u32,
+    zcash_to: u32,
+) -> Result<Vec<ClaimFinding>> {
+    use alloy::sol_types::SolEvent;
+    let provider = ProviderBuilder::new().connect_http(rpc.parse().context("Base RPC URL")?);
+    let registry = IZecuredRegistry::new(registry_address, &provider);
+    let head = provider.get_block_number().await.context("Base block number")?;
+    let logs = zecured_base::events::get_logs_chunked(base_from, head, |a, b| {
+        let filter = Filter::new()
+            .address(registry_address)
+            .event_signature(IZecuredRegistry::SpendCommitted::SIGNATURE_HASH)
+            .from_block(a)
+            .to_block(b);
+        let provider = &provider;
+        async move { provider.get_logs(&filter).await.map_err(anyhow::Error::from) }
+    })
+    .await?;
+    // The claims of these destinations that a commitment names, with the reference it gives.
+    let commitments: Vec<B256> = own.iter().map(|r| B256::from(commitment(&r.salt, &r.receiver))).collect();
+    let mut wanted: Vec<(B256, B256, usize)> = vec![]; // (claim id, claim ref, destination)
+    for log in logs.iter().filter(|l| !l.removed) {
+        let ev = IZecuredRegistry::SpendCommitted::decode_log(&log.inner).context("SpendCommitted")?;
+        for (id, claim_ref) in ev.claimIds.iter().zip(&ev.claimRefs) {
+            let c = registry.claim(*id).call().await.context("Registry.claim")?;
+            if let Some(d) = commitments.iter().position(|x| *x == c.commitment) {
+                wanted.push((*id, *claim_ref, d));
+            }
+        }
+    }
+    // The payouts, among the Zcash transactions, by their reference.
+    let mut found: Vec<Option<TxId>> = vec![None; wanted.len()];
+    let mut from = zcash_from;
+    while from <= zcash_to && found.iter().any(Option::is_none) {
+        let to = from.saturating_add(999).min(zcash_to);
+        for (_, txid) in zecured_zcash_ops::lwd::block_txids(client, from, to).await? {
+            for (k, (_, committed_ref, d)) in wanted.iter().enumerate() {
+                if found[k].is_none() && B256::from(claim_ref(&own[*d].salt, &txid)) == *committed_ref {
+                    found[k] = Some(TxId::from_bytes(txid));
+                }
+            }
+        }
+        from = to.saturating_add(1);
+    }
+    let mut findings = vec![];
+    for ((claim_id, committed_ref, d), x) in wanted.into_iter().zip(found) {
+        let r = &own[d];
+        let Some(x) = x else {
+            findings.push(ClaimFinding::Unmatched { claim_id });
+            continue;
+        };
+        let Some(ivk) = &r.ivk else {
+            findings.push(ClaimFinding::OtherWallet { claim_id, payout: x });
+            continue;
+        };
+        let p = registry.claimPayment(committed_ref).call().await.context("Registry.claimPayment")?;
+        let address = Option::<orchard::Address>::from(orchard::Address::from_raw_address_bytes(&r.receiver))
+            .context("not an Ironwood receiver")?;
+        let value = claim_output_value(client, x, p.outputIndex, ivk, &address).await?;
+        findings.push(judge(claim_id, x, p.expected, value, evidence(x, p.outputIndex, r, Some(ivk))));
+    }
+    Ok(findings)
 }
 
 /// The committed payouts among the lineage findings: the transactions that can pay claims.
@@ -292,6 +371,10 @@ pub fn report_claim(f: &ClaimFinding, evidence: Option<&Path>) {
             payout,
             value,
         } => println!("tier 3: claim {} paid {value} zat by its committed output in {payout}: ok", short(claim_id)),
+        ClaimFinding::Unmatched { claim_id } => println!(
+            "tier 3: claim {} is committed, but no Zcash transaction searched has its reference: not mined yet, or a wrong reference (F4, provable by the vault's borrower or an honest signer)",
+            short(claim_id)
+        ),
         ClaimFinding::WrongClaimRef { payout, .. } => {
             println!(
                 "tier 3: VIOLATION F4: the commitment of payout {payout} names one of this loan's claims under a reference its claimant cannot find"

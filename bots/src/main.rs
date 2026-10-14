@@ -1,7 +1,9 @@
 //! `zecured-bots`: the liquidator and the market maker used in the demo.
 //!
 //! Both roles are permissionless; anyone can run them. Each liquidation or close uses a
-//! fresh salt, so the bot's commitments on Base cannot be linked to each other.
+//! fresh salt, so the bot's commitments on Base cannot be linked to each other. The salts are
+//! kept (`--destinations`, 0600) so that the bot's operator can check and prove each payment of
+//! its claims with `zecured-wallet watch-claims` (Tier 3, F3).
 
 mod chain;
 mod relayer;
@@ -60,6 +62,10 @@ struct Cli {
         global = true
     )]
     backend: String,
+    /// RT-2: where the bot keeps the salt and receiver of every commitment it uses (0600), for
+    /// `zecured-wallet watch-claims`. Default: data/bots/<role>-destinations.json.
+    #[arg(long, env = "BOT_DESTINATIONS_FILE", global = true)]
+    destinations: Option<PathBuf>,
     #[command(subcommand)]
     cmd: Cmd,
 }
@@ -138,6 +144,15 @@ async fn main() -> Result<()> {
         .await;
     }
     let d = Deployment::load(&cli.deployments)?;
+    let role = match cli.cmd {
+        Cmd::Liquidator { .. } => "liquidator",
+        _ => "market-maker",
+    };
+    chain::keep_destinations_in(
+        cli.destinations
+            .clone()
+            .unwrap_or_else(|| PathBuf::from(format!("data/bots/{role}-destinations.json"))),
+    );
     match cli.cmd {
         Cmd::Liquidator {
             key,

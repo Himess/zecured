@@ -104,6 +104,27 @@ enum Cmd {
         /// destinations its loan file kept and the wallet's own viewing key.
         #[arg(long, requires = "tier3")]
         claims_of: Option<B256>,
+        /// With `--tier3`, for a signer's operator (RT-1): a destination file from
+        /// `zecured-node export-audit`; every commitment naming one of these claims under a
+        /// wrong reference is reported (F4).
+        #[arg(long, requires = "tier3", conflicts_with = "claims_of")]
+        destinations: Option<PathBuf>,
+        #[arg(long, env = "BASE_SEPOLIA_RPC_URL", default_value = "https://sepolia.base.org")]
+        rpc: String,
+    },
+    /// RT-2: as a third-party claimant (a liquidator or a market maker, with its own wallet),
+    /// checks every committed payment of the claims behind a destination file (a bot's
+    /// `--destinations`): finds each payout by its claim reference and reports any shortfall
+    /// (F3), writing its evidence next to the destination file.
+    WatchClaims {
+        #[arg(long)]
+        destinations: PathBuf,
+        /// First Zcash block to search for payouts.
+        #[arg(long)]
+        from: u32,
+        /// First Base block to read commitments from.
+        #[arg(long)]
+        base_from: u64,
         #[arg(long, env = "BASE_SEPOLIA_RPC_URL", default_value = "https://sepolia.base.org")]
         rpc: String,
     },
@@ -616,6 +637,7 @@ async fn main() -> Result<()> {
             from,
             tier3,
             claims_of,
+            destinations,
             rpc,
         } => {
             // RT-10: the viewing key is the vault's tag key; its file is restricted to its owner.
@@ -631,7 +653,7 @@ async fn main() -> Result<()> {
                 .context("UFVK has no Orchard-protocol key")?;
             let mut client = lwd::connect(&cli.lwd).await?;
             let tip = u32::try_from(lwd::latest_block(&mut client).await?.height)?;
-            let mut state = ScanState::from_birthday(&mut client, fvk, from).await?;
+            let mut state = ScanState::from_birthday(&mut client, fvk.clone(), from).await?;
             state.scan_to(&mut client, tip).await?;
             state.verify_against_server(&mut client).await?;
             for n in &state.notes {
@@ -648,14 +670,29 @@ async fn main() -> Result<()> {
                 let net = network_params()?;
                 let findings = watch::check_lineage(&ufvk, &state.notes, net.registry, &rpc).await?;
                 watch::report(&findings);
-                if let Some(vault) = claims_of {
-                    let l: LoanFile = read_secret_json(&loan_path(&cli.wallet, &vault))?;
-                    let w = load_wallet(&cli.wallet)?;
-                    let own = l
-                        .destinations
-                        .iter()
-                        .map(|d| watch::own_recipient(&d.salt, &d.receiver, &w.fvk))
-                        .collect::<Result<Vec<_>>>()?;
+                let audit = match (claims_of, &destinations) {
+                    (Some(vault), _) => {
+                        let l: LoanFile = read_secret_json(&loan_path(&cli.wallet, &vault))?;
+                        let w = load_wallet(&cli.wallet)?;
+                        let own = l
+                            .destinations
+                            .iter()
+                            .map(|d| watch::own_recipient(&d.salt, &d.receiver, &w.fvk))
+                            .collect::<Result<Vec<_>>>()?;
+                        Some((own, loan_path(&cli.wallet, &vault), hex::encode(&vault[..8])))
+                    }
+                    // A signer's operator holds no claimant's key: F4 needs none (F3 is the claimant's).
+                    (None, Some(file)) => {
+                        let kept: Vec<KeptDestination> = read_secret_json(file)?;
+                        let own = kept
+                            .iter()
+                            .map(|d| watch::own_recipient(&d.salt, &d.receiver, &fvk))
+                            .collect::<Result<Vec<_>>>()?;
+                        Some((own, file.clone(), "audit".to_owned()))
+                    }
+                    (None, None) => None,
+                };
+                if let Some((own, beside, name)) = audit {
                     let payouts = watch::committed_payouts(&findings);
                     let claims = watch::check_claims(&mut client, &ufvk, &own, &payouts, net.registry, &rpc).await?;
                     for f in &claims {
@@ -665,11 +702,7 @@ async fn main() -> Result<()> {
                             _ => None,
                         };
                         if let Some((kind, evidence)) = found {
-                            let path = loan_path(&cli.wallet, &vault).with_file_name(format!(
-                                "{kind}-{}-{}.json",
-                                hex::encode(&vault[..8]),
-                                evidence.txid
-                            ));
+                            let path = beside.with_file_name(format!("{kind}-{name}-{}.json", evidence.txid));
                             write_json(&path, evidence)?;
                             watch::report_claim(f, Some(&path));
                         } else {
@@ -680,6 +713,35 @@ async fn main() -> Result<()> {
                         println!("tier 3: no committed payment of this loan's claims yet");
                     }
                 }
+            }
+        }
+        Cmd::WatchClaims {
+            destinations,
+            from,
+            base_from,
+            rpc,
+        } => {
+            let kept: Vec<KeptDestination> = read_secret_json(&destinations)?;
+            let w = load_wallet(&cli.wallet)?;
+            let own = kept
+                .iter()
+                .map(|d| watch::own_recipient(&d.salt, &d.receiver, &w.fvk))
+                .collect::<Result<Vec<_>>>()?;
+            let net = network_params()?;
+            let mut client = lwd::connect(&cli.lwd).await?;
+            let tip = u32::try_from(lwd::latest_block(&mut client).await?.height)?;
+            let claims = watch::check_third_party(&mut client, &own, net.registry, &rpc, base_from, from, tip).await?;
+            for f in &claims {
+                if let watch::ClaimFinding::Misdirected { evidence, .. } = f {
+                    let path = destinations.with_file_name(format!("f3-{}.json", evidence.txid));
+                    write_json(&path, evidence)?;
+                    watch::report_claim(f, Some(&path));
+                } else {
+                    watch::report_claim(f, None);
+                }
+            }
+            if claims.is_empty() {
+                println!("tier 3: no commitment names a claim of these destinations yet");
             }
         }
         Cmd::Loan(cmd) => loan(&cli.wallet, &cli.lwd, &cli.backend, cmd).await?,

@@ -19,6 +19,22 @@ struct Cli {
 
 #[derive(Subcommand)]
 enum Cmd {
+    /// Tier 3 (review RT-1): writes what this signer's operator needs to audit a vault's payouts
+    /// as part of the honest minority: the vault's viewing key, and the salt and receiver of every
+    /// claim's recipient, each in its own file readable by the operator only. Check them with
+    /// `zecured-wallet watch --ufvk-file <..>.ufvk --from <birthday> --tier3 --destinations
+    /// <..>-destinations.json`, which reports any commitment that names a claim under a wrong
+    /// reference (F4). Never share these files.
+    ExportAudit {
+        #[arg(long)]
+        data: PathBuf,
+        /// The vault id (0x hex).
+        #[arg(long)]
+        vault: alloy::primitives::B256,
+        /// Directory for the two files.
+        #[arg(long)]
+        out: PathBuf,
+    },
     /// Create this node's identity and print its public info for the network config.
     Init {
         #[arg(long)]
@@ -75,6 +91,38 @@ async fn main() -> Result<()> {
         .with_env_filter(tracing_subscriber::EnvFilter::try_from_default_env().unwrap_or_else(|_| "info".into()))
         .init();
     match Cli::parse().cmd {
+        Cmd::ExportAudit { data, vault, out } => {
+            use anyhow::Context;
+            use zecured_node::store::{Store, private_dir, write_atomic};
+            let store = Store::open(&data.join("store"))?;
+            let v = store.vaults.get(&vault).context("this node has no such vault")?;
+            private_dir(&out)?;
+            let name = hex::encode(&vault[..8]);
+            let ufvk_path = out.join(format!("vault-{name}.ufvk"));
+            write_atomic(&ufvk_path, v.ufvk.as_bytes())?;
+            let destinations: Vec<serde_json::Value> = v
+                .claims
+                .iter()
+                .filter_map(|c| {
+                    let r = store.recipient(&c.commitment)?;
+                    Some(serde_json::json!({
+                        "commitment": alloy::primitives::B256::from(c.commitment),
+                        "receiver": hex::encode(r.receiver),
+                        "salt": hex::encode(r.salt),
+                    }))
+                })
+                .collect();
+            let destinations_path = out.join(format!("vault-{name}-destinations.json"));
+            write_atomic(&destinations_path, &serde_json::to_vec_pretty(&destinations)?)?;
+            println!(
+                "{} destinations; audit with:\n  zecured-wallet watch --ufvk-file {} --from {} --tier3 --destinations {}",
+                destinations.len(),
+                ufvk_path.display(),
+                v.birthday,
+                destinations_path.display()
+            );
+            Ok(())
+        }
         Cmd::Init {
             index,
             data,

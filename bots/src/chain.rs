@@ -1,6 +1,11 @@
 //! Shared Base access for the bots: deployment file, ABIs, position math, recipients.
 
-use std::path::Path;
+use std::{
+    fs,
+    io::Write,
+    path::{Path, PathBuf},
+    sync::{Mutex, OnceLock},
+};
 
 use alloy::{
     primitives::{Address, B256, U256, keccak256},
@@ -192,8 +197,48 @@ pub fn commitment(salt: &[u8; 32], receiver: &[u8; 43]) -> B256 {
     keccak256(preimage)
 }
 
+/// RT-2: where the bot keeps the salt and receiver of every commitment it puts on Base, so that
+/// it can check, and prove (F3), the payment of each of its claims (`zecured-wallet
+/// watch-claims`). Set once at startup; the file is readable by its owner only.
+static DESTINATIONS: OnceLock<PathBuf> = OnceLock::new();
+static DESTINATIONS_LOCK: Mutex<()> = Mutex::new(());
+
+pub fn keep_destinations_in(path: PathBuf) {
+    let _ = DESTINATIONS.set(path);
+}
+
+/// Appends a destination (`zecured-wallet`'s `KeptDestination` layout) to the bot's file.
+fn keep_destination(commitment: B256, salt: &[u8; 32], receiver: &[u8; 43]) -> Result<()> {
+    let Some(path) = DESTINATIONS.get() else {
+        return Ok(());
+    };
+    let _guard = DESTINATIONS_LOCK.lock().map_err(|_| anyhow!("destination file lock poisoned"))?;
+    let mut kept: Vec<Value> = match fs::read(path) {
+        Ok(raw) => serde_json::from_slice(&raw).context("the bot's destination file")?,
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => vec![],
+        Err(e) => return Err(e).context("read the bot's destination file"),
+    };
+    kept.push(json!({ "commitment": commitment, "receiver": hex::encode(receiver), "salt": hex::encode(salt) }));
+    write_private(path, &serde_json::to_vec_pretty(&kept)?)
+}
+
+/// Writes `data` to `path` atomically, readable by its owner only.
+fn write_private(path: &Path, data: &[u8]) -> Result<()> {
+    use std::os::unix::fs::{DirBuilderExt, OpenOptionsExt, PermissionsExt};
+    if let Some(dir) = path.parent().filter(|d| !d.as_os_str().is_empty()) {
+        fs::DirBuilder::new().recursive(true).mode(0o700).create(dir)?;
+    }
+    let tmp = path.with_extension("tmp");
+    let mut f = fs::OpenOptions::new().write(true).create(true).truncate(true).mode(0o600).open(&tmp)?;
+    f.set_permissions(fs::Permissions::from_mode(0o600))?;
+    f.write_all(data)?;
+    f.sync_all()?;
+    fs::rename(&tmp, path)?;
+    Ok(())
+}
+
 /// Reveals a fresh (receiver, salt) for the bot's Ironwood address to the signers through
-/// the backend and returns the salted commitment to put on Base.
+/// the backend and returns the salted commitment to put on Base, after keeping its salt (RT-2).
 ///
 /// The commitment is computed here, and the backend's answer must be the same (M-11): a
 /// backend that answered with a commitment to its own receiver would otherwise get the bot's
@@ -217,6 +262,7 @@ pub async fn fresh_commitment(backend: &str, zcash_address: &str, receiver: &[u8
     }
     let returned: B256 = v["commitment"].as_str().context("no commitment")?.parse().map_err(|e| anyhow!("{e}"))?;
     ensure!(returned == expected, "the backend answered with a commitment that is not ours; not using it");
+    keep_destination(expected, &salt, receiver).context("keeping the commitment's salt")?;
     Ok(expected)
 }
 
@@ -260,6 +306,25 @@ mod tests {
         let malicious = backend([8u8; 43]).await;
         let e = fresh_commitment(&malicious, "utest1ours", &ours).await.unwrap_err();
         assert!(e.to_string().contains("not ours"), "{e}");
+    }
+
+    /// RT-2: the salt of every commitment the bot uses is kept, readable by its owner only, in the
+    /// layout `zecured-wallet watch-claims` reads.
+    #[tokio::test]
+    async fn every_commitment_is_kept_with_its_salt() {
+        use std::os::unix::fs::PermissionsExt;
+        let path = std::env::temp_dir().join(format!("zecured-bots-destinations-{}.json", std::process::id()));
+        keep_destinations_in(path);
+        let file = DESTINATIONS.get().unwrap();
+        let ours = [9u8; 43];
+        let c = fresh_commitment(&backend(ours).await, "utest1ours", &ours).await.unwrap();
+        let kept: Vec<Value> = serde_json::from_slice(&fs::read(file).unwrap()).unwrap();
+        let mine = kept.iter().find(|k| k["commitment"] == json!(c)).expect("the commitment is kept");
+        let salt: [u8; 32] = hex::decode(mine["salt"].as_str().unwrap()).unwrap().try_into().unwrap();
+        assert_eq!(commitment(&salt, &ours), c);
+        assert_eq!(mine["receiver"], json!(hex::encode(ours)));
+        assert_eq!(fs::metadata(file).unwrap().permissions().mode() & 0o777, 0o600);
+        let _ = fs::remove_file(file);
     }
 
     #[test]
