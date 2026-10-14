@@ -207,8 +207,14 @@ ZECURED_DEPOSIT_ELF=deposit.bin zecured-tier2-host image-id           # its imag
 ```
 
 A prover built anywhere else (the GPU machine's host has the CUDA prover compiled in) runs the pinned file with
-`ZECURED_DEPOSIT_ELF` set. Anyone can check that a published `deposit.bin` has the deployed image id; rebuilding it
-bit for bit needs the same toolchain (rzup, risc0 3.0.6) and source paths, or RISC Zero's Docker build.
+`ZECURED_DEPOSIT_ELF` set (the violation guest: `ZECURED_VIOLATION_ELF`).
+
+**The deployed ids come from RISC Zero's Docker build** (review E4). With `ZECURED_DOCKER_GUESTS=1`,
+`tier2/methods/build.rs` compiles both guests in the pinned `risczero/risc0-guest-builder:r0.1.97.0` image with
+`tier2/` as the build context, so the ELFs, and with them the image ids, no longer depend on the machine. The `guests`
+workflow (`.github/workflows/guests.yml`) runs that build on every change to the statement, the guests or the vendored
+crate and publishes the ids and the two ELFs; the commands to reproduce them are in the README. The statement crate and
+both guests are frozen once the deployed ids are taken from that build.
 
 ## 9. Tier 3 directions
 

@@ -1,0 +1,59 @@
+# Reproducible build of the two RISC Zero guests (review E4, docs/TIER2.md § 8.1). The Registry
+# and the slasher pin the image ids this job prints, and every prover runs the ELFs it exports
+# (ZECURED_DEPOSIT_ELF, ZECURED_VIOLATION_ELF). Anyone with Docker gets the same ids with the
+# commands in README.md ("Reproducing the guest image ids").
+name: guests
+
+on:
+  workflow_dispatch:
+  push:
+    branches: [main]
+    paths:
+      - "tier2/statement/**"
+      - "tier2/methods/**"
+      - "tier2/vendor/**"
+      - ".github/workflows/guests.yml"
+
+permissions:
+  contents: read
+
+jobs:
+  guests:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 150
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Rust toolchain (rust-toolchain.toml)
+        run: rustup show active-toolchain || rustup toolchain install
+
+      - name: Host with both guests built in RISC Zero's guest-builder image
+        working-directory: tier2
+        env:
+          ZECURED_DOCKER_GUESTS: "1"
+        run: cargo build --release --locked -p zecured-tier2-host
+
+      - name: Image ids and the ELFs to pin
+        working-directory: tier2
+        run: |
+          host=target/release/zecured-tier2-host
+          mkdir -p ../guests
+          $host export-elf ../guests/deposit.bin
+          $host violation export-elf ../guests/violation.bin
+          {
+            echo "deposit   $($host image-id)"
+            echo "violation $($host violation image-id)"
+            (cd ../guests && sha256sum deposit.bin violation.bin)
+          } | tee ../guests/image-ids.txt
+          {
+            echo '### Guest image ids (reproducible build)'
+            echo '```'
+            cat ../guests/image-ids.txt
+            echo '```'
+          } >> "$GITHUB_STEP_SUMMARY"
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: guests-${{ github.sha }}
+          path: guests/
+          if-no-files-found: error

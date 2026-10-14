@@ -121,6 +121,24 @@ On the local fork the proof is checked by `MockRiscZeroVerifier` (MOCK); the rea
 succinct receipt wrapped in Groth16 (`zecured-tier2-host prove`, then `groth16` on an x86 machine
 with Docker), checked by RISC Zero's verifier router on Base Sepolia.
 
+### Reproducing the guest image ids
+
+The Registry pins the deposit guest's image id and the slasher the violation guest's. Both come
+from a reproducible build: the guests are compiled in RISC Zero's pinned guest-builder image
+(`risczero/risc0-guest-builder:r0.1.97.0`) with `tier2/` as the build context, as the `guests`
+workflow does on every change. With Docker installed:
+
+```bash
+cd tier2
+ZECURED_DOCKER_GUESTS=1 cargo build --release -p zecured-tier2-host
+./target/release/zecured-tier2-host image-id              # deposit guest
+./target/release/zecured-tier2-host violation image-id    # violation guest
+```
+
+Both ids must equal the deployed ones (`deployments/base-sepolia.json`). A build without
+`ZECURED_DOCKER_GUESTS` uses the local risc0 toolchain and gives machine-dependent ids; provers
+then run the pinned ELFs (`ZECURED_DEPOSIT_ELF`, `ZECURED_VIOLATION_ELF`, docs/TIER2.md § 8.1).
+
 ## Security notes
 
 This is a hackathon build. All five signers are run by the authors, key material is stored
