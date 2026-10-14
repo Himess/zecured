@@ -61,6 +61,15 @@ jobs:
             echo '```'
           } >> "$GITHUB_STEP_SUMMARY"
 
+      # The Docker-built guests must behave exactly as the native statement: every single change of
+      # the TEST-ONLY deposit witness (K4) and of the F1 witness gives the same outcome in both.
+      - name: Parity of the pinned guests with the native statement
+        working-directory: tier2
+        run: |
+          host=target/release/zecured-tier2-host
+          $host parity statement/tests/fixtures/TEST-ONLY_vault9_witness.json
+          $host violation parity statement/tests/fixtures/TEST-ONLY_vault9_f1_witness.json
+
       - uses: actions/upload-artifact@v4
         with:
           name: guests-${{ github.sha }}
