@@ -24,7 +24,8 @@ import {ZecuredFixture} from "../utils/ZecuredFixture.sol";
 ///      (tier2/statement) on real chain data: the transaction's txid path, the block's ZIP 221 history-tree leaf,
 ///      path and peaks, and the header's `hashBlockCommitments`. That header and 11 more are submitted to the REAL
 ///      relay below, which checks their Equihash solutions, difficulty and linkage on-chain (fixture cross-checked
-///      against CipherScan). The proof itself is replaced by the MOCK verifier: Groth16 seals need an x86 machine.
+///      against CipherScan). The proof itself is replaced by the MOCK verifier here; RealGroth16Seal.t.sol runs the
+///      same journal with its real Groth16 seal through RISC Zero's verifier router.
 contract DepositProofsTest is ZecuredFixture, RelayFixtures {
     string internal constant ANCHOR = "test/relay/fixtures/testnet_deposit_anchor.json";
     bytes32 internal constant IMAGE_ID = keccak256("zecured.test.depositImageId");
@@ -137,7 +138,7 @@ contract DepositProofsTest is ZecuredFixture, RelayFixtures {
         uint256 gasBefore = gasleft();
         registry.attestDepositWithProof(journal, _seal(journal), _openedSigs(OPENED));
         emit log_named_uint(
-            "attestDepositWithProof gas (MOCK verifier, excl. the ~276k of a Groth16 check)", gasBefore - gasleft()
+            "attestDepositWithProof gas (MOCK verifier; the router's Groth16 check adds ~240k)", gasBefore - gasleft()
         );
 
         // K3: reserved, not minted.

@@ -85,8 +85,8 @@ review and their status are in [SECURITY_REVIEW.md](SECURITY_REVIEW.md).
 - Only one public light wallet server runs NU7 software today, so every node reads Zcash from it:
   a server that lies about a deposit could get it attested. Independent operators run their own
   (the witness mechanism is in place); the structural fix, minting on a deposit proof verified on
-  Base ([TIER2.md](TIER2.md)), runs on the local fork with a MOCK verifier until Groth16 seals can be
-  produced (x86 machine with Docker).
+  Base ([TIER2.md](TIER2.md)), runs on the local fork with a MOCK verifier; real Groth16 seals of a
+  real deposit pass RISC Zero's verifier router in the fork tests (`RealGroth16Seal.t.sol`).
 - The backend host holds the coordinator key, the demo token and the MOCK oracle key (one
   operator during the hackathon). Whoever holds the MOCK oracle key can crash the price and
   liquidate every vault: a real deployment needs a real oracle.

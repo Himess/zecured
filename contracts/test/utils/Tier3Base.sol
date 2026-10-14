@@ -34,6 +34,8 @@ abstract contract Tier3Base is ZecuredFixture {
     MockHeaderRelay internal relay;
     MockRiscZeroVerifier internal verifier;
     SignerBond internal bond;
+    /// The nonce the bond predicted for the slasher.
+    uint64 internal slasherNonce;
     ZecuredSlasher internal slasher;
 
     address internal watcher = makeAddr("tier3.watcher");
@@ -55,6 +57,7 @@ abstract contract Tier3Base is ZecuredFixture {
 
     function _signerBond() internal override returns (ISignerBond) {
         uint64 n = vm.getNonce(address(this));
+        slasherNonce = n + 4;
         bond = new SignerBond(
             vm.computeCreateAddress(address(this), n + 2), vm.computeCreateAddress(address(this), n + 4), WINDOW
         );
@@ -63,6 +66,9 @@ abstract contract Tier3Base is ZecuredFixture {
 
     function setUp() public virtual override {
         super.setUp();
+        // `forge test --isolate` runs each call as a transaction, which also advances this contract's nonce: put it
+        // back where the bond expects the slasher (a no-op without --isolate).
+        vm.setNonceUnsafe(address(this), slasherNonce);
         slasher = new ZecuredSlasher(
             address(registry),
             address(bond),

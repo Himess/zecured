@@ -5,8 +5,9 @@ mint path of the Base Sepolia deployment (D25).** The statement, the RISC Zero g
 Registry entry points (proof, pending activation, finalization), the header relay and the refund path for unminted
 deposits are in the repository with tests, including a negative test for every relation of the statement, run
 natively and in the zkVM executor (§ 6). A real deposit's proof was produced locally as a RISC Zero succinct (STARK)
-receipt. Not done yet: the Groth16 wrap that Base can verify (a rented NVIDIA GPU, no Docker needed) and the deployment
-on Base Sepolia. "Verified" below means checked against a primary source (ZIP text, Zebra or librustzcash source,
+receipt, then (2026-10-14) on a rented GPU and wrapped in Groth16: RISC Zero's verifier router accepts the seal, and
+`RealGroth16Seal.t.sol` mints the deposit through it on a Base Sepolia fork. Not done yet: the deployment on Base
+Sepolia. "Verified" below means checked against a primary source (ZIP text, Zebra or librustzcash source,
 live chain data); "estimate" marks numbers not measured here.
 
 ## 1. What changes
@@ -122,8 +123,9 @@ selector, journals of the wrong length or with a dirty address word, a reused or
 cancellation, also while a proof is pending; the `VaultOpened` golden vector. `PendingActivation.t.sol` (7 tests) drives
 a MOCK relay through what real headers cannot do in a test: `ProofOnly` refusing even five signatures, not ready by
 height or by time, the anchor leaving the best chain before finalization, dropping and proving again.
-Gas: **222,380** for the proof without the verifier call (MOCK), **163,179** for the finalization (mint and Morpho
-supply); RISC Zero's Groth16 verification adds roughly 2.8 × 10^5 (estimate, not measured here).
+Gas: **289,256** for the proof with the MOCK verifier, **163,423** for the finalization (mint and Morpho supply). With
+the real seal and RISC Zero's router (`RealGroth16Seal.t.sol`): **520,722** for the proof; the router's Groth16 check
+costs about 2.4 × 10^5.
 
 ## 4. The deposit tag (D24)
 
@@ -191,8 +193,8 @@ leaving zZEC unbacked:
    `cuda` feature, no Docker, no guest build) and proves with the pinned guests. Measured on an RTX 4090: 36 s for
    the real deposit, 48 s for an F1 violation (TESTING.md § 2b). `risc0-groth16` 3.0.5 wraps in Groth16 either with
    Docker on x86 or natively with its `cuda` feature. The CUDA prover fails on our receipts (an out-of-bounds read
-   in its own kernel, TESTING.md § 2b), so the wrap uses Docker on x86. Its input is the succinct receipt, which
-   holds no viewing key. The witness does hold the vault's viewing key, so proving it on rented hardware is a
+   in its own kernel, TESTING.md § 2b), so the wrap uses Docker on x86: about a minute per seal. Its input is the
+   succinct receipt, which holds no viewing key. Both seals pass RISC Zero's router (done). The witness does hold the vault's viewing key, so proving it on rented hardware is a
    documented testnet trade-off; the private alternative keeps the STARK on the depositor's machine.
 2. **Base Sepolia**: deploy a relay from a recent checkpoint (`script/DeployRelay.s.sol`), keep it fed, deploy the
    Registry `ProofOnly` with the router, the image id below and the relay.

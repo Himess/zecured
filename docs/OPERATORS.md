@@ -113,5 +113,5 @@ nodes' stores freezes the affected vaults; three leaked stores are enough to ste
   existing vaults cannot be re-shared to a new party yet. Replacing an operator means a new
   deployment for new vaults.
 - Bonds and slashing for misbehaving operators are on the roadmap ([TIER2.md](TIER2.md) § 9).
-  Base-side verification of deposits is implemented (Tier 2) and verified with a MOCK verifier
-  on the local fork until Groth16 seals are produced.
+  Base-side verification of deposits is implemented (Tier 2): a MOCK verifier on the local fork,
+  real Groth16 seals through RISC Zero's router in the fork tests (`RealGroth16Seal.t.sol`).

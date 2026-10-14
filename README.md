@@ -65,14 +65,14 @@ txids) and how to reproduce every run: [docs/TESTING.md](docs/TESTING.md).
 | ZZEC / ZecuredRegistry / SettlementAdapter contracts | |
 | Liquidation, close from collateral, refunds of non-conforming deposits | |
 | Own RPC / bundler / paymaster proxy with a sponsorship allowlist | |
-| Tier 2 deposit statement on real Testnet data, run in the RISC Zero zkVM; Zcash header relay with on-chain Equihash | RISC Zero verifier on the local fork (`MockRiscZeroVerifier`, accepts unproven journals) until Groth16 seals are produced on an x86 machine; Base Sepolia uses the real verifier router |
+| Tier 2 deposit statement on real Testnet data, run in the RISC Zero zkVM; Zcash header relay with on-chain Equihash | RISC Zero verifier on the local fork (`MockRiscZeroVerifier`, accepts unproven journals) for the demo's own proofs; real Groth16 seals of a real deposit and a real F1 spend pass RISC Zero's verifier router, which Base Sepolia uses (`RealGroth16Seal.t.sol`) |
 | Tier 3 ([docs/TIER3.md](docs/TIER3.md)): every payout committed on Base before it is signed; `SignerBond`, `ZecuredSlasher`; the violation statement proven on a real Testnet vault spend and run in the zkVM; the `watch --tier3` watchtower | The theft demonstration runs on its own deployment with a 2-minute challenge window (labelled DEMO), never on the judge deployment |
 
 ## Repository layout
 
 | Path | What |
 |---|---|
-| `contracts/` | Solidity + Foundry: `ZZEC`, `ZecuredRegistry` (attestations, Tier 2 deposit proofs, cancellation, Tier 3 spend commitments), `SettlementAdapter`, `SignerBond`, `ZecuredSlasher`, mocks, and the Zcash header relay (`src/relay/`); 334 tests and 10 symbolic checks (Halmos) |
+| `contracts/` | Solidity + Foundry: `ZZEC`, `ZecuredRegistry` (attestations, Tier 2 deposit proofs, cancellation, Tier 3 spend commitments), `SettlementAdapter`, `SignerBond`, `ZecuredSlasher`, mocks, and the Zcash header relay (`src/relay/`); 340 tests and 10 symbolic checks (Halmos) |
 | `signer/crates/zcash-ops` | Ironwood scanning, PCZT build/prove/sign/extract, ZIP 2005 vault keys |
 | `signer/crates/threshold` | FROST DKG and re-randomized signing |
 | `signer/crates/policy` | P1 classification, payout ledger (I10), PCZT verification against the plan |
@@ -136,9 +136,10 @@ DEPOSIT_PROOF_HOST=$PWD/tier2/target/release/zecured-tier2-host DEPOSIT_PROOF_MO
   scripts/signer-network.sh start             # the coordinator proves deposits instead of attesting them
 ```
 
-On the local fork the proof is checked by `MockRiscZeroVerifier` (MOCK); the real seal is a
-succinct receipt wrapped in Groth16 (`zecured-tier2-host prove`, then `groth16` on an x86 machine
-with Docker), checked by RISC Zero's verifier router on Base Sepolia.
+On the local fork the proof is checked by `MockRiscZeroVerifier` (MOCK). The real seal is a
+succinct receipt (`zecured-tier2-host prove`, 36 s on a rented RTX 4090: `scripts/gpu-prove.sh`)
+wrapped in Groth16 (`groth16`, about a minute with Docker on x86), checked by RISC Zero's verifier
+router on Base Sepolia; `RealGroth16Seal.t.sol` runs a real deposit's seal through it.
 
 ### Reproducing the guest image ids
 
