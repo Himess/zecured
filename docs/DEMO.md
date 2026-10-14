@@ -24,6 +24,31 @@
 | Verify | Owner-signed viewing-key request → scan the vault yourself | UFVK and the vault's notes |
 | Tier 2 (optional) | The same deposit activated on a zero-knowledge proof instead of signer signatures: the relay's verified header, the proof's journal, `attestDepositWithProof` | The Base transaction; the journal holds no Zcash data but a later header |
 
+## Theft demo (Tier 3, its own deployment)
+
+Three signers really steal from a vault, and the theft is proven and slashed on Base. This runs on
+a separate deployment with its own five signers, where three nodes can be compromised (review
+T3-6, docs/TIER3.md § 8). Its binaries refuse to start against the judge deployment.
+
+Setup, once:
+1. `THEFT_DEMO=1 scripts/signer-network.sh init`: five fresh node identities in
+   `signer/data-theft-demo/` (and the `demo-tier3` build in `target/theft-demo/`).
+2. `scripts/deploy-theft-demo.sh` (a simulation), then `scripts/deploy-theft-demo.sh --broadcast`:
+   Registry, zZEC, Adapter, `SignerBond` and `ZecuredSlasher` with a 2-minute window
+   (`contracts/deployments/base-sepolia-theft-demo.json`).
+3. `THEFT_DEMO=1 scripts/signer-network.sh init` again (the network config now names the
+   deployment), `THEFT_DEMO=1 scripts/bond-signers.sh`, `THEFT_DEMO=1 scripts/signer-network.sh start`.
+4. Open a vault on the theft demo's backend (port 8180) and deposit until it is active; keep its
+   viewing key (`loan viewing-key`).
+
+| Scene | Command | On screen |
+|---|---|---|
+| Compromise three | `POST /admin/nodes/{3,4,5}/mode` with `{"mode":"compromised"}` (header `x-admin-token`) | Three nodes compromised; outside this build the panel stops at two |
+| Steal | `POST /admin/vaults/<id>/steal` with `{"to":"<an attacker's unified address>"}` | The sweep's txid on a Zcash explorer: no commitment on Base |
+| Detect | `zecured-wallet watch --ufvk-file vault.ufvk --from <birthday> --tier3` | `VIOLATION F1` and the command that builds the witness |
+| Prove | `build-violation uncommitted ... --out f1.json`, then `zecured-tier2-host violation prove f1.json f1.receipt` and `... violation groth16 f1.receipt f1.seal.json` | The journal: an anchor header, a tag, a reference; no Zcash transaction, note or address |
+| Slash | `cast send <ZecuredSlasher> "proveViolation(uint8,bytes,bytes)" 1 <journal> <seal>`; two minutes later `cast send <ZecuredSlasher> "executeSlash(bytes32)" <caseId>` | All five bonds slashed, the bounty owed to the prover, `halted()` true: no new vault can be activated |
+
 ## Two-minute video
 
 | Time | Scene | Narration |
