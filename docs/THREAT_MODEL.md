@@ -53,12 +53,14 @@ review and their status are in [SECURITY_REVIEW.md](SECURITY_REVIEW.md).
 | L20 | Registering the vault on Base just before the deposit | Vaults are opened off-chain; the first Base trace is the attested deposit | coordinator, Registry |
 | L21 | The light wallet server learns which transactions the signers look up (deposits, payouts) | Each signer can use its own server; roadmap: every signer on its own full node | node config ([OPERATORS.md](OPERATORS.md)) |
 | L22 | A Tier 2 deposit proof revealing the deposit or the vault's address on Base | The journal holds the anchor header (a later block, not the deposit's), vault id, account, amount, tag and the `VaultOpened` struct hash; the deposit's block, transaction, note and the address hash stay inside the proof (D22). Base learns only that the deposit precedes the anchor | `tier2/statement`, `ZecuredRegistry.attestDepositWithProof` |
+| L23 | A payout's Tier 3 commitment lands on Base seconds before its broadcast, pointing at the next Zcash blocks | A random delay of 0 to `payout_delay_max_blocks` Zcash blocks (8 on the judge deployment) between commitment and broadcast, inside the 120-block expiry (D32) | coordinator |
+| L24 | Tier 3 records and violation journals linking to Zcash | A commitment holds only keyed tags, a keyed payout reference, salted claim references and output indexes; a journal adds an anchor header and, for F3, the value the claimant received. No txid, note commitment or address (docs/TIER3.md § 11) | `policy/src/derive.rs`, `tier2/statement`, contracts |
 
 ## Attacks on the signer network
 
 | Threat | Mitigation | Where |
 |---|---|---|
-| One or two signers compromised | Payouts need 3 of 5 FROST shares; each signer checks the request independently. Shown live: two "compromised" signers signed a sweep, three refused, nothing moved. The demo's "compromised" mode exists only in demo builds and only on two nodes started for it | `node/src/signing.rs`, `coordinator::demo_drain` |
+| One or two signers compromised | Payouts need 3 of 5 FROST shares; each signer checks the request independently. Shown live: two "compromised" signers signed a sweep, three refused, nothing moved. The demo's "compromised" mode exists only in demo builds and only on nodes 4 and 5; only the separate theft demo's build allows a third, and it refuses to run against the judge deployment (D35) | `node/src/signing.rs`, `coordinator::demo_drain`, `base-client/src/theft_demo_guard.rs` |
 | Forged chain data (a lying light wallet server or Base RPC) | Each node reads its own sources; optional witness sources must agree on the deposit (block hash, transaction bytes, tip); Registry events are checked against contract state | `zcash-ops/src/witness.rs`, `base-client/src/verify.rs` |
 | A substituted deposit address or viewing key | All five signers sign `VaultOpened` (address and UFVK hashes); the app and the CLI verify the signatures against a signer set pinned in the build | node DKG, `app/`, `cli/` |
 | One payout's transaction attributed to another payout's claims | A node never signs a second payout while one it signed can still be mined, and confirms only the transaction it signed | `node/src/signing.rs` |
@@ -72,13 +74,14 @@ review and their status are in [SECURITY_REVIEW.md](SECURITY_REVIEW.md).
 | A deposit minted twice, or a refunded deposit also minted | P1 marks exactly one conforming note; decisions are final; the Registry rejects reused vault ids and tags, and one note has one tag on both minting paths (D24); the conforming deposit is refunded only after `cancelVault` made the vault unmintable (D23) | `policy/src/classify.rs`, Registry I5, node `cancel` |
 | Three signers attesting a deposit that does not exist, or honest signers fooled by a lying data source | Tier 2: a deposit can be minted on a proof instead, which needs no signer and no light wallet server; the signers only vouch for the vault key, and all five must (D22) | `tier2/`, `ZecuredRegistry.attestDepositWithProof` |
 | zZEC escaping its vault (transfers, flash loans, direct liquidation) | zZEC moves only Registry ↔ Morpho ↔ Adapter under a one-shot transient expectation | `contracts/src/ZZEC.sol`, invariant I2 |
-| Three colluding signers | Can steal vault funds: this is the hackathon trust assumption for payouts. Minting no longer needs them (Tier 2). Roadmap: independent operators, bonds, slashing | — |
+| Three colluding signers | Tier 3: every payout is committed on Base before it is signed. Taking ZEC that backs loans, without a commitment or under a false one, or paying a claim to anyone but its owner, is provable with a zero-knowledge proof and slashes the signers' bonds (F1, F2, F3). Outside the proofs: refunds of non-conforming notes and liveness (refusing to pay leaves the ZEC in the vault). Minting does not need them (Tier 2). On Testnet both rest on weak proof of work | `ZecuredRegistry.commitSpend`, `ZecuredSlasher`, `SignerBond`, `node/src/signing.rs` |
 
 ## Known limitations (hackathon)
 
 - All five signers, the coordinator and the bots are run by us (signer independence is a mock).
 - Signer key material (FROST shares, vault `sk`) is stored unencrypted on each node's disk.
-- The price oracle and USDC are mocks.
+- The price oracle is a mock (`MockZecOracle` behind `DemoShockOracle`); USDC is Circle's testnet
+  USDC on Base Sepolia (`MockUSDC` only on the local fork).
 - Only one public light wallet server runs NU7 software today, so every node reads Zcash from it:
   a server that lies about a deposit could get it attested. Independent operators run their own
   (the witness mechanism is in place); the structural fix, minting on a deposit proof verified on
@@ -108,6 +111,8 @@ review and their status are in [SECURITY_REVIEW.md](SECURITY_REVIEW.md).
 - [ ] No Base transaction about a vault before its deposit
 - [ ] Demo control panel authenticated; `setPrice` owner-only
 - [ ] Browser network tab: no third-party RPC / bundler / paymaster calls
+- [ ] No address, viewing key, salt or IP in any log or watchdog alarm
+- [ ] The whole git history passes a secret scanner (gitleaks or trufflehog) before the repository goes public
 - [ ] Backend and node logs: no addresses, viewing keys, salts or IPs
 - [ ] Demo video: no real personal addresses
 - [ ] README "What is real and what is a mock" up to date
