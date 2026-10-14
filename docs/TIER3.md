@@ -25,9 +25,10 @@ the same functions in `tier2/statement` (`violation.rs`).
 
 A 3-of-5 FROST signature on a Zcash spend says nothing about who signed: three colluding signers
 can spend a vault and nobody can point at them. Tier 3 changes the order of signing. In a fully
-shielded v6 transaction the signature digest *is* the txid (ZIP 244: with no transparent inputs, the
-shielded sighash is the txid digest; pinned by zcash-ops' `frost_spend` test), so every signer knows
-the payout's txid in FROST round 1, before any share leaves it. The signers first **commit** the
+shielded v6 transaction the signature digest *is* the txid (ZIP 244, as modified for v6 by
+ZIP 229: with no transparent inputs, the shielded sighash is the txid digest; pinned by zcash-ops'
+`frost_spend` test), so every signer knows the payout's txid in FROST round 1, before any share
+leaves it. The signers first **commit** the
 payout on Base (which lineage note it spends, which claims it pays, which change note it returns),
 and only then release their round-2 shares. Every value then has an owner who can check it:
 
@@ -54,7 +55,7 @@ note or address. It slashes the signers' bonds and halts minting.
 ## 2. References: what Base sees is keyed or salted
 
 `K = BLAKE2b-256(personal "Zecured_TagKey__", UFVK string)`, the vault's tag key (D24). A txid is
-always in internal byte order (the ZIP 244 digest itself, not the reversed display form).
+always in internal byte order (the ZIP 244 / ZIP 229 digest itself, not the reversed display form).
 
 | Value | Definition | Code |
 |---|---|---|
