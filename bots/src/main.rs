@@ -179,6 +179,9 @@ async fn liquidator(
     }
 }
 
+/// Base blocks of Registry events the liquidator reads per pass at most.
+const EVENT_STEP: u64 = 20_000;
+
 async fn liquidation_pass<P: Provider>(
     p: &P,
     backend: &str,
@@ -190,12 +193,15 @@ async fn liquidation_pass<P: Provider>(
 ) -> Result<()> {
     let head = p.get_block_number().await?;
     if head > *cursor {
-        for ev in events::fetch(p, d.registry, *cursor + 1, head).await? {
+        // A bounded step per pass, so that a long backlog (a restart weeks after the deployment)
+        // makes progress pass after pass instead of failing as a whole.
+        let to = head.min(cursor.saturating_add(EVENT_STEP));
+        for ev in events::fetch(p, d.registry, *cursor + 1, to).await? {
             if let RegistryEvent::VaultActivated { account, .. } = ev.event {
                 accounts.insert(ev.vault_id, account);
             }
         }
-        *cursor = head;
+        *cursor = to;
     }
     for (vault_id, account) in accounts.clone() {
         let pos = chain::position(p, d, account).await?;
