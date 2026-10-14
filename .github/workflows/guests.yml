@@ -29,12 +29,15 @@ jobs:
 
       # risc0-build asks rzup for the guest toolchain's version even when Docker builds the guests
       # (it picks a rustc flag by version); the guests themselves are compiled inside the image.
-      - name: rzup and the risc0 Rust toolchain
+      # r0vm runs the executor for the parity checks.
+      - name: rzup, the risc0 Rust toolchain and r0vm
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: |
           curl -sSfL https://risczero.com/install | bash
           "$HOME/.risc0/bin/rzup" install rust 1.97.0
+          "$HOME/.risc0/bin/rzup" install r0vm 3.0.6
+          echo "$HOME/.risc0/bin" >> "$GITHUB_PATH"
 
       - name: Host with both guests built in RISC Zero's guest-builder image
         working-directory: tier2
