@@ -2,8 +2,8 @@
 //! first, the Tier 3 violation guest on a witness built by `build-violation`.
 //!
 //!   zecured-tier2-host [violation] execute <witness.json>    # zkVM executor: cycles and journal
-//!   zecured-tier2-host prove <witness.json> <receipt.bin>    # succinct (STARK) receipt, locally
-//!   zecured-tier2-host groth16 <receipt.bin> <seal.json>     # Groth16 seal for Base (x86 + Docker)
+//!   zecured-tier2-host prove <witness.json> <receipt.bin>    # succinct (STARK) receipt (segments: ZECURED_SEGMENT_PO2)
+//!   zecured-tier2-host groth16 <receipt.bin> <seal.json>     # Groth16 seal for Base (x86: Docker, or --features cuda)
 //!   zecured-tier2-host mock-seal <witness.json> <seal.json>  # MOCK seal for the local fork only
 //!   zecured-tier2-host image-id                              # the guest's image id
 //!   zecured-tier2-host export-elf <deposit.bin>              # the embedded guest, to pin it
@@ -257,9 +257,14 @@ fn main() -> Result<()> {
             let out = args.get(3).context("receipt output path")?;
             let (frame, journal) = load_witness(statement, input)?;
             let started = std::time::Instant::now();
-            // Segments of 2^18 cycles keep memory around 3 GB on an 8 GB machine.
+            // Segments of 2^18 cycles keep memory around 3 GB on an 8 GB machine; a 24 GB GPU proves
+            // faster with larger ones (`ZECURED_SEGMENT_PO2=20`).
+            let po2 = match std::env::var("ZECURED_SEGMENT_PO2") {
+                Ok(v) => v.parse().context("ZECURED_SEGMENT_PO2")?,
+                Err(_) => 18,
+            };
             let info = default_prover().prove_with_opts(
-                env_for_frame(&frame, Some(18))?,
+                env_for_frame(&frame, Some(po2))?,
                 &guest.elf,
                 &ProverOpts::succinct(),
             )?;

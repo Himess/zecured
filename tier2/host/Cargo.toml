@@ -15,3 +15,8 @@ bincode = "1"
 hex = "0.4"
 sha2 = "0.10"
 serde_json = "1"
+
+[features]
+# Proves on an NVIDIA GPU (needs the CUDA toolkit to build), and wraps in Groth16 natively through the
+# `risc0-groth16` rzup component instead of Docker (docs/TIER2.md § 8).
+cuda = ["risc0-zkvm/cuda"]

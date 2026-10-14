@@ -188,9 +188,11 @@ leaving zZEC unbacked:
 ## 8. Remaining work
 
 1. **Groth16 seal.** `risc0-groth16` 3.0.5 proves with Docker on x86, or natively with its `cuda` feature (`rzup
-   install risc0-groth16`), which is the plan: a rented 24 GB NVIDIA GPU, an estimated 2 to 4 minutes per proof. The
-   witness holds the vault's viewing key, so proving on rented hardware is documented as a testnet trade-off; the
-   private alternative keeps the STARK on the depositor's machine and sends only its `identity_p254` seal out.
+   install risc0-groth16`), which is the plan: a rented 24 GB NVIDIA GPU, an estimated 2 to 4 minutes per proof.
+   `scripts/gpu-prove.sh` sets such a machine up (the host's `cuda` feature, no Docker, no guest build) and proves
+   with the pinned guests. The witness holds the vault's viewing key, so proving on rented hardware is documented as
+   a testnet trade-off; the private alternative keeps the STARK on the depositor's machine and sends only its
+   `identity_p254` seal out.
 2. **Base Sepolia**: deploy a relay from a recent checkpoint (`script/DeployRelay.s.sol`), keep it fed, deploy the
    Registry `ProofOnly` with the router, the image id below and the relay.
 3. **Fewer cycles** (optional once proving runs on a GPU): one note commitment instead of three (own ZIP 212
