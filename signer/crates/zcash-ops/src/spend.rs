@@ -286,3 +286,16 @@ pub async fn broadcast_raw(client: &mut LwdClient, data: Vec<u8>) -> Result<()> 
     );
     Ok(())
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// Cross-language vector (red-team review § 4): ZIP 317's fee for one input and 1 to 9
+    /// outputs, the table `contracts/test/fork/SpendCommits.t.sol` checks against `commitSpend`.
+    #[test]
+    fn zip317_fee_table() {
+        let table: Vec<u64> = (1..=9).map(|outputs| zip317_fee(1, outputs)).collect();
+        assert_eq!(table, [10_000, 10_000, 15_000, 20_000, 25_000, 30_000, 35_000, 40_000, 45_000]);
+    }
+}

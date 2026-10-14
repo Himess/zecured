@@ -269,6 +269,41 @@ fn honest_pczt_passes_and_yields_one_spend() {
     assert_eq!(v.payment_actions, vec![output_action(&pczt, &liq)]);
 }
 
+/// Red-team review § 4: in a two-claim payout (a close: the borrower, then the market maker) each
+/// payment's committed output is the action that pays exactly that receiver that value, so F3 checks
+/// the right output for both claims.
+#[test]
+fn a_close_pairs_payments_map_to_their_own_actions() {
+    let fvk = vault_fvk();
+    let (ns, anchor) = notes(&fvk, &[NOTE]);
+    let (user, mm) = (other(), other());
+    let fee = zip317_fee(1, 3);
+    let p = PayoutPlan {
+        claims: vec![[3; 32], [4; 32]],
+        payments: vec![
+            PlannedPayment {
+                claim: [3; 32],
+                receiver: user.to_raw_address_bytes(),
+                value: 1_200_000 - fee,
+                privacy: OutputPrivacy::VaultOvk,
+            },
+            PlannedPayment {
+                claim: [4; 32],
+                receiver: mm.to_raw_address_bytes(),
+                value: 2_300_000,
+                privacy: OutputPrivacy::NoOvk,
+            },
+        ],
+        inputs: 1,
+        change: NOTE - 1_200_000 - 2_300_000,
+        fee,
+    };
+    let pczt = build(&fvk, anchor, &[&ns[0]], &honest_payments(&p));
+    let v = verify_payout(&pczt, &fvk, &inputs(&[&ns[0]]), &p, &expect()).unwrap();
+    assert_eq!(v.payment_actions, vec![output_action(&pczt, &user), output_action(&pczt, &mm)]);
+    assert_ne!(v.payment_actions[0], v.payment_actions[1]);
+}
+
 #[test]
 fn other_recipient_is_refused() {
     let fvk = vault_fvk();

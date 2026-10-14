@@ -292,6 +292,31 @@ contract SpendCommitsTest is ZecuredFixture {
         assertEq(registry.claimPayment(c.claimRefs[1]).outputIndex, 1);
     }
 
+    /// Cross-language vector (red-team review § 4): the fee claim 0 bears for every shape, 1 to 8 claims with and
+    /// without change, is the table `zecured_zcash_ops::spend::zip317_fee(1, outputs)` asserts in Rust.
+    function test_vector_zip317FeeTable() public {
+        uint64[10] memory feeFor = [uint64(0), 10_000, 10_000, 15_000, 20_000, 25_000, 30_000, 35_000, 40_000, 45_000];
+        for (uint256 n = 1; n <= 8; ++n) {
+            for (uint256 change; change < 2; ++change) {
+                uint256 snap = vm.snapshotState();
+                bytes32[] memory ids = new bytes32[](n);
+                for (uint256 i; i < n; ++i) {
+                    bytes32 dest = keccak256(abi.encode("fee table", i));
+                    vm.prank(account);
+                    ids[i] = (i == n - 1 && change == 0)
+                        ? registry.requestRelease(vaultId, dest)
+                        : registry.requestPartialRelease(vaultId, 200_000, dest);
+                }
+                SpendCommit memory c = _spendCommit(vaultId, depositTag, ids, keccak256(abi.encode("fee", n, change)));
+                assertEq(c.changeValue != 0, change == 1);
+                _send(c);
+                (,, uint64 amount,,) = registry.claim(ids[0]);
+                assertEq(amount - registry.claimPayment(c.claimRefs[0]).expected, feeFor[n + change]);
+                vm.revertToState(snap);
+            }
+        }
+    }
+
     /// The fee-bearing claim must cover the fee: the signers never pay dust (it stays in the vault).
     function test_commitSpend_revertsWhenTheFeeBearerIsDust() public {
         bytes32 a = _partial(1_000_000);

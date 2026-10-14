@@ -2,7 +2,7 @@
 pragma solidity 0.8.28;
 
 import {Tier3Base} from "../utils/Tier3Base.sol";
-import {ViolationKind, IZecuredSlasher} from "../../src/interfaces/IZecuredSlasher.sol";
+import {ViolationKind, ViolationJournal, IZecuredSlasher} from "../../src/interfaces/IZecuredSlasher.sol";
 import {IZecuredSpendCommits} from "../../src/interfaces/IZecuredSpendCommits.sol";
 import {ISignerBond} from "../../src/interfaces/ISignerBond.sol";
 import {IZecuredRegistry, VaultStatus, ClaimStatus} from "../../src/interfaces/IZecuredRegistry.sol";
@@ -120,6 +120,81 @@ contract RedTeamRegressionsTest is Tier3Base {
         bytes[] memory sigs = _threeSigs(registry.hashSpendCommit(c));
         vm.expectRevert(abi.encodeWithSelector(IZecuredSpendCommits.DuplicateClaimCommitment.selector, _dest()));
         registry.commitSpend(c, sigs);
+    }
+
+    // ================================================================== cross-language vectors (review § 4)
+
+    /// The journals the Rust statement computes for the TEST-ONLY vault 9's deposit standing in for a payout X
+    /// (tier2/statement/tests/violations.rs, `journals_are_pinned_across_languages`): the claim's salt is 0x5a * 32,
+    /// its receiver the vault's own address, its output action 1.
+    bytes32 internal constant X_ANCHOR = 0xa27b5e3c30e3dc292138c751bf10c85fd842fb759be90c7e9397d0477d0b0000;
+    bytes32 internal constant X_CLAIM_REF = 0x62840e8e15455e60905714b51e12fa370ec8cc849cd2cbf30b696ce139950869;
+    bytes32 internal constant X_PAYOUT_REF = 0x46b19981da842f7bf81342fa8db82ecd88933c3f9d777816c80bc712ef931496;
+    bytes32 internal constant X_DEST = 0x0144dce00498a1cb4e3d04161414ccf1cd42b09f70fe83ddcf745973c522a0a7;
+
+    function _rustJournal(uint8 kind, bytes32 ref, bytes32 noteTag, uint64 value, uint8 output)
+        internal
+        pure
+        returns (bytes memory)
+    {
+        return bytes.concat(
+            bytes32(uint256(kind)),
+            X_ANCHOR,
+            hex"000000000000000000000000bebebebebebebebebebebebebebebebebebebebe",
+            ref,
+            noteTag,
+            bytes32(uint256(value)),
+            X_DEST,
+            bytes32(uint256(output))
+        );
+    }
+
+    /// A vault whose claim of recipient X_DEST is committed in payout `payoutRef` under `claimRef` at output 1.
+    function _committedClaim(uint64 claimAmount, bytes32 payoutRef, bytes32 claimRef) internal returns (bytes32) {
+        address acct = makeAddr("vectors.account");
+        bytes32 vaultId = _attest(acct, VAULT_005);
+        vm.startPrank(acct);
+        MORPHO.setAuthorization(address(registry), true);
+        bytes32 claimId = registry.requestPartialRelease(vaultId, claimAmount, X_DEST);
+        vm.stopPrank();
+        SpendCommit memory c = _spendCommit(vaultId, _depositTagFor(acct), _one(claimId), "vectors");
+        (c.payoutRef, c.claimRefs[0], c.claimOutputs[0]) = (payoutRef, claimRef, 1);
+        _send(c);
+        relay.setBlock(X_ANCHOR, true, SLASH_WORK);
+        return vaultId;
+    }
+
+    function test_vector_theRustStatementsF3Journal() public {
+        bytes memory f3 = _rustJournal(3, X_CLAIM_REF, bytes32(0), 1_000_000, 1);
+        ViolationJournal memory j = abi.decode(f3, (ViolationJournal));
+        assertEq(uint8(j.kind), uint8(ViolationKind.Misdirected));
+        assertEq((j.value), 1_000_000);
+        assertEq(j.outputIndex, 1);
+        uint256 snap = vm.snapshotState();
+        // The output paid 1,000,000 zat: a claim expecting more is short (F3) ...
+        bytes32 vaultId = _committedClaim(2_000_000, keccak256("vectors.payout"), X_CLAIM_REF);
+        assertEq(slasher.caseOf(_prove(f3)).vaultId, vaultId);
+        vm.revertToState(snap);
+        // ... and one expecting exactly that (1,010,000 less the 10,000 zat fee) was paid.
+        _committedClaim(1_010_000, keccak256("vectors.payout"), X_CLAIM_REF);
+        _proveExpectRevert(
+            f3, abi.encodeWithSelector(IZecuredSlasher.NoViolation.selector, ViolationKind.Misdirected, X_CLAIM_REF)
+        );
+    }
+
+    function test_vector_theRustStatementsF4Journal() public {
+        bytes memory f4 = _rustJournal(4, X_PAYOUT_REF, X_CLAIM_REF, 0, 0);
+        assertEq(uint8(abi.decode(f4, (ViolationJournal)).kind), uint8(ViolationKind.WrongClaimRef));
+        uint256 snap = vm.snapshotState();
+        // The commitment of X names the claim under another reference: F4 ...
+        bytes32 vaultId = _committedClaim(1_000_000, X_PAYOUT_REF, keccak256("vectors.wrong"));
+        assertEq(slasher.caseOf(_prove(f4)).vaultId, vaultId);
+        vm.revertToState(snap);
+        // ... under the one the statement computes: nothing to prove.
+        _committedClaim(1_000_000, X_PAYOUT_REF, X_CLAIM_REF);
+        _proveExpectRevert(
+            f4, abi.encodeWithSelector(IZecuredSlasher.NoViolation.selector, ViolationKind.WrongClaimRef, X_PAYOUT_REF)
+        );
     }
 
     // ================================================================== RT-4: one claim set per input

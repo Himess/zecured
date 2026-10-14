@@ -87,6 +87,56 @@ fn references_match_the_signers_derivations() {
         h32("51d4b707b5a706e51817d290a91ae40d0363befaad5013b6658f20cd87ddcdd6")
     );
     assert_eq!(deposit_tag(&deposit().vault_ufvk, &deposit_cmx()), h32(DEPOSIT_TAG));
+    // The note tag vector `zecured_policy::derive` pins (red-team review § 4: both implementations).
+    assert_eq!(
+        deposit_tag("uviewtest1a", &[7; 32]),
+        h32("add8548e79e01888ca52988bc44b01d0be125fdc5569db7597bd040f335f25aa")
+    );
+}
+
+/// Cross-language vectors (red-team review § 4): the F3 and F4 journals of the fixture standing in
+/// for a payout X (salt 0x5a * 32, the vault's own receiver, output 1), byte for byte what
+/// `contracts/test/fork/RedTeamRegressions.t.sol` proves with (`test_vector_*`).
+#[test]
+fn journals_are_pinned_across_languages() {
+    let receiver = deposit().note_recipient;
+    let ivk = vault_fvk().to_ivk(Scope::External).to_bytes().to_vec();
+    let words = |j: zecured_deposit_statement::violation::ViolationJournal| -> Vec<String> {
+        j.abi_encode().chunks(32).map(|w| w.iter().map(|b| format!("{b:02x}")).collect()).collect()
+    };
+    let f3 = words(verify_violation(&misdirected(receiver.clone(), ivk, paid_action())).unwrap());
+    let f4 = words(verify_violation(&wrong_claim_ref(deposit().vault_ufvk, receiver)).unwrap());
+    const ANCHOR_W: &str = "a27b5e3c30e3dc292138c751bf10c85fd842fb759be90c7e9397d0477d0b0000";
+    const BENEFICIARY_W: &str = "000000000000000000000000bebebebebebebebebebebebebebebebebebebebe";
+    const CLAIM_REF: &str = "62840e8e15455e60905714b51e12fa370ec8cc849cd2cbf30b696ce139950869";
+    const DEST: &str = "0144dce00498a1cb4e3d04161414ccf1cd42b09f70fe83ddcf745973c522a0a7";
+    let word = |n: u64| format!("{n:064x}");
+    assert_eq!(
+        f3,
+        [
+            word(3),
+            ANCHOR_W.into(),
+            BENEFICIARY_W.into(),
+            CLAIM_REF.into(),
+            word(0),
+            word(1_000_000),
+            DEST.into(),
+            word(1)
+        ]
+    );
+    assert_eq!(
+        f4,
+        [
+            word(4),
+            ANCHOR_W.into(),
+            BENEFICIARY_W.into(),
+            "46b19981da842f7bf81342fa8db82ecd88933c3f9d777816c80bc712ef931496".into(),
+            CLAIM_REF.into(),
+            word(0),
+            DEST.into(),
+            word(0),
+        ]
+    );
 }
 
 // ------------------------------------------------------------------ F2: withheld change
