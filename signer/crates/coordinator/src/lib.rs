@@ -663,6 +663,11 @@ impl Coordinator {
         })
     }
 
+    /// The Zcash tip height the last coordinator pass saw (0 before the first one).
+    pub fn zcash_tip(&self) -> u32 {
+        self.last_tip.load(Ordering::Relaxed)
+    }
+
     // ------------------------------------------------------------------ threshold demo
 
     /// DEMO: builds a transaction sweeping every unspent note of the vault to `to` and asks

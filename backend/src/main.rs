@@ -4,7 +4,13 @@
 //! clients are a fixed message and a short code (`{ "error", "code" }`); details are logged at
 //! debug level only, scrubbed of identifiers and numbers.
 
-use std::{future::Future, net::SocketAddr, path::PathBuf, sync::Arc, time::Duration};
+use std::{
+    future::Future,
+    net::SocketAddr,
+    path::PathBuf,
+    sync::Arc,
+    time::{Duration, Instant, SystemTime, UNIX_EPOCH},
+};
 
 use alloy::primitives::{Address, B256, Bytes, keccak256};
 use anyhow::{Context, Result, anyhow, ensure};
@@ -727,6 +733,71 @@ async fn health() -> Json<serde_json::Value> {
     Json(json!({ "ok": true }))
 }
 
+/// What `GET /status` shows that never changes while the backend runs: the commit it was built
+/// from and the deployment it serves (review G5).
+#[derive(Clone)]
+struct StatusInfo {
+    fixed: Arc<serde_json::Value>,
+    /// The signer nodes' modes, cached so that `/status` never fans out to the nodes per request.
+    nodes: Arc<tokio::sync::Mutex<Option<NodeModes>>>,
+}
+
+/// When the nodes' modes were read, and what they were.
+type NodeModes = (Instant, Vec<serde_json::Value>);
+
+const STATUS_NODES_TTL: Duration = Duration::from_secs(15);
+
+fn status_info(dep: &serde_json::Value) -> StatusInfo {
+    let field = |path: &[&str]| path.iter().fold(dep, |v, k| &v[*k]).clone();
+    let fixed = json!({
+        "commit": env!("ZECURED_COMMIT"),
+        "treeClean": env!("ZECURED_TREE_CLEAN") == "true",
+        "startedAt": SystemTime::now().duration_since(UNIX_EPOCH).map(|d| d.as_secs()).unwrap_or(0),
+        "deployment": {
+            "chainId": field(&["chainId"]),
+            "block": field(&["block"]),
+            "registry": field(&["contracts", "ZecuredRegistry"]),
+            "slasher": field(&["contracts", "ZecuredSlasher"]),
+            "signerBond": field(&["contracts", "SignerBond"]),
+            "mintMode": field(&["depositProofs", "mintMode"]),
+            "verifierIsMock": field(&["depositProofs", "verifierIsMock"]),
+            "depositImageId": field(&["depositProofs", "imageId"]),
+            "violationImageId": field(&["tier3", "violationImageId"]),
+            "challengeWindow": field(&["tier3", "challengeWindow"]),
+            "theftDemo": field(&["tier3", "theftDemo"]),
+        },
+    });
+    StatusInfo {
+        fixed: Arc::new(fixed),
+        nodes: Arc::new(tokio::sync::Mutex::new(None)),
+    }
+}
+
+/// `GET /status`: the running commit and image ids (G5), the Zcash tip of the last coordinator
+/// pass, and each signer node's mode. Nothing about any vault or user.
+async fn status(State(c): App, axum::Extension(s): axum::Extension<StatusInfo>) -> Json<serde_json::Value> {
+    let nodes = {
+        let mut cache = s.nodes.lock().await;
+        match cache.as_ref() {
+            Some((at, nodes)) if at.elapsed() < STATUS_NODES_TTL => nodes.clone(),
+            _ => {
+                let nodes: Vec<serde_json::Value> = c
+                    .node_health()
+                    .await
+                    .into_iter()
+                    .map(|n| json!({ "index": n["index"], "mode": n["mode"] }))
+                    .collect();
+                *cache = Some((Instant::now(), nodes.clone()));
+                nodes
+            }
+        }
+    };
+    let mut out = (*s.fixed).clone();
+    out["zcashTip"] = c.zcash_tip().into();
+    out["nodes"] = nodes.into();
+    Json(out)
+}
+
 /// The deployment file written by the deploy script (`Null` if there is none).
 fn load_deployment(path: &std::path::Path) -> serde_json::Value {
     std::fs::read(path)
@@ -818,6 +889,7 @@ fn cors_layer(origins: &str) -> Result<CorsLayer> {
 /// Per-request context besides the coordinator.
 struct Wiring {
     public_config: PublicConfig,
+    status: StatusInfo,
     admin_token: AdminToken,
     modes: ModePolicy,
     oracle: Oracle,
@@ -840,6 +912,7 @@ fn router(
     let router = router.route("/admin/vaults/{id}/steal", post(admin_steal));
     router
         .route("/health", get(health))
+        .route("/status", get(status))
         .route("/config", get(public_config))
         .route("/vaults/{id}", get(get_vault))
         .route("/admin/nodes", get(admin_nodes))
@@ -866,6 +939,7 @@ fn router(
                 .route_layer(limited(&limits.market_maker)),
         )
         .layer(axum::Extension(w.public_config))
+        .layer(axum::Extension(w.status))
         .layer(axum::Extension(w.admin_token))
         .layer(axum::Extension(w.modes))
         .layer(axum::Extension(w.oracle))
@@ -985,6 +1059,7 @@ async fn main() -> Result<()> {
 
     let wiring = Wiring {
         public_config: PublicConfig(Arc::new(public_config_json(&coordinator.cfg, &deployment, sponsorship))),
+        status: status_info(&deployment),
         admin_token: AdminToken(Arc::new(cli.admin_token.clone())),
         modes,
         oracle: Oracle {
@@ -1221,6 +1296,7 @@ mod tests {
         );
         let wiring = Wiring {
             public_config: PublicConfig(Arc::new(json!({}))),
+            status: status_info(&serde_json::Value::Null),
             admin_token: AdminToken(Arc::new("tok".into())),
             modes: ModePolicy::parse("4,5", &[1, 2, 3, 4, 5]).unwrap(),
             oracle: Oracle {
@@ -1262,6 +1338,13 @@ mod tests {
 
         let (status, _, cors) = call(Method::GET, "/health", "").await;
         assert_eq!((status, cors), (StatusCode::OK, true));
+        // G5: the status page names the running commit and each node's mode, nothing about vaults.
+        let (status, body, _) = call(Method::GET, "/status", "").await;
+        assert_eq!(status, StatusCode::OK);
+        assert_eq!(body["commit"], env!("ZECURED_COMMIT"));
+        let nodes = body["nodes"].as_array().expect("nodes");
+        assert_eq!(nodes.len(), 5);
+        assert!(nodes.iter().all(|n| n.as_object().is_some_and(|o| o.len() == 2) && n["mode"] == "unreachable"));
         let unknown = format!("/vaults/{}", B256::repeat_byte(9));
         let (status, body, _) = call(Method::GET, &unknown, "").await;
         assert_eq!((status, body["code"].as_str()), (StatusCode::NOT_FOUND, Some("unknown_vault")));
