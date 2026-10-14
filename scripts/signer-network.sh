@@ -174,6 +174,12 @@ cmd_start() {
   mkdir -p "$LOGS" "$PIDS"
   local token
   token="$(admin_token)"
+  # RT-5: every node checks Registry records on a second, independent Base RPC (not on the local
+  # fork, whose state no public RPC has).
+  local witness=""
+  if [[ "${BASE_SEPOLIA_RPC_URL:-https://sepolia.base.org}" != *127.0.0.1* && "${BASE_SEPOLIA_RPC_URL:-}" != *localhost* ]]; then
+    witness="${BASE_SEPOLIA_RPC_WITNESS_URL:-https://base-sepolia-rpc.publicnode.com}"
+  fi
   for i in 1 2 3 4 5; do
     if [[ -f "$PIDS/node-$i" ]] && kill -0 "$(cat "$PIDS/node-$i")" 2>/dev/null; then
       continue
@@ -182,7 +188,8 @@ cmd_start() {
     if [[ "$DEMO_COMPROMISABLE_NODES" == *" $i "* ]]; then
       demo_flags=(--demo-allow-compromise)
     fi
-    DEMO_ADMIN_TOKEN="$token" nohup "$BIN/zecured-node" run --data "$DATA/node-$i" --config "$NETWORK" \
+    DEMO_ADMIN_TOKEN="$token" NODE_BASE_RPC_WITNESS_URL="$witness" \
+      nohup "$BIN/zecured-node" run --data "$DATA/node-$i" --config "$NETWORK" \
       --bind "127.0.0.1:$PORT_PREFIX$i" ${demo_flags[@]+"${demo_flags[@]}"} > "$LOGS/node-$i.log" 2>&1 &
     echo $! > "$PIDS/node-$i"
   done

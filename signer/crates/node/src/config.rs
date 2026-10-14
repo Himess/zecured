@@ -70,12 +70,29 @@ fn default_commit_depth() -> u64 {
     crate::DEFAULT_COMMIT_DEPTH
 }
 
+/// Blocks of a payout's expiry window kept free of the L23 delay: signing, a rebroadcast or two
+/// and the inclusion itself (RT-15).
+pub const PAYOUT_DELAY_HEADROOM: u32 = 40;
+
 impl NetworkConfig {
     pub fn load(path: &Path) -> Result<Self> {
         let raw = fs::read_to_string(path).with_context(|| format!("read {}", path.display()))?;
         let cfg: Self = serde_json::from_str(&raw).context("parse network config")?;
-        anyhow::ensure!(cfg.nodes.len() == 5, "the network has exactly 5 signer nodes");
+        cfg.check()?;
         Ok(cfg)
+    }
+
+    /// Values a network config must respect.
+    pub fn check(&self) -> Result<()> {
+        anyhow::ensure!(self.nodes.len() == 5, "the network has exactly 5 signer nodes");
+        // RT-15: a delay near the expiry would let every payout expire before its broadcast.
+        let max_delay = zecured_zcash_ops::spend::PAYOUT_EXPIRY_DELTA.saturating_sub(PAYOUT_DELAY_HEADROOM);
+        anyhow::ensure!(
+            self.payout_delay_max_blocks <= max_delay,
+            "payout_delay_max_blocks must leave {PAYOUT_DELAY_HEADROOM} of the payout's {} expiry blocks (at most {max_delay})",
+            zecured_zcash_ops::spend::PAYOUT_EXPIRY_DELTA
+        );
+        Ok(())
     }
 
     pub fn node(&self, index: u16) -> Result<&NodeInfo> {
@@ -149,5 +166,48 @@ impl Identity {
             x25519: hex::encode(PublicKey::from(&self.x25519).as_bytes()),
             eth: self.eth.address(),
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn node(index: u16) -> NodeInfo {
+        NodeInfo {
+            index,
+            url: String::new(),
+            x25519: String::new(),
+            eth: Address::repeat_byte(u8::try_from(index).unwrap()),
+        }
+    }
+
+    /// RT-15: the L23 delay must leave room in the payout's expiry window.
+    #[test]
+    fn the_payout_delay_leaves_room_before_expiry() {
+        let mut cfg = NetworkConfig {
+            lightwalletd_url: String::new(),
+            base_rpc_url: String::new(),
+            chain_id: 84_532,
+            registry: Address::ZERO,
+            adapter: Address::ZERO,
+            registry_from_block: 0,
+            confirmations: 10,
+            vault_expiry_blocks: 288,
+            denominations: vec![1_000_000],
+            nodes: (1..=5).map(node).collect(),
+            coordinator: None,
+            attest_delay_max_blocks: 0,
+            payout_delay_max_blocks: 8,
+            commit_depth_blocks: 3,
+        };
+        cfg.check().unwrap();
+        cfg.payout_delay_max_blocks = zecured_zcash_ops::spend::PAYOUT_EXPIRY_DELTA - PAYOUT_DELAY_HEADROOM;
+        cfg.check().unwrap();
+        cfg.payout_delay_max_blocks += 1;
+        assert!(cfg.check().is_err());
+        cfg.payout_delay_max_blocks = 8;
+        cfg.nodes.pop();
+        assert!(cfg.check().is_err(), "five nodes");
     }
 }

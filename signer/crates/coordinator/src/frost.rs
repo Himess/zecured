@@ -50,6 +50,9 @@ pub struct Payload<'a> {
 pub struct Signed {
     pub signatures: Vec<(usize, [u8; 64])>,
     pub signers: Vec<u16>,
+    /// Tier 3: the payout's commitment and the signatures it was recorded with, kept so that it
+    /// can be submitted again if a Base reorg drops it (RT-5). `None` for refunds and demos.
+    pub spend_commit: Option<(SpendCommitRecord, Vec<Bytes>)>,
 }
 
 struct Committer {
@@ -270,6 +273,7 @@ pub async fn sign<C: SpendCommitter>(nodes: &Nodes, p: &Payload<'_>, committer: 
                     return Ok(Signed {
                         signatures,
                         signers: chosen,
+                        spend_commit: committed,
                     });
                 }
                 Err(AggregateError::Culprits(c)) => culprits = c,
@@ -322,6 +326,7 @@ pub async fn demo_sign_uncommitted(nodes: &Nodes, p: &Payload<'_>) -> Result<Sig
     Ok(Signed {
         signatures,
         signers: chosen,
+        spend_commit: None,
     })
 }
 

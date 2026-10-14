@@ -213,6 +213,11 @@ impl Session {
     }
 }
 
+/// Blocks past its expiry height during which a payout still counts as minable: a light wallet
+/// server's tip can run ahead, and a reorg of the last blocks could still mine it (RT-4). The
+/// coordinator rebuilds a payout only this many blocks after its expiry too.
+pub const EXPIRY_REORG_MARGIN: u32 = 10;
+
 /// H-1, round 1: a node never commits to a second payout while one it signed can still be
 /// mined (before its expiry height, with all its inputs unspent): the coordinator could
 /// otherwise broadcast one and attribute it to the other's claims. Signing the very same
@@ -232,7 +237,8 @@ pub fn check_no_live_payout(
     let Some(signed) = inflight.txid else {
         return Ok(None);
     };
-    let can_be_mined = tip < inflight.expiry_height && inflight.inputs.iter().all(|n| unspent.contains(n));
+    let can_be_mined = tip <= inflight.expiry_height.saturating_add(EXPIRY_REORG_MARGIN)
+        && inflight.inputs.iter().all(|n| unspent.contains(n));
     ensure!(
         !can_be_mined || signed == *txid,
         "a payout this node signed can still be mined (until height {}): not signing another",
@@ -259,13 +265,15 @@ pub fn check_confirmation(inflight: &Inflight, claim_ids: &[[u8; 32]], txid: &[u
     Ok(())
 }
 
-/// The plan and inputs this node expects for `kind`, from its own view.
+/// The plan and inputs this node expects for `kind`, from its own view. `bound`: the unpaid
+/// claims a commitment on Base already binds to the vault's lineage note (RT-3).
 pub fn expected_plan(
     store: &Store,
     vault: &VaultRecord,
     notes: &VaultNotes,
     kind: &SignKind,
     now: u64,
+    bound: &[[u8; 32]],
 ) -> Result<(PayoutPlan, Vec<ReceivedNote>)> {
     let fvk = vault_fvk(vault)?;
     match kind {
@@ -276,7 +284,8 @@ pub fn expected_plan(
             // H-2: a recipient that is one of the vault's own addresses is no recipient: the
             // claim is set aside rather than paid back into the vault outside its books.
             let recipient = |c: &Commitment| store.recipient(c).filter(|r| !owns_receiver(&fvk, &r.receiver));
-            let next = ledger::next_payout(&vault.claims, recipient, notes.lineage_value(), notes.lineage.len(), now)?;
+            let next =
+                ledger::next_payout(&vault.claims, recipient, notes.lineage_value(), notes.lineage.len(), now, bound)?;
             let NextPayout::Pay(plan) = next else {
                 bail!("nothing is payable for this vault right now ({next:?})");
             };
@@ -487,8 +496,10 @@ mod tests {
         // Round 1 of S2: refused while TX1 can still be mined.
         assert!(check_no_live_payout(Some(&s1), 1_000, &[INPUT], &TX2).is_err());
         assert!(check_no_live_payout(Some(&s1), 1_039, &[INPUT], &TX2).is_err());
+        // RT-4: still live for EXPIRY_REORG_MARGIN blocks past its expiry height.
+        assert!(check_no_live_payout(Some(&s1), 1_040 + EXPIRY_REORG_MARGIN, &[INPUT], &TX2).is_err());
         // Allowed once TX1 expired unmined, or once its inputs are spent (it, or nothing, was mined).
-        assert_eq!(check_no_live_payout(Some(&s1), 1_040, &[INPUT], &TX2).unwrap(), Some(TX1));
+        assert_eq!(check_no_live_payout(Some(&s1), 1_041 + EXPIRY_REORG_MARGIN, &[INPUT], &TX2).unwrap(), Some(TX1));
         assert_eq!(check_no_live_payout(Some(&s1), 1_000, &[], &TX2).unwrap(), Some(TX1));
         assert_eq!(check_no_live_payout(None, 1_000, &[INPUT], &TX2).unwrap(), None);
     }

@@ -248,16 +248,35 @@ pub fn book_value(outstanding: u64, claims: &[Claim]) -> u64 {
 /// `lineage_value` / `lineage_notes`: the unspent conforming-lineage notes (all are spent).
 /// `recipient(commitment)`: the recipient revealed off-chain for a commitment, if any.
 /// `now`: Unix time, used only for the market maker grace period.
+/// `bound`: the unpaid claims a commitment on Base already binds to the lineage note (Tier 3).
 pub fn next_payout(
     claims: &[Claim],
     recipient: impl Fn(&Commitment) -> Option<Recipient>,
     lineage_value: u64,
     lineage_notes: usize,
     now: u64,
+    bound: &[ClaimId],
 ) -> Result<NextPayout, LedgerError> {
     let mut unpaid: Vec<&Claim> = claims.iter().filter(|c| c.state == ClaimState::Unpaid).collect();
     unpaid.sort_by_key(|c| (c.order, c.kind == ClaimKind::CloseMarketMaker));
     let by_id = |id: &ClaimId| unpaid.iter().copied().find(|c| &c.id == id);
+
+    // RT-3: claims a commitment on Base already binds to this lineage note are its payout, all of
+    // them and nothing else (the Registry accepts no other claim list from this note, RT-4), in
+    // queue order, before any other claim. They were payable when they were committed.
+    if !bound.is_empty() {
+        let mut group: Vec<(&Claim, Recipient)> = vec![];
+        for claim in unpaid.iter().filter(|c| bound.contains(&c.id)) {
+            let Some(rcpt) = recipient(&claim.commitment) else {
+                return Ok(NextPayout::Nothing);
+            };
+            group.push((claim, rcpt));
+        }
+        if group.len() != bound.len() {
+            return Ok(NextPayout::Nothing); // a bound claim this signer does not know as unpaid
+        }
+        return Ok(plan(&group, lineage_value, lineage_notes)?.map_or(NextPayout::Nothing, NextPayout::Pay));
+    }
 
     for claim in &unpaid {
         // A market maker claim whose borrower claim is still unpaid is paid together with it
@@ -443,6 +462,46 @@ mod tests {
         move |c| map.get(c).copied()
     }
 
+    /// RT-3: a claim that a commitment on Base binds to the lineage note is paid before an earlier
+    /// claim whose recipient arrived later, so a vault never deadlocks on a bound claim.
+    #[test]
+    fn a_claim_bound_on_base_is_planned_before_an_earlier_payable_one() {
+        let c0 = claim(5, ClaimKind::Liquidation, 1_000_000, (12, 0), None);
+        let c1 = claim(6, ClaimKind::Liquidation, 1_500_000, (13, 0), None);
+        let claims = [c0.clone(), c1.clone()];
+        // c0's recipient is unknown: c1 is planned alone and committed on Base; its signing fails.
+        let NextPayout::Pay(p1) = next_payout(&claims, known(&[6]), DEPOSIT, 1, 2_000, &[]).unwrap() else {
+            panic!()
+        };
+        assert_eq!(p1.claims, vec![c1.id]);
+        // c0's recipient arrives: c1, bound to the note, is still the payout.
+        let NextPayout::Pay(p) = next_payout(&claims, known(&[5, 6]), DEPOSIT, 1, 3_000, &[c1.id]).unwrap() else {
+            panic!()
+        };
+        assert_eq!(p.claims, vec![c1.id]);
+        // Without the binding the queue order would pick c0.
+        let NextPayout::Pay(p) = next_payout(&claims, known(&[5, 6]), DEPOSIT, 1, 3_000, &[]).unwrap() else {
+            panic!()
+        };
+        assert_eq!(p.claims, vec![c0.id]);
+        // A bound claim this signer does not know as unpaid, or whose recipient it lost: nothing.
+        assert_eq!(next_payout(&claims, known(&[5, 6]), DEPOSIT, 1, 3_000, &[[9; 32]]).unwrap(), NextPayout::Nothing);
+        assert_eq!(next_payout(&claims, known(&[5]), DEPOSIT, 1, 3_000, &[c1.id]).unwrap(), NextPayout::Nothing);
+    }
+
+    /// RT-3: a close pair bound on Base is paid as the pair, borrower first.
+    #[test]
+    fn a_bound_close_pair_is_paid_as_committed() {
+        let user = claim(3, ClaimKind::CloseUser, 1_200_000, (11, 0), Some(4));
+        let mm = claim(4, ClaimKind::CloseMarketMaker, 3_800_000, (11, 0), Some(3));
+        let NextPayout::Pay(p) =
+            next_payout(&[mm.clone(), user.clone()], known(&[3, 4]), DEPOSIT, 1, 1_010, &[mm.id, user.id]).unwrap()
+        else {
+            panic!()
+        };
+        assert_eq!(p.claims, vec![user.id, mm.id]);
+    }
+
     /// `cast keccak` of the 64 bytes `0x11 * 32 || 0x42 * 32`.
     #[test]
     fn claim_ref_vector() {
@@ -462,7 +521,7 @@ mod tests {
     #[test]
     fn full_release_pays_borrower_minus_fee_without_change() {
         let c = claim(1, ClaimKind::Release, DEPOSIT, (10, 0), None);
-        let got = next_payout(std::slice::from_ref(&c), known(&[1]), DEPOSIT, 1, 2_000).unwrap();
+        let got = next_payout(std::slice::from_ref(&c), known(&[1]), DEPOSIT, 1, 2_000, &[]).unwrap();
         let NextPayout::Pay(p) = got else { panic!("{got:?}") };
         assert_eq!(p.change, 0);
         assert_eq!(p.fee, FEE_1_IN_1_OUT);
@@ -476,7 +535,8 @@ mod tests {
         // ~70% seized at 62.5% LLTV; the rest stays outstanding.
         let seized = 3_520_000;
         let c = claim(2, ClaimKind::Liquidation, seized, (10, 1), None);
-        let NextPayout::Pay(p) = next_payout(std::slice::from_ref(&c), known(&[2]), DEPOSIT, 1, 2_000).unwrap() else {
+        let NextPayout::Pay(p) = next_payout(std::slice::from_ref(&c), known(&[2]), DEPOSIT, 1, 2_000, &[]).unwrap()
+        else {
             panic!()
         };
         assert_eq!(p.payments[0].value, seized - FEE_1_IN_2_OUT);
@@ -492,7 +552,8 @@ mod tests {
     fn close_pays_both_in_one_tx_and_borrower_bears_the_fee() {
         let user = claim(3, ClaimKind::CloseUser, 1_200_000, (11, 0), Some(4));
         let mm = claim(4, ClaimKind::CloseMarketMaker, 3_800_000, (11, 0), Some(3));
-        let NextPayout::Pay(p) = next_payout(&[mm.clone(), user.clone()], known(&[3, 4]), DEPOSIT, 1, 1_010).unwrap()
+        let NextPayout::Pay(p) =
+            next_payout(&[mm.clone(), user.clone()], known(&[3, 4]), DEPOSIT, 1, 1_010, &[]).unwrap()
         else {
             panic!()
         };
@@ -518,7 +579,8 @@ mod tests {
         mm.commitment = same.commitment();
         let map: HashMap<Commitment, Recipient> = [(rcpt(3).commitment(), rcpt(3)), (mm.commitment, same)].into();
         let recipient = |c: &Commitment| map.get(c).copied();
-        let NextPayout::Pay(p) = next_payout(&[user.clone(), mm.clone()], recipient, DEPOSIT, 1, 1_010).unwrap() else {
+        let NextPayout::Pay(p) = next_payout(&[user.clone(), mm.clone()], recipient, DEPOSIT, 1, 1_010, &[]).unwrap()
+        else {
             panic!()
         };
         assert_eq!(p.claims, vec![user.id], "the borrower alone");
@@ -527,7 +589,8 @@ mod tests {
             state: ClaimState::Paid,
             ..user
         };
-        let NextPayout::Pay(p) = next_payout(&[paid, mm.clone()], recipient, DEPOSIT - 1_200_000, 1, 1_010).unwrap()
+        let NextPayout::Pay(p) =
+            next_payout(&[paid, mm.clone()], recipient, DEPOSIT - 1_200_000, 1, 1_010, &[]).unwrap()
         else {
             panic!()
         };
@@ -540,10 +603,10 @@ mod tests {
         let mm = claim(4, ClaimKind::CloseMarketMaker, 3_800_000, (11, 0), Some(3));
         let claims = [user.clone(), mm.clone()];
         assert_eq!(
-            next_payout(&claims, known(&[3]), DEPOSIT, 1, 1_050).unwrap(),
+            next_payout(&claims, known(&[3]), DEPOSIT, 1, 1_050, &[]).unwrap(),
             NextPayout::WaitUntil(1_000 + MARKET_MAKER_GRACE_SECS)
         );
-        let NextPayout::Pay(p) = next_payout(&claims, known(&[3]), DEPOSIT, 1, 1_200).unwrap() else {
+        let NextPayout::Pay(p) = next_payout(&claims, known(&[3]), DEPOSIT, 1, 1_200, &[]).unwrap() else {
             panic!()
         };
         assert_eq!(p.claims, vec![user.id]);
@@ -557,7 +620,8 @@ mod tests {
         let mut user = claim(3, ClaimKind::CloseUser, 1_200_000, (11, 0), Some(4));
         user.state = ClaimState::Paid;
         let mm = claim(4, ClaimKind::CloseMarketMaker, 3_800_000, (11, 0), Some(3));
-        let NextPayout::Pay(p) = next_payout(&[user, mm.clone()], known(&[4]), 3_800_000, 1, 5_000).unwrap() else {
+        let NextPayout::Pay(p) = next_payout(&[user, mm.clone()], known(&[4]), 3_800_000, 1, 5_000, &[]).unwrap()
+        else {
             panic!()
         };
         assert_eq!(p.claims, vec![mm.id]);
@@ -569,7 +633,8 @@ mod tests {
     fn claim_without_recipient_does_not_block_the_queue() {
         let a = claim(5, ClaimKind::Liquidation, 1_000_000, (12, 0), None);
         let b = claim(6, ClaimKind::Liquidation, 1_500_000, (13, 0), None);
-        let NextPayout::Pay(p) = next_payout(&[a.clone(), b.clone()], known(&[6]), DEPOSIT, 1, 2_000).unwrap() else {
+        let NextPayout::Pay(p) = next_payout(&[a.clone(), b.clone()], known(&[6]), DEPOSIT, 1, 2_000, &[]).unwrap()
+        else {
             panic!()
         };
         assert_eq!(p.claims, vec![b.id]);
@@ -581,7 +646,8 @@ mod tests {
     fn dust_claim_stays_in_the_vault() {
         let dust = claim(7, ClaimKind::Liquidation, FEE_1_IN_2_OUT, (12, 0), None);
         let ok = claim(8, ClaimKind::Liquidation, 2_000_000, (13, 0), None);
-        let NextPayout::Pay(p) = next_payout(&[dust, ok.clone()], known(&[7, 8]), DEPOSIT, 1, 2_000).unwrap() else {
+        let NextPayout::Pay(p) = next_payout(&[dust, ok.clone()], known(&[7, 8]), DEPOSIT, 1, 2_000, &[]).unwrap()
+        else {
             panic!()
         };
         assert_eq!(p.claims, vec![ok.id]);
@@ -592,7 +658,7 @@ mod tests {
     fn overdrawn_ledger_is_refused() {
         let c = claim(9, ClaimKind::Release, DEPOSIT + 1, (10, 0), None);
         assert_eq!(
-            next_payout(&[c], known(&[9]), DEPOSIT, 1, 2_000),
+            next_payout(&[c], known(&[9]), DEPOSIT, 1, 2_000, &[]),
             Err(LedgerError::Overdrawn {
                 claims: DEPOSIT + 1,
                 lineage: DEPOSIT
@@ -638,10 +704,10 @@ mod tests {
         let claims = [user.clone(), mm.clone()];
         // Within the grace period the market maker waits for the borrower's recipient.
         for now in [1_000, 1_050, 1_000 + MARKET_MAKER_GRACE_SECS - 1] {
-            assert_eq!(next_payout(&claims, known(&[4]), SMALL_DEPOSIT, 1, now).unwrap(), NextPayout::Nothing);
+            assert_eq!(next_payout(&claims, known(&[4]), SMALL_DEPOSIT, 1, now, &[]).unwrap(), NextPayout::Nothing);
         }
         for now in [1_000 + MARKET_MAKER_GRACE_SECS, 1_200, 10_000, 10_000_000] {
-            let NextPayout::Pay(p) = next_payout(&claims, known(&[4]), SMALL_DEPOSIT, 1, now).unwrap() else {
+            let NextPayout::Pay(p) = next_payout(&claims, known(&[4]), SMALL_DEPOSIT, 1, now, &[]).unwrap() else {
                 panic!("market maker not paid at {now}");
             };
             assert_eq!(p.claims, vec![mm.id]);
@@ -660,11 +726,12 @@ mod tests {
             let mm = claim(4, ClaimKind::CloseMarketMaker, SMALL_DEPOSIT - user_amount, (11, 0), Some(3));
             let claims = [user.clone(), mm.clone()];
             assert_eq!(
-                next_payout(&claims, known(&[3, 4]), SMALL_DEPOSIT, 1, 1_050).unwrap(),
+                next_payout(&claims, known(&[3, 4]), SMALL_DEPOSIT, 1, 1_050, &[]).unwrap(),
                 NextPayout::Nothing,
                 "user_amount = {user_amount}: within the grace period"
             );
-            let NextPayout::Pay(p) = next_payout(&claims, known(&[3, 4]), SMALL_DEPOSIT, 1, 10_000).unwrap() else {
+            let NextPayout::Pay(p) = next_payout(&claims, known(&[3, 4]), SMALL_DEPOSIT, 1, 10_000, &[]).unwrap()
+            else {
                 panic!("market maker not paid, user_amount = {user_amount}");
             };
             assert_eq!(p.claims, vec![mm.id]);
@@ -682,7 +749,7 @@ mod tests {
         let user = claim(3, ClaimKind::CloseUser, 300_000, (11, 0), Some(4));
         let mm = claim(4, ClaimKind::CloseMarketMaker, 700_000, (11, 0), Some(3));
         let NextPayout::Pay(p) =
-            next_payout(&[mm.clone(), user.clone()], known(&[3, 4]), SMALL_DEPOSIT, 1, 10_000).unwrap()
+            next_payout(&[mm.clone(), user.clone()], known(&[3, 4]), SMALL_DEPOSIT, 1, 10_000, &[]).unwrap()
         else {
             panic!()
         };
@@ -756,7 +823,7 @@ mod tests {
         assert_eq!(lineage, vec![notes[1]]);
         let value: u64 = lineage.iter().map(|n| n.value).sum();
         check_i10(value, outstanding, &claims).unwrap();
-        let NextPayout::Pay(p) = next_payout(&claims, known(&[2]), value, lineage.len(), 2_000).unwrap() else {
+        let NextPayout::Pay(p) = next_payout(&claims, known(&[2]), value, lineage.len(), 2_000, &[]).unwrap() else {
             panic!("the claim must stay payable")
         };
         assert_eq!(p.claims, vec![second.id]);

@@ -64,7 +64,7 @@ use zecured_node::{
 };
 use zecured_policy::{
     classify::{self, Classification, DepositRules, NotePosition},
-    derive::note_id,
+    derive::{deposit_tag, note_id},
     ledger::{self, ClaimState, NextPayout, PayoutPlan, Recipient},
 };
 use zecured_zcash_ops::{
@@ -80,7 +80,7 @@ use crate::{
     error::{PublicError, public_error, scrubbed},
     inflight::{Action, Inputs, Settled},
     nodes::{Answer, Nodes, is_refusal, shortfall, split},
-    store::{CoordVault, Inflight, Refund, Store, VaultStatus},
+    store::{CoordVault, Inflight, KeptCommitment, Refund, Store, VaultStatus},
 };
 
 const NETWORK: Network = Network::TestNetwork;
@@ -971,13 +971,15 @@ impl Coordinator {
         Ok(())
     }
 
-    /// L23: Zcash blocks between a payout's commitment and its broadcast, drawn per payout.
+    /// L23: Zcash blocks between a payout's commitment and its broadcast, drawn per payout from
+    /// 1 to the maximum (0 when the maximum is 0), counted from the tip once the payout is signed
+    /// (RT-13): a draw of 0 would go out right after the commitment.
     fn payout_delay(&self) -> u32 {
         let max = self.cfg.payout_delay_max_blocks;
         if max == 0 {
             0
         } else {
-            rand_core_06::RngCore::next_u32(&mut rand_core_06::OsRng) % (max + 1)
+            1 + rand_core_06::RngCore::next_u32(&mut rand_core_06::OsRng) % max
         }
     }
 
@@ -1073,13 +1075,15 @@ impl Coordinator {
             return Ok(false);
         }
         ledger::check_i10(notes.lineage_value(), v.outstanding, &v.claims).map_err(|e| anyhow!("{e}"))?;
+        // RT-3: the claims a commitment on Base binds to the lineage note come first, as the nodes plan.
+        let bound = self.bound_claims(v, notes).await?;
         // The nodes never pay a vault's own addresses (security review H-2): plan the same way.
         let fvk = fvk_of(v)?;
         let next = {
             let store = self.store.lock().await;
             let recipient =
                 |c: &_| store.recipient(c).filter(|r| !zecured_node::chain::owns_receiver(&fvk, &r.receiver));
-            ledger::next_payout(&v.claims, recipient, notes.lineage_value(), notes.lineage.len(), now())?
+            ledger::next_payout(&v.claims, recipient, notes.lineage_value(), notes.lineage.len(), now(), &bound)?
         };
         let NextPayout::Pay(plan) = next else { return Ok(false) };
         let kind = SignKind::Payout {
@@ -1087,6 +1091,24 @@ impl Coordinator {
         };
         self.execute(&v.vault_id, kind, &plan, &notes.lineage, notes.tip).await?;
         Ok(true)
+    }
+
+    /// RT-3: the unpaid claims that a commitment on Base binds to the vault's lineage note.
+    async fn bound_claims(&self, v: &CoordVault, notes: &VaultNotes) -> Result<Vec<[u8; 32]>> {
+        let [input] = notes.lineage.as_slice() else {
+            return Ok(vec![]);
+        };
+        let cmx = orchard::note::ExtractedNoteCommitment::from(input.note.commitment()).to_bytes();
+        let tag = B256::from(deposit_tag(&v.ufvk, &cmx));
+        let provider = ProviderBuilder::new().connect_http(self.cfg.base_rpc_url.parse()?);
+        let registry = IZecuredRegistry::new(self.cfg.registry, &provider);
+        let mut bound = vec![];
+        for c in v.claims.iter().filter(|c| c.state == ClaimState::Unpaid) {
+            if registry.claimInput(B256::from(c.id)).call().await.context("Registry.claimInput")? == tag {
+                bound.push(c.id);
+            }
+        }
+        Ok(bound)
     }
 
     async fn refund_next(&self, v: &CoordVault, notes: &VaultNotes) -> Result<()> {
@@ -1190,6 +1212,12 @@ impl Coordinator {
             SignKind::Payout { .. } => self.payout_delay(),
             SignKind::Refund { .. } => 0,
         };
+        // RT-13: counted from the tip now that the payout is signed, not from when it was planned.
+        let signed_tip = if delay == 0 {
+            tip
+        } else {
+            self.fetch_zcash_tip().await.unwrap_or(tip).max(tip)
+        };
         let record = Inflight {
             claim_ids,
             refund_note,
@@ -1197,7 +1225,12 @@ impl Coordinator {
             expiry_height: expiry,
             raw_tx: (!withhold).then(|| hex::encode(&raw)),
             inputs: inputs.iter().map(|n| B256::from(n.nullifier.to_bytes())).collect(),
-            broadcast_from: if delay == 0 { 0 } else { tip.saturating_add(delay) },
+            broadcast_from: if delay == 0 {
+                0
+            } else {
+                signed_tip.saturating_add(delay)
+            },
+            spend_commit: signed.spend_commit.clone().map(|(record, sigs)| KeptCommitment { record, sigs }),
         };
         self.update_vault(id, |cur| cur.inflight = Some(record)).await?;
         if withhold {
@@ -1213,6 +1246,12 @@ impl Coordinator {
             Err(e) => log_failure(id, "payout broadcast (will retry)", &e),
         }
         Ok(())
+    }
+
+    /// The Zcash tip now, from the light wallet server.
+    async fn fetch_zcash_tip(&self) -> Result<u32> {
+        let mut client = zecured_zcash_ops::lwd::connect(&self.cfg.lightwalletd_url).await?;
+        Ok(u32::try_from(zecured_zcash_ops::lwd::latest_block(&mut client).await?.height)?)
     }
 
     async fn broadcast(&self, raw: Vec<u8>) -> Result<()> {
@@ -1252,6 +1291,10 @@ impl Coordinator {
     /// rebroadcasts it while it can still be mined, and drops it (to be rebuilt) only once it
     /// is provably dead (I-5).
     async fn check_inflight(&self, id: &B256, inflight: Inflight, tip: u32) -> Result<()> {
+        // RT-5: a payout that may still be mined (or was) must keep its commitment on Base.
+        if let Some(kept) = &inflight.spend_commit {
+            self.keep_commitment(kept).await?;
+        }
         let txid = TxId::from_hex(&inflight.txid).context("stored txid")?;
         let lookup = match zecured_zcash_ops::lwd::connect(&self.cfg.lightwalletd_url).await {
             Ok(mut client) => inflight::lookup(&mut client, &NETWORK, &txid).await,
@@ -1433,6 +1476,35 @@ impl Coordinator {
         Ok(sigs)
     }
 
+    /// RT-5: Base still holds the payout's commitment, or it is submitted again with the
+    /// signatures it was first recorded with (a Base reorg dropped it). Anyone may submit a
+    /// commitment, and a slashing case for the payout is dismissed once it is back.
+    async fn keep_commitment(&self, kept: &KeptCommitment) -> Result<()> {
+        let msg = kept.record.message();
+        let provider = ProviderBuilder::new()
+            .wallet(EthereumWallet::from(self.gas.clone()))
+            .connect_http(self.cfg.base_rpc_url.parse()?);
+        let registry = IZecuredRegistry::new(self.cfg.registry, &provider);
+        let on_base = registry.spendRecord(kept.record.payout_ref).call().await.context("Registry.spendRecord")?;
+        if !commitment_missing(&on_base, msg.eip712_hash_struct())? {
+            return Ok(());
+        }
+        warn!(vault = %short(&kept.record.vault_id), "a payout's commitment is missing on Base: submitting it again");
+        let call = registry.commitSpend((&msg).into(), kept.sigs.clone());
+        let gas = zecured_base::gas_with_headroom(call.estimate_gas().await.context("estimate commitSpend")?);
+        let receipt = call
+            .gas(gas)
+            .send()
+            .await
+            .context("send commitSpend")?
+            .with_timeout(Some(RECEIPT_TIMEOUT))
+            .get_receipt()
+            .await
+            .context("commitSpend receipt")?;
+        ensure!(receipt.status(), "commitSpend reverted");
+        Ok(())
+    }
+
     /// D23: gets 3 signers' `VaultCancellation` (each node also records the owner's refund
     /// request, `body`) and submits `cancelVault`.
     async fn cancel_on_base(&self, id: &B256, body: &RefundIn) -> Result<()> {
@@ -1470,6 +1542,16 @@ impl Coordinator {
         info!(vault = %short(id), "vault cancelled on Base");
         Ok(())
     }
+}
+
+/// RT-5: whether Base lacks the commitment whose struct hash is `record_hash` (so it must be
+/// submitted again). Another record under the same payout reference cannot be fixed by resubmitting.
+fn commitment_missing(on_base: &IZecuredRegistry::SpendRecord, record_hash: B256) -> Result<bool> {
+    if on_base.recordHash == record_hash {
+        return Ok(false);
+    }
+    ensure!(on_base.vaultId == B256::ZERO, "another commitment holds this payout's reference; investigate");
+    Ok(true)
 }
 
 impl frost::SpendCommitter for Coordinator {
@@ -1780,6 +1862,24 @@ mod tests {
         assert!(!format!("{e:#}").contains("127.0.0.1"), "no node URL in errors: {e:#}");
     }
 
+    /// RT-5: a commitment dropped by a Base reorg is submitted again; one still there is left alone.
+    #[test]
+    fn a_commitment_missing_on_base_is_submitted_again() {
+        let record = |hash: u8, vault: u8| IZecuredRegistry::SpendRecord {
+            recordHash: B256::repeat_byte(hash),
+            vaultId: B256::repeat_byte(vault),
+            inputTag: B256::ZERO,
+            changeTag: B256::ZERO,
+            changeValue: 0,
+            claimCount: 1,
+            signerBitmap: 0x15,
+        };
+        let ours = B256::repeat_byte(7);
+        assert!(!commitment_missing(&record(7, 1), ours).unwrap(), "still on Base");
+        assert!(commitment_missing(&record(0, 0), ours).unwrap(), "gone: submit it again");
+        assert!(commitment_missing(&record(8, 1), ours).is_err(), "another record: investigate");
+    }
+
     fn test_address() -> orchard::Address {
         let sk = (0u8..=255)
             .map(|i| [i; 32])
@@ -1822,6 +1922,7 @@ mod tests {
             raw_tx: None,
             inputs: vec![],
             broadcast_from: 0,
+            spend_commit: None,
         }
     }
 

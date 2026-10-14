@@ -58,6 +58,18 @@ pub struct Inflight {
     /// on Base before it is signed, so broadcasting right away would point at the next block.
     #[serde(default)]
     pub broadcast_from: u32,
+    /// Tier 3: the payout's commitment and the signatures it was recorded with. Every pass checks
+    /// that Base still has it and submits it again if a reorg dropped it (RT-5): a mined payout
+    /// whose commitment is gone would be an uncommitted spend.
+    #[serde(default)]
+    pub spend_commit: Option<KeptCommitment>,
+}
+
+/// A payout commitment as it was recorded on Base.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct KeptCommitment {
+    pub record: zecured_node::signing::SpendCommitRecord,
+    pub sigs: Vec<Bytes>,
 }
 
 /// A refund the owner asked for and the signers accepted.

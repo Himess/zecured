@@ -537,10 +537,8 @@ impl Node {
     /// asks the Registry, on every Base provider it is configured with: the vault must be
     /// cancelled (D23), or activated against another note (this note's deposit tag unused, D24).
     /// Never while the vault can still be activated. Notes of any other value cannot back a mint.
+    /// And never a note that Base counts as a lineage note of any vault (RT-9).
     async fn check_refund_on_base(&self, v: &VaultRecord, note: &zecured_zcash_ops::scan::ReceivedNote) -> Result<()> {
-        if note.value() != v.amount {
-            return Ok(());
-        }
         let cmx = orchard::note::ExtractedNoteCommitment::from(note.note.commitment()).to_bytes();
         let tag = B256::from(deposit_tag(&v.ufvk, &cmx));
         let mut providers = vec![chain::base_provider(&self.cfg.base_rpc_url)?];
@@ -549,6 +547,14 @@ impl Node {
         }
         for provider in &providers {
             let registry = IZecuredRegistry::new(self.cfg.registry, provider);
+            // RT-9: whatever its value, a note Base counts as the vault's lineage backs zZEC:
+            // refunding it would be an uncommitted spend (F1). A change returned to the external
+            // address by colluding signers looks like a deposit to refund, and is not.
+            let lineage = registry.lineageOf(tag).call().await.context("Registry.lineageOf")?;
+            ensure!(lineage.vaultId == B256::ZERO, "this note backs zZEC on Base (a lineage note)");
+            if note.value() != v.amount {
+                continue;
+            }
             let status = registry.vault(v.vault_id).call().await.context("Registry.vault")?.status;
             let tag_used = registry.depositTagUsed(tag).call().await.context("Registry.depositTagUsed")?;
             refund_allowed_by_registry(status, tag_used)?;
@@ -637,7 +643,15 @@ impl Node {
         }
 
         let (store, v, notes) = self.scan_vault(&req.vault_id).await?;
-        let (plan, inputs) = signing::expected_plan(&store, &v, &notes, &req.kind, now())?;
+        drop(store);
+        // RT-3: the claims a commitment on Base binds to the lineage note come first (Base calls
+        // never hold the store lock, M-7).
+        let bound = match &req.kind {
+            SignKind::Payout { .. } => self.bound_claims(&v, &notes).await?,
+            SignKind::Refund { .. } => vec![],
+        };
+        let store = self.store.lock().await;
+        let (plan, inputs) = signing::expected_plan(&store, &v, &notes, &req.kind, now(), &bound)?;
         // Tier 3: the salts of the plan's recipients, for the claim refs.
         let salts = match &req.kind {
             SignKind::Payout { .. } => Some(plan_salts(&store, &v, &plan.claims)?),
@@ -671,6 +685,34 @@ impl Node {
         self.start_session(&req, session, &commitments, spend_commit).await
     }
 
+    /// RT-3: the unpaid claims that a commitment on Base binds to the vault's lineage note (the
+    /// payout from it carries exactly those), read from every Base provider, which must agree.
+    async fn bound_claims(&self, v: &VaultRecord, notes: &VaultNotes) -> Result<Vec<[u8; 32]>> {
+        let [input] = notes.lineage.as_slice() else {
+            return Ok(vec![]); // no single lineage note: the plan is refused anyway
+        };
+        let cmx = orchard::note::ExtractedNoteCommitment::from(input.note.commitment()).to_bytes();
+        let tag = B256::from(zecured_policy::derive::deposit_tag(&v.ufvk, &cmx));
+        let unpaid: Vec<[u8; 32]> = v.claims.iter().filter(|c| c.state == ClaimState::Unpaid).map(|c| c.id).collect();
+        let mut agreed: Option<Vec<[u8; 32]>> = None;
+        for provider in self.base_providers()? {
+            let registry = IZecuredRegistry::new(self.cfg.registry, &provider);
+            let mut bound = vec![];
+            for id in &unpaid {
+                if registry.claimInput(B256::from(*id)).call().await.context("Registry.claimInput")? == tag {
+                    bound.push(*id);
+                }
+            }
+            match &agreed {
+                Some(first) => {
+                    ensure!(*first == bound, "Base providers disagree on the claims bound to the lineage note")
+                }
+                None => agreed = Some(bound),
+            }
+        }
+        Ok(agreed.unwrap_or_default())
+    }
+
     /// Tier 3 checks before signing a commitment, on every Base provider: the input is a lineage
     /// note of this vault on Base (else this node's lineage differs from the Registry's), and the
     /// payout keeps every pending claim already committed against that note (T3-5).
@@ -689,6 +731,10 @@ impl Node {
                 }
             }
             signing::check_bound_claims(&planned, &bound)?;
+            // RT-4: the Registry accepts from a note only the claim list of its first commitment.
+            let set = registry.inputClaimSet(record.input_tag).call().await.context("Registry.inputClaimSet")?;
+            let ours = alloy::primitives::keccak256(planned.concat());
+            ensure!(set == B256::ZERO || set == ours, "a commitment from this lineage note carries another claim list");
         }
         Ok(())
     }
