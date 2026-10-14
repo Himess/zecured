@@ -33,7 +33,7 @@ review and their status are in [SECURITY_REVIEW.md](SECURITY_REVIEW.md).
 |---|---|---|---|
 | L1 | Funding the Base account for gas from outside | Paymaster sponsors only an allowlist; the account never receives ETH | `backend/src/allowlist.rs`, `backend/src/proxy.rs` |
 | L2 | Depositing with transparent inputs | P1 never attests such a deposit; P5 refunds it | `signer/crates/zcash-ops/src/tx.rs`, `policy/src/classify.rs` |
-| L3 | Amount fingerprinting | Standard denominations only (testnet 0.01 / 0.05 TAZ; 2–3 buckets on mainnet) | node P0 (`dkg::check_open`), app |
+| L3 | Amount fingerprinting | Standard denominations only (testnet 0.01 / 0.05 / 0.125 TAZ, the last what the Valar faucet pays, D29; 2–3 buckets on mainnet) | node P0 (`dkg::check_open`), app |
 | L4 | The deposit transaction revealed on Base | The attestation carries only vault id, account, amount and a keyed tag; no Zcash data ever reaches Base | `policy/src/derive.rs`, contracts |
 | L5 | Timing correlation (deposit ↔ mint) | Confirmations before attesting; optional random delay (roadmap); small testnet volume stated openly | coordinator |
 | L6 | The return address published on Base | Off-chain owner-signed destination; Base only sees a salted commitment | node `destination`, `ledger::commitment` |
