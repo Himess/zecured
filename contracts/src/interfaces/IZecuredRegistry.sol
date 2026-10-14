@@ -57,11 +57,13 @@ enum ClaimKind {
     CloseMarketMaker
 }
 
-/// @notice Payout status of a claim.
+/// @notice Payout status of a claim. `WrittenOff`: a dust claim of a closed vault, too small to ever be paid
+///         (`writeOffDust`, review RT-8); its value stays in the vault.
 enum ClaimStatus {
     None,
     Pending,
-    Paid
+    Paid,
+    WrittenOff
 }
 
 /// @title IZecuredRegistry
@@ -99,6 +101,8 @@ interface IZecuredRegistry {
         bytes32 mmCommitment
     );
     event PayoutConfirmed(bytes32 indexed vaultId, bytes32[] claimIds);
+    /// @notice RT-8: a closed vault's claim too small to bear any payout's fee was settled without a payment.
+    event DustWrittenOff(bytes32 indexed vaultId, bytes32 indexed claimId, uint64 amount);
     /// @notice The signers cancelled a vault that was never activated (L-8).
     event VaultCancelled(bytes32 indexed vaultId);
 
@@ -173,8 +177,11 @@ interface IZecuredRegistry {
     error NoPendingActivation(bytes32 vaultId);
     /// @notice K3: the relay has not reached `readyHeight`, or `readyTime` has not passed yet.
     error ActivationNotReady(bytes32 vaultId, uint256 readyHeight, uint256 readyTime);
-    /// @notice K3: only a pending activation whose anchor left the best chain can be dropped.
+    /// @notice K3: only a pending activation whose anchor left the best chain (or any, once minting has halted) can be
+    ///         dropped.
     error AnchorStillOnBestChain(bytes32 vaultId);
+    /// @notice RT-8: only a claim of a closed vault, not larger than `DUST_LIMIT` and never committed, is dust.
+    error NotDust(bytes32 claimId);
 
     // ------------------------------------------------------------------ state-changing (docs/INTERFACES.md § 3.2)
 
@@ -203,7 +210,9 @@ interface IZecuredRegistry {
     function finalizeActivation(bytes32 vaultId) external;
 
     /// @notice K3: drops a pending activation whose anchor is no longer on the relay's best chain (a proof against a
-    ///         branch that lost), freeing the vault, its tag and its account. Anyone may call.
+    ///         branch that lost), freeing the vault, its tag and its account. Anyone may call. Once a slash has
+    ///         halted minting (the activation can never finalize), any pending activation can be dropped, so that
+    ///         the signers can cancel the vault and refund its deposit (review RT-6).
     function dropPendingActivation(bytes32 vaultId) external;
 
     /// @notice L-8: marks a vault that was never activated as `Cancelled`, so that neither an attestation nor a proof
@@ -241,6 +250,15 @@ interface IZecuredRegistry {
     /// @notice Marks pending claims of `vaultId` as paid. Anyone may relay; needs >= 3 signer signatures over
     ///         PayoutConfirmation(vaultId, keccak256(abi.encodePacked(claimIds))).
     function confirmPayout(bytes32 vaultId, bytes32[] calldata claimIds, bytes[] calldata sigs) external;
+
+    /// @notice RT-8: settles a dust claim without a payment. A claim of at most `DUST_LIMIT` zatoshi can never bear a
+    ///         payout's fee (the smallest payout costs 10,000 zat under ZIP 317), so once its vault is closed no
+    ///         payout will ever carry it, and it would keep the vault open (and every bond locked) for good. Anyone
+    ///         may call; the claim must never have been committed. Its value stays in the vault.
+    function writeOffDust(bytes32 claimId) external;
+
+    /// @notice The largest claim `writeOffDust` accepts: the ZIP 317 fee of a one-claim payout (10,000 zat).
+    function DUST_LIMIT() external view returns (uint64);
 
     // ------------------------------------------------------------------ views (docs/INTERFACES.md § 3.2)
 

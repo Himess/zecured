@@ -134,9 +134,13 @@ contract Tier3SlashingTest is ZecuredFixture {
     }
 
     function _partial(uint64 amount) internal returns (bytes32 claimId) {
+        return _partialTo(amount, keccak256("zecured.tier3.dest"));
+    }
+
+    function _partialTo(uint64 amount, bytes32 dest) internal returns (bytes32 claimId) {
         vm.startPrank(account);
         if (!MORPHO.isAuthorized(account, address(registry))) MORPHO.setAuthorization(address(registry), true);
-        claimId = registry.requestPartialRelease(vaultId, amount, keccak256("zecured.tier3.dest"));
+        claimId = registry.requestPartialRelease(vaultId, amount, dest);
         vm.stopPrank();
     }
 
@@ -394,11 +398,12 @@ contract Tier3SlashingTest is ZecuredFixture {
     /// second claim's committed output does not pay it, and its own output is the only one that counts: the other
     /// claim's payment cannot mask the theft.
     function test_F3_aSecondClaimToTheSameReceiverIsNotMasked() public {
-        bytes32 first = _partial(1_000_000);
-        bytes32 second = _partial(500_000);
+        // Two destinations of the same receiver (two salts, so two commitments).
+        bytes32 first = _partialTo(1_000_000, keccak256("zecured.tier3.dest.salt1"));
+        bytes32 second = _partialTo(500_000, keccak256("zecured.tier3.dest.salt2"));
         SpendCommit memory c = _spendCommit(vaultId, depositTag, _two(first, second), "same receiver");
         registry.commitSpend(c, _threeSigs(registry.hashSpendCommit(c)));
-        bytes32 dest = keccak256("zecured.tier3.dest");
+        bytes32 dest = keccak256("zecured.tier3.dest.salt2");
         uint8 secondOutput = c.claimOutputs[1];
 
         // The first claim's payment, 985,000 zat at output 0, is not the second claim's output.

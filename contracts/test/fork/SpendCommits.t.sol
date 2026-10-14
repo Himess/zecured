@@ -21,6 +21,7 @@ import {MockSignerBond} from "../mocks/MockSignerBond.sol";
 ///         `confirmPayout`'s new requirement, the open-vault count the bonds wait on, and the halt.
 contract SpendCommitsTest is ZecuredFixture {
     bytes32 internal constant PARTIAL_COMMITMENT = keccak256("zecured.test.commitment.partial");
+    uint256 internal partials;
     /// Signers 0, 2 and 4 of the sorted set (`_threeSigs`).
     uint8 internal constant BITMAP_0_2_4 = 0x15;
     /// Storage slot of the Registry's `_claims` mapping (`forge inspect ZecuredRegistry storageLayout`).
@@ -39,9 +40,11 @@ contract SpendCommitsTest is ZecuredFixture {
         MORPHO.setAuthorization(address(registry), true);
     }
 
+    /// Each partial release gets its own destination commitment (a fresh salt, as the app and the CLI do): a payout
+    /// never names two claims of one commitment (RT-1).
     function _partial(uint64 amount) internal returns (bytes32 claimId) {
         vm.prank(account);
-        claimId = registry.requestPartialRelease(vaultId, amount, PARTIAL_COMMITMENT);
+        claimId = registry.requestPartialRelease(vaultId, amount, keccak256(abi.encode(PARTIAL_COMMITMENT, partials++)));
     }
 
     function _one(bytes32 a) internal pure returns (bytes32[] memory r) {
@@ -254,18 +257,19 @@ contract SpendCommitsTest is ZecuredFixture {
         _expectRevertOn(c, abi.encodeWithSelector(IZecuredSpendCommits.ClaimRefAlreadyUsed.selector, bytes32(0)));
         SpendCommit memory paid = _spendCommit(vaultId, depositTag, _one(a), "paid");
         _send(paid);
-        c = _spendCommit(vaultId, depositTag, _one(b), "claims");
+        // A rebuild of the same payout (same input, same claim set) with the first one's claim ref.
+        c = _spendCommit(vaultId, depositTag, _one(a), "claims");
         c.claimRefs[0] = paid.claimRefs[0];
         _expectRevertOn(c, abi.encodeWithSelector(IZecuredSpendCommits.ClaimRefAlreadyUsed.selector, c.claimRefs[0]));
 
-        // A claim already confirmed paid.
+        // A claim already confirmed paid, named again from the paying payout's change.
         registry.confirmPayout(vaultId, _one(a), _threeSigs(registry.hashPayoutConfirmation(vaultId, _one(a))));
-        c = _spendCommit(vaultId, depositTag, _one(b), "claims");
+        c = _spendCommit(vaultId, paid.changeTag, _one(b), "claims");
         c.claimIds = _two(b, a);
         c.claimRefs = _two(keccak256("ref b"), keccak256("ref a"));
         c.claimOutputs = new uint8[](2);
         c.claimOutputs[1] = 1;
-        c.changeValue = VAULT_005 - 2_000_000;
+        c.changeValue = VAULT_005 - 3_000_000;
         _expectRevertOn(c, abi.encodeWithSelector(IZecuredSpendCommits.ClaimNotPayable.selector, a));
     }
 

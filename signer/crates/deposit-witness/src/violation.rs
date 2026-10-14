@@ -148,6 +148,30 @@ pub async fn misdirected(
     checked(witness(Kind::Misdirected, beneficiary, at, detail)?)
 }
 
+/// F4: committed payout `txid` of the vault (viewing key `ufvk`) names the claim of recipient
+/// `(salt, receiver)` under a reference other than `keccak256(salt || txid)` (review RT-1). The
+/// borrower proves it for its own claims; the signers, who hold every salt, for any claim.
+#[allow(clippy::too_many_arguments)]
+pub async fn wrong_claim_ref(
+    client: &mut LwdClient,
+    headers_path: &Path,
+    summaries_path: &Path,
+    ufvk: &str,
+    txid: TxId,
+    salt: [u8; 32],
+    receiver: [u8; 43],
+    tip: u32,
+    beneficiary: [u8; 20],
+) -> Result<(ViolationWitness, ViolationJournal)> {
+    let at = locate(client, headers_path, summaries_path, txid, tip).await?;
+    let detail = Detail::WrongClaimRef {
+        vault_ufvk: ufvk.to_owned(),
+        salt,
+        receiver: receiver.to_vec(),
+    };
+    checked(witness(Kind::WrongClaimRef, beneficiary, at, detail)?)
+}
+
 /// What a claimant keeps to prove F3: written by `zecured-wallet watch --claims-of` when a
 /// committed payment did not arrive in full, read by `build-violation misdirected`. It holds the
 /// claim's salt and the wallet's incoming viewing key: keep it on the claimant's machine.

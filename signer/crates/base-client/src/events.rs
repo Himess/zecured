@@ -100,6 +100,8 @@ sol! {
         function spendRecord(bytes32 payoutRef) external view returns (SpendRecord memory);
         function claimPayment(bytes32 claimRef) external view returns (ClaimPayment memory);
         function claimInput(bytes32 claimId) external view returns (bytes32);
+        function inputClaimSet(bytes32 inputTag) external view returns (bytes32);
+        function claimRefOf(bytes32 payoutRef, bytes32 commitment) external view returns (bytes32);
         function hashSpendCommit(SpendCommit c) external view returns (bytes32);
         function openVaultCount() external view returns (uint256);
         function signerBond() external view returns (address);

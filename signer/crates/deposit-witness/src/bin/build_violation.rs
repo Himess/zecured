@@ -68,6 +68,18 @@ enum KindArgs {
         #[arg(long)]
         change_value: u64,
     },
+    /// F4: a committed payout that names a claim under a reference other than
+    /// keccak256(salt || txid), hiding the payout from the claimant.
+    WrongClaimRef {
+        #[arg(long)]
+        ufvk_file: PathBuf,
+        #[arg(long)]
+        txid: String,
+        /// The claim's destination (salt and raw receiver), as `zecured-wallet watch --claims-of`
+        /// writes it.
+        #[arg(long)]
+        claim_file: PathBuf,
+    },
     /// F3: a committed payout whose output for a claim did not pay the claim's receiver in full.
     Misdirected {
         /// The claimant's evidence (payout, output index, salt, receiver, incoming viewing key),
@@ -128,6 +140,27 @@ async fn main() -> Result<()> {
                 TxId::from_hex(txid).context("txid")?,
                 hex32(change_tag)?,
                 *change_value,
+                tip,
+                beneficiary,
+            )
+            .await?
+        }
+        KindArgs::WrongClaimRef {
+            ufvk_file,
+            txid,
+            claim_file,
+        } => {
+            let e: violation::ClaimEvidence = serde_json::from_slice(
+                &fs::read(claim_file).with_context(|| format!("read {}", claim_file.display()))?,
+            )?;
+            violation::wrong_claim_ref(
+                &mut client,
+                &args.headers,
+                &args.summaries,
+                &read_ufvk(ufvk_file)?,
+                TxId::from_hex(txid).context("txid")?,
+                hex32(&e.salt)?,
+                hex::decode(&e.receiver)?.try_into().map_err(|_| anyhow!("receiver: 43 bytes"))?,
                 tip,
                 beneficiary,
             )

@@ -117,10 +117,15 @@ fn write_seal(guest: &Guest, out: &str, journal: &[u8], seal: &[u8]) -> Result<(
 fn violation_parity(guest: &Guest, input: &str) -> Result<()> {
     use zecured_deposit_statement::violation::{Detail, Kind};
     let base: ViolationWitness = serde_json::from_slice(&std::fs::read(input)?)?;
-    let Detail::Uncommitted { vault_ufvk, .. } = &base.detail else {
+    let Detail::Uncommitted {
+        vault_ufvk,
+        note_recipient,
+        ..
+    } = &base.detail
+    else {
         bail!("an F1 (uncommitted) witness is expected");
     };
-    let ufvk = vault_ufvk.clone();
+    let (ufvk, ufvk4, receiver) = (vault_ufvk.clone(), vault_ufvk.clone(), note_recipient.clone());
     type Change = (&'static str, Box<dyn Fn(&mut ViolationWitness)>);
     let detail = |f: fn(&mut Detail)| -> Box<dyn Fn(&mut ViolationWitness)> { Box::new(move |w| f(&mut w.detail)) };
     let changes: Vec<Change> = vec![
@@ -169,6 +174,17 @@ fn violation_parity(guest: &Guest, input: &str) -> Result<()> {
                     vault_ufvk: ufvk.clone(),
                     change_tag: [7; 32],
                     change_value: 1,
+                };
+            }),
+        ),
+        (
+            "F4: the reference of a claim",
+            Box::new(move |w| {
+                w.kind = Kind::WrongClaimRef;
+                w.detail = Detail::WrongClaimRef {
+                    vault_ufvk: ufvk4.clone(),
+                    salt: [5; 32],
+                    receiver: receiver.clone(),
                 };
             }),
         ),

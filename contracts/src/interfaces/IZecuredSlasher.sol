@@ -1,7 +1,7 @@
 // SPDX-License-Identifier: MIT
 pragma solidity 0.8.28;
 
-/// @notice The three provable violations (docs/TIER3.md § 6; review T3-1 to T3-3). One RISC Zero guest, one image id.
+/// @notice The provable violations (docs/TIER3.md § 6; reviews T3-1 to T3-3, RT-1). One RISC Zero guest, one image id.
 enum ViolationKind {
     None,
     /// F1: a lineage note was spent by a transaction X that has no commitment for that note.
@@ -9,7 +9,10 @@ enum ViolationKind {
     /// F2: a committed payout X did not return the committed change note to the vault.
     WithheldChange,
     /// F3: a committed payout X did not pay a claim it names to the claim's recipient.
-    Misdirected
+    Misdirected,
+    /// F4: the commitment of a payout X names a claim under a reference other than `keccak256(salt || txid_X)`, which
+    ///     hides the payout from the claimant (review RT-1).
+    WrongClaimRef
 }
 
 /// @notice Journal of a violation proof: `abi.encode(ViolationJournal)`, committed by the guest; the seal proves
@@ -18,12 +21,13 @@ enum ViolationKind {
 /// @param kind Equals the `kind` argument of `proveViolation`.
 /// @param anchor Relay header whose history commitment includes X's block.
 /// @param beneficiary Receives the bounty; bound inside the proof, so a copied seal cannot redirect it.
-/// @param ref F1, F2: `payoutRef(txid_X)` under the vault's tag key; F3: `claimRef = keccak256(salt || txid_X)`.
-/// @param noteTag F1: tag of the lineage note X spends; F2: the committed change tag; F3: zero.
+/// @param ref F1, F2, F4: `payoutRef(txid_X)` under the vault's tag key; F3: `claimRef = keccak256(salt || txid_X)`.
+/// @param noteTag F1: tag of the lineage note X spends; F2: the committed change tag; F3: zero; F4: the claim
+///        reference an honest commitment gives, `keccak256(salt || txid_X)`.
 /// @param value F2: the committed change value; F3: what the output at `outputIndex` pays the claim's exact receiver,
 ///        decrypted with the claimant's IVK and checked against its note commitment (zero if it pays anything else, or
 ///        is no such output); F1: zero.
-/// @param destCommitment F3: `keccak256(salt || receiver)`, the claim's recipient commitment; zero otherwise.
+/// @param destCommitment F3, F4: `keccak256(salt || receiver)`, the claim's recipient commitment; zero otherwise.
 /// @param outputIndex F3: the action of X the commitment names for the claim; zero otherwise.
 struct ViolationJournal {
     ViolationKind kind;
@@ -37,7 +41,7 @@ struct ViolationJournal {
 }
 
 /// @notice An open or executed violation case.
-/// @param signerBitmap Whose bonds the case slashes: all five (0x1f) for F1, the commitment's signers for F2 and F3.
+/// @param signerBitmap Whose bonds the case slashes: all five (0x1f) for F1, the commitment's signers for F2 to F4.
 struct ViolationCase {
     ViolationKind kind;
     bytes32 anchor;
@@ -61,7 +65,10 @@ struct ViolationCase {
 ///      - F2: `spendRecord(ref)` exists with `changeValue > 0`, `changeTag == noteTag` and `changeValue == value`;
 ///        slashes its `signerBitmap`;
 ///      - F3: `claimPayment(ref)` exists for output `outputIndex`, its claim's commitment is `destCommitment` and
-///        `value < expected`; slashes the `signerBitmap` of its payout.
+///        `value < expected`; slashes the `signerBitmap` of its payout;
+///      - F4: `spendRecord(ref)` exists and `claimRefOf(ref, destCommitment)` is set and differs from `noteTag`;
+///        slashes its `signerBitmap`. Provable by whoever holds the vault's viewing key and the claim's salt: the
+///        borrower for its own claims, and the honest signers for every claim.
 ///      It opens case `caseIdOf(kind, ref, noteTag)` (one per violation, whoever proves it first), executable after
 ///      `challengeWindow`. `executeSlash(caseId)` (anyone) checks the anchor and the condition again: an F1 case is
 ///      dismissed (deleted) if the commitment appeared meanwhile, an honest resubmission after a Base reorg (a lying

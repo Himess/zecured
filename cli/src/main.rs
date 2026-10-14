@@ -618,6 +618,8 @@ async fn main() -> Result<()> {
             claims_of,
             rpc,
         } => {
+            // RT-10: the viewing key is the vault's tag key; its file is restricted to its owner.
+            restrict(&ufvk_file).with_context(|| format!("read {}", ufvk_file.display()))?;
             let ufvk = fs::read_to_string(&ufvk_file)
                 .with_context(|| format!("read {}", ufvk_file.display()))?
                 .trim()
@@ -655,11 +657,16 @@ async fn main() -> Result<()> {
                         .map(|d| watch::own_recipient(&d.salt, &d.receiver, &w.fvk))
                         .collect::<Result<Vec<_>>>()?;
                     let payouts = watch::committed_payouts(&findings);
-                    let claims = watch::check_claims(&mut client, &own, &payouts, net.registry, &rpc).await?;
+                    let claims = watch::check_claims(&mut client, &ufvk, &own, &payouts, net.registry, &rpc).await?;
                     for f in &claims {
-                        if let watch::ClaimFinding::Misdirected { evidence, .. } = f {
+                        let found = match f {
+                            watch::ClaimFinding::Misdirected { evidence, .. } => Some(("f3", evidence)),
+                            watch::ClaimFinding::WrongClaimRef { evidence, .. } => Some(("f4", evidence)),
+                            _ => None,
+                        };
+                        if let Some((kind, evidence)) = found {
                             let path = loan_path(&cli.wallet, &vault).with_file_name(format!(
-                                "f3-{}-{}.json",
+                                "{kind}-{}-{}.json",
                                 hex::encode(&vault[..8]),
                                 evidence.txid
                             ));

@@ -10,7 +10,9 @@
 //! A claimant checks its own claims (F3): for each committed payout X and each destination it
 //! gave, `claimPayment(keccak256(salt || txid_X))` on Base names what X promised the claim and in
 //! which output; the wallet's incoming viewing key shows what that output paid. A shortfall is
-//! written to an evidence file for `build-violation misdirected`.
+//! written to an evidence file for `build-violation misdirected`. With the vault's viewing key it
+//! also checks that the commitment of X names the claim by that very reference (F4, review RT-1):
+//! `claimRefOf(payoutRef(X), commitment)` must be `keccak256(salt || txid_X)`.
 
 use std::path::Path;
 
@@ -28,7 +30,7 @@ use zecured_base::events::IZecuredRegistry;
 use zecured_deposit_witness::violation::{ClaimEvidence, claim_output_value};
 use zecured_policy::{
     derive::{deposit_tag, payout_ref},
-    ledger::claim_ref,
+    ledger::{claim_ref, commitment},
 };
 use zecured_zcash_ops::{lwd::LwdClient, scan::ReceivedNote};
 
@@ -175,8 +177,11 @@ pub fn own_recipient(salt: &str, receiver: &str, fvk: &FullViewingKey) -> Result
     Ok(OwnRecipient { salt, receiver, ivk })
 }
 
-/// What a claimant found about one committed payment of its claims (F3).
+/// What a claimant found about one committed payment of its claims (F3, F4).
 pub enum ClaimFinding {
+    /// F4: the commitment of `payout` names the claim of this destination under a foreign
+    /// reference, so that its claimant could never find the payout.
+    WrongClaimRef { payout: TxId, evidence: ClaimEvidence },
     /// The claim's own output paid at least what the commitment promised.
     Paid { claim_id: B256, payout: TxId, value: u64 },
     /// The destination is another wallet's: only that wallet can check this payment.
@@ -202,9 +207,11 @@ pub fn committed_payouts(findings: &[Finding]) -> Vec<TxId> {
         .collect()
 }
 
-/// Checks every committed payment of the claims behind `own` among `payouts`.
+/// Checks every committed payment of the claims behind `own` among `payouts` of the vault with
+/// viewing key `ufvk`.
 pub async fn check_claims(
     client: &mut LwdClient,
+    ufvk: &str,
     own: &[OwnRecipient],
     payouts: &[TxId],
     registry: Address,
@@ -214,8 +221,18 @@ pub async fn check_claims(
     let registry = IZecuredRegistry::new(registry, &provider);
     let mut findings = vec![];
     for x in payouts {
+        let payout = B256::from(payout_ref(ufvk, x.as_ref()));
         for r in own {
             let claim_ref = B256::from(claim_ref(&r.salt, x.as_ref()));
+            let commitment = B256::from(commitment(&r.salt, &r.receiver));
+            let named = registry.claimRefOf(payout, commitment).call().await.context("Registry.claimRefOf")?;
+            if named != B256::ZERO && named != claim_ref {
+                findings.push(ClaimFinding::WrongClaimRef {
+                    payout: *x,
+                    evidence: evidence(*x, 0, r, None),
+                });
+                continue;
+            }
             let p = registry.claimPayment(claim_ref).call().await.context("Registry.claimPayment")?;
             if p.claimId == B256::ZERO {
                 continue; // X pays no claim of this destination
@@ -230,17 +247,22 @@ pub async fn check_claims(
             let address = Option::<orchard::Address>::from(orchard::Address::from_raw_address_bytes(&r.receiver))
                 .context("not an Ironwood receiver")?;
             let value = claim_output_value(client, *x, p.outputIndex, ivk, &address).await?;
-            let evidence = ClaimEvidence {
-                txid: x.to_string(),
-                output_index: p.outputIndex,
-                salt: hex::encode(r.salt),
-                receiver: hex::encode(r.receiver),
-                ivk: hex::encode(ivk.to_bytes()),
-            };
-            findings.push(judge(p.claimId, *x, p.expected, value, evidence));
+            findings.push(judge(p.claimId, *x, p.expected, value, evidence(*x, p.outputIndex, r, Some(ivk))));
         }
     }
     Ok(findings)
+}
+
+/// The evidence file of a finding about payout `x` and destination `r` (the wallet's key that owns
+/// the receiver, if any; F4 does not need it).
+fn evidence(x: TxId, output_index: u8, r: &OwnRecipient, ivk: Option<&IncomingViewingKey>) -> ClaimEvidence {
+    ClaimEvidence {
+        txid: x.to_string(),
+        output_index,
+        salt: hex::encode(r.salt),
+        receiver: hex::encode(r.receiver),
+        ivk: ivk.map(|k| hex::encode(k.to_bytes())).unwrap_or_default(),
+    }
 }
 
 /// A committed payment is honest when the claim's output paid at least what was promised.
@@ -270,6 +292,17 @@ pub fn report_claim(f: &ClaimFinding, evidence: Option<&Path>) {
             payout,
             value,
         } => println!("tier 3: claim {} paid {value} zat by its committed output in {payout}: ok", short(claim_id)),
+        ClaimFinding::WrongClaimRef { payout, .. } => {
+            println!(
+                "tier 3: VIOLATION F4: the commitment of payout {payout} names one of this loan's claims under a reference its claimant cannot find"
+            );
+            if let Some(path) = evidence {
+                println!(
+                    "  build the witness: build-violation wrong-claim-ref --ufvk-file <vault UFVK file> --txid {payout} --claim-file {} --tip <anchor> --beneficiary <your EOA>",
+                    path.display()
+                );
+            }
+        }
         ClaimFinding::OtherWallet { claim_id, payout } => println!(
             "tier 3: claim {} is committed to {payout}, paid to another wallet's address: check it there",
             short(claim_id)

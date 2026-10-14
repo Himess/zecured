@@ -48,13 +48,16 @@ struct ClaimPayment {
 ///      - 1 to MAX_CLAIMS_PER_PAYOUT claims, no duplicates, each of `c.vaultId`, `Pending`, and bound to no other
 ///        input: `claimInput(id)` is zero or `c.inputTag` (the first commitment binds it, claim-reuse fix);
 ///      - `c.claimRefs.length == c.claimOutputs.length == c.claimIds.length`, every claim ref unused, the claims'
-///        output indexes distinct (E1: two claims never share an output);
+///        output indexes distinct (E1: two claims never share an output), and their recipient commitments distinct;
+///      - RT-4: the claim set is fixed per input: a later commitment from `c.inputTag` (a rebuild of the same payout)
+///        carries exactly the claim list of the first one (`inputClaimSet`);
 ///      - conservation: `lineageOf(c.inputTag).value == sum of claim amounts + c.changeValue`;
 ///      - `c.changeTag == 0` iff `c.changeValue == 0`; a non-zero change tag is not yet a lineage note;
 ///      - the fee-bearing claim covers the fee: `amount(claimIds[0]) > fee`, where
 ///        `fee = 5,000 * max(2, claimCount + (changeValue > 0 ? 1 : 0))` zatoshi (ZIP 317 for one lineage input, as
 ///        `zecured_policy::ledger::plan` charges it).
-///      Effects: records the SpendRecord and each ClaimPayment, binds each claim to `c.inputTag`, adds the change as a
+///      Effects: records the SpendRecord and each ClaimPayment, keeps each claim's reference under its recipient
+///      commitment (`claimRefOf`, which F4 checks: review RT-1), binds each claim to `c.inputTag`, adds the change as a
 ///      lineage note and emits SpendCommitted. Payouts keep working after a slash (users must be able to exit).
 ///      Elsewhere in v2: a deposit note becomes a lineage note as soon as its activation is pending (a spend during the
 ///      K3 window is F1) and stops being one if `dropPendingActivation` drops it; `confirmPayout` requires every
@@ -77,6 +80,8 @@ interface IZecuredSpendCommits {
     error InvalidClaimCount(uint256 claims, uint256 claimRefs);
     error DuplicateClaim(bytes32 claimId);
     error DuplicateClaimOutput(uint8 outputIndex);
+    error DuplicateClaimCommitment(bytes32 commitment);
+    error ClaimSetMismatch(bytes32 inputTag);
     error ClaimNotPayable(bytes32 claimId);
     error ClaimBoundToAnotherInput(bytes32 claimId, bytes32 inputTag);
     error ClaimRefAlreadyUsed(bytes32 claimRef);
@@ -105,6 +110,16 @@ interface IZecuredSpendCommits {
 
     /// @notice The lineage note a claim is bound to (zero until its first commitment).
     function claimInput(bytes32 claimId) external view returns (bytes32 inputTag);
+
+    /// @notice RT-4: `keccak256(abi.encodePacked(claimIds))` of the first commitment from this lineage note (zero if
+    ///         none); every later commitment from it must carry exactly that list.
+    function inputClaimSet(bytes32 inputTag) external view returns (bytes32);
+
+    /// @notice F4 (review RT-1): the claim reference that the commitment of payout `payoutRef` gives the claim whose
+    ///         recipient commitment is `commitment` (zero if that payout names no such claim). An honest commitment
+    ///         gives `keccak256(salt || txid)`; anyone who knows the vault's viewing key and the claim's salt can prove
+    ///         any other value.
+    function claimRefOf(bytes32 payoutRef, bytes32 commitment) external view returns (bytes32);
 
     /// @notice EIP-712 digest of a SpendCommit under the Registry domain.
     function hashSpendCommit(SpendCommit calldata c) external view returns (bytes32);

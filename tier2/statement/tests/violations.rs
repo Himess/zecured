@@ -102,9 +102,13 @@ fn withheld(change_tag: [u8; 32], change_value: u64) -> ViolationWitness {
     )
 }
 
+/// RT-9: change is the vault's internal-scope note. The fixture's output pays the vault's external
+/// (published) address, so as change it is not delivered: the signers would count it as a deposit
+/// to refund. The real payout's internal-scope change is delivered (`f2_the_real_payouts_change_is_delivered`).
 #[test]
-fn f2_a_delivered_change_proves_nothing() {
-    assert_eq!(verify_violation(&withheld(h32(DEPOSIT_TAG), 1_000_000)), Err(ViolationError::ChangeDelivered));
+fn f2_change_to_the_external_scope_is_not_delivered() {
+    let j = verify_violation(&withheld(h32(DEPOSIT_TAG), 1_000_000)).expect("the external scope is not change");
+    assert_eq!((j.note_tag, j.value), (h32(DEPOSIT_TAG), 1_000_000));
 }
 
 #[test]
@@ -135,6 +139,39 @@ fn f2_the_reference_is_keyed_by_the_vault() {
     let j = verify_violation(&w).unwrap();
     assert_ne!(j.reference, payout_ref(&deposit().vault_ufvk, &txid()));
     assert_eq!(j.reference, payout_ref(other, &txid()));
+}
+
+// ------------------------------------------------------------------ F4: wrong claim reference
+
+fn wrong_claim_ref(vault_ufvk: String, receiver: Vec<u8>) -> ViolationWitness {
+    violation(
+        Kind::WrongClaimRef,
+        Detail::WrongClaimRef {
+            vault_ufvk,
+            salt: SALT,
+            receiver,
+        },
+    )
+}
+
+/// F4 (RT-1) gives the reference an honest commitment of X names the claim by, and names X by its
+/// payout reference under the vault's key, which is how the slasher finds the commitment of X.
+#[test]
+fn f4_gives_the_reference_an_honest_commitment_names_the_claim_by() {
+    let receiver = deposit().note_recipient;
+    let j = verify_violation(&wrong_claim_ref(deposit().vault_ufvk, receiver.clone())).unwrap();
+    assert_eq!(j.kind, Kind::WrongClaimRef);
+    assert_eq!(j.reference, payout_ref(&deposit().vault_ufvk, &txid()));
+    assert_eq!(j.note_tag, claim_ref(&SALT, &txid()));
+    assert_eq!(j.dest_commitment, keccak256(&[SALT.as_slice(), &receiver].concat()));
+    assert_eq!((j.value, j.output_index), (0, 0));
+}
+
+#[test]
+fn f4_needs_the_vaults_key_and_a_receiver() {
+    let receiver = deposit().note_recipient;
+    assert_eq!(verify_violation(&wrong_claim_ref("uviewtest1x".into(), receiver)), Err(ViolationError::Ufvk));
+    assert_eq!(verify_violation(&wrong_claim_ref(deposit().vault_ufvk, vec![1; 42])), Err(ViolationError::Receiver));
 }
 
 // ------------------------------------------------------------------ F3: misdirected payment
@@ -263,6 +300,8 @@ fn f1_a_note_the_transaction_does_not_spend_proves_nothing() {
 fn kind_and_detail_must_agree() {
     let mut w = withheld([7; 32], 1);
     w.kind = Kind::Misdirected;
+    assert_eq!(verify_violation(&w), Err(ViolationError::KindMismatch));
+    w.kind = Kind::WrongClaimRef;
     assert_eq!(verify_violation(&w), Err(ViolationError::KindMismatch));
 }
 

@@ -67,6 +67,8 @@ contract ZecuredRegistry is IZecuredRegistry, IZecuredSpendCommits, EIP712 {
     ///      actions are its outputs (claims plus change). The signers' plans charge exactly this
     ///      (`zecured_zcash_ops::spend::zip317_fee`).
     uint64 private constant ZIP317_MARGINAL_FEE = 5_000;
+    /// @inheritdoc IZecuredRegistry
+    uint64 public constant DUST_LIMIT = 10_000;
     uint256 private constant ZIP317_GRACE_ACTIONS = 2;
     /// @dev All five signers: an uncommitted spend is signed by three of them, and FROST does not tell which.
     uint8 private constant ALL_SIGNERS = 0x1f;
@@ -161,6 +163,9 @@ contract ZecuredRegistry is IZecuredRegistry, IZecuredSpendCommits, EIP712 {
     mapping(bytes32 claimRef => ClaimPayment) private _claimPayments;
     /// @inheritdoc IZecuredSpendCommits
     mapping(bytes32 claimId => bytes32 inputTag) public claimInput;
+    /// @inheritdoc IZecuredSpendCommits
+    mapping(bytes32 inputTag => bytes32 claimSet) public inputClaimSet;
+    mapping(bytes32 payoutRef => mapping(bytes32 commitment => bytes32 claimRef)) private _claimRefOf;
     uint256 private _openVaults;
     uint64 private _lastVaultSettledAt;
 
@@ -295,7 +300,9 @@ contract ZecuredRegistry is IZecuredRegistry, IZecuredSpendCommits, EIP712 {
     function dropPendingActivation(bytes32 vaultId) external {
         PendingActivation memory p = _pending[vaultId];
         if (p.account == address(0)) revert NoPendingActivation(vaultId);
-        if (relay.isInBestChain(p.anchor)) revert AnchorStillOnBestChain(vaultId);
+        // RT-6: after a halt the activation can never finalize; dropping it lets the vault be cancelled and refunded.
+        bool halted = address(signerBond) != address(0) && signerBond.halted();
+        if (relay.isInBestChain(p.anchor) && !halted) revert AnchorStillOnBestChain(vaultId);
         delete _pending[vaultId];
         // Nothing was minted: the note may be proven again against the chain that won, and it backs nothing.
         depositTagUsed[p.depositTag] = false;
@@ -442,6 +449,20 @@ contract ZecuredRegistry is IZecuredRegistry, IZecuredSpendCommits, EIP712 {
         if (v.status == VaultStatus.Closed && v.unpaidClaims == 0) _settle();
     }
 
+    /// @inheritdoc IZecuredRegistry
+    function writeOffDust(bytes32 claimId) external {
+        Claim storage c = _claims[claimId];
+        Vault storage v = _vaults[c.vaultId];
+        if (
+            c.status != ClaimStatus.Pending || c.amount > DUST_LIMIT || v.status != VaultStatus.Closed
+                || claimInput[claimId] != bytes32(0)
+        ) revert NotDust(claimId);
+        c.status = ClaimStatus.WrittenOff;
+        v.unpaidClaims -= 1;
+        emit DustWrittenOff(c.vaultId, claimId, c.amount);
+        if (v.unpaidClaims == 0) _settle();
+    }
+
     // ------------------------------------------------------------------ Tier 3: spend commitments
 
     /// @inheritdoc IZecuredSpendCommits
@@ -553,6 +574,11 @@ contract ZecuredRegistry is IZecuredRegistry, IZecuredSpendCommits, EIP712 {
     /// @inheritdoc IZecuredSpendCommits
     function claimPayment(bytes32 claimRef) external view returns (ClaimPayment memory) {
         return _claimPayments[claimRef];
+    }
+
+    /// @inheritdoc IZecuredSpendCommits
+    function claimRefOf(bytes32 payoutRef, bytes32 commitment) external view returns (bytes32) {
+        return _claimRefOf[payoutRef][commitment];
     }
 
     /// @inheritdoc IZecuredSpendCommits
@@ -750,11 +776,19 @@ contract ZecuredRegistry is IZecuredRegistry, IZecuredSpendCommits, EIP712 {
         if (withChange != (c.changeTag != bytes32(0)) || (withChange && _lineage[c.changeTag].vaultId != bytes32(0))) {
             revert InvalidChange(c.changeTag, c.changeValue);
         }
+        // RT-4: one claim set per input, so a claim can never stay bound to a note a payout without it spent.
+        bytes32 claimSet = inputClaimSet[c.inputTag];
+        if (claimSet != bytes32(0) && claimSet != keccak256(abi.encodePacked(c.claimIds))) {
+            revert ClaimSetMismatch(c.inputTag);
+        }
         return input.value;
     }
 
     /// @dev Records a checked commitment; its change becomes a lineage note of the vault.
     function _recordSpend(SpendCommit calldata c, bytes32 recordHash, uint8 signerBitmap) internal {
+        if (inputClaimSet[c.inputTag] == bytes32(0)) {
+            inputClaimSet[c.inputTag] = keccak256(abi.encodePacked(c.claimIds));
+        }
         _spends[c.payoutRef] = SpendRecord({
             recordHash: recordHash,
             vaultId: c.vaultId,
@@ -783,6 +817,10 @@ contract ZecuredRegistry is IZecuredRegistry, IZecuredSpendCommits, EIP712 {
         }
         Claim storage cl = _claims[id];
         if (cl.vaultId != c.vaultId || cl.status != ClaimStatus.Pending) revert ClaimNotPayable(id);
+        // F4 (RT-1): each claim's reference is kept under its recipient commitment, distinct within a payout (the
+        // payout reference is new, so an entry can only come from an earlier claim of this commitment).
+        bytes32 commitment = cl.commitment;
+        if (_claimRefOf[c.payoutRef][commitment] != bytes32(0)) revert DuplicateClaimCommitment(commitment);
         bytes32 bound = claimInput[id];
         if (bound == bytes32(0)) claimInput[id] = c.inputTag;
         else if (bound != c.inputTag) revert ClaimBoundToAnotherInput(id, bound);
@@ -797,12 +835,15 @@ contract ZecuredRegistry is IZecuredRegistry, IZecuredSpendCommits, EIP712 {
         }
         _claimPayments[ref] =
             ClaimPayment({claimId: id, payoutRef: c.payoutRef, expected: expected, outputIndex: output});
+        _claimRefOf[c.payoutRef][commitment] = ref;
     }
 
     /// @dev A vault's deposit note becomes its first lineage note as soon as the vault is pending or activated: from
     ///      then on, spending it without a commitment is F1. The vault stays open until it is closed and every claim is
     ///      confirmed paid (or its pending activation is dropped).
     function _open(bytes32 vaultId, uint64 amount, bytes32 depositTag) internal {
+        // RT-16: a lineage tag is never reused (a change tag that equals a deposit tag would need a BLAKE2b collision).
+        if (_lineage[depositTag].vaultId != bytes32(0)) revert DepositTagUsed(depositTag);
         _lineage[depositTag] = LineageNote({vaultId: vaultId, value: amount});
         _openVaults += 1;
     }

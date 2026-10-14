@@ -1,5 +1,5 @@
 //! Tier 3 violation statements (docs/TIER3.md § 6): what a proof that the signers took
-//! collateral proves. One statement, three kinds, one zkVM guest.
+//! collateral proves. One statement, four kinds, one zkVM guest.
 //!
 //! Every kind first shows that a transaction X (whose txid is computed from its bytes) is in a
 //! block committed by a later header T, with the Tier 2 inclusion code ([`check_inclusion`]).
@@ -11,13 +11,19 @@
 //!   UFVK's tag key; the slasher checks that the tag is a lineage note on Base and that no
 //!   commitment of X names it as its input.
 //! - **F2, WithheldChange.** No action of X carries the change note the commitment of X
-//!   promised: none whose note commitment has the committed tag and decrypts, with either of the
-//!   vault's incoming viewing keys, to a note of the committed value.
+//!   promised: none whose note commitment has the committed tag and decrypts, with the vault's
+//!   internal incoming viewing key, to a note of the committed value. Change goes to the internal
+//!   scope only: one sent to the vault's external address is not counted as delivered, since the
+//!   signers would treat it as a deposit to refund (review RT-9).
 //! - **F3, Misdirected.** X names a claim through `claimRef = keccak256(salt || txid)`; the
 //!   claim's recipient is `keccak256(salt || receiver)`; the commitment of X names the action whose
 //!   output pays the claim (E1). An incoming viewing key that owns the receiver shows what that one
 //!   output pays that exact receiver (`value`): its note decrypts and matches its note commitment,
 //!   or it counts as nothing. The slasher compares it with what the commitment promised the claim.
+//! - **F4, WrongClaimRef.** With the vault's UFVK (for X's `payoutRef`) and a claim's salt and
+//!   receiver, the journal gives the reference an honest commitment of X names that claim by,
+//!   `keccak256(salt || txid)`; the slasher checks that the commitment of X names the claim of
+//!   that recipient commitment under another one, which hides X from the claimant (review RT-1).
 //!
 //! The journal ([`ViolationJournal::abi_encode`]) is what `ZecuredSlasher.proveViolation` decodes;
 //! fields a kind does not use are zero. It never contains a txid, a note commitment, a
@@ -46,6 +52,7 @@ pub enum Kind {
     Uncommitted = 1,
     WithheldChange = 2,
     Misdirected = 3,
+    WrongClaimRef = 4,
 }
 
 /// The private input of a violation proof.
@@ -97,6 +104,13 @@ pub enum Detail {
         ivk: Vec<u8>,
         output_index: u32,
     },
+    /// F4: the vault's UFVK (for X's `payoutRef`) and a claim's salt and receiver (its recipient
+    /// commitment). Held by the borrower for its own claims and by the signers for every claim.
+    WrongClaimRef {
+        vault_ufvk: String,
+        salt: [u8; 32],
+        receiver: Vec<u8>,
+    },
 }
 
 /// The public output of a violation proof.
@@ -106,13 +120,14 @@ pub struct ViolationJournal {
     /// SHA-256d of header T, internal byte order.
     pub anchor: [u8; 32],
     pub beneficiary: [u8; 20],
-    /// F1, F2: `payoutRef` of X; F3: `claimRef` of the claim in X.
+    /// F1, F2, F4: `payoutRef` of X; F3: `claimRef` of the claim in X.
     pub reference: [u8; 32],
-    /// F1: tag of the note X spends; F2: the committed change tag; F3: zero.
+    /// F1: tag of the note X spends; F2: the committed change tag; F3: zero; F4: the claim
+    /// reference an honest commitment of X gives, `keccak256(salt || txid)`.
     pub note_tag: [u8; 32],
     /// F2: the committed change value; F3: what the claim's output pays its exact receiver.
     pub value: u64,
-    /// F3: the claim's recipient commitment.
+    /// F3, F4: the claim's recipient commitment.
     pub dest_commitment: [u8; 32],
     /// F3: the action of X the commitment names for the claim.
     pub output_index: u8,
@@ -276,16 +291,14 @@ pub fn verify_violation(w: &ViolationWitness) -> Result<ViolationJournal, Violat
             Kind::WithheldChange,
         ) => {
             let fvk = vault_fvk(vault_ufvk)?;
-            let ivks = [Scope::Internal, Scope::External].map(|s| PreparedIncomingViewingKey::new(&fvk.to_ivk(s)));
+            // Change is the vault's internal-scope note (RT-9): honest payouts send it there.
+            let ivk = PreparedIncomingViewingKey::new(&fvk.to_ivk(Scope::Internal));
             for action in bundle.actions() {
                 if deposit_tag(vault_ufvk, &action.cmx().to_bytes()) != *change_tag {
                     continue;
                 }
-                let domain = IronwoodDomain::for_action(action);
-                let delivered = ivks.iter().any(|ivk| {
-                    try_note_decryption(&domain, ivk, action)
-                        .is_some_and(|(n, _, _)| n.value().inner() == *change_value)
-                });
+                let delivered = try_note_decryption(&IronwoodDomain::for_action(action), &ivk, action)
+                    .is_some_and(|(n, _, _)| n.value().inner() == *change_value);
                 if delivered {
                     return Err(ViolationError::ChangeDelivered);
                 }
@@ -321,6 +334,23 @@ pub fn verify_violation(w: &ViolationWitness) -> Result<ViolationJournal, Violat
             journal.reference = claim_ref(salt, &txid);
             journal.dest_commitment = keccak256(&[salt.as_slice(), &receiver].concat());
             journal.output_index = index;
+        }
+        (
+            Detail::WrongClaimRef {
+                vault_ufvk,
+                salt,
+                receiver,
+            },
+            Kind::WrongClaimRef,
+        ) => {
+            vault_fvk(vault_ufvk)?;
+            let receiver: [u8; 43] = receiver.clone().try_into().map_err(|_| ViolationError::Receiver)?;
+            Option::<Address>::from(Address::from_raw_address_bytes(&receiver)).ok_or(ViolationError::Receiver)?;
+            // X under the vault's key (the commitment of X is found by it), and the reference an
+            // honest commitment of X names this claim by.
+            journal.reference = payout_ref(vault_ufvk, &txid);
+            journal.note_tag = claim_ref(salt, &txid);
+            journal.dest_commitment = keccak256(&[salt.as_slice(), &receiver].concat());
         }
         _ => return Err(ViolationError::KindMismatch),
     }

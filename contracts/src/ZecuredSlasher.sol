@@ -196,6 +196,15 @@ contract ZecuredSlasher is IZecuredSlasher {
                 (bytes32 claimVault,,, bytes32 commitment,) = IZecuredRegistry(registry).claim(p.claimId);
                 if (commitment == j.destCommitment) return (claimVault, r.spendRecord(p.payoutRef).signerBitmap);
             }
+        } else if (j.kind == ViolationKind.WrongClaimRef) {
+            // X is committed (`ref`) with a claim of recipient `destCommitment` under a reference other than the one its
+            // claimant computes, keccak256(salt || txid_X) = `noteTag`, so the claimant can never find X (RT-1).
+            SpendRecord memory s = r.spendRecord(j.ref);
+            bytes32 committed = r.claimRefOf(j.ref, j.destCommitment);
+            if (
+                j.value == 0 && j.outputIndex == 0 && j.noteTag != bytes32(0) && s.vaultId != bytes32(0)
+                    && committed != bytes32(0) && committed != j.noteTag
+            ) return (s.vaultId, s.signerBitmap);
         } else {
             revert UnknownKind();
         }
