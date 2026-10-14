@@ -23,6 +23,7 @@ import {
 import {ZecuredEIP712, DepositAttestation, SpendCommit} from "./libraries/ZecuredEIP712.sol";
 import {IZecuredSpendCommits, LineageNote, SpendRecord, ClaimPayment} from "./interfaces/IZecuredSpendCommits.sol";
 import {ISignerBond} from "./interfaces/ISignerBond.sol";
+import {IZecuredSlasher} from "./interfaces/IZecuredSlasher.sol";
 
 /// @title ZecuredRegistry
 /// @notice Book-keeping for Zecured vaults on Base (docs/INTERFACES.md § 3.2):
@@ -283,6 +284,8 @@ contract ZecuredRegistry is IZecuredRegistry, IZecuredSpendCommits, EIP712 {
         }
         // Still on the best chain, and confirmation work only grows while it stays there.
         _checkAnchor(p.anchor);
+        // E2: not while a violation case about this vault (its deposit spent during the wait) is open.
+        _checkNoOpenCase(vaultId);
         delete _pending[vaultId];
         // The vault is still None: cancelVault and both mint paths refuse a vault with a pending activation.
         _activate(vaultId, p.account, p.amount, p.depositTag);
@@ -804,6 +807,13 @@ contract ZecuredRegistry is IZecuredRegistry, IZecuredSpendCommits, EIP712 {
         uint256 open = _openVaults - 1;
         _openVaults = open;
         if (open == 0) _lastVaultSettledAt = uint64(block.timestamp);
+    }
+
+    /// @dev E2: a vault with an open violation case is not activated; the case's execution halts minting anyway, and
+    ///      its dismissal lets the activation go on. Vault-level, so a case cannot hold up any other vault.
+    function _checkNoOpenCase(bytes32 vaultId) internal view {
+        if (address(signerBond) == address(0)) return;
+        if (IZecuredSlasher(signerBond.slasher()).openCasesOf(vaultId) != 0) revert ViolationCaseOpen(vaultId);
     }
 
     /// @dev Minting needs every signer bonded and no slash yet (S5).

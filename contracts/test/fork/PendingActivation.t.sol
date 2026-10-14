@@ -210,6 +210,31 @@ contract PendingActivationTest is ZecuredFixture {
         assertEq(registry.openVaultCount(), 1);
     }
 
+    /// E2: an open violation case about the vault (its deposit spent during the wait) holds its activation; once the
+    /// case is gone the activation goes on.
+    function test_E2_anOpenCaseHoldsTheActivation() public {
+        _prove(ANCHOR);
+        _ready();
+        bond.setOpenCases(VAULT, 1);
+        vm.expectRevert(abi.encodeWithSelector(IZecuredSpendCommits.ViolationCaseOpen.selector, VAULT));
+        registry.finalizeActivation(VAULT);
+        bond.setOpenCases(VAULT, 0);
+        registry.finalizeActivation(VAULT);
+        assertEq(uint8(_status(VAULT)), uint8(VaultStatus.Active));
+    }
+
+    /// E3: while its activation is pending, the deposit can be neither refunded nor cancelled: the two reads a signer
+    /// makes before a refund (D23, K2) say the vault is not Cancelled and the note's tag is used. After a drop the
+    /// tag is free and the vault can be cancelled (test_cancel_refusedWhilePending_allowedAfterTheDrop).
+    function test_E3_aPendingDepositIsNeitherRefundableNorCancellable() public {
+        _prove(ANCHOR);
+        assertEq(uint8(_status(VAULT)), uint8(VaultStatus.None), "a signer refunds only from a Cancelled vault");
+        assertTrue(registry.depositTagUsed(TAG), "or a note whose tag no vault uses");
+        bytes[] memory sigs = _threeSigs(registry.hashVaultCancellation(VAULT));
+        vm.expectRevert(abi.encodeWithSelector(IZecuredRegistry.ActivationIsPending.selector, VAULT));
+        registry.cancelVault(VAULT, sigs);
+    }
+
     /// After a slash (the bond halted), no new deposit proof is accepted and no pending one is activated.
     function test_halt_stopsProofsAndFinalization() public {
         _prove(ANCHOR);

@@ -103,6 +103,9 @@ interface IZecuredSlasher {
     function caseIdOf(ViolationKind kind, bytes32 ref, bytes32 noteTag) external pure returns (bytes32);
     /// @notice Cases proven but neither executed nor dismissed (bonds stay locked meanwhile).
     function openCaseCount() external view returns (uint256);
+    /// @notice Open cases of one vault. E2: the Registry does not finalize a pending activation while its vault has one
+    ///         (a deposit stolen during the K3 window would otherwise be minted before the case executes).
+    function openCasesOf(bytes32 vaultId) external view returns (uint256);
 
     function registry() external view returns (address);
     function signerBond() external view returns (address);

@@ -18,6 +18,7 @@ import {SpendCommit, DepositAttestation} from "../../src/libraries/ZecuredEIP712
 import {MockRiscZeroVerifier} from "../../src/mocks/MockRiscZeroVerifier.sol";
 import {MockHeaderRelay} from "../mocks/MockHeaderRelay.sol";
 import {ZecuredFixture} from "../utils/ZecuredFixture.sol";
+import {MessageHashUtils} from "@openzeppelin/contracts/utils/cryptography/MessageHashUtils.sol";
 
 /// @notice Tier 3 end to end on a Base Sepolia fork (docs/TIER3.md §§ 6, 7): the five bonds, each violation kind proven
 ///         with the MOCK verifier against Registry records and a MOCK relay's anchors, the challenge window, dismissal,
@@ -280,6 +281,39 @@ contract Tier3SlashingTest is ZecuredFixture {
         slasher.executeSlash(caseId);
         assertEq(_totalBonds(), 0);
         assertEq(bond.bountyOf(address(0xBEbeBeBEbeBebeBeBEBEbebEBeBeBebeBeBebebe)), 0.005 ether);
+    }
+
+    /// E2 with the real slasher: a deposit proven but not yet activated is spent (F1); the vault is not activated while
+    /// the case is open. Dismissed (the theft's block left the best chain), the activation goes on.
+    function test_E2_aCaseOnAPendingDepositHoldsItsActivation() public {
+        bytes32 pVault = keccak256("zecured.tier3.pendingVault");
+        address pAccount = makeAddr("zecured.tier3.pendingAccount");
+        bytes32 pTag = keccak256("zecured.tier3.pendingTag");
+        bytes32 opened = keccak256("zecured.tier3.opened");
+        bytes32 depositAnchor = keccak256("zecured.tier3.depositAnchor");
+        relay.setBlock(depositAnchor, true, 3_500_000);
+        relay.setTipHeight(1_000);
+        bytes memory journal = abi.encode(depositAnchor, pVault, pAccount, VAULT_001, pTag, opened);
+        uint256[] memory all5 = new uint256[](5);
+        (all5[0], all5[1], all5[2], all5[3], all5[4]) = (0, 1, 2, 3, 4);
+        bytes[] memory openedSigs =
+            _signerSigs(MessageHashUtils.toTypedDataHash(registry.domainSeparator(), opened), all5);
+        registry.attestDepositWithProof(journal, verifier.mockSeal(DEPOSIT_IMAGE, sha256(journal)), openedSigs);
+
+        bytes32 caseId = _prove(_journal(ViolationKind.Uncommitted, THEFT_REF, pTag, 0, bytes32(0)));
+        assertEq(slasher.openCasesOf(pVault), 1);
+        relay.setTipHeight(1_006);
+        vm.warp(block.timestamp + 150);
+        vm.expectRevert(abi.encodeWithSelector(IZecuredSpendCommits.ViolationCaseOpen.selector, pVault));
+        registry.finalizeActivation(pVault);
+
+        relay.setBlock(ANCHOR, false, 0);
+        vm.warp(block.timestamp + WINDOW);
+        slasher.executeSlash(caseId); // dismissed
+        assertEq(slasher.openCasesOf(pVault), 0);
+        registry.finalizeActivation(pVault);
+        (address activated,,) = registry.vault(pVault);
+        assertEq(activated, pAccount);
     }
 
     // ================================================================== F2: withheld change

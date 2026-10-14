@@ -957,8 +957,10 @@ mod tests {
         // Cancelled (D23): the conforming deposit goes back, whatever its tag.
         assert!(refund_allowed_by_registry(VAULT_CANCELLED, false).is_ok());
         assert!(refund_allowed_by_registry(VAULT_CANCELLED, true).is_ok());
-        // Not activated yet: a deposit proof may still activate the vault with this note.
+        // Not activated yet: a deposit proof may still activate the vault with this note; and E3,
+        // a proof is pending (the vault reads None, the tag reads used): never refundable either.
         assert!(refund_allowed_by_registry(STATUS_NONE, false).is_err());
+        assert!(refund_allowed_by_registry(STATUS_NONE, true).is_err());
         // Activated or closed: only a note other than the one that backs the vault.
         for status in [VAULT_ACTIVE, VAULT_CLOSED] {
             assert!(refund_allowed_by_registry(status, false).is_ok());

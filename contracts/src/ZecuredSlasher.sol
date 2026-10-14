@@ -42,6 +42,8 @@ contract ZecuredSlasher is IZecuredSlasher {
     mapping(bytes32 caseId => ViolationCase) private _cases;
     /// @inheritdoc IZecuredSlasher
     uint256 public openCaseCount;
+    /// @inheritdoc IZecuredSlasher
+    mapping(bytes32 vaultId => uint256) public openCasesOf;
 
     /// @param registry_ The Registry (v2) whose records the violations are checked against.
     /// @param signerBond_ The SignerBond whose `slasher` is this contract and whose `registry` is `registry_`.
@@ -118,6 +120,7 @@ contract ZecuredSlasher is IZecuredSlasher {
             executed: false
         });
         openCaseCount += 1;
+        openCasesOf[vaultId] += 1;
         emit ViolationProven(caseId, kind, vaultId, signerBitmap, j.beneficiary, executableAt);
     }
 
@@ -128,6 +131,7 @@ contract ZecuredSlasher is IZecuredSlasher {
         if (c.executed) revert CaseAlreadyExecuted(caseId);
         if (block.timestamp < c.executableAt) revert ChallengeWindowOpen(caseId, c.executableAt);
         openCaseCount -= 1;
+        openCasesOf[c.vaultId] -= 1;
 
         bool anchorHolds = IZcashHeaderRelay(relay).isInBestChain(c.anchor)
             && IZcashHeaderRelay(relay).confirmationWork(c.anchor) >= slashConfirmationWork;

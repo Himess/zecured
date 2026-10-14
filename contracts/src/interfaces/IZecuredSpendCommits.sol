@@ -82,6 +82,7 @@ interface IZecuredSpendCommits {
     error ClaimNotCommitted(bytes32 claimId);
     error MintingHalted();
     error SignersNotBonded();
+    error ViolationCaseOpen(bytes32 vaultId);
 
     /// @notice Most claims one payout may pay (8; the signers' plans pay one claim or a close pair).
     function MAX_CLAIMS_PER_PAYOUT() external view returns (uint256);
