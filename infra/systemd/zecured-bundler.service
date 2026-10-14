@@ -1,0 +1,23 @@
+# Our own ERC-4337 bundler (alto, D30); only the backend's proxy talks to it. Configuration:
+# /etc/zecured/bundler.env (BASE_SEPOLIA_RPC_URL, BUNDLER_EXECUTOR_PRIVATE_KEY,
+# BUNDLER_UTILITY_PRIVATE_KEY, BUNDLER_PORT). Keep BUNDLER_PORT closed to the outside.
+[Unit]
+Description=Zecured ERC-4337 bundler
+After=network-online.target
+Wants=network-online.target
+StartLimitIntervalSec=0
+
+[Service]
+User=zecured
+Group=zecured
+EnvironmentFile=/etc/zecured/bundler.env
+ExecStart=/opt/zecured/src/scripts/bundler.sh
+Restart=always
+RestartSec=10
+UMask=0077
+NoNewPrivileges=yes
+ProtectHome=yes
+PrivateTmp=yes
+
+[Install]
+WantedBy=multi-user.target

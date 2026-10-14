@@ -1,0 +1,25 @@
+# Header relayer %i (two run, each with its own key and RPC: D30). Configuration:
+# /etc/zecured/relayer-%i.env (RELAYER_PRIVATE_KEY, ZECURED_RELAY, BASE_SEPOLIA_RPC_URL).
+[Unit]
+Description=Zecured header relayer %i
+After=network-online.target
+Wants=network-online.target
+StartLimitIntervalSec=0
+
+[Service]
+User=zecured
+Group=zecured
+WorkingDirectory=/var/lib/zecured
+EnvironmentFile=/etc/zecured/relayer-%i.env
+ExecStart=/opt/zecured/bin/zecured-bots relayer
+Restart=always
+RestartSec=10
+UMask=0077
+NoNewPrivileges=yes
+ProtectSystem=strict
+ProtectHome=yes
+PrivateTmp=yes
+ReadWritePaths=/var/lib/zecured
+
+[Install]
+WantedBy=multi-user.target

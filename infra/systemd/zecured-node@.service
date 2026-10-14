@@ -1,0 +1,24 @@
+# Signer node %i (1..5). Configuration: /etc/zecured/node-%i.env (see infra/README.md).
+# NODE_EXTRA_ARGS carries per-node flags, e.g. --demo-allow-compromise on nodes 4 and 5 (D18).
+[Unit]
+Description=Zecured signer node %i
+After=network-online.target
+Wants=network-online.target
+StartLimitIntervalSec=0
+
+[Service]
+User=zecured
+Group=zecured
+EnvironmentFile=/etc/zecured/node-%i.env
+ExecStart=/opt/zecured/bin/zecured-node run --data /var/lib/zecured/node-%i --config /etc/zecured/network.json --bind 127.0.0.1:910%i $NODE_EXTRA_ARGS
+Restart=always
+RestartSec=5
+UMask=0077
+NoNewPrivileges=yes
+ProtectSystem=strict
+ProtectHome=yes
+PrivateTmp=yes
+ReadWritePaths=/var/lib/zecured/node-%i
+
+[Install]
+WantedBy=multi-user.target

@@ -1,0 +1,25 @@
+# The backend: coordinator, public API and RPC/bundler/paymaster proxy. Configuration:
+# /etc/zecured/backend.env (see infra/README.md).
+[Unit]
+Description=Zecured backend (coordinator and API)
+After=network-online.target zecured-node@1.service zecured-node@2.service zecured-node@3.service zecured-node@4.service zecured-node@5.service
+Wants=network-online.target
+StartLimitIntervalSec=0
+
+[Service]
+User=zecured
+Group=zecured
+WorkingDirectory=/var/lib/zecured
+EnvironmentFile=/etc/zecured/backend.env
+ExecStart=/opt/zecured/bin/zecured-backend
+Restart=always
+RestartSec=5
+UMask=0077
+NoNewPrivileges=yes
+ProtectSystem=strict
+ProtectHome=yes
+PrivateTmp=yes
+ReadWritePaths=/var/lib/zecured
+
+[Install]
+WantedBy=multi-user.target

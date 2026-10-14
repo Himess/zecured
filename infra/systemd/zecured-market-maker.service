@@ -1,0 +1,24 @@
+# The market-maker bot. Configuration: /etc/zecured/market-maker.env (see infra/README.md).
+[Unit]
+Description=Zecured market-maker
+After=network-online.target zecured-backend.service
+Wants=network-online.target
+StartLimitIntervalSec=0
+
+[Service]
+User=zecured
+Group=zecured
+WorkingDirectory=/var/lib/zecured
+EnvironmentFile=/etc/zecured/market-maker.env
+ExecStart=/opt/zecured/bin/zecured-bots market-maker
+Restart=always
+RestartSec=10
+UMask=0077
+NoNewPrivileges=yes
+ProtectSystem=strict
+ProtectHome=yes
+PrivateTmp=yes
+ReadWritePaths=/var/lib/zecured
+
+[Install]
+WantedBy=multi-user.target

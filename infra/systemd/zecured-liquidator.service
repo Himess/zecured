@@ -1,0 +1,24 @@
+# The liquidator bot. Configuration: /etc/zecured/liquidator.env (see infra/README.md).
+[Unit]
+Description=Zecured liquidator
+After=network-online.target zecured-backend.service
+Wants=network-online.target
+StartLimitIntervalSec=0
+
+[Service]
+User=zecured
+Group=zecured
+WorkingDirectory=/var/lib/zecured
+EnvironmentFile=/etc/zecured/liquidator.env
+ExecStart=/opt/zecured/bin/zecured-bots liquidator
+Restart=always
+RestartSec=10
+UMask=0077
+NoNewPrivileges=yes
+ProtectSystem=strict
+ProtectHome=yes
+PrivateTmp=yes
+ReadWritePaths=/var/lib/zecured
+
+[Install]
+WantedBy=multi-user.target

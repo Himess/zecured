@@ -1,0 +1,17 @@
+# One watchdog pass (infra/watchdog/watchdog.py); zecured-watchdog.timer runs it every 5 minutes.
+[Unit]
+Description=Zecured watchdog pass
+After=network-online.target
+
+[Service]
+Type=oneshot
+User=zecured
+Group=zecured
+EnvironmentFile=/etc/zecured/watchdog.env
+ExecStart=/usr/bin/python3 -I /opt/zecured/src/infra/watchdog/watchdog.py
+SuccessExitStatus=1
+NoNewPrivileges=yes
+ProtectSystem=strict
+ProtectHome=yes
+PrivateTmp=yes
+ReadWritePaths=/var/lib/zecured
