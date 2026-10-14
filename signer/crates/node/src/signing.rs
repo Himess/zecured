@@ -90,6 +90,8 @@ pub struct SpendCommitRecord {
     pub input_tag: B256,
     pub claim_ids: Vec<B256>,
     pub claim_refs: Vec<B256>,
+    /// The action whose output pays each claim (E1).
+    pub claim_outputs: Vec<u8>,
     pub payout_ref: B256,
     pub change_tag: B256,
     pub change_value: u64,
@@ -103,6 +105,7 @@ impl SpendCommitRecord {
             inputTag: self.input_tag,
             claimIds: self.claim_ids.clone(),
             claimRefs: self.claim_refs.clone(),
+            claimOutputs: self.claim_outputs.clone(),
             payoutRef: self.payout_ref,
             changeTag: self.change_tag,
             changeValue: self.change_value,
@@ -119,8 +122,9 @@ pub struct SignedSpendCommit {
 
 /// The commitment of a verified payout (docs/TIER3.md §§ 2, 3), computed by every node from its own
 /// view: the tag of the one lineage note it spends (`input_cmx`), the plan's claims with the salts
-/// of their recipients, references to the verified sighash (the txid of these transactions) and
-/// the tag of the change note the verified PCZT returns to the vault.
+/// of their recipients and the actions of the verified PCZT that pay them, references to the
+/// verified sighash (the txid of these transactions) and the tag of the change note the verified
+/// PCZT returns to the vault.
 pub fn spend_commit(
     vault_id: B256,
     ufvk: &str,
@@ -130,6 +134,12 @@ pub fn spend_commit(
     change: u64,
 ) -> Result<SpendCommitRecord> {
     let txid = verified.sighash;
+    ensure!(verified.payment_actions.len() == claims.len(), "one paying action per claim expected");
+    let claim_outputs = verified
+        .payment_actions
+        .iter()
+        .map(|a| u8::try_from(*a).map_err(|_| anyhow!("a payment's action index does not fit in a byte")))
+        .collect::<Result<Vec<u8>>>()?;
     let change_tag = match (change, verified.change_cmx) {
         (0, None) => [0u8; 32],
         (c, Some(cmx)) if c > 0 => deposit_tag(ufvk, &cmx),
@@ -140,6 +150,7 @@ pub fn spend_commit(
         input_tag: B256::from(deposit_tag(ufvk, input_cmx)),
         claim_ids: claims.iter().map(|(id, _)| B256::from(*id)).collect(),
         claim_refs: claims.iter().map(|(_, salt)| B256::from(claim_ref(salt, &txid))).collect(),
+        claim_outputs,
         payout_ref: B256::from(payout_ref(ufvk, &txid)),
         change_tag: B256::from(change_tag),
         change_value: change,
@@ -345,6 +356,7 @@ pub fn commit_unchecked(vault: &VaultRecord, req: &CommitRequest) -> Result<(Ses
         spends,
         expiry_height,
         change_cmx: None,
+        payment_actions: vec![],
     };
     start_session(vault, req, verified, vec![], 0, None, true)
 }
@@ -416,6 +428,7 @@ mod tests {
             spends: vec![],
             expiry_height: 1_040,
             change_cmx,
+            payment_actions: vec![1],
         }
     }
 
@@ -431,6 +444,7 @@ mod tests {
         assert_eq!(r.payout_ref, B256::from(payout_ref(ufvk, &TX1)));
         assert_eq!(r.claim_ids, vec![B256::from(A)]);
         assert_eq!(r.claim_refs, vec![B256::from(claim_ref(&salt, &TX1))]);
+        assert_eq!(r.claim_outputs, vec![1], "the verified PCZT's action that pays the claim");
         assert_eq!(r.change_tag, B256::from(deposit_tag(ufvk, &change_cmx)));
         assert_eq!(r.change_value, 400_000);
         assert_eq!(r.message().changeValue, 400_000);

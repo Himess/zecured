@@ -360,6 +360,7 @@ mod tests {
             input_tag: B256::repeat_byte(0x66),
             claim_ids: vec![B256::repeat_byte(7)],
             claim_refs: vec![B256::repeat_byte(8)],
+            claim_outputs: vec![0],
             payout_ref: B256::repeat_byte(0xaa),
             change_tag: B256::repeat_byte(0xbb),
             change_value: 3_800_000,

@@ -58,6 +58,9 @@ pub struct Verified {
     /// The note commitment of the change output, if the plan has change: its tag is the vault's
     /// next lineage note on Base (Tier 3 `changeTag`).
     pub change_cmx: Option<[u8; 32]>,
+    /// The action whose output pays each of the plan's payments, in plan order (Tier 3
+    /// `claimOutputs`, E1).
+    pub payment_actions: Vec<usize>,
 }
 
 /// Transaction-level expectations.
@@ -126,6 +129,10 @@ struct FoundOutput {
     visible_internal: bool,
 }
 
+/// An output the plan asks for: receiver, value, OVK policy and payment index (the last two are
+/// `None` for the change).
+type WantedOutput = ([u8; 43], u64, Option<OutputPrivacy>, Option<usize>);
+
 /// Verifies `pczt` against `plan` for the vault with full viewing key `fvk`.
 pub fn verify_payout(
     pczt: &Pczt,
@@ -184,23 +191,32 @@ pub fn verify_payout(
         return Err(VerifyError::InputsMismatch);
     }
 
-    // Outputs: the plan's payments + change, nothing else.
+    // Outputs: the plan's payments + change, nothing else. Each wanted output remembers which
+    // payment it is (None: the change).
     let change_receiver = fvk.address_at(0u32, Scope::Internal).to_raw_address_bytes();
-    let mut wanted: Vec<([u8; 43], u64, Option<OutputPrivacy>)> =
-        plan.payments.iter().map(|p| (p.receiver, p.value, Some(p.privacy))).collect();
+    let mut wanted: Vec<WantedOutput> = plan
+        .payments
+        .iter()
+        .enumerate()
+        .map(|(i, p)| (p.receiver, p.value, Some(p.privacy), Some(i)))
+        .collect();
     if plan.change > 0 {
-        wanted.push((change_receiver, plan.change, None));
+        wanted.push((change_receiver, plan.change, None, None));
     }
     if wanted.len() != outputs.len() {
         return Err(VerifyError::OutputsMismatch);
     }
     let mut change_cmx = None;
+    let mut payment_actions = vec![usize::MAX; plan.payments.len()];
     for out in &outputs {
         let pos = wanted
             .iter()
-            .position(|(r, v, _)| *r == out.receiver && *v == out.value)
+            .position(|(r, v, _, _)| *r == out.receiver && *v == out.value)
             .ok_or(VerifyError::OutputsMismatch)?;
-        let (_, _, privacy) = wanted.swap_remove(pos);
+        let (_, _, privacy, payment) = wanted.swap_remove(pos);
+        if let Some(i) = payment {
+            payment_actions[i] = out.action;
+        }
         let ok = match privacy {
             // Third parties: not recoverable with any vault OVK.
             Some(OutputPrivacy::NoOvk) => !out.visible_external && !out.visible_internal,
@@ -236,6 +252,7 @@ pub fn verify_payout(
             .collect(),
         expiry_height: expiry,
         change_cmx,
+        payment_actions,
     })
 }
 

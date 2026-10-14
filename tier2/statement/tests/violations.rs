@@ -11,7 +11,7 @@ use zcash_primitives::transaction::Transaction;
 use zcash_protocol::consensus::BranchId;
 use zecured_deposit_statement::{
     Error, Witness, deposit_tag, keccak256,
-    violation::{Detail, Kind, ViolationError, ViolationWitness, claim_ref, payout_ref, verify_violation},
+    violation::{Detail, Kind, ViolationError, ViolationWitness, claim_ref, paid_to, payout_ref, verify_violation},
 };
 
 const FIXTURE: &str = concat!(env!("CARGO_MANIFEST_DIR"), "/tests/fixtures/TEST-ONLY_vault9_witness.json");
@@ -139,29 +139,86 @@ fn f2_the_reference_is_keyed_by_the_vault() {
 
 // ------------------------------------------------------------------ F3: misdirected payment
 
-fn misdirected(receiver: Vec<u8>, ivk: Vec<u8>) -> ViolationWitness {
+fn misdirected(receiver: Vec<u8>, ivk: Vec<u8>, output_index: u32) -> ViolationWitness {
     violation(
         Kind::Misdirected,
         Detail::Misdirected {
             salt: SALT,
             receiver,
             ivk,
+            output_index,
         },
     )
 }
 
-/// The claimant (here the vault, which the transaction pays) learns what it was paid: the
-/// slasher compares that with what the commitment promised the claim.
+/// The action of the fixture transaction whose output pays the vault (the "claim's output").
+fn paid_action() -> u32 {
+    deposit().action_index
+}
+
+/// The claimant (here the vault, which the transaction pays) learns what its claim's output paid
+/// it: the slasher compares that with what the commitment promised the claim.
 #[test]
-fn f3_the_claimant_proves_what_it_was_paid() {
+fn f3_the_claimant_proves_what_its_output_paid() {
     let receiver = deposit().note_recipient;
     let ivk = vault_fvk().to_ivk(Scope::External).to_bytes().to_vec();
-    let j = verify_violation(&misdirected(receiver.clone(), ivk)).expect("the vault's own key");
+    let j = verify_violation(&misdirected(receiver.clone(), ivk, paid_action())).expect("the vault's own key");
     assert_eq!(j.kind, Kind::Misdirected);
     assert_eq!(j.reference, claim_ref(&SALT, &txid()));
     assert_eq!(j.dest_commitment, keccak256(&[SALT.as_slice(), &receiver].concat()));
     assert_eq!(j.value, 1_000_000);
+    assert_eq!(j.output_index, u8::try_from(paid_action()).unwrap());
     assert_eq!(j.note_tag, [0; 32]);
+}
+
+/// E1: only the claim's own output counts. Another action of the same transaction (here the
+/// depositor's change), or an index the transaction does not have, paid the claim nothing.
+#[test]
+fn f3_only_the_claims_own_output_counts() {
+    let receiver = deposit().note_recipient;
+    let ivk = vault_fvk().to_ivk(Scope::External).to_bytes().to_vec();
+    let other = 1 - paid_action(); // two actions
+    assert_eq!(verify_violation(&misdirected(receiver.clone(), ivk.clone(), other)).unwrap().value, 0);
+    assert_eq!(verify_violation(&misdirected(receiver.clone(), ivk.clone(), 7)).unwrap().value, 0);
+    assert_eq!(verify_violation(&misdirected(receiver, ivk, 256)), Err(ViolationError::OutputIndex));
+}
+
+/// E1: the output must pay the exact receiver of the claim's commitment, not another address of
+/// the same wallet: a payment to another diversified address is a deviation from the plan.
+#[test]
+fn f3_another_address_of_the_same_wallet_is_not_the_receiver() {
+    let fvk = vault_fvk();
+    let other = fvk.address_at(1u32, Scope::External).to_raw_address_bytes().to_vec();
+    assert_ne!(other, deposit().note_recipient);
+    let ivk = fvk.to_ivk(Scope::External).to_bytes().to_vec();
+    let j = verify_violation(&misdirected(other, ivk, paid_action())).expect("the key owns that address too");
+    assert_eq!(j.value, 0, "the output pays the wallet, but not this receiver");
+}
+
+/// E1 (c): a note counts only if its plaintext matches the action's note commitment. The same
+/// ciphertext under another action's commitment (an output a wallet would reject) pays nothing.
+#[test]
+fn f3_a_note_that_does_not_match_its_commitment_pays_nothing() {
+    use orchard::{Action, Address, keys::PreparedIncomingViewingKey};
+    let d = deposit();
+    let tx = Transaction::read(&d.tx[..], BranchId::Nu7).unwrap();
+    let actions = tx.ironwood_bundle().unwrap().actions();
+    let honest = &actions[d.action_index as usize];
+    let other = &actions[1 - d.action_index as usize];
+    let ivk = PreparedIncomingViewingKey::new(&vault_fvk().to_ivk(Scope::External));
+    let receiver: [u8; 43] = d.note_recipient.clone().try_into().unwrap();
+    let receiver = Address::from_raw_address_bytes(&receiver).unwrap();
+    assert_eq!(paid_to(honest, &ivk, &receiver), 1_000_000);
+    let forged = Action::from_parts(
+        *honest.nullifier(),
+        honest.rk().clone(),
+        *other.cmx(),
+        honest.encrypted_note().clone(),
+        honest.cv_net().clone(),
+        honest.authorization().clone(),
+    )
+    .unwrap();
+    assert_eq!(paid_to(&forged, &ivk, &receiver), 0);
 }
 
 #[test]
@@ -169,18 +226,13 @@ fn f3_a_key_that_does_not_own_the_receiver_proves_nothing() {
     let receiver = deposit().note_recipient;
     // The vault's internal key owns its change address, not the deposit receiver.
     let internal = vault_fvk().to_ivk(Scope::Internal).to_bytes().to_vec();
-    assert_eq!(verify_violation(&misdirected(receiver.clone(), internal)), Err(ViolationError::NotTheClaimant));
-    assert_eq!(verify_violation(&misdirected(receiver[..42].to_vec(), vec![0; 64])), Err(ViolationError::Receiver));
-    assert_eq!(verify_violation(&misdirected(receiver, vec![0; 63])), Err(ViolationError::Ivk));
-}
-
-/// A wallet that X does not pay: it proves it received nothing (value 0).
-#[test]
-fn f3_a_wallet_the_transaction_does_not_pay_received_nothing() {
-    let fvk = vault_fvk();
-    let change_address = fvk.address_at(0u32, Scope::Internal).to_raw_address_bytes().to_vec();
-    let j = verify_violation(&misdirected(change_address, fvk.to_ivk(Scope::Internal).to_bytes().to_vec())).unwrap();
-    assert_eq!(j.value, 0);
+    let p = paid_action();
+    assert_eq!(verify_violation(&misdirected(receiver.clone(), internal, p)), Err(ViolationError::NotTheClaimant));
+    assert_eq!(
+        verify_violation(&misdirected(receiver[..42].to_vec(), vec![0; 64], p)),
+        Err(ViolationError::Receiver)
+    );
+    assert_eq!(verify_violation(&misdirected(receiver, vec![0; 63], p)), Err(ViolationError::Ivk));
 }
 
 // ------------------------------------------------------------------ F1: uncommitted spend
@@ -230,7 +282,7 @@ fn the_transaction_must_be_in_the_anchored_history() {
 fn the_journal_is_the_slashers_abi() {
     let j = verify_violation(&withheld(h32(DEPOSIT_TAG), 999_999)).unwrap();
     let enc = j.abi_encode();
-    assert_eq!(enc.len(), 7 * 32);
+    assert_eq!(enc.len(), 8 * 32);
     assert_eq!(enc[31], 2);
     assert!(enc[..31].iter().all(|b| *b == 0));
     assert_eq!(enc[32..64], h32(ANCHOR));
@@ -241,6 +293,7 @@ fn the_journal_is_the_slashers_abi() {
     assert_eq!(u64::from_be_bytes(enc[184..192].try_into().unwrap()), 999_999);
     assert_eq!(enc[160..184], [0; 24]);
     assert_eq!(enc[192..224], [0; 32]);
+    assert_eq!(enc[224..256], [0; 32], "output index, F3 only");
 }
 
 // ------------------------------------------------------------------ F1 on a real vault spend

@@ -226,10 +226,12 @@ abstract contract ZecuredFixture is Test {
     {
         uint64 claimed;
         bytes32[] memory refs = new bytes32[](claimIds.length);
+        uint8[] memory outputs = new uint8[](claimIds.length);
         for (uint256 i; i < claimIds.length; ++i) {
             (,, uint64 amount,,) = registry.claim(claimIds[i]);
             claimed += amount;
             refs[i] = keccak256(abi.encode("zecured.test.claimRef", salt, i));
+            outputs[i] = uint8(i); // claim i paid by action i
         }
         uint64 change = registry.lineageOf(inputTag).value - claimed;
         c = SpendCommit({
@@ -237,6 +239,7 @@ abstract contract ZecuredFixture is Test {
             inputTag: inputTag,
             claimIds: claimIds,
             claimRefs: refs,
+            claimOutputs: outputs,
             payoutRef: keccak256(abi.encode("zecured.test.payoutRef", salt)),
             changeTag: change == 0 ? bytes32(0) : keccak256(abi.encode("zecured.test.changeTag", salt)),
             changeValue: change

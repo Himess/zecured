@@ -118,8 +118,9 @@ pub async fn withheld_change(
     checked(witness(Kind::WithheldChange, beneficiary, at, detail)?)
 }
 
-/// F3: committed payout `txid` names a claim whose recipient is `(salt, receiver)`; `ivk` (raw,
-/// 64 bytes) is an incoming viewing key of the claimant's wallet.
+/// F3: committed payout `txid` names a claim whose recipient is `(salt, receiver)`, paid by its
+/// action `output_index` (`claimPayment(claimRef).outputIndex` on Base); `ivk` (raw, 64 bytes) is an
+/// incoming viewing key of the claimant's wallet.
 #[allow(clippy::too_many_arguments)]
 pub async fn misdirected(
     client: &mut LwdClient,
@@ -129,6 +130,7 @@ pub async fn misdirected(
     salt: [u8; 32],
     receiver: [u8; 43],
     ivk: [u8; 64],
+    output_index: u8,
     tip: u32,
     beneficiary: [u8; 20],
 ) -> Result<(ViolationWitness, ViolationJournal)> {
@@ -137,6 +139,7 @@ pub async fn misdirected(
         salt,
         receiver: receiver.to_vec(),
         ivk: ivk.to_vec(),
+        output_index: u32::from(output_index),
     };
     checked(witness(Kind::Misdirected, beneficiary, at, detail)?)
 }

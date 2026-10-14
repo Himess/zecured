@@ -99,6 +99,14 @@ contract Tier3SlashingTest is ZecuredFixture {
         view
         returns (bytes memory)
     {
+        return _journalAt(kind, ref, noteTag, value, dest, 0);
+    }
+
+    function _journalAt(ViolationKind kind, bytes32 ref, bytes32 noteTag, uint64 value, bytes32 dest, uint8 output)
+        internal
+        view
+        returns (bytes memory)
+    {
         return abi.encode(
             ViolationJournal({
                 kind: kind,
@@ -107,7 +115,8 @@ contract Tier3SlashingTest is ZecuredFixture {
                 ref: ref,
                 noteTag: noteTag,
                 value: value,
-                destCommitment: dest
+                destCommitment: dest,
+                outputIndex: output
             })
         );
     }
@@ -126,7 +135,7 @@ contract Tier3SlashingTest is ZecuredFixture {
 
     function _partial(uint64 amount) internal returns (bytes32 claimId) {
         vm.startPrank(account);
-        MORPHO.setAuthorization(address(registry), true);
+        if (!MORPHO.isAuthorized(account, address(registry))) MORPHO.setAuthorization(address(registry), true);
         claimId = registry.requestPartialRelease(vaultId, amount, keccak256("zecured.tier3.dest"));
         vm.stopPrank();
     }
@@ -134,6 +143,11 @@ contract Tier3SlashingTest is ZecuredFixture {
     function _one(bytes32 a) internal pure returns (bytes32[] memory r) {
         r = new bytes32[](1);
         r[0] = a;
+    }
+
+    function _two(bytes32 a, bytes32 b) internal pure returns (bytes32[] memory r) {
+        r = new bytes32[](2);
+        (r[0], r[1]) = (a, b);
     }
 
     function _totalBonds() internal view returns (uint256 sum) {
@@ -263,6 +277,7 @@ contract Tier3SlashingTest is ZecuredFixture {
             hex"0a20962f2e701d49033b677adf918a7f8a38e3115e52f52ea3567140930e25ba",
             tag,
             hex"0000000000000000000000000000000000000000000000000000000000000000",
+            hex"0000000000000000000000000000000000000000000000000000000000000000",
             hex"0000000000000000000000000000000000000000000000000000000000000000"
         );
         address vault9Account = makeAddr("zecured.tier3.vault9");
@@ -375,6 +390,28 @@ contract Tier3SlashingTest is ZecuredFixture {
         assertTrue(bond.halted());
     }
 
+    /// E1: two claims of the same borrower in one payout, to the same receiver. Colluders pay only the first; the
+    /// second claim's committed output does not pay it, and its own output is the only one that counts: the other
+    /// claim's payment cannot mask the theft.
+    function test_F3_aSecondClaimToTheSameReceiverIsNotMasked() public {
+        bytes32 first = _partial(1_000_000);
+        bytes32 second = _partial(500_000);
+        SpendCommit memory c = _spendCommit(vaultId, depositTag, _two(first, second), "same receiver");
+        registry.commitSpend(c, _threeSigs(registry.hashSpendCommit(c)));
+        bytes32 dest = keccak256("zecured.tier3.dest");
+        uint8 secondOutput = c.claimOutputs[1];
+
+        // The first claim's payment, 985,000 zat at output 0, is not the second claim's output.
+        _expectProveRevert(
+            _journalAt(ViolationKind.Misdirected, c.claimRefs[1], bytes32(0), 985_000, dest, c.claimOutputs[0]),
+            abi.encodeWithSelector(IZecuredSlasher.NoViolation.selector, ViolationKind.Misdirected, c.claimRefs[1])
+        );
+        // The second claim's own output pays nothing to its receiver.
+        bytes32 caseId =
+            _prove(_journalAt(ViolationKind.Misdirected, c.claimRefs[1], bytes32(0), 0, dest, secondOutput));
+        assertEq(slasher.caseOf(caseId).signerBitmap, 0x15);
+    }
+
     // ================================================================== journal checks
 
     function test_prove_revertsOnABadJournalOrSeal() public {
@@ -404,7 +441,8 @@ contract Tier3SlashingTest is ZecuredFixture {
                 ref: THEFT_REF,
                 noteTag: depositTag,
                 value: 0,
-                destCommitment: bytes32(0)
+                destCommitment: bytes32(0),
+                outputIndex: 0
             })
         );
         vm.expectRevert(MockRiscZeroVerifier.MockSealInvalid.selector);
@@ -425,7 +463,8 @@ contract Tier3SlashingTest is ZecuredFixture {
                 ref: THEFT_REF,
                 noteTag: depositTag,
                 value: 0,
-                destCommitment: bytes32(0)
+                destCommitment: bytes32(0),
+                outputIndex: 0
             })
         );
         _expectProveRevert(toVault, abi.encodeWithSelector(IZecuredSlasher.InvalidBeneficiary.selector, account));

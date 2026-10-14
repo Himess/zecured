@@ -743,8 +743,8 @@ contract ZecuredRegistry is IZecuredRegistry, IZecuredSpendCommits, EIP712 {
         LineageNote memory input = _lineage[c.inputTag];
         if (c.vaultId == bytes32(0) || input.vaultId != c.vaultId) revert NotALineageNote(c.vaultId, c.inputTag);
         uint256 n = c.claimIds.length;
-        if (n == 0 || n > MAX_CLAIMS_PER_PAYOUT || c.claimRefs.length != n) {
-            revert InvalidClaimCount(n, c.claimRefs.length);
+        if (n == 0 || n > MAX_CLAIMS_PER_PAYOUT || c.claimRefs.length != n || c.claimOutputs.length != n) {
+            revert InvalidClaimCount(n, c.claimRefs.length == n ? c.claimOutputs.length : c.claimRefs.length);
         }
         bool withChange = c.changeValue != 0;
         if (withChange != (c.changeTag != bytes32(0)) || (withChange && _lineage[c.changeTag].vaultId != bytes32(0))) {
@@ -771,12 +771,15 @@ contract ZecuredRegistry is IZecuredRegistry, IZecuredSpendCommits, EIP712 {
     }
 
     /// @dev One claim of a commitment (docs/TIER3.md § 4): distinct, of the vault, pending, bound to this input (the
-    ///      first commitment binds it), with an unused claim ref, which records what the claimant must receive.
+    ///      first commitment binds it), paid by its own output (E1), with an unused claim ref, which records what the
+    ///      claimant must receive and where.
     ///      `claimIds[0]` bears the fee. Returns the claim's amount.
     function _commitClaim(SpendCommit calldata c, uint256 i, uint64 fee) internal returns (uint64 amount) {
         bytes32 id = c.claimIds[i];
+        uint8 output = c.claimOutputs[i];
         for (uint256 k; k < i; ++k) {
             if (c.claimIds[k] == id) revert DuplicateClaim(id);
+            if (c.claimOutputs[k] == output) revert DuplicateClaimOutput(output);
         }
         Claim storage cl = _claims[id];
         if (cl.vaultId != c.vaultId || cl.status != ClaimStatus.Pending) revert ClaimNotPayable(id);
@@ -792,7 +795,8 @@ contract ZecuredRegistry is IZecuredRegistry, IZecuredSpendCommits, EIP712 {
             if (amount <= fee) revert FeeBearerIsDust(id, amount, fee);
             expected = amount - fee;
         }
-        _claimPayments[ref] = ClaimPayment({claimId: id, payoutRef: c.payoutRef, expected: expected});
+        _claimPayments[ref] =
+            ClaimPayment({claimId: id, payoutRef: c.payoutRef, expected: expected, outputIndex: output});
     }
 
     /// @dev A vault's deposit note becomes its first lineage note as soon as the vault is pending or activated: from

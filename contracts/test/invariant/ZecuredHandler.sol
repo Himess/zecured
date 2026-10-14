@@ -487,6 +487,7 @@ contract ZecuredHandler is Test {
             inputTag: head,
             claimIds: ids,
             claimRefs: refs,
+            claimOutputs: new uint8[](ids.length),
             payoutRef: keccak256(abi.encode("zecured.inv.payoutRef", head)),
             changeTag: change == 0 ? bytes32(0) : keccak256(abi.encode("zecured.inv.change", head)),
             changeValue: change
@@ -540,6 +541,7 @@ contract ZecuredHandler is Test {
             inputTag: head,
             claimIds: ids,
             claimRefs: refs,
+            claimOutputs: new uint8[](1),
             payoutRef: keccak256(abi.encode("zecured.inv.reusePayout", head, claimId)),
             changeTag: amount == lineage ? bytes32(0) : keccak256(abi.encode("zecured.inv.reuseChange", head)),
             changeValue: lineage - amount

@@ -174,6 +174,23 @@ fn output_ciphertext(pczt: &pczt::Pczt, to: &Address) -> ([u8; 32], [u8; 580]) {
     found.expect("an output paying this address")
 }
 
+/// The index of the action whose output pays `to`.
+fn output_action(pczt: &pczt::Pczt, to: &Address) -> usize {
+    let mut found = None;
+    LowLevelSigner::new(pczt.clone())
+        .sign_ironwood_with(|_, bundle, _| -> Result<(), OrchardParseError> {
+            for (i, a) in bundle.actions().iter().enumerate() {
+                let paid = a.output().value().is_some_and(|v| v.inner() > 0);
+                if paid && a.output().recipient().as_ref() == Some(to) {
+                    found = Some(i);
+                }
+            }
+            Ok(())
+        })
+        .unwrap();
+    found.expect("an output paying this address")
+}
+
 /// The note commitment of the output paying `to`.
 fn output_cmx(pczt: &pczt::Pczt, to: &Address) -> [u8; 32] {
     let mut found = None;
@@ -248,6 +265,8 @@ fn honest_pczt_passes_and_yields_one_spend() {
     let change = fvk.address_at(0u32, Scope::Internal);
     assert_eq!(v.change_cmx, Some(output_cmx(&pczt, &change)));
     assert_ne!(v.change_cmx, Some(output_cmx(&pczt, &liq)));
+    // E1: the action that pays the plan's one payment (the liquidator) is the one committed for it.
+    assert_eq!(v.payment_actions, vec![output_action(&pczt, &liq)]);
 }
 
 #[test]

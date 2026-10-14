@@ -32,7 +32,7 @@ contract ZecuredEIP712Test is Test {
     string internal constant DELEVERAGE_REQUEST =
         "DeleverageRequest(bytes32 vaultId,address account,address executor,uint16 marginBps,uint256 repayAssets,uint64 maxCollateral,uint256 nonce,uint64 deadline)";
     string internal constant SPEND_COMMIT =
-        "SpendCommit(bytes32 vaultId,bytes32 inputTag,bytes32[] claimIds,bytes32[] claimRefs,bytes32 payoutRef,bytes32 changeTag,uint64 changeValue)";
+        "SpendCommit(bytes32 vaultId,bytes32 inputTag,bytes32[] claimIds,bytes32[] claimRefs,uint8[] claimOutputs,bytes32 payoutRef,bytes32 changeTag,uint64 changeValue)";
 
     // ------------------------------------------------------------------ fixed vector inputs (Base Sepolia)
 
@@ -105,11 +105,14 @@ contract ZecuredEIP712Test is Test {
         bytes32[] memory refs = new bytes32[](2);
         refs[0] = CLAIM_REF_0;
         refs[1] = CLAIM_REF_1;
+        uint8[] memory outputs = new uint8[](2);
+        (outputs[0], outputs[1]) = (2, 0); // the borrower's output is action 2, the market maker's action 0
         c = SpendCommit({
             vaultId: VAULT_ID,
             inputTag: DEPOSIT_TAG,
             claimIds: _claimIds(),
             claimRefs: refs,
+            claimOutputs: outputs,
             payoutRef: PAYOUT_REF,
             changeTag: CHANGE_TAG,
             changeValue: CHANGE_VALUE
@@ -335,7 +338,7 @@ contract ZecuredEIP712Test is Test {
         string memory json = string.concat(
             '{"types":{',
             DOMAIN_TYPES_JSON,
-            ',"SpendCommit":[{"name":"vaultId","type":"bytes32"},{"name":"inputTag","type":"bytes32"},{"name":"claimIds","type":"bytes32[]"},{"name":"claimRefs","type":"bytes32[]"},{"name":"payoutRef","type":"bytes32"},{"name":"changeTag","type":"bytes32"},{"name":"changeValue","type":"uint64"}]},',
+            ',"SpendCommit":[{"name":"vaultId","type":"bytes32"},{"name":"inputTag","type":"bytes32"},{"name":"claimIds","type":"bytes32[]"},{"name":"claimRefs","type":"bytes32[]"},{"name":"claimOutputs","type":"uint8[]"},{"name":"payoutRef","type":"bytes32"},{"name":"changeTag","type":"bytes32"},{"name":"changeValue","type":"uint64"}]},',
             '"primaryType":"SpendCommit",',
             _domainJson("ZecuredRegistry", REGISTRY),
             _spendCommitMessageJson(c)
@@ -360,7 +363,7 @@ contract ZecuredEIP712Test is Test {
             vm.toString(c.claimRefs[0]),
             '","',
             vm.toString(c.claimRefs[1]),
-            '"],"payoutRef":"',
+            '"],"claimOutputs":["2","0"],"payoutRef":"',
             vm.toString(c.payoutRef),
             '","changeTag":"',
             vm.toString(c.changeTag),
@@ -389,6 +392,9 @@ contract ZecuredEIP712Test is Test {
         c = _spendCommit();
         c.claimRefs[0] = bytes32(uint256(c.claimRefs[0]) ^ 1);
         assertTrue(ZecuredEIP712.hashSpendCommit(c) != base);
+        c = _spendCommit();
+        c.claimOutputs[1] = 1;
+        assertTrue(ZecuredEIP712.hashSpendCommit(c) != base, "an output index");
         c = _spendCommit();
         (c.claimIds, c.claimRefs) = (c.claimRefs, c.claimIds);
         assertTrue(ZecuredEIP712.hashSpendCommit(c) != base, "arrays swapped");
@@ -489,7 +495,7 @@ contract ZecuredEIP712Test is Test {
     bytes32 internal constant GOLDEN_DELEVERAGE_REQUEST_DIGEST =
         0x54c59f01064cf8a39e3c1036566f3e83c7cd9c5b21d3256c70f4adc4f1297211;
     // SpendCommit: inputTag 0x6666..66, claimIds as PayoutConfirmation's, claimRefs [0x8888..88, 0x9999..99],
-    // payoutRef 0xaaaa..aa, changeTag 0xbbbb..bb, changeValue 3,800,000.
+    // claimOutputs [2, 0], payoutRef 0xaaaa..aa, changeTag 0xbbbb..bb, changeValue 3,800,000.
     bytes32 internal constant GOLDEN_SPEND_COMMIT_DIGEST =
-        0x16347216b48a0eb77b4af1738514b09ced87e423e69215bc7aeecefa866fe781;
+        0x3dd9f2e94c96d5aa0a5c016684697f2283f0447f4d0eb81739052c0a07217d7a;
 }

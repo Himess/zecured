@@ -35,6 +35,7 @@ sol! {
             bytes32 inputTag;
             bytes32[] claimIds;
             bytes32[] claimRefs;
+            uint8[] claimOutputs;
             bytes32 payoutRef;
             bytes32 changeTag;
             uint64 changeValue;
@@ -59,6 +60,7 @@ sol! {
             bytes32 claimId;
             bytes32 payoutRef;
             uint64 expected;
+            uint8 outputIndex;
         }
 
         event VaultActivated(bytes32 indexed vaultId, address indexed account, uint64 amount, bytes32 depositTag);

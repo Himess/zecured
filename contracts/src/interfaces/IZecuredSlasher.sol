@@ -20,9 +20,11 @@ enum ViolationKind {
 /// @param beneficiary Receives the bounty; bound inside the proof, so a copied seal cannot redirect it.
 /// @param ref F1, F2: `payoutRef(txid_X)` under the vault's tag key; F3: `claimRef = keccak256(salt || txid_X)`.
 /// @param noteTag F1: tag of the lineage note X spends; F2: the committed change tag; F3: zero.
-/// @param value F2: the committed change value; F3: the largest value X pays to the claimant's IVK (zero if none);
-///        F1: zero.
+/// @param value F2: the committed change value; F3: what the output at `outputIndex` pays the claim's exact receiver,
+///        decrypted with the claimant's IVK and checked against its note commitment (zero if it pays anything else, or
+///        is no such output); F1: zero.
 /// @param destCommitment F3: `keccak256(salt || receiver)`, the claim's recipient commitment; zero otherwise.
+/// @param outputIndex F3: the action of X the commitment names for the claim; zero otherwise.
 struct ViolationJournal {
     ViolationKind kind;
     bytes32 anchor;
@@ -31,6 +33,7 @@ struct ViolationJournal {
     bytes32 noteTag;
     uint64 value;
     bytes32 destCommitment;
+    uint8 outputIndex;
 }
 
 /// @notice An open or executed violation case.
@@ -57,8 +60,8 @@ struct ViolationCase {
 ///      - F1: `lineageOf(noteTag)` exists and `spendRecord(ref).inputTag != noteTag`; slashes all five;
 ///      - F2: `spendRecord(ref)` exists with `changeValue > 0`, `changeTag == noteTag` and `changeValue == value`;
 ///        slashes its `signerBitmap`;
-///      - F3: `claimPayment(ref)` exists, its claim's commitment is `destCommitment` and `value < expected`; slashes
-///        the `signerBitmap` of its payout.
+///      - F3: `claimPayment(ref)` exists for output `outputIndex`, its claim's commitment is `destCommitment` and
+///        `value < expected`; slashes the `signerBitmap` of its payout.
 ///      It opens case `caseIdOf(kind, ref, noteTag)` (one per violation, whoever proves it first), executable after
 ///      `challengeWindow`. `executeSlash(caseId)` (anyone) checks the anchor and the condition again: an F1 case is
 ///      dismissed (deleted) if the commitment appeared meanwhile, an honest resubmission after a Base reorg (a lying
@@ -91,7 +94,7 @@ interface IZecuredSlasher {
     error ChallengeWindowOpen(bytes32 caseId, uint64 executableAt);
     error CaseAlreadyExecuted(bytes32 caseId);
 
-    /// @notice Length of an ABI-encoded ViolationJournal: seven words.
+    /// @notice Length of an ABI-encoded ViolationJournal: eight words.
     function JOURNAL_LENGTH() external view returns (uint256);
 
     function proveViolation(ViolationKind kind, bytes calldata journal, bytes calldata seal)

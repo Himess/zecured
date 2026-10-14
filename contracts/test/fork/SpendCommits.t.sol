@@ -263,8 +263,29 @@ contract SpendCommitsTest is ZecuredFixture {
         c = _spendCommit(vaultId, depositTag, _one(b), "claims");
         c.claimIds = _two(b, a);
         c.claimRefs = _two(keccak256("ref b"), keccak256("ref a"));
+        c.claimOutputs = new uint8[](2);
+        c.claimOutputs[1] = 1;
         c.changeValue = VAULT_005 - 2_000_000;
         _expectRevertOn(c, abi.encodeWithSelector(IZecuredSpendCommits.ClaimNotPayable.selector, a));
+    }
+
+    /// E1: each claim names its own output of the payout; two claims never share one, and every claim names one.
+    function test_commitSpend_eachClaimHasItsOwnOutput() public {
+        bytes32 a = _partial(1_000_000);
+        bytes32 b = _partial(1_000_000);
+        SpendCommit memory c = _spendCommit(vaultId, depositTag, _two(a, b), "outputs");
+        c.claimOutputs[1] = c.claimOutputs[0];
+        _expectRevertOn(
+            c, abi.encodeWithSelector(IZecuredSpendCommits.DuplicateClaimOutput.selector, c.claimOutputs[0])
+        );
+        c.claimOutputs = new uint8[](1);
+        _expectRevertOn(c, abi.encodeWithSelector(IZecuredSpendCommits.InvalidClaimCount.selector, 2, 1));
+
+        c = _spendCommit(vaultId, depositTag, _two(a, b), "outputs");
+        (c.claimOutputs[0], c.claimOutputs[1]) = (3, 1);
+        _send(c);
+        assertEq(registry.claimPayment(c.claimRefs[0]).outputIndex, 3);
+        assertEq(registry.claimPayment(c.claimRefs[1]).outputIndex, 1);
     }
 
     /// The fee-bearing claim must cover the fee: the signers never pay dust (it stays in the vault).
@@ -363,6 +384,7 @@ contract SpendCommitsTest is ZecuredFixture {
             inputTag: att.depositTag,
             claimIds: _one(claimId),
             claimRefs: refs,
+            claimOutputs: new uint8[](1),
             payoutRef: keccak256("zecured.test.haltPayout"),
             changeTag: bytes32(0),
             changeValue: 0

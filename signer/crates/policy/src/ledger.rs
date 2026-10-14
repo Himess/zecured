@@ -285,6 +285,9 @@ pub fn next_payout(
         {
             let grace_end = claim.created_at.saturating_add(MARKET_MAKER_GRACE_SECS);
             match recipient(&mm.commitment) {
+                // E1: one payout never pays the same receiver twice; the market maker then waits
+                // for the next payout.
+                Some(mm_rcpt) if mm_rcpt.receiver == rcpt.receiver => {}
                 Some(mm_rcpt) => group.push((mm, mm_rcpt)),
                 None if now < grace_end => return Ok(NextPayout::WaitUntil(grace_end)),
                 None => {} // grace over: pay the borrower alone
@@ -314,7 +317,7 @@ fn borrower_payable(
         return Ok(false);
     };
     let mut group = vec![(user, user_rcpt)];
-    if let Some(mm_rcpt) = recipient(&mm.commitment) {
+    if let Some(mm_rcpt) = recipient(&mm.commitment).filter(|r| r.receiver != user_rcpt.receiver) {
         group.push((mm, mm_rcpt));
     }
     Ok(plan(&group, lineage_value, lineage_notes)?.is_some())
@@ -499,6 +502,36 @@ mod tests {
         assert_eq!(p.payments[0].value, 1_200_000 - FEE_1_IN_2_OUT);
         assert_eq!(p.payments[1].value, 3_800_000);
         assert_eq!(p.payments[1].privacy, OutputPrivacy::NoOvk);
+    }
+
+    /// E1: a close whose borrower and market maker share a receiver is paid in two payouts, so
+    /// that no payout pays one receiver twice: first the borrower (bearing its own fee), then the
+    /// market maker on its own.
+    #[test]
+    fn a_shared_receiver_is_never_paid_twice_in_one_payout() {
+        let user = claim(3, ClaimKind::CloseUser, 1_200_000, (11, 0), Some(4));
+        let mut mm = claim(4, ClaimKind::CloseMarketMaker, 3_800_000, (11, 0), Some(3));
+        let same = Recipient {
+            receiver: [3; 43],
+            salt: [9; 32],
+        };
+        mm.commitment = same.commitment();
+        let map: HashMap<Commitment, Recipient> = [(rcpt(3).commitment(), rcpt(3)), (mm.commitment, same)].into();
+        let recipient = |c: &Commitment| map.get(c).copied();
+        let NextPayout::Pay(p) = next_payout(&[user.clone(), mm.clone()], recipient, DEPOSIT, 1, 1_010).unwrap() else {
+            panic!()
+        };
+        assert_eq!(p.claims, vec![user.id], "the borrower alone");
+        assert_eq!(p.payments[0].value, 1_200_000 - FEE_1_IN_2_OUT, "with change, two outputs");
+        let paid = Claim {
+            state: ClaimState::Paid,
+            ..user
+        };
+        let NextPayout::Pay(p) = next_payout(&[paid, mm.clone()], recipient, DEPOSIT - 1_200_000, 1, 1_010).unwrap()
+        else {
+            panic!()
+        };
+        assert_eq!(p.claims, vec![mm.id], "then the market maker");
     }
 
     #[test]

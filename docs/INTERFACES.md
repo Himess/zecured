@@ -105,7 +105,7 @@ VaultOpened(bytes32 vaultId,address owner,address account,uint64 amount,uint32 e
 ### 2.6 Tier 3: signed by signer nodes before they sign a payout (Registry v2, Deploy 2)
 
 ```
-SpendCommit(bytes32 vaultId,bytes32 inputTag,bytes32[] claimIds,bytes32[] claimRefs,bytes32 payoutRef,bytes32 changeTag,uint64 changeValue)
+SpendCommit(bytes32 vaultId,bytes32 inputTag,bytes32[] claimIds,bytes32[] claimRefs,uint8[] claimOutputs,bytes32 payoutRef,bytes32 changeTag,uint64 changeValue)
 ```
 
 - Signed in FROST round 1 and recorded by `commitSpend` before any node releases a round-2
@@ -115,6 +115,8 @@ SpendCommit(bytes32 vaultId,bytes32 inputTag,bytes32[] claimIds,bytes32[] claimR
   spent and of the change returned; `payoutRef = BLAKE2b-256(key = the same tag key, personal =
   "Zecured_PayRef__", txid)`; `claimRefs[i] = keccak256(salt_i || txid)` for `claimIds[i]`
   (`salt_i` of its recipient commitment, § 1). Txids in internal byte order.
+- `claimOutputs[i]` is the index of the payout's action whose output pays `claimIds[i]`; the indexes
+  are distinct, so two claims never share one output (E1, D34).
 - `claimIds[0]` bears the payout's ZIP 317 fee. Arrays are hashed as EIP-712 requires
   (`keccak256` of the concatenated elements); signatures as in § 2.2.
 
@@ -177,7 +179,8 @@ function commitSpend(SpendCommit calldata c, bytes[] calldata sigs) external;
 function lineageOf(bytes32 tag) external view returns (LineageNote memory);             // (vaultId, value)
 function spendRecord(bytes32 payoutRef) external view returns (SpendRecord memory);    // (recordHash, vaultId, inputTag,
                                                                                         //  changeTag, changeValue, claimCount, signerBitmap)
-function claimPayment(bytes32 claimRef) external view returns (ClaimPayment memory);   // (claimId, payoutRef, expected)
+function claimPayment(bytes32 claimRef) external view returns (ClaimPayment memory);   // (claimId, payoutRef, expected,
+                                                                                        //  outputIndex)
 function claimInput(bytes32 claimId) external view returns (bytes32 inputTag);
 function hashSpendCommit(SpendCommit calldata c) external view returns (bytes32);
 function openVaultCount() external view returns (uint256);
@@ -224,10 +227,12 @@ event SpendCommitted(bytes32 indexed vaultId, bytes32 indexed payoutRef, bytes32
 - Tier 3 (D31): `commitSpend` records a payout before the signers sign it (rules in
   `IZecuredSpendCommits` and docs/TIER3.md § 4: 3 sorted signer signatures, one lineage input of the
   vault, 1 to 8 distinct pending claims bound to that input on first commitment, one unused claim ref
-  each, exact conservation, the ZIP 317 fee fixed by the committed shape). `confirmPayout` requires every
-  claim to have been committed. A deposit note is a lineage note from its proof (or attestation) on, and
-  stops being one if its pending activation is dropped. New proofs and activations need the bond
-  contract `fullyBonded()` and not `halted()`.
+  and one distinct output index each, exact conservation, the ZIP 317 fee fixed by the committed
+  shape). `confirmPayout` requires every claim to have been committed. A deposit note is a lineage
+  note from its proof (or attestation) on, and stops being one if its pending activation is dropped.
+  New proofs and activations need the bond contract `fullyBonded()` and not `halted()`;
+  `finalizeActivation` also reverts with `ViolationCaseOpen(vaultId)` while the slasher has a case open
+  on the vault (E2, D34).
 
 ### 3.3 `SettlementAdapter`
 
@@ -282,10 +287,12 @@ function halted() external view returns (bool);
 // ZecuredSlasher (IZecuredSlasher)
 enum ViolationKind { None, Uncommitted, WithheldChange, Misdirected }
 struct ViolationJournal { ViolationKind kind; bytes32 anchor; address beneficiary; bytes32 ref; bytes32 noteTag;
-                          uint64 value; bytes32 destCommitment; }               // abi.encode: 7 words
+                          uint64 value; bytes32 destCommitment; uint8 outputIndex; }  // abi.encode: 8 words
 function proveViolation(ViolationKind kind, bytes calldata journal, bytes calldata seal) external returns (bytes32 caseId);
 function executeSlash(bytes32 caseId) external;                               // after challengeWindow
 function caseIdOf(ViolationKind kind, bytes32 ref, bytes32 noteTag) external pure returns (bytes32);
+function openCaseCount() external view returns (uint256);                     // SignerBond.withdraw needs 0
+function openCasesOf(bytes32 vaultId) external view returns (uint256);        // finalizeActivation needs 0 (E2)
 ```
 
 - The journal's kinds, the Registry records each is checked against, and the dismissal rules are in

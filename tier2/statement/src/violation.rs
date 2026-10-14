@@ -14,9 +14,10 @@
 //!   promised: none whose note commitment has the committed tag and decrypts, with either of the
 //!   vault's incoming viewing keys, to a note of the committed value.
 //! - **F3, Misdirected.** X names a claim through `claimRef = keccak256(salt || txid)`; the
-//!   claim's recipient is `keccak256(salt || receiver)`; an incoming viewing key that owns the
-//!   receiver shows that the largest note X pays that wallet is `value`. The slasher compares it
-//!   with what the commitment of X promised the claim.
+//!   claim's recipient is `keccak256(salt || receiver)`; the commitment of X names the action whose
+//!   output pays the claim (E1). An incoming viewing key that owns the receiver shows what that one
+//!   output pays that exact receiver (`value`): its note decrypts and matches its note commitment,
+//!   or it counts as nothing. The slasher compares it with what the commitment promised the claim.
 //!
 //! The journal ([`ViolationJournal::abi_encode`]) is what `ZecuredSlasher.proveViolation` decodes;
 //! fields a kind does not use are zero. It never contains a txid, a note commitment, a
@@ -87,12 +88,14 @@ pub enum Detail {
         change_tag: [u8; 32],
         change_value: u64,
     },
-    /// F3: the claim's salt and receiver (its recipient commitment) and an incoming viewing key
-    /// of the claimant's wallet (raw, 64 bytes).
+    /// F3: the claim's salt and receiver (its recipient commitment), an incoming viewing key of
+    /// the claimant's wallet (raw, 64 bytes) and the action the commitment names for the claim
+    /// (`claimPayment(claimRef).outputIndex` on Base).
     Misdirected {
         salt: [u8; 32],
         receiver: Vec<u8>,
         ivk: Vec<u8>,
+        output_index: u32,
     },
 }
 
@@ -107,16 +110,18 @@ pub struct ViolationJournal {
     pub reference: [u8; 32],
     /// F1: tag of the note X spends; F2: the committed change tag; F3: zero.
     pub note_tag: [u8; 32],
-    /// F2: the committed change value; F3: the largest note X pays the claimant's wallet.
+    /// F2: the committed change value; F3: what the claim's output pays its exact receiver.
     pub value: u64,
     /// F3: the claim's recipient commitment.
     pub dest_commitment: [u8; 32],
+    /// F3: the action of X the commitment names for the claim.
+    pub output_index: u8,
 }
 
 impl ViolationJournal {
-    /// `abi.encode(ViolationJournal)` of IZecuredSlasher.sol: seven words.
+    /// `abi.encode(ViolationJournal)` of IZecuredSlasher.sol: eight words.
     pub fn abi_encode(&self) -> Vec<u8> {
-        let mut out = Vec::with_capacity(7 * 32);
+        let mut out = Vec::with_capacity(8 * 32);
         out.extend_from_slice(&crate::word(u128::from(self.kind as u8)));
         out.extend_from_slice(&self.anchor);
         out.extend_from_slice(&crate::address_word(&self.beneficiary));
@@ -124,6 +129,7 @@ impl ViolationJournal {
         out.extend_from_slice(&self.note_tag);
         out.extend_from_slice(&crate::word(u128::from(self.value)));
         out.extend_from_slice(&self.dest_commitment);
+        out.extend_from_slice(&crate::word(u128::from(self.output_index)));
         out
     }
 }
@@ -145,6 +151,8 @@ pub enum ViolationError {
     Ivk,
     /// F3: the incoming viewing key does not own the claim's receiver.
     NotTheClaimant,
+    /// F3: an output index beyond any a commitment can name.
+    OutputIndex,
     /// The witness's detail is for another kind.
     KindMismatch,
 }
@@ -159,6 +167,17 @@ pub fn payout_ref(ufvk: &str, txid: &[u8; 32]) -> [u8; 32] {
 /// `zecured_policy::ledger::claim_ref`).
 pub fn claim_ref(salt: &[u8; 32], txid: &[u8; 32]) -> [u8; 32] {
     keccak256(&[salt.as_slice(), txid].concat())
+}
+
+/// What `action`'s output pays `receiver`, as the holder of `ivk` sees it: the note decrypts with
+/// the key, its plaintext matches the action's note commitment (`try_note_decryption` checks the
+/// commitment and the ephemeral key, ZIP 212), and it is addressed to `receiver` exactly. Anything
+/// else pays the receiver nothing (E1).
+pub fn paid_to<A>(action: &orchard::Action<A>, ivk: &PreparedIncomingViewingKey, receiver: &Address) -> u64 {
+    match try_note_decryption(&IronwoodDomain::for_action(action), ivk, action) {
+        Some((note, to, _)) if to == *receiver => note.value().inner(),
+        _ => 0,
+    }
 }
 
 /// The Orchard-protocol full viewing key of a Testnet UFVK string.
@@ -208,6 +227,7 @@ pub fn verify_violation(w: &ViolationWitness) -> Result<ViolationJournal, Violat
         note_tag: [0; 32],
         value: 0,
         dest_commitment: [0; 32],
+        output_index: 0,
     };
 
     match (&w.detail, w.kind) {
@@ -274,28 +294,33 @@ pub fn verify_violation(w: &ViolationWitness) -> Result<ViolationJournal, Violat
             journal.note_tag = *change_tag;
             journal.value = *change_value;
         }
-        (Detail::Misdirected { salt, receiver, ivk }, Kind::Misdirected) => {
+        (
+            Detail::Misdirected {
+                salt,
+                receiver,
+                ivk,
+                output_index,
+            },
+            Kind::Misdirected,
+        ) => {
             let receiver: [u8; 43] = receiver.clone().try_into().map_err(|_| ViolationError::Receiver)?;
             let address =
                 Option::<Address>::from(Address::from_raw_address_bytes(&receiver)).ok_or(ViolationError::Receiver)?;
             let ivk: [u8; 64] = ivk.clone().try_into().map_err(|_| ViolationError::Ivk)?;
             let ivk =
                 Option::<IncomingViewingKey>::from(IncomingViewingKey::from_bytes(&ivk)).ok_or(ViolationError::Ivk)?;
+            // The key must own the receiver, or a wrong key would see nothing in an honest payment.
             if ivk.diversifier_index(&address).is_none() {
                 return Err(ViolationError::NotTheClaimant);
             }
-            // Trial decryption with the wallet's key finds every note X pays any of its addresses.
+            let index = u8::try_from(*output_index).map_err(|_| ViolationError::OutputIndex)?;
+            // The claim's own output only (E1): no other output, even to the same receiver, counts;
+            // an index X does not have pays nothing.
             let prepared = PreparedIncomingViewingKey::new(&ivk);
-            let received = bundle
-                .actions()
-                .iter()
-                .filter_map(|a| try_note_decryption(&IronwoodDomain::for_action(a), &prepared, a))
-                .map(|(n, _, _)| n.value().inner())
-                .max()
-                .unwrap_or(0);
+            journal.value = bundle.actions().get(usize::from(index)).map_or(0, |a| paid_to(a, &prepared, &address));
             journal.reference = claim_ref(salt, &txid);
-            journal.value = received;
             journal.dest_commitment = keccak256(&[salt.as_slice(), &receiver].concat());
+            journal.output_index = index;
         }
         _ => return Err(ViolationError::KindMismatch),
     }

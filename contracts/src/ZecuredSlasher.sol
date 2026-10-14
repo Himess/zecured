@@ -18,7 +18,7 @@ import {IZcashHeaderRelay} from "./relay/IZcashHeaderRelay.sol";
 ///      journal shape and one case id.
 contract ZecuredSlasher is IZecuredSlasher {
     /// @inheritdoc IZecuredSlasher
-    uint256 public constant JOURNAL_LENGTH = 7 * 32;
+    uint256 public constant JOURNAL_LENGTH = 8 * 32;
     /// @dev An uncommitted spend was signed by three signers, and FROST does not tell which: all five answer for it.
     uint8 private constant ALL_SIGNERS = 0x1f;
 
@@ -174,21 +174,25 @@ contract ZecuredSlasher is IZecuredSlasher {
         IZecuredSpendCommits r = IZecuredSpendCommits(registry);
         if (j.kind == ViolationKind.Uncommitted) {
             // X spends lineage note `noteTag`, and no commitment of X names it as its input.
-            if (j.value == 0 && j.destCommitment == bytes32(0) && _uncommitted(j.ref, j.noteTag)) {
+            if (j.value == 0 && j.destCommitment == bytes32(0) && j.outputIndex == 0 && _uncommitted(j.ref, j.noteTag))
+            {
                 return (r.lineageOf(j.noteTag).vaultId, ALL_SIGNERS);
             }
         } else if (j.kind == ViolationKind.WithheldChange) {
             // X is committed with change (`noteTag`, `value`), and none of X's outputs is that note.
             SpendRecord memory s = r.spendRecord(j.ref);
             if (
-                j.destCommitment == bytes32(0) && s.vaultId != bytes32(0) && s.changeValue != 0
+                j.destCommitment == bytes32(0) && j.outputIndex == 0 && s.vaultId != bytes32(0) && s.changeValue != 0
                     && s.changeTag == j.noteTag && s.changeValue == j.value
             ) return (s.vaultId, s.signerBitmap);
         } else if (j.kind == ViolationKind.Misdirected) {
-            // X is committed to pay the claim behind `ref`, whose recipient is `destCommitment`, at least `expected` in
-            // one output; the most X pays that recipient's wallet is `value`.
+            // X is committed to pay the claim behind `ref`, whose recipient is `destCommitment`, at least `expected` in its
+            // output `outputIndex`; that output pays the recipient `value` (E1).
             ClaimPayment memory p = r.claimPayment(j.ref);
-            if (j.noteTag == bytes32(0) && p.claimId != bytes32(0) && j.value < p.expected) {
+            if (
+                j.noteTag == bytes32(0) && p.claimId != bytes32(0) && j.outputIndex == p.outputIndex
+                    && j.value < p.expected
+            ) {
                 (bytes32 claimVault,,, bytes32 commitment,) = IZecuredRegistry(registry).claim(p.claimId);
                 if (commitment == j.destCommitment) return (claimVault, r.spendRecord(p.payoutRef).signerBitmap);
             }

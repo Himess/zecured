@@ -67,6 +67,8 @@ struct DeleverageRequest {
 /// @param claimIds The claims the payout pays (at least one, all Pending), in plan order; `claimIds[0]` bears the fee.
 /// @param claimRefs `keccak256(salt_i || txid)` of `claimIds[i]` (`salt_i` from its recipient commitment, txid in
 ///        internal byte order): lets the claimant, who knows `salt_i` but not the vault's key, find the payout.
+/// @param claimOutputs The index, among the payout's Ironwood actions, of the output that pays `claimIds[i]`; distinct
+///        (E1): each claim is paid by its own output, which F3 checks exactly.
 /// @param payoutRef BLAKE2b-256 of the payout's txid keyed with the vault's tag key (`policy::derive::payout_ref`).
 /// @param changeTag `noteTag` of the change note the payout returns to the vault; zero if it returns none.
 /// @param changeValue Zatoshi of that change note; zero if none.
@@ -75,6 +77,7 @@ struct SpendCommit {
     bytes32 inputTag;
     bytes32[] claimIds;
     bytes32[] claimRefs;
+    uint8[] claimOutputs;
     bytes32 payoutRef;
     bytes32 changeTag;
     uint64 changeValue;
@@ -135,10 +138,10 @@ library ZecuredEIP712 {
     );
 
     /// @dev keccak256("SpendCommit(bytes32 vaultId,bytes32 inputTag,bytes32[] claimIds,bytes32[] claimRefs,
-    ///      bytes32 payoutRef,bytes32 changeTag,uint64 changeValue)") (one line, no spaces). Tier 3 (docs/TIER3.md):
-    ///      verified by the Registry's `commitSpend` (Deploy 2).
+    ///      uint8[] claimOutputs,bytes32 payoutRef,bytes32 changeTag,uint64 changeValue)") (one line, no spaces).
+    ///      Tier 3 (docs/TIER3.md): verified by the Registry's `commitSpend`.
     bytes32 internal constant SPEND_COMMIT_TYPEHASH = keccak256(
-        "SpendCommit(bytes32 vaultId,bytes32 inputTag,bytes32[] claimIds,bytes32[] claimRefs,bytes32 payoutRef,bytes32 changeTag,uint64 changeValue)"
+        "SpendCommit(bytes32 vaultId,bytes32 inputTag,bytes32[] claimIds,bytes32[] claimRefs,uint8[] claimOutputs,bytes32 payoutRef,bytes32 changeTag,uint64 changeValue)"
     );
 
     // ------------------------------------------------------------------ verified off-chain (Registry domain)
@@ -193,7 +196,7 @@ library ZecuredEIP712 {
     }
 
     /// @notice EIP-712 struct hash of a SpendCommit. Arrays are encoded as EIP-712 requires: the keccak256 of their
-    ///         concatenated 32-byte elements (as `claimIdsHash`).
+    ///         elements, each encoded as one 32-byte word (`abi.encodePacked` pads array elements to 32 bytes).
     function hashSpendCommit(SpendCommit memory c) internal pure returns (bytes32) {
         return keccak256(
             abi.encode(
@@ -202,6 +205,7 @@ library ZecuredEIP712 {
                 c.inputTag,
                 keccak256(abi.encodePacked(c.claimIds)),
                 keccak256(abi.encodePacked(c.claimRefs)),
+                keccak256(abi.encodePacked(c.claimOutputs)),
                 c.payoutRef,
                 c.changeTag,
                 c.changeValue

@@ -27,12 +27,14 @@ struct SpendRecord {
 }
 
 /// @notice One claim payment named by a committed payout, keyed by its `claimRef` (F3).
-/// @param expected Zatoshi the claimant must receive in one output: the claim amount, less the payout's ZIP 317 fee
-///        for the fee-bearing claim (`claimIds[0]`).
+/// @param expected Zatoshi the claimant must receive: the claim amount, less the payout's ZIP 317 fee for the
+///        fee-bearing claim (`claimIds[0]`).
+/// @param outputIndex The payout's action whose output pays the claim (E1): F3 checks exactly that output.
 struct ClaimPayment {
     bytes32 claimId;
     bytes32 payoutRef;
     uint64 expected;
+    uint8 outputIndex;
 }
 
 /// @title IZecuredSpendCommits
@@ -45,7 +47,8 @@ struct ClaimPayment {
 ///      - `lineageOf(c.inputTag).vaultId == c.vaultId`;
 ///      - 1 to MAX_CLAIMS_PER_PAYOUT claims, no duplicates, each of `c.vaultId`, `Pending`, and bound to no other
 ///        input: `claimInput(id)` is zero or `c.inputTag` (the first commitment binds it, claim-reuse fix);
-///      - `c.claimRefs.length == c.claimIds.length`, every claim ref unused;
+///      - `c.claimRefs.length == c.claimOutputs.length == c.claimIds.length`, every claim ref unused, the claims'
+///        output indexes distinct (E1: two claims never share an output);
 ///      - conservation: `lineageOf(c.inputTag).value == sum of claim amounts + c.changeValue`;
 ///      - `c.changeTag == 0` iff `c.changeValue == 0`; a non-zero change tag is not yet a lineage note;
 ///      - the fee-bearing claim covers the fee: `amount(claimIds[0]) > fee`, where
@@ -73,6 +76,7 @@ interface IZecuredSpendCommits {
     error PayoutAlreadyCommitted(bytes32 payoutRef);
     error InvalidClaimCount(uint256 claims, uint256 claimRefs);
     error DuplicateClaim(bytes32 claimId);
+    error DuplicateClaimOutput(uint8 outputIndex);
     error ClaimNotPayable(bytes32 claimId);
     error ClaimBoundToAnotherInput(bytes32 claimId, bytes32 inputTag);
     error ClaimRefAlreadyUsed(bytes32 claimRef);

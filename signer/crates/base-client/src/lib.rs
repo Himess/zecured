@@ -94,14 +94,16 @@ sol! {
     }
 
     /// Tier 3 (docs/TIER3.md § 3): signed by signer nodes in FROST round 1, before any share is
-    /// released; recorded by the Registry's `commitSpend` (Deploy 2). `claimIds[0]` bears the fee;
-    /// `claimRefs[i] = keccak256(salt_i || txid)` belongs to `claimIds[i]`.
+    /// released; recorded by the Registry's `commitSpend`. `claimIds[0]` bears the fee;
+    /// `claimRefs[i] = keccak256(salt_i || txid)` belongs to `claimIds[i]`, which the payout's
+    /// action `claimOutputs[i]` pays (E1).
     #[derive(Debug, PartialEq, Eq)]
     struct SpendCommit {
         bytes32 vaultId;
         bytes32 inputTag;
         bytes32[] claimIds;
         bytes32[] claimRefs;
+        uint8[] claimOutputs;
         bytes32 payoutRef;
         bytes32 changeTag;
         uint64 changeValue;
@@ -287,6 +289,7 @@ impl From<&SpendCommit> for events::IZecuredRegistry::SpendCommit {
             inputTag: c.inputTag,
             claimIds: c.claimIds.clone(),
             claimRefs: c.claimRefs.clone(),
+            claimOutputs: c.claimOutputs.clone(),
             payoutRef: c.payoutRef,
             changeTag: c.changeTag,
             changeValue: c.changeValue,
@@ -346,7 +349,7 @@ mod tests {
         );
         assert_eq!(
             SpendCommit::eip712_encode_type(),
-            "SpendCommit(bytes32 vaultId,bytes32 inputTag,bytes32[] claimIds,bytes32[] claimRefs,bytes32 payoutRef,bytes32 changeTag,uint64 changeValue)"
+            "SpendCommit(bytes32 vaultId,bytes32 inputTag,bytes32[] claimIds,bytes32[] claimRefs,uint8[] claimOutputs,bytes32 payoutRef,bytes32 changeTag,uint64 changeValue)"
         );
     }
 
@@ -391,15 +394,16 @@ mod tests {
             inputTag: B256::repeat_byte(0x66),
             claimIds: vec![claim_id(0), claim_id(1)],
             claimRefs: vec![B256::repeat_byte(0x88), B256::repeat_byte(0x99)],
+            claimOutputs: vec![2, 0],
             payoutRef: B256::repeat_byte(0xaa),
             changeTag: B256::repeat_byte(0xbb),
             changeValue: 3_800_000,
         };
-        assert_eq!(msg.eip712_hash_struct(), b("0x25b83714a905e6d4a17e948a1743d118bbc7924c5e1b3da8112450cb233e9856"));
+        assert_eq!(msg.eip712_hash_struct(), b("0xc129e8c0fbddba658c07dded97e6c32a7c3af4a5ba4a24045faac75db662efe6"));
         let rd = registry_domain(BASE_SEPOLIA_CHAIN_ID, Address::repeat_byte(0x11));
         assert_eq!(
             msg.eip712_signing_hash(&rd),
-            b("0x16347216b48a0eb77b4af1738514b09ced87e423e69215bc7aeecefa866fe781")
+            b("0x3dd9f2e94c96d5aa0a5c016684697f2283f0447f4d0eb81739052c0a07217d7a")
         );
     }
 
