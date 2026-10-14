@@ -12,13 +12,20 @@ the rest returns to a new shielded address in the same transaction. No outside f
 touch your account.
 
 **What if three signers collude?**
-They could steal a vault's ZEC: that's our hackathon trust assumption for payouts, stated
-openly. They can no longer mint unbacked zZEC through Tier 2: a deposit can be activated on a
-zero-knowledge proof (RISC Zero) that the note is in a Zcash block committed by a header our
-on-chain relay verified with Equihash, without revealing which block; the signers only vouch
-for the vault's key, and all five must ([TIER2.md](TIER2.md)). Roadmap: independent operators,
-bonds on Base, slashing on proven Zcash spends. Meanwhile you can watch your vault with its
-viewing key.
+Signers must commit every payout on Base before they can sign it. Taking ZEC that backs loans —
+without a commitment or under a false one — or paying any claim to anyone but its owner is provable
+on Base with a zero-knowledge proof that reveals no Zcash transaction, note or address, and it
+slashes the signers' bonds ([TIER3.md](TIER3.md)). Two things remain outside these proofs: refunds
+of non-conforming deposits, and liveness — signers refusing to pay, in which case the funds stay in
+the vault. Nor can they mint unbacked zZEC: a deposit is activated on a zero-knowledge proof (RISC
+Zero) that the note is in a Zcash block committed by a header our on-chain relay verified with
+Equihash, without revealing which block ([TIER2.md](TIER2.md)).
+
+On Zcash testnet a single Equihash ASIC out-mines the whole network about 40 times over, so every
+proof-of-work-based guarantee here — Tier 2 minting and Tier 3 slashing — is demonstrative on
+testnet. On mainnet the same mechanisms inherit Zcash's proof of work, with confirmation depth
+chosen by the value at risk. The five demo signers are run by the team; the bonds demonstrate the
+mechanism, not independent economic security.
 
 **Does a deposit proof leak anything on Base?**
 It reveals a recent Zcash header (the anchor, not the deposit's block), the vault id, the
@@ -34,6 +41,11 @@ and the ZEC never leaves the shielded pool.
 **What happens after a partial liquidation?**
 The vault tracks an outstanding amount. The liquidator gets only the seized ZEC; the rest stays
 yours, and you take it back by repaying or closing from collateral.
+
+**Is this a bridge or a swap?**
+No. The ZEC never leaves Zcash's shielded Ironwood pool, and nothing is sold. Holding ZEC shielded
+no longer means giving up liquidity: you can borrow dollars on Base without selling or unshielding
+it, and USDC lenders on Base gain a new market backed by Zcash collateral.
 
 **Why not NEAR Intents?**
 Today's Zcash-origin bridge routes typically require a transparent sender. That's exactly the
@@ -67,6 +79,9 @@ you at close, on Base — unlinkable to you. Zcash recipients appear on Base onl
 commitments. Full table in [THREAT_MODEL.md](THREAT_MODEL.md).
 
 **What's mocked?**
-Price oracle, USDC, and signer independence (all five nodes run by us). Everything else is real:
-Zcash testnet (NU7) Ironwood transactions, FROST threshold signing, Morpho Blue on Base Sepolia,
-gasless smart accounts through our own proxy.
+The price oracle (`MockZecOracle`, behind `DemoShockOracle`, whose owner-set shock shows a
+liquidation) and signer independence (all five nodes run by us; the bonds show the mechanism). The
+theft demonstration is a separate deployment with a 2-minute challenge window. Everything else is
+real: Zcash testnet (NU7) Ironwood transactions, FROST threshold signing, the zero-knowledge deposit
+and violation proofs, the on-chain Zcash header relay, Morpho Blue and Circle's testnet USDC on Base
+Sepolia, gasless smart accounts through our own proxy, bundler and paymaster.

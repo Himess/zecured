@@ -3,6 +3,8 @@
 > **Borrow against shielded ZEC. Sell nothing. Reveal nothing.**
 
 Every way to use ZEC in DeFi today starts with unshielding it. Zecured doesn't.
+Holding ZEC shielded no longer means giving up liquidity: you can borrow dollars on Base without
+selling or unshielding it, and USDC lenders on Base gain a new market backed by Zcash collateral.
 
 Zecured lets ZEC holders borrow USDC on Base without selling their ZEC and without it ever
 leaving the shielded pool. Collateral sits in a fresh **3-of-5 FROST threshold vault** in
@@ -11,6 +13,20 @@ Zcash's **Ironwood** pool; a **non-transferable receipt (zZEC)** is minted strai
 — or **close it from collateral**: a market maker repays the debt and takes ZEC for it, and
 the rest returns to a new shielded address, so no outside funds ever touch your account. If
 the price drops, a liquidator repays and receives the seized ZEC, shielded.
+
+**Who you have to trust.** Deposits mint zZEC only on a zero-knowledge proof that the note is in a
+Zcash block whose header Base verified ([Tier 2](docs/TIER2.md)). Signers must commit every payout
+on Base before they can sign it. Taking ZEC that backs loans — without a commitment or under a false
+one — or paying any claim to anyone but its owner is provable on Base with a zero-knowledge proof
+that reveals no Zcash transaction, note or address, and it slashes the signers' bonds
+([Tier 3](docs/TIER3.md)). Two things remain outside these proofs: refunds of non-conforming
+deposits, and liveness — signers refusing to pay, in which case the funds stay in the vault.
+
+On Zcash testnet a single Equihash ASIC out-mines the whole network about 40 times over, so every
+proof-of-work-based guarantee here — Tier 2 minting and Tier 3 slashing — is demonstrative on
+testnet. On mainnet the same mechanisms inherit Zcash's proof of work, with confirmation depth
+chosen by the value at risk. The five demo signers are run by the team; the bonds demonstrate the
+mechanism, not independent economic security.
 
 Built for ZECATHON 2026, Cross-Chain track. **Testnet experiment — not a financial product.**
 
@@ -30,6 +46,9 @@ Verified end to end on **Zcash testnet (NU7)** with five independent signer proc
 | Failure handling | Payouts with two signers offline, a signer restarted mid-payout, and a payout that expired unmined and was rebuilt |
 | Threshold demo | Two signers switched to "compromised" sign a sweep, three refuse, nothing moves |
 | Vault verification | The borrower scans the vault with its viewing key (UFVK) |
+| Tier 2 deposit proof | The deposit statement on a real deposit: the zkVM's journal equals the native one (20.2 M cycles), the relay verified the anchor header's Equihash on-chain |
+| Tier 3 commit before sign | A real payout's `SpendCommit` signed by the three chosen signers in FROST round 1, recorded on Base, and checked by every signer three blocks deep before it released its share; then mined and confirmed |
+| Tier 3 violation statements | F1 holds on a real Testnet vault spend and the slasher's tests slash with exactly that journal; F1 and F3 run in the zkVM with the native journal |
 
 The Base side of P2 / P3 / P6 / D14 has been run against a local fork of Base Sepolia (real
 Morpho Blue deployment); the public Base Sepolia deployment follows. Evidence (block heights,
