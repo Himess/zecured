@@ -3,13 +3,15 @@
 # copy of the repository (`git archive`), never with signer keys or .env on it.
 #
 #   scripts/gpu-prove.sh setup                                   # once: Rust, rzup, the native Groth16 prover, the host
-#   scripts/gpu-prove.sh prove deposit <witness.json> <out-dir>  # succinct receipt, then Groth16 seal
+#   scripts/gpu-prove.sh prove deposit <witness.json> <out-dir>  # the succinct receipt
 #   scripts/gpu-prove.sh prove violation <witness.json> <out-dir>
 #
-# The host is built with the `cuda` feature: the STARK is proven on the GPU and wrapped in Groth16
-# natively (the `risc0-groth16` rzup component), so the machine needs no Docker. The guests are not
+# The host is built with the `cuda` feature, so the STARK is proven on the GPU. The Groth16 wrap is not made
+# here: risc0-groth16 3.0.5's CUDA prover fails on our receipts (docs/TESTING.md § 2b), so the wrap runs with
+# Docker on x86 (`zecured-tier2-host groth16`), from the succinct receipt, which holds no viewing key.
+# GROTH16=cuda still tries it here, in two processes (`p254`, then `shrink-wrap`). The guests are not
 # built here: ZECURED_DEPOSIT_ELF / ZECURED_VIOLATION_ELF name the pinned ELFs (the `guests`
-# workflow's artifact), so every seal is for the deployed image id.
+# workflow's artifact), so every receipt is for the deployed image id.
 #
 # A witness holds its vault's viewing key: only the team's own disposable vaults are proven on
 # rented hardware, and the machine is destroyed afterwards (docs/TIER2.md § 8).
@@ -23,9 +25,26 @@ setup() {
   nvidia-smi --query-gpu=name,memory.total,driver_version --format=csv
   command -v nvcc >/dev/null || { echo "nvcc not found: use a CUDA devel image" >&2; exit 1; }
   nvcc --version | tail -1
+  # risc0 3.0's kernels do not compile against CUDA 13's headers (CCCL's driver_api.h): build with a
+  # CUDA 12 compiler next to the image's toolkit. The driver runs code built for 12.x.
+  if nvcc --version | grep -q "release 13"; then
+    apt-get update -qq
+    DEBIAN_FRONTEND=noninteractive apt-get install -y -qq cuda-nvcc-12-8 cuda-cudart-dev-12-8 cuda-cccl-12-8 \
+      cuda-driver-dev-12-8 cuda-nvrtc-dev-12-8
+    # Every build script must see 12.8: some link through /usr/local/cuda (cust), so it points there too.
+    update-alternatives --set cuda /usr/local/cuda-12.8
+    export PATH="/usr/local/cuda-12.8/bin:$PATH" CUDA_PATH=/usr/local/cuda-12.8 CUDA_HOME=/usr/local/cuda-12.8 \
+      CUDA_ROOT=/usr/local/cuda-12.8
+  fi
+  # bindgen (circom-witnesscalc, in the Groth16 prover) needs libclang.
+  if ! command -v clang >/dev/null; then
+    apt-get update -qq
+    DEBIAN_FRONTEND=noninteractive apt-get install -y -qq clang libclang-dev pkg-config libssl-dev
+  fi
   if ! command -v cargo >/dev/null; then
     curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh -s -- -y --profile minimal --default-toolchain none
   fi
+  rustup toolchain install "$(sed -n 's/^channel = "\(.*\)"/\1/p' "$ROOT/rust-toolchain.toml")" --profile minimal
   if ! command -v rzup >/dev/null; then
     curl -sSfL https://risczero.com/install | bash
   fi
@@ -52,9 +71,13 @@ prove() {
   started=$(date +%s)
   "$HOST" ${prefix[@]+"${prefix[@]}"} prove "$witness" "$out/$statement.receipt"
   echo "$statement succinct: $(( $(date +%s) - started )) s" | tee -a "$out/timings.txt"
-  started=$(date +%s)
-  "$HOST" ${prefix[@]+"${prefix[@]}"} groth16 "$out/$statement.receipt" "$out/$statement.seal.json"
-  echo "$statement groth16: $(( $(date +%s) - started )) s" | tee -a "$out/timings.txt"
+  if [[ "${GROTH16:-}" == cuda ]]; then
+    "$HOST" ${prefix[@]+"${prefix[@]}"} p254 "$out/$statement.receipt" "$out/$statement.p254"
+    started=$(date +%s)
+    "$HOST" ${prefix[@]+"${prefix[@]}"} shrink-wrap "$out/$statement.p254" "$out/$statement.receipt" \
+      "$out/$statement.seal.json"
+    echo "$statement groth16: $(( $(date +%s) - started )) s" | tee -a "$out/timings.txt"
+  fi
 }
 
 case "${1:-}" in

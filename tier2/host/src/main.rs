@@ -4,6 +4,8 @@
 //!   zecured-tier2-host [violation] execute <witness.json>    # zkVM executor: cycles and journal
 //!   zecured-tier2-host prove <witness.json> <receipt.bin>    # succinct (STARK) receipt (segments: ZECURED_SEGMENT_PO2)
 //!   zecured-tier2-host groth16 <receipt.bin> <seal.json>     # Groth16 seal for Base (x86: Docker, or --features cuda)
+//!   zecured-tier2-host p254 <receipt.bin> <p254.bin>         # with --features cuda: groth16's first half
+//!   zecured-tier2-host shrink-wrap <p254.bin> <receipt.bin> <seal.json>  # ... and its second, in another process
 //!   zecured-tier2-host mock-seal <witness.json> <seal.json>  # MOCK seal for the local fork only
 //!   zecured-tier2-host image-id                              # the guest's image id
 //!   zecured-tier2-host export-elf <deposit.bin>              # the embedded guest, to pin it
@@ -223,9 +225,9 @@ fn main() -> Result<()> {
     } else {
         Statement::Deposit
     };
-    let cmd = args
-        .get(1)
-        .context("command: execute | prove | groth16 | mock-seal | image-id | export-elf | parity")?;
+    let cmd = args.get(1).context(
+        "command: execute | prove | groth16 | p254 | shrink-wrap | mock-seal | image-id | export-elf | parity",
+    )?;
     let guest = Guest::load(statement)?;
     if cmd == "image-id" {
         println!("0x{}", hex::encode(guest.image_id()));
@@ -287,6 +289,41 @@ fn main() -> Result<()> {
             wrapped.verify(guest.id)?;
             let g = wrapped.inner.groth16()?;
             // The router dispatches on the first four bytes of the verifier parameters digest.
+            let seal = [&g.verifier_parameters.as_bytes()[..4], &g.seal[..]].concat();
+            write_seal(&guest, out, &wrapped.journal.bytes, &seal)?;
+            println!("Groth16 seal in {:.1?}, verified, written to {out}", started.elapsed());
+        }
+        // `groth16` in two processes, as risc0-zkvm's succinct_to_groth16 chains them: the Poseidon254 identity
+        // receipt, then its Groth16 wrap. Run apart, each half can be checked on its own (review RQ-17).
+        #[cfg(feature = "cuda")]
+        "p254" => {
+            let out = args.get(3).context("identity_p254 receipt output path")?;
+            let receipt: Receipt = bincode::deserialize(&std::fs::read(input)?)?;
+            receipt.verify(guest.id).context("the receipt is not a proof of this guest")?;
+            let started = std::time::Instant::now();
+            let p254 = risc0_zkvm::recursion::identity_p254(receipt.inner.succinct()?)?;
+            std::fs::write(out, bincode::serialize(&p254)?)?;
+            println!("identity_p254 receipt in {:.1?}, written to {out}", started.elapsed());
+        }
+        #[cfg(feature = "cuda")]
+        "shrink-wrap" => {
+            use risc0_zkvm::sha::Digestible;
+            let receipt_path = args.get(3).context("succinct receipt path")?;
+            let out = args.get(4).context("seal output path")?;
+            let p254: risc0_zkvm::SuccinctReceipt<risc0_zkvm::ReceiptClaim> =
+                bincode::deserialize(&std::fs::read(input)?)?;
+            let receipt: Receipt = bincode::deserialize(&std::fs::read(receipt_path)?)?;
+            receipt.verify(guest.id).context("the receipt is not a proof of this guest")?;
+            let started = std::time::Instant::now();
+            let seal = risc0_groth16::prove::shrink_wrap(&p254.get_seal_bytes())?.to_vec();
+            let groth16 = risc0_zkvm::Groth16Receipt::new(
+                seal,
+                receipt.inner.succinct()?.claim.clone(),
+                risc0_zkvm::Groth16ReceiptVerifierParameters::default().digest(),
+            );
+            let wrapped = Receipt::new(risc0_zkvm::InnerReceipt::Groth16(groth16), receipt.journal.bytes.clone());
+            wrapped.verify(guest.id)?;
+            let g = wrapped.inner.groth16()?;
             let seal = [&g.verifier_parameters.as_bytes()[..4], &g.seal[..]].concat();
             write_seal(&guest, out, &wrapped.journal.bytes, &seal)?;
             println!("Groth16 seal in {:.1?}, verified, written to {out}", started.elapsed());

@@ -6137,6 +6137,7 @@ dependencies = [
  "anyhow",
  "bincode",
  "hex",
+ "risc0-groth16",
  "risc0-zkvm",
  "serde_json",
  "sha2 0.10.9",
