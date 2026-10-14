@@ -47,7 +47,17 @@ pub struct Relayer {
     /// Headers per transaction at most (a batch is split further if its gas would not fit).
     pub batch: usize,
     pub alarm_lag: u32,
+    /// 0: submit every pass. Otherwise a standby relayer (D30): it submits only once the relay
+    /// lags the Zcash tip by this many blocks, so two relayers do not both pay for every header
+    /// while the active one keeps up.
+    pub standby_lag: u32,
     pub every: Duration,
+}
+
+/// Whether a pass submits: always for an active relayer, and for a standby one only when the
+/// relay (at `relay_height`) lags the highest height seen by `standby_lag` blocks or more.
+pub fn should_submit(standby_lag: u32, seen: u32, relay_height: u32) -> bool {
+    standby_lag == 0 || seen.saturating_sub(relay_height) >= standby_lag
 }
 
 /// Testnet peers are probed again this often, or after a failed pass.
@@ -136,6 +146,10 @@ async fn pass(r: &Relayer, book: &mut PeerBook) -> Result<()> {
     let peers: Vec<SocketAddr> = book.reachable.iter().map(|p| p.addr).collect();
     let (lines, tip_height, _) = headers_after(&relay, &peers).await?;
     let fetch_ms = elapsed_ms(started);
+    let seen = lines.last().map_or(0, |l| l.height).max(book.reachable.first().map_or(0, |p| p.height));
+    if !should_submit(r.standby_lag, seen, tip_height) {
+        return Ok(()); // standby: the active relayer keeps up
+    }
 
     // Headers above the relay's tip are new unless another relayer is racing this one (then the
     // submission's estimate fails and that batch is filtered); only a step back below the tip
@@ -222,6 +236,14 @@ async fn submit<P: Provider>(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn a_standby_relayer_waits_until_the_relay_lags() {
+        assert!(should_submit(0, 100, 100), "an active relayer always submits");
+        assert!(!should_submit(10, 109, 100));
+        assert!(should_submit(10, 110, 100));
+        assert!(!should_submit(10, 90, 100), "a relay ahead of the peers seen");
+    }
 
     #[test]
     fn hashes_are_turned_into_the_relays_byte_order() {

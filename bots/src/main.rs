@@ -89,6 +89,10 @@ enum Cmd {
         /// Log an alarm when the relay lags the Zcash tip by this many blocks (S10).
         #[arg(long, default_value_t = 5)]
         alarm_lag: u32,
+        /// Standby (D30): submit only once the relay lags by this many blocks (0: always), so a
+        /// second relayer does not pay for every header the first one already submits.
+        #[arg(long, env = "RELAYER_STANDBY_LAG", default_value_t = 0)]
+        standby_lag: u32,
         #[arg(long, default_value_t = 20)]
         every_secs: u64,
     },
@@ -117,6 +121,7 @@ async fn main() -> Result<()> {
         key,
         batch,
         alarm_lag,
+        standby_lag,
         every_secs,
     } = cli.cmd
     {
@@ -127,6 +132,7 @@ async fn main() -> Result<()> {
             rpc: cli.rpc,
             batch,
             alarm_lag,
+            standby_lag,
             every: std::time::Duration::from_secs(every_secs),
         })
         .await;

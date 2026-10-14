@@ -20,7 +20,7 @@ alarm channel.
 |---|---|---|
 | `zecured-node@1..5` | the five signer nodes, on 127.0.0.1:9101..9105 | `node-N.env`: `DEMO_ADMIN_TOKEN`, `NODE_BASE_RPC_URL`, `NODE_BASE_RPC_WITNESS_URL`, `NODE_LIGHTWALLETD_URL`, `NODE_EXTRA_ARGS` (`--demo-allow-compromise` on nodes 4 and 5 only) |
 | `zecured-backend` | coordinator, public API, proxies | `backend.env`: `COORDINATOR_PRIVATE_KEY`, `ZECURED_NETWORK_CONFIG`, `ZECURED_COORDINATOR_DATA`, `ZECURED_DEPLOYMENTS`, `BUNDLER_URL`, `PAYMASTER_*`, `PROXY_RPC_URL`, `APP_ORIGINS`, `DEPOSIT_PROOF_*` |
-| `zecured-relayer@1..2` | two independent header relayers (D30) | `relayer-N.env`: `RELAYER_PRIVATE_KEY`, `ZECURED_RELAY`, `BASE_SEPOLIA_RPC_URL` |
+| `zecured-relayer@1..2` | two independent header relayers (D30): the second on standby | `relayer-N.env`: `RELAYER_PRIVATE_KEY`, `ZECURED_RELAY`, `BASE_SEPOLIA_RPC_URL`; relayer 2 also `RELAYER_STANDBY_LAG=10`, so it pays only when the first falls 10 blocks behind |
 | `zecured-market-maker`, `zecured-liquidator` | the bots | `market-maker.env`, `liquidator.env` |
 | `zecured-bundler` | our ERC-4337 bundler (alto) | `bundler.env` |
 | `zecured-watchdog.timer` | `infra/watchdog/watchdog.py` every 5 minutes | `watchdog.env` (see `watchdog.env.example`) |
