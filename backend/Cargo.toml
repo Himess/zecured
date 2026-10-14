@@ -10,9 +10,13 @@ publish.workspace = true
 # TEST ONLY: honour the coordinator's `test-withhold-next-broadcast` flag file
 # (docs/TESTING.md). Never enable it in a demo or production build.
 test-hooks = ["zecured-coordinator/test-hooks"]
+# DEMO ONLY: the separate theft demo (review T3-6, docs/TIER3.md § 8): three compromisable nodes
+# and POST /admin/vaults/:id/steal. Refuses to start against the judge deployment.
+demo-tier3 = ["zecured-coordinator/demo-tier3"]
 
 [dependencies]
 zecured-coordinator = { path = "../signer/crates/coordinator" }
+zecured-base = { path = "../signer/crates/base-client" }
 zecured-node = { path = "../signer/crates/node" }
 alloy.workspace = true
 axum.workspace = true

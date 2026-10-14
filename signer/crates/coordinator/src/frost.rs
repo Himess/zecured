@@ -282,6 +282,49 @@ pub async fn sign<C: SpendCommitter>(nodes: &Nodes, p: &Payload<'_>, committer: 
     Err(anyhow!("no valid signature after {MAX_ATTEMPTS} sessions").context(PublicError::SignersUnavailable))
 }
 
+/// DEMO ONLY (`demo-tier3`, the separate theft demo, review T3-6): both FROST rounds without a
+/// Tier 3 commitment, as three compromised signers would run them to steal. Honest signers refuse
+/// round 1 (the PCZT matches no plan of theirs) and are left out; nothing goes to Base, which is
+/// what makes the spend provable as F1.
+#[cfg(feature = "demo-tier3")]
+pub async fn demo_sign_uncommitted(nodes: &Nodes, p: &Payload<'_>) -> Result<Signed> {
+    let need = usize::from(MIN_SIGNERS);
+    let spends = p.requests.len();
+    let session = session_id();
+    let commit = CommitRequest {
+        session_id: session.clone(),
+        vault_id: p.vault_id,
+        kind: p.kind.clone(),
+        pczt: p.pczt.to_vec(),
+    };
+    let (answers, failures) =
+        split(nodes.post_many::<_, CommitResponse>(&nodes.indices(), "/v1/sign/commit", &commit).await);
+    let mut committers: Vec<Committer> =
+        answers.iter().filter_map(|(index, c)| parse_commitments(*index, c, spends).ok()).collect();
+    if committers.len() < need {
+        return Err(shortfall("theft demo, round 1", committers.len(), need, &failures));
+    }
+    committers.truncate(need);
+    let chosen: Vec<u16> = committers.iter().map(|c| c.index).collect();
+    let share = ShareRequest {
+        session_id: session,
+        commitments: (0..spends).map(|k| committers.iter().map(|c| (c.index, c.raw[k].clone())).collect()).collect(),
+        spend_commit_sigs: vec![],
+    };
+    let mut shares = BTreeMap::new();
+    for (index, answer) in nodes.post_many::<_, ShareResponse>(&chosen, "/v1/sign/share", &share).await {
+        shares.insert(index, answer.and_then(|s| parse_shares(index, &s, spends))?);
+    }
+    let signatures = aggregate(&committers, &shares, p).map_err(|e| match e {
+        AggregateError::Culprits(c) => anyhow!("theft demo: invalid shares from nodes {c:?}"),
+        AggregateError::Failed(e) => e,
+    })?;
+    Ok(Signed {
+        signatures,
+        signers: chosen,
+    })
+}
+
 #[cfg(test)]
 mod tests {
     use std::{

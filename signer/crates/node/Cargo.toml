@@ -19,6 +19,10 @@ default = []
 # checks. Never enable it in a real deployment; even then a node must also be started with
 # --demo-allow-compromise before it can be switched to that mode.
 demo = ["zecured-zcash-ops/demo"]
+# DEMO ONLY: the separate theft demo (review T3-6, docs/TIER3.md § 8): node 3 may be compromised
+# too, so three compromised nodes can really steal from a vault and the theft is then proven and
+# slashed. Refuses to start against the judge deployment (zecured_base::theft_demo_guard).
+demo-tier3 = ["demo"]
 
 [dependencies]
 zecured-zcash-ops = { path = "../zcash-ops" }

@@ -99,6 +99,7 @@ sol! {
         function hashSpendCommit(SpendCommit c) external view returns (bytes32);
         function openVaultCount() external view returns (uint256);
         function signerBond() external view returns (address);
+        function signers() external view returns (address[5] memory);
     }
 }
 

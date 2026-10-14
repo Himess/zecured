@@ -292,6 +292,14 @@ fn settle_payout(v: &mut VaultRecord, paid: &Inflight, txid: [u8; 32]) {
     }
 }
 
+/// D18: the nodes that may be started with `--demo-allow-compromise`. The demo build allows two
+/// (4 and 5), never a signing threshold; only the separate theft demo's build (`demo-tier3`,
+/// T3-6) allows a third (3), so that a theft can really be signed there.
+pub fn may_be_compromised(index: u16) -> bool {
+    let first = if cfg!(feature = "demo-tier3") { 3 } else { 4 };
+    (first..=5).contains(&index)
+}
+
 /// H-2: a vault never pays itself. A destination or refund to one of its own addresses would
 /// come back as a note outside its books.
 fn ensure_not_own_receiver(v: &VaultRecord, receiver: &[u8; 43]) -> Result<()> {
@@ -311,6 +319,17 @@ impl Node {
             !opts.demo_allow_compromise || cfg!(feature = "demo"),
             "--demo-allow-compromise needs a build with the `demo` feature"
         );
+        ensure!(
+            !opts.demo_allow_compromise || may_be_compromised(id.index),
+            "--demo-allow-compromise: node {} can never be compromised in this build (D18, T3-6)",
+            id.index
+        );
+        #[cfg(feature = "demo-tier3")]
+        {
+            let mut signers: Vec<alloy::primitives::Address> = cfg.nodes.iter().map(|n| n.eth).collect();
+            signers.push(id.eth.address());
+            zecured_base::theft_demo_guard::check(cfg.registry, &signers)?;
+        }
         store::private_dir(data_dir)?;
         let store = Store::open(&data_dir.join("store"))?;
         let zcash = ZcashView::with_witnesses(&cfg.lightwalletd_url, opts.lightwalletd_witnesses);
@@ -934,6 +953,18 @@ mod tests {
     use zecured_policy::ledger::{Claim, ClaimKind};
 
     use super::*;
+
+    /// D18, T3-6: never a signing threshold of compromisable nodes, except in the theft demo's
+    /// own build, where exactly three can be.
+    #[test]
+    fn compromisable_nodes_stay_below_the_threshold_outside_the_theft_demo() {
+        let allowed: Vec<u16> = (0..=6).filter(|i| may_be_compromised(*i)).collect();
+        if cfg!(feature = "demo-tier3") {
+            assert_eq!(allowed, vec![3, 4, 5]);
+        } else {
+            assert_eq!(allowed, vec![4, 5]);
+        }
+    }
 
     #[test]
     fn bounded_maps_expire_and_cap_their_entries() {

@@ -274,7 +274,22 @@ and so is each claimant for its own claims.
 | Bond per signer | 0.01 ETH | 0.01 ETH |
 | Build | the judge build: no compromise mode beyond D18 | `demo-tier3` feature, its own Registry, bond and slasher, five demo keys, same relay |
 
-The theft demo never runs on the judge deployment (T3-6).
+**The theft demo (T3-6)** never runs on the judge deployment. It has its own deployment
+(`THEFT_DEMO=true`, a `DEPLOYMENT_NAME` containing `theft-demo`, a 2-minute window), its own five
+signer keys and coordinator (`THEFT_DEMO=1 scripts/signer-network.sh`), and its own build
+(`demo-tier3`, in `target/theft-demo/`). Only that build lets a third node (node 3) be compromised
+and adds `POST /admin/vaults/:id/steal`: three compromised nodes sweep the vault with no commitment
+on Base, which is an F1 violation, and the demo then proves it and slashes. The guards make a
+misconfiguration end in an error message, never in a theft on the judge network:
+- the deploy script refuses a theft-demo signer set that shares an address with the judge signers;
+- that build's node and backend refuse to start if any of these holds
+  (`zecured_base::theft_demo_guard`):
+  - the configured Registry is a judge Registry (a compiled-in list);
+  - a signer of the network config, or of the Registry on chain, is a judge signer;
+  - the node's own key is a judge signer.
+  A test fails if the compiled-in lists stop matching `deployments/base-sepolia.json`;
+- outside that build, at most two nodes (4 and 5) can ever be compromised, a rule enforced by both
+  the node and the backend.
 
 ## 9. Measurements on real Testnet data
 

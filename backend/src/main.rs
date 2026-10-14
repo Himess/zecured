@@ -92,7 +92,8 @@ struct Cli {
     #[arg(long, env = "DEMO_ADMIN_TOKEN", hide_env_values = true, default_value = "")]
     admin_token: String,
     /// Nodes the demo panel may switch to "compromised": at most two, so it can never compromise
-    /// a signing threshold. Those nodes must also be started with `--demo-allow-compromise`.
+    /// a signing threshold (three only in the separate theft demo's `demo-tier3` build). Those
+    /// nodes must also be started with `--demo-allow-compromise`.
     #[arg(long, env = "DEMO_COMPROMISABLE_NODES", default_value = "4,5")]
     demo_compromisable_nodes: String,
     /// Seconds between coordinator passes.
@@ -362,9 +363,19 @@ fn check_admin(token: &AdminToken, headers: &HeaderMap) -> Result<(), ApiError> 
     Ok(())
 }
 
+/// How many nodes the demo panel may compromise: fewer than `MIN_SIGNERS`, so it can never
+/// assemble a threshold of policy-free signers, except in the separate theft demo's build
+/// (`demo-tier3`, review T3-6), whose whole point is a real theft that is then slashed.
+fn max_compromisable() -> usize {
+    if cfg!(feature = "demo-tier3") {
+        usize::from(MIN_SIGNERS)
+    } else {
+        usize::from(MIN_SIGNERS) - 1
+    }
+}
+
 /// Which modes the demo panel may set: "normal" and "offline" anywhere, "compromised" only on
-/// a fixed set of fewer than `MIN_SIGNERS` nodes, so the panel can never assemble a threshold
-/// of policy-free signers.
+/// a fixed set of nodes ([`max_compromisable`]).
 #[derive(Clone, Debug)]
 struct ModePolicy {
     compromisable: Arc<Vec<u16>>,
@@ -381,9 +392,9 @@ impl ModePolicy {
             }
         }
         ensure!(
-            compromisable.len() < usize::from(MIN_SIGNERS),
+            compromisable.len() <= max_compromisable(),
             "DEMO_COMPROMISABLE_NODES: at most {} nodes",
-            MIN_SIGNERS - 1
+            max_compromisable()
         );
         Ok(Self {
             compromisable: Arc::new(compromisable),
@@ -428,6 +439,21 @@ async fn admin_drain(
     check_admin(&t, &headers)?;
     let report = c.demo_drain(id, &b.to).await?;
     Ok(Json(serde_json::to_value(report).map_err(|e| ApiError::from(anyhow::Error::from(e)))?))
+}
+
+/// DEMO ONLY (`demo-tier3`, the theft demo, T3-6): three compromised nodes sweep the vault to
+/// `to` without a commitment on Base, and the transaction is broadcast (an F1 violation).
+#[cfg(feature = "demo-tier3")]
+async fn admin_steal(
+    State(c): App,
+    axum::Extension(t): axum::Extension<AdminToken>,
+    headers: HeaderMap,
+    Param(id): Param<B256>,
+    Body(b): Body<DrainBody>,
+) -> ApiResult {
+    check_admin(&t, &headers)?;
+    let txid = c.demo_steal(id, &b.to).await?;
+    Ok(Json(json!({ "txid": txid })))
 }
 
 #[derive(Deserialize)]
@@ -808,7 +834,11 @@ fn router(
     cors: CorsLayer,
 ) -> Router {
     let limited = |bucket: &Arc<limits::TokenBucket>| middleware::from_fn_with_state(bucket.clone(), limits::limit);
-    Router::new()
+    let router = Router::new();
+    // DEMO ONLY: the theft demo's sweep exists only in its own build (T3-6).
+    #[cfg(feature = "demo-tier3")]
+    let router = router.route("/admin/vaults/{id}/steal", post(admin_steal));
+    router
         .route("/health", get(health))
         .route("/config", get(public_config))
         .route("/vaults/{id}", get(get_vault))
@@ -881,6 +911,14 @@ async fn main() -> Result<()> {
         .init();
     let cli = Cli::parse();
     let cfg = NetworkConfig::load(&cli.config)?;
+    #[cfg(feature = "demo-tier3")]
+    {
+        // T3-6: the theft demo's backend never runs against the judge deployment.
+        let signers: Vec<Address> = cfg.nodes.iter().map(|n| n.eth).collect();
+        zecured_base::theft_demo_guard::check(cfg.registry, &signers)?;
+        zecured_base::theft_demo_guard::check_on_chain(&cfg.base_rpc_url, cfg.registry).await?;
+        warn!("DEMO (theft demo build): three nodes of this network can be compromised and steal");
+    }
     let indices: Vec<u16> = cfg.nodes.iter().map(|n| n.index).collect();
     let modes = ModePolicy::parse(&cli.demo_compromisable_nodes, &indices)?;
     let cors = cors_layer(&cli.app_origins)?;
@@ -1005,7 +1043,12 @@ mod tests {
             assert_eq!(p.check(i, "normal"), Ok(()));
         }
         assert_eq!(p.check(4, "evil"), Err(ApiError::bad_request()));
-        assert!(ModePolicy::parse("1,2,3", &nodes).is_err(), "three nodes would reach the threshold");
+        assert_eq!(
+            ModePolicy::parse("1,2,3", &nodes).is_ok(),
+            cfg!(feature = "demo-tier3"),
+            "three nodes reach the threshold: only the theft demo's build allows it"
+        );
+        assert!(ModePolicy::parse("1,2,3,4", &nodes).is_err());
         assert!(ModePolicy::parse("4,5,4", &nodes).is_ok(), "duplicates count once");
         assert!(ModePolicy::parse("6", &nodes).is_err());
         assert!(ModePolicy::parse("four", &nodes).is_err());

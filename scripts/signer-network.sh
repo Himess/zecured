@@ -11,14 +11,35 @@
 # DEMO build: the node binary is built with the `demo` feature and nodes 4 and 5 are started
 # with --demo-allow-compromise, so the demo panel can switch them (and only them) to
 # "compromised" for the threshold demo. "offline" works on every node. Never deploy this build.
+#
+# THEFT_DEMO=1 runs the separate theft demo's network instead (review T3-6, docs/TIER3.md § 8):
+# its own data (signer/data-theft-demo/), keys (THEFT_DEMO_SIGNER_n_PRIVATE_KEY,
+# THEFT_DEMO_COORDINATOR_PRIVATE_KEY and _ADDRESS), deployment
+# (contracts/deployments/base-sepolia-theft-demo.json), ports (nodes 920n, backend 8180) and build
+# (`demo-tier3`, in target/theft-demo/), where nodes 3, 4 and 5 can be compromised. Those binaries
+# refuse to start against the judge deployment.
 set -euo pipefail
 
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
-DATA="$ROOT/signer/data"
+THEFT_DEMO="${THEFT_DEMO:-}"
+if [[ -n "$THEFT_DEMO" ]]; then
+  DATA="$ROOT/signer/data-theft-demo"
+  BIN="$ROOT/target/theft-demo/debug"
+  PORT_PREFIX=920
+  BACKEND_PORT=8180
+  KEY_PREFIX=THEFT_DEMO_
+  DEFAULT_DEPLOYMENTS="$ROOT/contracts/deployments/base-sepolia-theft-demo.json"
+else
+  DATA="$ROOT/signer/data"
+  BIN="$ROOT/target/debug"
+  PORT_PREFIX=910
+  BACKEND_PORT=8080
+  KEY_PREFIX=
+  DEFAULT_DEPLOYMENTS="$ROOT/contracts/deployments/base-sepolia.json"
+fi
 NETWORK="$DATA/network.json"
 LOGS="$DATA/logs"
 PIDS="$DATA/pids"
-BIN="$ROOT/target/debug"
 
 # Values already set in the environment (e.g. a local fork, see scripts/local-fork.sh) win over .env.
 OVERRIDABLE=(BASE_SEPOLIA_RPC_URL ZECURED_DEPLOYMENTS BUNDLER_URL PAYMASTER_URL)
@@ -49,16 +70,42 @@ admin_token() {
   cat "$DATA/admin-token"
 }
 
-# Nodes that the demo panel may switch to "compromised" (two at most: below the 3-of-5 threshold).
-DEMO_COMPROMISABLE_NODES=" 4 5 "
+# Nodes that the demo panel may switch to "compromised": two (below the 3-of-5 threshold), or
+# three in the theft demo, whose build alone allows it.
+if [[ -n "$THEFT_DEMO" ]]; then
+  DEMO_COMPROMISABLE_NODES=" 3 4 5 "
+else
+  DEMO_COMPROMISABLE_NODES=" 4 5 "
+fi
 
 build() {
+  if [[ -n "$THEFT_DEMO" ]]; then
+    # Its own target directory: these binaries never replace the judge network's.
+    (cd "$ROOT" && cargo build -q --target-dir "$ROOT/target/theft-demo" -p zecured-node -p zecured-backend \
+      --features zecured-node/demo-tier3,zecured-backend/demo-tier3)
+    return
+  fi
   # Two builds: only the node binary gets the `demo` feature.
   (cd "$ROOT" && cargo build -q -p zecured-node --features demo && cargo build -q -p zecured-backend -p zecured-wallet)
 }
 
+# The theft demo's keys stand in for the judge network's (THEFT_DEMO_ prefix).
+use_theft_demo_keys() {
+  [[ -n "$THEFT_DEMO" ]] || return 0
+  local var
+  for var in COORDINATOR_ADDRESS COORDINATOR_PRIVATE_KEY; do
+    local demo_var="THEFT_DEMO_$var"
+    if [[ -z "${!demo_var:-}" ]]; then
+      echo "$demo_var is not set: the theft demo runs on its own keys, never the judge network's" >&2
+      exit 1
+    fi
+    export "$var=${!demo_var}"
+  done
+}
+
 cmd_init() {
   load_env
+  use_theft_demo_keys
   if [[ -z "${COORDINATOR_ADDRESS:-}" ]]; then
     echo "COORDINATOR_ADDRESS is not set (the address of COORDINATOR_PRIVATE_KEY, in .env):" >&2
     echo "nodes refuse to start without it, as every request must be signed by the coordinator (D16)." >&2
@@ -70,15 +117,19 @@ cmd_init() {
   local infos=()
   for i in 1 2 3 4 5; do
     local dir="$DATA/node-$i"
-    local key_var="SIGNER_${i}_PRIVATE_KEY"
+    local key_var="${KEY_PREFIX}SIGNER_${i}_PRIVATE_KEY"
+    if [[ -n "$THEFT_DEMO" && -z "${!key_var:-}" ]]; then
+      echo "$key_var is not set: the theft demo's five signers have their own keys" >&2
+      exit 1
+    fi
     if [[ ! -f "$dir/identity.json" ]]; then
       NODE_ETH_PRIVATE_KEY="${!key_var:-}" "$BIN/zecured-node" init --index "$i" --data "$dir" \
-        --url "http://127.0.0.1:910$i" > "$dir.public.json"
+        --url "http://127.0.0.1:$PORT_PREFIX$i" > "$dir.public.json"
     fi
     infos+=("$dir.public.json")
   done
 
-  local deployments="${ZECURED_DEPLOYMENTS:-$ROOT/contracts/deployments/base-sepolia.json}"
+  local deployments="${ZECURED_DEPLOYMENTS:-$DEFAULT_DEPLOYMENTS}"
   local rpc="${BASE_SEPOLIA_RPC_URL:-https://sepolia.base.org}"
   python3 -I - "$NETWORK" "$deployments" "$rpc" "${LIGHTWALLETD_URL:-https://testnet.zec.rocks:443}" "${infos[@]}" <<'PY'
 import json, sys, os, subprocess
@@ -119,6 +170,7 @@ PY
 
 cmd_start() {
   load_env
+  use_theft_demo_keys
   [[ -f "$NETWORK" ]] || cmd_init
   build
   mkdir -p "$LOGS" "$PIDS"
@@ -133,7 +185,7 @@ cmd_start() {
       demo_flags=(--demo-allow-compromise)
     fi
     DEMO_ADMIN_TOKEN="$token" nohup "$BIN/zecured-node" run --data "$DATA/node-$i" --config "$NETWORK" \
-      --bind "127.0.0.1:910$i" ${demo_flags[@]+"${demo_flags[@]}"} > "$LOGS/node-$i.log" 2>&1 &
+      --bind "127.0.0.1:$PORT_PREFIX$i" ${demo_flags[@]+"${demo_flags[@]}"} > "$LOGS/node-$i.log" 2>&1 &
     echo $! > "$PIDS/node-$i"
   done
   if ! { [[ -f "$PIDS/backend" ]] && kill -0 "$(cat "$PIDS/backend")" 2>/dev/null; }; then
@@ -141,9 +193,12 @@ cmd_start() {
     # our own paymaster (RQ-05), so it does not get that paymaster's signer key either.
     local own_paymaster=()
     [[ -n "${PAYMASTER_URL:-}" ]] && own_paymaster=(-u PAYMASTER_ADDRESS -u PAYMASTER_SIGNER_PRIVATE_KEY)
+    local compromisable
+    compromisable="$(echo $DEMO_COMPROMISABLE_NODES | tr ' ' ',')"
     env ${own_paymaster[@]+"${own_paymaster[@]}"} \
       DEMO_ADMIN_TOKEN="$token" ZECURED_NETWORK_CONFIG="$NETWORK" ZECURED_COORDINATOR_DATA="$DATA/coordinator" \
-      ZECURED_DEPLOYMENTS="${ZECURED_DEPLOYMENTS:-$ROOT/contracts/deployments/base-sepolia.json}" \
+      ZECURED_DEPLOYMENTS="${ZECURED_DEPLOYMENTS:-$DEFAULT_DEPLOYMENTS}" \
+      BACKEND_BIND="127.0.0.1:$BACKEND_PORT" DEMO_COMPROMISABLE_NODES="$compromisable" \
       nohup "$BIN/zecured-backend" > "$LOGS/backend.log" 2>&1 &
     echo $! > "$PIDS/backend"
   fi
@@ -163,11 +218,11 @@ cmd_stop() {
 cmd_status() {
   for i in 1 2 3 4 5; do
     printf "node %s  " "$i"
-    curl -s --max-time 3 "http://127.0.0.1:910$i/v1/health" || printf "down"
+    curl -s --max-time 3 "http://127.0.0.1:$PORT_PREFIX$i/v1/health" || printf "down"
     echo
   done
   printf "backend "
-  curl -s --max-time 3 "http://127.0.0.1:8080/health" || printf "down"
+  curl -s --max-time 3 "http://127.0.0.1:$BACKEND_PORT/health" || printf "down"
   echo
 }
 

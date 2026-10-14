@@ -669,33 +669,7 @@ impl Coordinator {
     /// all signers for round-1 commitments. Honest signers refuse (the PCZT matches no
     /// plan); signers switched to "compromised" mode accept. Never broadcasts anything.
     pub async fn demo_drain(&self, vault_id: B256, to: &str) -> Result<DrainReport> {
-        let attacker = keys::ironwood_receiver(&NETWORK, to).context(PublicError::InvalidReceiver)?;
-        let v = self.vault(&vault_id).await?;
-        let mut decisions = v.decisions.clone();
-        let notes = self.notes(&v, &mut decisions).await?;
-        let mut inputs: Vec<ReceivedNote> = notes.lineage.clone();
-        inputs.extend(notes.non_conforming.iter().map(|(_, n)| n.clone()));
-        ensure!(!inputs.is_empty(), PublicError::BadRequest);
-        let total: u64 = inputs.iter().map(|n| n.value()).sum();
-        let fee = spend::zip317_fee(inputs.len(), 1);
-        let payments = [Payment {
-            recipient: attacker,
-            value: total.checked_sub(fee).context(PublicError::BadRequest)?,
-            privacy: spend::OutputPrivacy::NoOvk,
-        }];
-        let fvk = fvk_of(&v)?;
-        let anchor = self.zcash.lock().await.scan(&vault_id).context("vault not scanned")?.anchor();
-        let refs: Vec<&ReceivedNote> = inputs.iter().collect();
-        let unsigned = spend::build(
-            &NETWORK,
-            BlockHeight::from_u32(notes.tip.checked_add(1).context("tip overflows")?),
-            &fvk,
-            anchor,
-            &refs,
-            &payments,
-        )?;
-        let pk = self.proving_key().await?;
-        let pczt = tokio::task::spawn_blocking(move || spend::finalize_and_prove(unsigned.pczt, &pk)).await??;
+        let (pczt, _, total) = self.sweep_pczt(vault_id, to).await?;
         let mut sid = [0u8; 16];
         rand_core_06::RngCore::fill_bytes(&mut rand_core_06::OsRng, &mut sid);
         let req = CommitRequest {
@@ -729,6 +703,71 @@ impl Coordinator {
             threshold_reached: signed >= usize::from(MIN_SIGNERS),
             votes,
         })
+    }
+
+    /// DEMO ONLY (`demo-tier3`, the separate theft demo, review T3-6): sweeps every unspent note
+    /// of the vault to `to` with the signatures of three compromised nodes and broadcasts it,
+    /// with no commitment on Base. That is an uncommitted spend (F1): the vault's watcher proves
+    /// it and the slasher takes all five bonds. Returns the transaction id.
+    #[cfg(feature = "demo-tier3")]
+    pub async fn demo_steal(&self, vault_id: B256, to: &str) -> Result<String> {
+        let v = self.vault(&vault_id).await?;
+        let (pczt, mut indices, total) = self.sweep_pczt(vault_id, to).await?;
+        indices.sort_unstable();
+        let (sighash, requests) = spend::signing_requests(&pczt, &indices)?;
+        let pczt_bytes = pczt.clone().serialize().map_err(|e| anyhow!("serialize PCZT: {e:?}"))?;
+        let pkp: PublicKeyPackage = serde_json::from_value(v.public_key_package.clone())?;
+        let signed = frost::demo_sign_uncommitted(
+            &self.nodes,
+            &frost::Payload {
+                vault_id,
+                kind: &SignKind::Payout { claim_ids: vec![] },
+                pczt: &pczt_bytes,
+                sighash,
+                requests: &requests,
+                public_key_package: &pkp,
+            },
+        )
+        .await?;
+        let tx = spend::extract(spend::apply_signatures(pczt, &signed.signatures)?)?;
+        let txid = tx.txid().to_string();
+        self.broadcast(spend::serialize(&tx)?).await?;
+        warn!(vault = %short(&vault_id), amount = total, signers = ?signed.signers, "THEFT DEMO: uncommitted sweep broadcast");
+        Ok(txid)
+    }
+
+    /// DEMO: the transaction sweeping every unspent note of the vault to `to` (proved, unsigned),
+    /// the action indices of its vault spends, and the value it sweeps.
+    async fn sweep_pczt(&self, vault_id: B256, to: &str) -> Result<(pczt::Pczt, Vec<usize>, u64)> {
+        let attacker = keys::ironwood_receiver(&NETWORK, to).context(PublicError::InvalidReceiver)?;
+        let v = self.vault(&vault_id).await?;
+        let mut decisions = v.decisions.clone();
+        let notes = self.notes(&v, &mut decisions).await?;
+        let mut inputs: Vec<ReceivedNote> = notes.lineage.clone();
+        inputs.extend(notes.non_conforming.iter().map(|(_, n)| n.clone()));
+        ensure!(!inputs.is_empty(), PublicError::BadRequest);
+        let total: u64 = inputs.iter().map(|n| n.value()).sum();
+        let fee = spend::zip317_fee(inputs.len(), 1);
+        let payments = [Payment {
+            recipient: attacker,
+            value: total.checked_sub(fee).context(PublicError::BadRequest)?,
+            privacy: spend::OutputPrivacy::NoOvk,
+        }];
+        let fvk = fvk_of(&v)?;
+        let anchor = self.zcash.lock().await.scan(&vault_id).context("vault not scanned")?.anchor();
+        let refs: Vec<&ReceivedNote> = inputs.iter().collect();
+        let unsigned = spend::build(
+            &NETWORK,
+            BlockHeight::from_u32(notes.tip.checked_add(1).context("tip overflows")?),
+            &fvk,
+            anchor,
+            &refs,
+            &payments,
+        )?;
+        let pk = self.proving_key().await?;
+        let indices = unsigned.spend_action_indices.clone();
+        let pczt = tokio::task::spawn_blocking(move || spend::finalize_and_prove(unsigned.pczt, &pk)).await??;
+        Ok((pczt, indices, total))
     }
 
     /// Forwards a demo mode switch to one node. The request is signed with the coordinator

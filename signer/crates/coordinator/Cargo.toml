@@ -10,6 +10,9 @@ publish.workspace = true
 # TEST ONLY: honour the `test-withhold-next-broadcast` flag file (docs/TESTING.md, expiry and
 # rebuild path). Never enable it in a demo or production build.
 test-hooks = []
+# DEMO ONLY: the separate theft demo (review T3-6): `Coordinator::demo_steal`, a sweep signed by
+# three compromised nodes and broadcast without a commitment on Base.
+demo-tier3 = []
 
 [dependencies]
 zecured-node = { path = "../node" }

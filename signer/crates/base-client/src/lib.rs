@@ -13,6 +13,7 @@ use anyhow::{Context, Result, anyhow, ensure};
 
 pub mod events;
 pub mod relay;
+pub mod theft_demo_guard;
 pub mod verify;
 
 /// Base Sepolia chain id.

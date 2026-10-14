@@ -126,6 +126,11 @@ async fn main() -> Result<()> {
                 base_rpc_witness = opts.base_rpc_witness.is_some(),
                 "independent data sources"
             );
+            #[cfg(feature = "demo-tier3")]
+            {
+                warn!("DEMO (theft demo build): three nodes of this network can be compromised");
+                zecured_base::theft_demo_guard::check_on_chain(&cfg.base_rpc_url, cfg.registry).await?;
+            }
             let id = Identity::load(&data.join("identity.json"))?;
             let index = id.index;
             let node = Arc::new(Node::open(cfg, id, &data, opts)?);

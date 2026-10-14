@@ -12,6 +12,7 @@
 
 # Signer / node state (FROST key packages, wallet DBs, salts)
 signer/data/
+signer/data-theft-demo/
 infra/data/
 *.sqlite
 *.sqlite-journal
