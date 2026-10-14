@@ -138,8 +138,9 @@ const MAX_LOG_RANGE: u64 = 2_000;
 const RECENT_STATE_MARGIN: u64 = 2;
 
 /// T3-4: Base blocks a payout's commitment must be under, on every provider, before this node
-/// releases a share for the payout (about 6 seconds).
-pub const COMMIT_DEPTH: u64 = 3;
+/// releases a share for the payout (about 6 seconds with 2 s blocks), unless the network config
+/// sets `commit_depth_blocks`.
+pub const DEFAULT_COMMIT_DEPTH: u64 = 3;
 
 /// I6: signatures a commitment needs.
 const COMMIT_THRESHOLD: usize = 3;
@@ -694,7 +695,7 @@ impl Node {
 
     /// T3-4: the shares of a payout leave this node only if it holds every signature its
     /// commitment was recorded with (so it can submit it again) and every Base provider it uses
-    /// shows that very record, `COMMIT_DEPTH` blocks deep.
+    /// shows that very record, `commit_depth_blocks` deep.
     async fn check_commitment_on_base(&self, record: &SpendCommitRecord, sigs: &[Bytes]) -> Result<()> {
         let msg = record.message();
         let domain = self.domain();
@@ -712,7 +713,7 @@ impl Node {
         let hash = msg.eip712_hash_struct();
         for provider in self.base_providers()? {
             let latest = provider.get_block_number().await.context("Base block number")?;
-            let at = BlockId::number(latest.saturating_sub(COMMIT_DEPTH));
+            let at = BlockId::number(latest.saturating_sub(self.cfg.commit_depth_blocks));
             let on_base = IZecuredRegistry::new(self.cfg.registry, &provider)
                 .spendRecord(record.payout_ref)
                 .block(at)
@@ -721,7 +722,8 @@ impl Node {
                 .context("Registry.spendRecord")?;
             ensure!(
                 on_base.recordHash == hash && on_base.vaultId == record.vault_id && on_base.signerBitmap == bitmap,
-                "the payout's commitment is not on Base {COMMIT_DEPTH} blocks deep with these signatures"
+                "the payout's commitment is not on Base {} blocks deep with these signatures",
+                self.cfg.commit_depth_blocks
             );
         }
         Ok(())

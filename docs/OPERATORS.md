@@ -33,7 +33,10 @@ decision from its own view of both chains:
   (`NODE_BASE_RPC_WITNESS_URL`) must return the same evidence; a disagreement stops ingestion.
 - **The network configuration** (`network.json`): the Registry and Adapter addresses, chain id,
   denominations, confirmations, the five nodes' public keys and the coordinator's address. Check
-  it against the deployment (the Registry's `signers()` must list the five node addresses).
+  it against the deployment (the Registry's `signers()` must list the five node addresses). It
+  also holds `commit_depth_blocks`, the Base blocks a payout's commitment must be under before any
+  share is released (default 3, about 6 s at Base's 2 s blocks; raise it if Base's blocks get
+  faster, as its planned Denim upgrade's 200 ms blocks would), and the L23 and D15 random delays.
 
 The coordinator is trusted for liveness only: it schedules work, builds PCZTs and relays
 messages. It holds no key share and cannot make a node sign anything outside policy.
@@ -89,6 +92,9 @@ nodes' stores freezes the affected vaults; three leaked stores are enough to ste
 ## Operations
 
 - **Health:** `GET /v1/health` → `{ index, mode, vaults }`.
+- **Event logs:** Registry events are read with `eth_getLogs` in ranges the provider accepts: up
+  to `ZECURED_LOG_RANGE` blocks (default 2,000), halved whenever the provider refuses a range
+  (Base Sepolia's public RPC allows 200), so no setting is needed for a stricter provider.
 - **Restarts and upgrades:** stop, replace the binary, start. State is on disk; a payout in flight
   survives a restart (the node still recognizes and confirms the transaction it signed).
 - **Downtime:** any two nodes may be down; payouts and attestations continue with the other three.

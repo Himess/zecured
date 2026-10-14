@@ -59,6 +59,15 @@ pub struct NetworkConfig {
     /// commitment on Base and its broadcast (docs/TIER3.md § 11; 0 broadcasts at once).
     #[serde(default)]
     pub payout_delay_max_blocks: u32,
+    /// T3-4: Base blocks a payout's commitment must be under before any node releases a share.
+    /// Configurable (G1): a faster Base (Denim's 200 ms blocks) needs more blocks for the same
+    /// time.
+    #[serde(default = "default_commit_depth")]
+    pub commit_depth_blocks: u64,
+}
+
+fn default_commit_depth() -> u64 {
+    crate::DEFAULT_COMMIT_DEPTH
 }
 
 impl NetworkConfig {

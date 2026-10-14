@@ -158,6 +158,8 @@ cfg = {
     # D15: random extra confirmations before attesting (0 for the demo).
     "attest_delay_max_blocks": int(os.environ.get("ATTEST_DELAY_MAX_BLOCKS", "0")),
     "payout_delay_max_blocks": int(os.environ.get("PAYOUT_DELAY_MAX_BLOCKS", "0")),
+    # T3-4: Base blocks under a payout's commitment before round 2 (3 = ~6 s at 2 s blocks).
+    "commit_depth_blocks": int(os.environ.get("COMMIT_DEPTH_BLOCKS", "3")),
 }
 json.dump(cfg, open(out, "w"), indent=2)
 print(f"wrote {out} (registry {registry})")

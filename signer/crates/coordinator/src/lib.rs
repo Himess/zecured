@@ -55,7 +55,7 @@ use zecured_base::{
     verify::VAULT_CANCELLED,
 };
 use zecured_node::{
-    AttestResponse, COMMIT_DEPTH, ConfirmIn, ConfirmResponse, DestinationIn, RecipientIn, RefundIn,
+    AttestResponse, ConfirmIn, ConfirmResponse, DestinationIn, RecipientIn, RefundIn,
     chain::{BaseView, VaultNotes, ZcashView, to_policy_position},
     config::NetworkConfig,
     dkg::{Round1Out, Round2In, Round2Out, Round3In, Round3Out, Sealed, VaultOpen},
@@ -1389,7 +1389,7 @@ impl Coordinator {
 
     /// Tier 3 (docs/TIER3.md § 5): records a payout's commitment on Base with the round-1
     /// signatures of the chosen signers, each checked against its node's attestation address and
-    /// sent in signer order, then waits until it is `COMMIT_DEPTH` blocks deep, where the nodes
+    /// sent in signer order, then waits until it is `commit_depth_blocks` deep, where the nodes
     /// read it before they release a share. A commitment already on Base comes from an earlier
     /// session whose signatures this coordinator no longer has: the payout is built again (a new
     /// transaction, so a new commitment).
@@ -1425,7 +1425,7 @@ impl Coordinator {
         ensure!(receipt.status(), "commitSpend reverted");
         let block = receipt.block_number.context("commitSpend receipt without a block")?;
         let started = Instant::now();
-        while provider.get_block_number().await.context("Base block number")? <= block + COMMIT_DEPTH {
+        while provider.get_block_number().await.context("Base block number")? <= block + self.cfg.commit_depth_blocks {
             ensure!(started.elapsed() < RECEIPT_TIMEOUT, "Base did not move past the commitment");
             tokio::time::sleep(Duration::from_secs(1)).await;
         }

@@ -3,7 +3,11 @@
 //! Logs only say what an RPC provider claims happened; signer nodes check every event they
 //! apply against the Registry's state (see [`crate::verify`]).
 
-use std::collections::HashMap;
+use std::{
+    collections::HashMap,
+    future::Future,
+    sync::atomic::{AtomicU64, Ordering},
+};
 
 use alloy::{
     eips::BlockNumberOrTag,
@@ -171,13 +175,72 @@ pub async fn safe_head<P: Provider>(provider: &P) -> Result<u64> {
     Ok(block.header.number)
 }
 
+/// The `eth_getLogs` block range asked for first: `ZECURED_LOG_RANGE`, or 2,000. Providers allow
+/// less (Base Sepolia's public RPC: 200 blocks), so a refused range is halved (G1).
+pub const DEFAULT_LOG_RANGE: u64 = 2_000;
+
+/// The range this process last saw accepted (0: not learned yet).
+static LEARNED_LOG_RANGE: AtomicU64 = AtomicU64::new(0);
+
+/// Logs of `from..=to` through `get`, in requests the provider accepts. A range it refuses is
+/// halved and retried (a refused single block is an error); after eight accepted requests in a
+/// row the range doubles again, up to the first one, so a passing error does not slow every
+/// later request. The accepted size carries over to the next calls of this process.
+pub async fn get_logs_chunked<F, Fut>(from: u64, to: u64, mut get: F) -> Result<Vec<Log>>
+where
+    F: FnMut(u64, u64) -> Fut,
+    Fut: Future<Output = Result<Vec<Log>>>,
+{
+    const GROW_AFTER: u32 = 8;
+    let ceiling = std::env::var("ZECURED_LOG_RANGE")
+        .ok()
+        .and_then(|v| v.parse().ok())
+        .filter(|r: &u64| *r > 0)
+        .unwrap_or(DEFAULT_LOG_RANGE);
+    let mut range = match LEARNED_LOG_RANGE.load(Ordering::Relaxed) {
+        0 => ceiling,
+        learned => learned.min(ceiling),
+    };
+    let mut logs = vec![];
+    let mut streak = 0;
+    let mut start = from;
+    while start <= to {
+        let end = start.saturating_add(range - 1).min(to);
+        match get(start, end).await {
+            Ok(mut chunk) => {
+                logs.append(&mut chunk);
+                LEARNED_LOG_RANGE.store(range, Ordering::Relaxed);
+                if end == to {
+                    break;
+                }
+                start = end + 1;
+                streak += 1;
+                if streak >= GROW_AFTER && range < ceiling {
+                    range = range.saturating_mul(2).min(ceiling);
+                    streak = 0;
+                }
+            }
+            Err(_) if range > 1 => {
+                range /= 2;
+                streak = 0;
+            }
+            Err(e) => return Err(e.context("eth_getLogs")),
+        }
+    }
+    Ok(logs)
+}
+
 /// Registry events in blocks `from..=to`, in chain order.
 pub async fn fetch<P: Provider>(provider: &P, registry: Address, from: u64, to: u64) -> Result<Vec<VaultEvent>> {
     if from > to {
         return Ok(vec![]);
     }
-    let filter = Filter::new().address(registry).from_block(from).to_block(to);
-    let logs = registry_logs(provider.get_logs(&filter).await.context("eth_getLogs")?, registry);
+    let logs = get_logs_chunked(from, to, |a, b| async move {
+        let filter = Filter::new().address(registry).from_block(a).to_block(b);
+        provider.get_logs(&filter).await.map_err(anyhow::Error::from)
+    })
+    .await?;
+    let logs = registry_logs(logs, registry);
     let mut timestamps: HashMap<u64, u64> = HashMap::new();
     let mut out = Vec::with_capacity(logs.len());
     for log in logs {
@@ -288,6 +351,30 @@ pub fn parse_b256(s: &str) -> Result<B256> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    /// G1: a provider that refuses ranges over 200 blocks (Base Sepolia's public RPC) is still
+    /// asked for every block, once and in order; a provider that refuses even one block fails.
+    #[tokio::test]
+    async fn log_ranges_shrink_to_what_the_provider_accepts() {
+        let asked = std::sync::Mutex::new(vec![]);
+        let logs = get_logs_chunked(1_000, 5_999, |a, b| {
+            asked.lock().unwrap().push((a, b));
+            async move {
+                anyhow::ensure!(b - a < 200, "eth_getLogs is limited to a 200 range");
+                Ok(vec![])
+            }
+        })
+        .await
+        .unwrap();
+        assert!(logs.is_empty());
+        let accepted: Vec<(u64, u64)> = asked.lock().unwrap().iter().copied().filter(|(a, b)| b - a < 200).collect();
+        assert_eq!((accepted[0].0, accepted[accepted.len() - 1].1), (1_000, 5_999));
+        assert!(accepted.windows(2).all(|w| w[0].1 + 1 == w[1].0), "contiguous, no block twice");
+        assert!(LEARNED_LOG_RANGE.load(Ordering::Relaxed) <= 200);
+
+        let down = get_logs_chunked(1, 10, |_, _| async { anyhow::bail!("connection refused") }).await;
+        assert!(down.is_err());
+    }
+
     use alloy::{
         primitives::{LogData, U256},
         sol_types::SolEvent,
