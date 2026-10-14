@@ -7,16 +7,20 @@ use std::path::Path;
 
 use anyhow::{Context, Result, bail};
 use orchard::{
-    keys::{PreparedIncomingViewingKey, Scope},
+    Address,
+    keys::{IncomingViewingKey, PreparedIncomingViewingKey, Scope},
     note_encryption::IronwoodDomain,
 };
+use serde::{Deserialize, Serialize};
 use zcash_note_encryption::try_note_decryption;
 use zcash_primitives::transaction::Transaction;
 use zcash_protocol::{
     TxId,
     consensus::{BlockHeight, BranchId, Network},
 };
-use zecured_deposit_statement::violation::{Detail, Kind, ViolationJournal, ViolationWitness, verify_violation};
+use zecured_deposit_statement::violation::{
+    Detail, Kind, ViolationJournal, ViolationWitness, paid_to, verify_violation,
+};
 use zecured_zcash_ops::lwd::{self, LwdClient};
 
 use crate::witness::{Located, locate, ufvk_fvk};
@@ -142,4 +146,39 @@ pub async fn misdirected(
         output_index: u32::from(output_index),
     };
     checked(witness(Kind::Misdirected, beneficiary, at, detail)?)
+}
+
+/// What a claimant keeps to prove F3: written by `zecured-wallet watch --claims-of` when a
+/// committed payment did not arrive in full, read by `build-violation misdirected`. It holds the
+/// claim's salt and the wallet's incoming viewing key: keep it on the claimant's machine.
+#[derive(Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ClaimEvidence {
+    /// The committed payout (txid as displayed).
+    pub txid: String,
+    /// The claim's output in it (`claimPayment(claimRef).outputIndex` on Base).
+    pub output_index: u8,
+    /// The claim's salt (hex, 32 bytes).
+    pub salt: String,
+    /// The claim's raw Ironwood receiver (hex, 43 bytes).
+    pub receiver: String,
+    /// The claimant wallet's raw incoming viewing key that owns the receiver (hex, 64 bytes).
+    pub ivk: String,
+}
+
+/// F3, before proving: what action `output_index` of transaction `txid` pays `receiver` exactly,
+/// as the holder of `ivk` sees it, by the statement's own rule ([`paid_to`]).
+pub async fn claim_output_value(
+    client: &mut LwdClient,
+    txid: TxId,
+    output_index: u8,
+    ivk: &IncomingViewingKey,
+    receiver: &Address,
+) -> Result<u64> {
+    let (raw, height) = lwd::raw_transaction(client, &txid).await?;
+    let branch = BranchId::for_height(&Network::TestNetwork, BlockHeight::from_u32(u32::try_from(height)?));
+    let tx = Transaction::read(&raw[..], branch)?;
+    let bundle = tx.ironwood_bundle().context("the payout has no Ironwood bundle")?;
+    let prepared = PreparedIncomingViewingKey::new(ivk);
+    Ok(bundle.actions().get(usize::from(output_index)).map_or(0, |a| paid_to(a, &prepared, receiver)))
 }

@@ -233,6 +233,14 @@ redirect the reward (`test_prove_revertsOnABadJournalOrSeal`: a seal for another
 - F3: every claimant, borrower or third party. A third party finds X by testing
   `keccak256(salt ‖ txid)` against its committed `claimRef` for each new Zcash transaction.
 
+**Tools.** `zecured-wallet watch --ufvk-file <vault UFVK> --tier3` checks every spend of the
+vault's lineage (F1, F2). With `--claims-of <vault id>`, the borrower's wallet also checks its own
+claims (F3): its loan file keeps the salt of every destination it gave, so for each committed
+payout X it asks the Registry for `claimPayment(keccak256(salt ‖ txid_X))` and decrypts the named
+output with the wallet's own viewing key. A shortfall is written to an evidence file (0600, next to
+the loan file). Each finding prints the `build-violation uncommitted | withheld-change | misdirected`
+command that builds its witness.
+
 Proofs are made on the prover's own machine, because the witness holds a viewing key.
 
 ## 7. Bonds: `ISignerBond` (S5, S6)
@@ -274,6 +282,7 @@ The theft demo never runs on the judge deployment (T3-6).
 |---|---|
 | A real vault spend | the first payout of the disposable vault 9 (local-fork runs of 2026-10-11, Testnet height 4,488,561) spends the vault's deposit note: `build-violation uncommitted` builds the F1 witness (anchor 4,488,600), the statement proves it with the deposit tag the Registry activated the vault with (`TEST-ONLY_vault9_f1_witness.json`), and `ZecuredSlasher` slashes with exactly that journal (`test_F1_theRustStatementsJournalOfARealSpend`) |
 | Statement tests | 17 (`tier2/statement/tests/violations.rs`): each kind on real transactions (F2 against the real payout's internal-scope change, F3 with the vault as claimant), every field of the F1 opening and the viewing key bound, the inclusion checks, the journal ABI; for F3 (E1) only the claim's own output counts, another address of the same wallet is not the receiver, and a note that does not match its `cmx` pays nothing |
+| F3 through the tools | `build-violation misdirected` on an evidence file for the TEST-ONLY vault as claimant of its own deposit (a stand-in payout): the right output index gives the note's 1,000,000 zat, another index 0; the witness runs in the zkVM in **18.9 M cycles** (20 segments), journal identical |
 | zkVM | violation guest image id `0xfbcb3e2d31921c131b9a803f82a533c2c19d3639968b6e2dea8f4f8807615456` (2026-10-14 build, after E1; fixed for deployment by the reproducible build, E4); F1 on the real spend: **26.2 M cycles** (26,225,609, 28 segments), journal identical to the native computation; 10 changes (opening, action, kind, inclusion, an F2 on the same payout) give the same outcome natively and in the executor (`zecured-tier2-host violation parity`) |
 
 ## 10. Out of scope, said plainly (T3-7)

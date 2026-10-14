@@ -6,17 +6,31 @@
 //! input: `spendRecord(payoutRef(X)).inputTag` is its tag, or X is an uncommitted spend (F1).
 //! A committed payout with change must have delivered a note with the committed tag and value
 //! (F2). Each finding comes with the `build-violation` command that builds its witness.
+//!
+//! A claimant checks its own claims (F3): for each committed payout X and each destination it
+//! gave, `claimPayment(keccak256(salt || txid_X))` on Base names what X promised the claim and in
+//! which output; the wallet's incoming viewing key shows what that output paid. A shortfall is
+//! written to an evidence file for `build-violation misdirected`.
+
+use std::path::Path;
 
 use alloy::{
     primitives::{Address, B256},
     providers::ProviderBuilder,
 };
-use anyhow::{Context, Result};
-use orchard::note::ExtractedNoteCommitment;
+use anyhow::{Context, Result, anyhow};
+use orchard::{
+    keys::{FullViewingKey, IncomingViewingKey, Scope},
+    note::ExtractedNoteCommitment,
+};
 use zcash_protocol::TxId;
 use zecured_base::events::IZecuredRegistry;
-use zecured_policy::derive::{deposit_tag, payout_ref};
-use zecured_zcash_ops::scan::ReceivedNote;
+use zecured_deposit_witness::violation::{ClaimEvidence, claim_output_value};
+use zecured_policy::{
+    derive::{deposit_tag, payout_ref},
+    ledger::claim_ref,
+};
+use zecured_zcash_ops::{lwd::LwdClient, scan::ReceivedNote};
 
 /// What the watchtower found about one lineage note.
 #[derive(Debug, PartialEq, Eq)]
@@ -140,6 +154,148 @@ pub fn report(findings: &[Finding]) {
     }
 }
 
+/// One destination this wallet gave for a loan's claims, with the wallet's incoming viewing key
+/// that owns its receiver (`None`: another wallet's address, which only that wallet can check).
+pub struct OwnRecipient {
+    salt: [u8; 32],
+    receiver: [u8; 43],
+    ivk: Option<IncomingViewingKey>,
+}
+
+/// A kept destination (hex salt and raw receiver) as seen by the wallet with viewing key `fvk`.
+pub fn own_recipient(salt: &str, receiver: &str, fvk: &FullViewingKey) -> Result<OwnRecipient> {
+    let salt: [u8; 32] = hex::decode(salt)?.try_into().map_err(|_| anyhow!("salt: 32 bytes"))?;
+    let receiver: [u8; 43] = hex::decode(receiver)?.try_into().map_err(|_| anyhow!("receiver: 43 bytes"))?;
+    let address = Option::<orchard::Address>::from(orchard::Address::from_raw_address_bytes(&receiver))
+        .context("not an Ironwood receiver")?;
+    let ivk = [Scope::External, Scope::Internal]
+        .map(|s| fvk.to_ivk(s))
+        .into_iter()
+        .find(|k| k.diversifier_index(&address).is_some());
+    Ok(OwnRecipient { salt, receiver, ivk })
+}
+
+/// What a claimant found about one committed payment of its claims (F3).
+pub enum ClaimFinding {
+    /// The claim's own output paid at least what the commitment promised.
+    Paid { claim_id: B256, payout: TxId, value: u64 },
+    /// The destination is another wallet's: only that wallet can check this payment.
+    OtherWallet { claim_id: B256, payout: TxId },
+    /// F3: the claim's output paid its receiver less than promised (`value < expected`).
+    Misdirected {
+        claim_id: B256,
+        payout: TxId,
+        expected: u64,
+        value: u64,
+        evidence: ClaimEvidence,
+    },
+}
+
+/// The committed payouts among the lineage findings: the transactions that can pay claims.
+pub fn committed_payouts(findings: &[Finding]) -> Vec<TxId> {
+    findings
+        .iter()
+        .filter_map(|f| match f {
+            Finding::Committed { payout, .. } | Finding::WithheldChange { payout, .. } => Some(*payout),
+            _ => None,
+        })
+        .collect()
+}
+
+/// Checks every committed payment of the claims behind `own` among `payouts`.
+pub async fn check_claims(
+    client: &mut LwdClient,
+    own: &[OwnRecipient],
+    payouts: &[TxId],
+    registry: Address,
+    rpc: &str,
+) -> Result<Vec<ClaimFinding>> {
+    let provider = ProviderBuilder::new().connect_http(rpc.parse().context("Base RPC URL")?);
+    let registry = IZecuredRegistry::new(registry, &provider);
+    let mut findings = vec![];
+    for x in payouts {
+        for r in own {
+            let claim_ref = B256::from(claim_ref(&r.salt, x.as_ref()));
+            let p = registry.claimPayment(claim_ref).call().await.context("Registry.claimPayment")?;
+            if p.claimId == B256::ZERO {
+                continue; // X pays no claim of this destination
+            }
+            let Some(ivk) = &r.ivk else {
+                findings.push(ClaimFinding::OtherWallet {
+                    claim_id: p.claimId,
+                    payout: *x,
+                });
+                continue;
+            };
+            let address = Option::<orchard::Address>::from(orchard::Address::from_raw_address_bytes(&r.receiver))
+                .context("not an Ironwood receiver")?;
+            let value = claim_output_value(client, *x, p.outputIndex, ivk, &address).await?;
+            let evidence = ClaimEvidence {
+                txid: x.to_string(),
+                output_index: p.outputIndex,
+                salt: hex::encode(r.salt),
+                receiver: hex::encode(r.receiver),
+                ivk: hex::encode(ivk.to_bytes()),
+            };
+            findings.push(judge(p.claimId, *x, p.expected, value, evidence));
+        }
+    }
+    Ok(findings)
+}
+
+/// A committed payment is honest when the claim's output paid at least what was promised.
+pub fn judge(claim_id: B256, payout: TxId, expected: u64, value: u64, evidence: ClaimEvidence) -> ClaimFinding {
+    if value >= expected {
+        ClaimFinding::Paid {
+            claim_id,
+            payout,
+            value,
+        }
+    } else {
+        ClaimFinding::Misdirected {
+            claim_id,
+            payout,
+            expected,
+            value,
+            evidence,
+        }
+    }
+}
+
+/// Prints a claim finding; `evidence` is where a misdirected payment's evidence file was written.
+pub fn report_claim(f: &ClaimFinding, evidence: Option<&Path>) {
+    match f {
+        ClaimFinding::Paid {
+            claim_id,
+            payout,
+            value,
+        } => println!("tier 3: claim {} paid {value} zat by its committed output in {payout}: ok", short(claim_id)),
+        ClaimFinding::OtherWallet { claim_id, payout } => println!(
+            "tier 3: claim {} is committed to {payout}, paid to another wallet's address: check it there",
+            short(claim_id)
+        ),
+        ClaimFinding::Misdirected {
+            claim_id,
+            payout,
+            expected,
+            value,
+            evidence: e,
+        } => {
+            println!(
+                "tier 3: VIOLATION F3: committed payout {payout} paid claim {} {value} zat in its output {}, {expected} promised",
+                short(claim_id),
+                e.output_index
+            );
+            if let Some(path) = evidence {
+                println!(
+                    "  build the witness: build-violation misdirected --claim-file {} --tip <anchor> --beneficiary <your EOA>",
+                    path.display()
+                );
+            }
+        }
+    }
+}
+
 fn short(tag: &B256) -> String {
     format!("0x{}", hex::encode(&tag[..4]))
 }
@@ -183,5 +339,81 @@ mod tests {
         };
         assert_eq!(spent(n, x, tag, &record(9, 7, 600_000), &[]), f2);
         assert_eq!(spent(n, x, tag, &record(9, 7, 600_000), &[(B256::repeat_byte(7), 599_999)]), f2);
+    }
+
+    fn fvk(seed: u8) -> FullViewingKey {
+        let sk = (seed..=255)
+            .map(|i| [i; 32])
+            .find_map(|b| Option::<orchard::keys::SpendingKey>::from(orchard::keys::SpendingKey::from_bytes(b)))
+            .unwrap();
+        FullViewingKey::from(&sk)
+    }
+
+    /// F3 runs only on committed payouts: an uncommitted spend has no claim payment to check.
+    #[test]
+    fn claims_are_checked_in_committed_payouts_only() {
+        let (a, b, c) = (TxId::from_bytes([1; 32]), TxId::from_bytes([2; 32]), TxId::from_bytes([3; 32]));
+        let tag = B256::repeat_byte(9);
+        let findings = [
+            Finding::Committed { tag, payout: a },
+            Finding::Uncommitted {
+                note_txid: a,
+                spend_txid: b,
+                tag,
+            },
+            Finding::WithheldChange {
+                payout: c,
+                change_tag: tag,
+                change_value: 1,
+            },
+            Finding::Unspent { tag, value: 1 },
+        ];
+        assert_eq!(committed_payouts(&findings), vec![a, c]);
+    }
+
+    /// The wallet checks a destination with the viewing key that owns its receiver, at any
+    /// diversifier and in either scope; another wallet's destination it cannot check.
+    #[test]
+    fn a_destination_is_checked_with_the_key_that_owns_it() {
+        let (mine, theirs) = (fvk(1), fvk(100));
+        let salt = hex::encode([5u8; 32]);
+        for address in [
+            mine.address_at(0u32, Scope::External),
+            mine.address_at(7u32, Scope::External),
+            mine.address_at(0u32, Scope::Internal),
+        ] {
+            let r = own_recipient(&salt, &hex::encode(address.to_raw_address_bytes()), &mine).unwrap();
+            assert!(r.ivk.is_some_and(|k| k.diversifier_index(&address).is_some()));
+        }
+        let other = theirs.address_at(0u32, Scope::External);
+        assert!(own_recipient(&salt, &hex::encode(other.to_raw_address_bytes()), &mine).unwrap().ivk.is_none());
+        assert!(own_recipient(&salt, "00", &mine).is_err());
+    }
+
+    /// A shortfall of even one zatoshi in the claim's own output is F3, with its evidence.
+    #[test]
+    fn a_payment_short_of_the_promise_is_misdirected() {
+        let (claim, x) = (B256::repeat_byte(4), TxId::from_bytes([2; 32]));
+        let evidence = || ClaimEvidence {
+            txid: x.to_string(),
+            output_index: 1,
+            salt: String::new(),
+            receiver: String::new(),
+            ivk: String::new(),
+        };
+        assert!(matches!(judge(claim, x, 990_000, 990_000, evidence()), ClaimFinding::Paid { value: 990_000, .. }));
+        assert!(matches!(judge(claim, x, 990_000, 1_000_000, evidence()), ClaimFinding::Paid { .. }));
+        assert!(matches!(judge(claim, x, 990_000, 0, evidence()), ClaimFinding::Misdirected { value: 0, .. }));
+        let ClaimFinding::Misdirected {
+            expected,
+            value,
+            evidence,
+            ..
+        } = judge(claim, x, 990_000, 989_999, evidence())
+        else {
+            panic!("a shortfall is F3")
+        };
+        assert_eq!((expected, value, evidence.output_index), (990_000, 989_999, 1));
+        assert_eq!(TxId::from_hex(&evidence.txid), Some(x), "build-violation reads the txid back");
     }
 }

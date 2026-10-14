@@ -5,8 +5,11 @@
 //!     --ufvk-file ufvk.txt --note-txid <txid> --spend-txid <txid> --tip <height> \
 //!     --beneficiary 0x... --headers data/tier2/headers_nu7.json --out violation.json
 //!
-//! The viewing key comes from a file, never the command line. The witness contains it: keep the
-//! witness on this machine.
+//!   ... -- misdirected --claim-file f3-<claim>.json --tip <height> --beneficiary 0x...
+//!
+//! The viewing key comes from a file, never the command line (F3: the claim file that
+//! `zecured-wallet watch --claims-of` writes). The witness contains it: keep the witness on this
+//! machine.
 
 use std::{fs, path::PathBuf};
 
@@ -64,6 +67,13 @@ enum KindArgs {
         change_tag: String,
         #[arg(long)]
         change_value: u64,
+    },
+    /// F3: a committed payout whose output for a claim did not pay the claim's receiver in full.
+    Misdirected {
+        /// The claimant's evidence (payout, output index, salt, receiver, incoming viewing key),
+        /// as written by `zecured-wallet watch --claims-of`.
+        #[arg(long)]
+        claim_file: PathBuf,
     },
 }
 
@@ -123,6 +133,24 @@ async fn main() -> Result<()> {
             )
             .await?
         }
+        KindArgs::Misdirected { claim_file } => {
+            let e: violation::ClaimEvidence = serde_json::from_slice(
+                &fs::read(claim_file).with_context(|| format!("read {}", claim_file.display()))?,
+            )?;
+            violation::misdirected(
+                &mut client,
+                &args.headers,
+                &args.summaries,
+                TxId::from_hex(&e.txid).context("txid")?,
+                hex32(&e.salt)?,
+                hex::decode(&e.receiver)?.try_into().map_err(|_| anyhow!("receiver: 43 bytes"))?,
+                hex::decode(&e.ivk)?.try_into().map_err(|_| anyhow!("ivk: 64 bytes"))?,
+                e.output_index,
+                tip,
+                beneficiary,
+            )
+            .await?
+        }
     };
     if let Some(out) = &args.out {
         fs::write(out, serde_json::to_vec(&witness)?)?;
@@ -132,6 +160,7 @@ async fn main() -> Result<()> {
     println!("reference 0x{}", hex::encode(journal.reference));
     println!("note tag 0x{}", hex::encode(journal.note_tag));
     println!("value {}", journal.value);
+    println!("output index {}", journal.output_index);
     println!("journal 0x{}", hex::encode(journal.abi_encode()));
     Ok(())
 }

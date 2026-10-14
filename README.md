@@ -90,7 +90,8 @@ scripts/signer-network.sh start    # 5 signer nodes + backend (logs in signer/da
 ./target/debug/zecured-wallet loan deposit <vault-id>
 ./target/debug/zecured-wallet loan status <vault-id>
 ./target/debug/zecured-wallet loan viewing-key <vault-id> > ufvk.txt   # keep it local
-./target/debug/zecured-wallet watch --ufvk-file ufvk.txt --from <height> --tier3
+./target/debug/zecured-wallet watch --ufvk-file ufvk.txt --from <height> --tier3 --claims-of <vault-id>
+# a finding prints the build-violation command that builds its proof's witness (F1, F2, F3)
 ```
 
 ### Local Base fork

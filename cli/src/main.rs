@@ -87,7 +87,9 @@ enum Cmd {
     /// Watch any vault (or wallet) with its unified full viewing key: shows the notes it
     /// received and spent. This is how a borrower verifies their vault independently. With
     /// `--tier3`, also checks every spend of the vault's lineage against its commitment on Base
-    /// and reports what a violation proof can show (F1 uncommitted spend, F2 withheld change).
+    /// and reports what a violation proof can show (F1 uncommitted spend, F2 withheld change);
+    /// with `--claims-of`, also that every committed payment of this wallet's claims arrived in
+    /// full in its own output (F3).
     Watch {
         /// File holding the unified full viewing key (never on the command line).
         #[arg(long)]
@@ -98,6 +100,10 @@ enum Cmd {
         /// Check the lineage against the Registry's Tier 3 records (docs/TIER3.md).
         #[arg(long)]
         tier3: bool,
+        /// With `--tier3`: the loan (vault id) whose claims this wallet checks, with the
+        /// destinations its loan file kept and the wallet's own viewing key.
+        #[arg(long, requires = "tier3")]
+        claims_of: Option<B256>,
         #[arg(long, env = "BASE_SEPOLIA_RPC_URL", default_value = "https://sepolia.base.org")]
         rpc: String,
     },
@@ -240,6 +246,20 @@ struct LoanFile {
     /// The deposit transaction sent by `loan deposit`.
     #[serde(default)]
     deposit_txid: Option<String>,
+    /// Every destination given for this loan's claims, with its salt: what checks each committed
+    /// payment and proves a misdirected one (F3, `watch --claims-of`).
+    #[serde(default)]
+    destinations: Vec<KeptDestination>,
+}
+
+/// A destination of the loan's claims: `commitment = keccak256(salt || receiver)`.
+#[derive(Serialize, Deserialize, Clone)]
+struct KeptDestination {
+    commitment: B256,
+    /// Raw Ironwood receiver (hex, 43 bytes).
+    receiver: String,
+    /// Hex, 32 bytes.
+    salt: String,
 }
 
 struct Wallet {
@@ -595,6 +615,7 @@ async fn main() -> Result<()> {
             ufvk_file,
             from,
             tier3,
+            claims_of,
             rpc,
         } => {
             let ufvk = fs::read_to_string(&ufvk_file)
@@ -625,6 +646,33 @@ async fn main() -> Result<()> {
                 let net = network_params()?;
                 let findings = watch::check_lineage(&ufvk, &state.notes, net.registry, &rpc).await?;
                 watch::report(&findings);
+                if let Some(vault) = claims_of {
+                    let l: LoanFile = read_secret_json(&loan_path(&cli.wallet, &vault))?;
+                    let w = load_wallet(&cli.wallet)?;
+                    let own = l
+                        .destinations
+                        .iter()
+                        .map(|d| watch::own_recipient(&d.salt, &d.receiver, &w.fvk))
+                        .collect::<Result<Vec<_>>>()?;
+                    let payouts = watch::committed_payouts(&findings);
+                    let claims = watch::check_claims(&mut client, &own, &payouts, net.registry, &rpc).await?;
+                    for f in &claims {
+                        if let watch::ClaimFinding::Misdirected { evidence, .. } = f {
+                            let path = loan_path(&cli.wallet, &vault).with_file_name(format!(
+                                "f3-{}-{}.json",
+                                hex::encode(&vault[..8]),
+                                evidence.txid
+                            ));
+                            write_json(&path, evidence)?;
+                            watch::report_claim(f, Some(&path));
+                        } else {
+                            watch::report_claim(f, None);
+                        }
+                    }
+                    if claims.is_empty() {
+                        println!("tier 3: no committed payment of this loan's claims yet");
+                    }
+                }
             }
         }
         Cmd::Loan(cmd) => loan(&cli.wallet, &cli.lwd, &cli.backend, cmd).await?,
@@ -676,6 +724,7 @@ async fn loan(wallet: &Path, lwd_url: &str, backend: &str, cmd: LoanCmd) -> Resu
                     expiry_height: Some(v.expiry_height),
                     opened_signatures: v.signatures.clone(),
                     deposit_txid: None,
+                    destinations: vec![],
                 },
             )?;
             eprintln!("vault address signed by all {SIGNERS} signers of the network config (checked here)");
@@ -850,6 +899,11 @@ async fn destination(wallet: &Path, backend: &str, vault: &B256, to: Option<Stri
     )
     .await?;
     l.next_nonce += 1;
+    l.destinations.push(KeptDestination {
+        commitment: c,
+        receiver: hex::encode(receiver),
+        salt: hex::encode(salt),
+    });
     write_json(&loan_path(wallet, vault), &l)?;
     Ok(c)
 }
