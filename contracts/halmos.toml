@@ -1,0 +1,7 @@
+# Halmos symbolic checks (docs/TESTING.md § 1b). From contracts/:
+#   FOUNDRY_PROFILE=halmos halmos
+[global]
+# The build output of foundry.toml's `halmos` profile.
+forge-build-out = "out/halmos"
+# The longest loop: the signature check over at most 6 signatures.
+loop = 8
