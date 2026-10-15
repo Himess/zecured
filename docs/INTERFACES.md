@@ -215,6 +215,18 @@ event SpendCommitted(bytes32 indexed vaultId, bytes32 indexed payoutRef, bytes32
   and emits `ActivationPending` with `readyHeight = relay tip height + finalizeDepth` and
   `readyTime = block.timestamp + finalizeDelay` (K3, D26). Disabled (reverts) when the
   deployment has no verifier. Anyone may relay.
+- Journal v2 (the guest round, design notes T-09), what the v3 Intake decodes (`DepositJournal`,
+  `contracts/src/interfaces/v3/IZecuredIntake.sol`): `abi.encode(uint8 mode, uint32 branchId,
+  bytes32 tipHash, bytes32 vaultId, address account, uint64 amount, bytes32 depositTag, bytes32
+  vaultOpenedHash)`, exactly 256 bytes. `mode` 0 = Activate (the D5 deposit rule, the vault's
+  amount, mined at or below its expiry height), 1 = Refund (any v6 transaction with an Ironwood
+  bundle, a note of any value to the vault's published receiver, at any height); nothing else is
+  ever committed. `branchId` is the consensus branch id of the epoch the proof walked (B and T in
+  it, the transaction of it): the network is a build parameter of the guest, so each network has
+  its own image id; the Testnet guest proves NU7 (`0x77190AD9`) only, the Mainnet guest NU6.3
+  (`0x37A5165B`) or NU7. `amount` is the note's value; `vaultOpenedHash` is `VaultOpened` v2's
+  struct hash (§ 2.5) with the vault's own amount. The deposit tag is the same in both modes,
+  so a note lands once, as collateral or as a refund.
 - `finalizeActivation` (anyone): the relay's tip height `>= readyHeight`, `block.timestamp >=
   readyTime`, and the anchor still on the best chain under `minConfirmationWork`; then the same
   effects as `attestDeposit`, emitting `VaultActivated`.
@@ -315,8 +327,13 @@ function openCasesOf(bytes32 vaultId) external view returns (uint256);        //
 
 - The journal's kinds, the Registry records each is checked against, and the dismissal rules are in
   docs/TIER3.md § 6 (F4: `ref` is the payout's `payoutRef`, `noteTag` the claim reference an honest
-  commitment gives, `keccak256(salt || txid)`, and `destCommitment` the claim's recipient commitment); the guest is `tier2/methods/violation` (one image id). The beneficiary is bound in
+  commitment gives, `keccak256(salt || txid)`, and `destCommitment` the claim's recipient commitment); the guest is `tier2/methods/violation` (one image id per network). The beneficiary is bound in
   the proof and is never a vault's smart account (smart accounts never receive ETH).
+- The violation guest also proves kind 5, `Included` (the guest round): journal `{5, anchor,
+  beneficiary 0, ref = payoutRef(txid_X), 0, 0, 0, 0}`, "a payout with this reference is in a
+  block under the anchor", for a later contract that confirms payouts by proof (design notes
+  T-05). It is not a violation: `ViolationKind` stops at `WrongClaimRef`, so the v2 slasher
+  refuses it (decoding kind 5 reverts).
 - Deployment: `script/DeployZecured.s.sol` with `VIOLATION_IMAGE_ID`; the signers then bond with
   `script/BondSigners.s.sol`. Challenge window: at least a day on the judge deployment, 2 minutes only on
   the separate theft demo (T3-6).
@@ -344,7 +361,7 @@ addresses, salts, viewing keys or IPs.
 | `POST /vaults/:id/destination` | `{ receiver (UA), salt, nonce, deadline, signature }` (`Destination`) | `{ commitment }` — validated **before** any Base tx that burns zZEC |
 | `POST /vaults/:id/refund` | `{ noteId, receiver, salt, nonce, deadline, signature }` (`RefundRequest`) | `{ accepted: true }` |
 | `POST /vaults/:id/viewing-key` | `{ nonce, deadline, signature }` (`ViewKeyRequest`) | `{ ufvk }` |
-| `POST /vaults/:id/deposit-proof` | `{ imageId, journal, seal }` (a deposit proof made elsewhere, e.g. `zecured-wallet loan prove`) | `{ accepted: true }` once `attestDepositWithProof` is mined with the vault's `VaultOpened` signatures and the coordinator's gas (Y10: proving one's own deposit needs no ETH); the coordinator then finalizes the activation (K3). Only while the vault waits for its deposit |
+| `POST /vaults/:id/deposit-proof` | `{ imageId, journal, seal }` (a deposit proof made elsewhere, e.g. `zecured-wallet loan prove`; journal v2 in Activate mode, § 3) | `{ accepted: true }` once `attestDepositWithProof` is mined with the vault's `VaultOpened` signatures and the coordinator's gas (Y10: proving one's own deposit needs no ETH); the coordinator then finalizes the activation (K3). Only while the vault waits for its deposit |
 | `POST /recipients` | `{ receiver (UA), salt }` (liquidator / market maker) | `{ commitment }` |
 | `GET /quotes/close/:vaultId` | — | `{ executor, marginBps (number), repayAssets, mmAmount, userAmount, expiresAt (number, Unix s) }` (relayed to the market maker) |
 | `POST /closes` | `{ request: CloseRequest (camelCase), signature }` | `{ txHash }` once `closeWithCollateral` is mined (relayed; executed by the market maker) |

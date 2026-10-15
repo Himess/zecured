@@ -22,6 +22,8 @@ review and their status are in [SECURITY_REVIEW.md](SECURITY_REVIEW.md).
 | Signer network (3-of-5) | Vault balances, timing, payout recipients | The user's identity and any ZEC outside the vault |
 | Coordinator | Same as the signers (it builds the transactions); it can delay or withhold work | Any key share: it cannot move funds, mint, or hand you a deposit address the signers did not sign |
 | The borrower (with the vault UFVK) | The vault's own notes, its payouts to the borrower and its change | Third-party payouts (liquidator, market maker): encrypted with `ovk = None` |
+| A deposit prover (our GPU server, or whoever a borrower hands a witness; review H-10a) | The deposit transaction and its note to the vault (value, recipient), the vault's id, owner, account and address, and its tag key K: with K it can tell which Zcash notes are the vault's (their tags) and which transactions are its payouts (their `payoutRef`) | The amounts, recipients and memos of the vault's other notes and payouts; the viewing key (a deposit witness carries K only, statement v2); any key share |
+| A violation prover | F1, F2: the vault's UFVK (what the borrower sees); F3: the claimant's own incoming viewing key and its claim; F4 and `Included`: K and, for F4, the claim's salt and receiver | With K alone (F4, `Included`): the amounts and recipients of the vault's notes and payouts; F3: the vault's notes beyond the claim's own output |
 | Our backend proxy | Requests and client IPs (never logged) | — |
 | The app's host | Page loads and client IPs | Vault ids (kept in the URL fragment) and keys (they stay in the browser) |
 | The light wallet server operator | Which transactions the signers look up: Zecured deposits and payouts | Amounts and addresses (shielded); the Base account |
@@ -39,7 +41,7 @@ review and their status are in [SECURITY_REVIEW.md](SECURITY_REVIEW.md).
 | L6 | The return address published on Base | Off-chain owner-signed destination; Base only sees a salted commitment | node `destination`, `ledger::commitment` |
 | L7 | Deshielding the returned amount right away | Warning and guidance in the app | app |
 | L8 | Reusing a vault | A fresh vault (fresh FROST key) per loan; one account ↔ one vault | DKG per vault; Registry I4 |
-| L9 | Linking `depositTag` to the deposit note | Keyed tag: BLAKE2b keyed with a hash of the vault's viewing key over the note commitment (D24); only holders of the viewing key can compute it | `policy/src/derive.rs`, `tier2/statement` |
+| L9 | Linking `depositTag` to the deposit note | Keyed tag: BLAKE2b keyed with a hash of the vault's viewing key, its tag key K, over the note commitment (D24); only holders of K can compute it: the viewing key's holders and whoever proves the vault's deposits | `policy/src/derive.rs`, `tier2/statement` |
 | L10 | Our backend and the app's host see client IPs | Nothing is logged; vault ids stay in the URL fragment, so the app's host never sees them; Tor support is roadmap | `backend/`, app routes |
 | L11 | Liquidator / market maker addresses | Revealed off-chain only; Base sees salted commitments; a fresh salt per operation | `bots/`, coordinator |
 | L12 | Bridges or NEAR Intents in the ZEC flow | None: ZEC never leaves Zcash | design |
@@ -52,9 +54,10 @@ review and their status are in [SECURITY_REVIEW.md](SECURITY_REVIEW.md).
 | L19 | Unsalted address hashes on Base | `keccak256(salt32 ‖ receiver43)`; salts only with the signers | `ledger::commitment`, contracts |
 | L20 | Registering the vault on Base just before the deposit | Vaults are opened off-chain; the first Base trace is the attested deposit | coordinator, Registry |
 | L21 | The light wallet server learns which transactions the signers look up (deposits, payouts) | Each signer can use its own server; roadmap: every signer on its own full node | node config ([OPERATORS.md](OPERATORS.md)) |
-| L22 | A Tier 2 deposit proof revealing the deposit or the vault's address on Base | The journal holds the anchor header (a later block, not the deposit's), vault id, account, amount, tag and the `VaultOpened` struct hash; the deposit's block, transaction, note and the address hash stay inside the proof (D22). Base learns only that the deposit precedes the anchor | `tier2/statement`, `ZecuredRegistry.attestDepositWithProof` |
+| L22 | A Tier 2 deposit proof revealing the deposit or the vault's address on Base | The journal holds the mode, the epoch's branch id, the anchor header (a later block, not the deposit's), vault id, account, amount, tag and the `VaultOpened` struct hash; the deposit's block, transaction, note and the address and tag key hashes stay inside the proof (D22). Base learns only that the deposit precedes the anchor | `tier2/statement`, `ZecuredRegistry.attestDepositWithProof` |
 | L23 | A payout's Tier 3 commitment lands on Base seconds before its broadcast, pointing at the next Zcash blocks | A random delay of 1 to `payout_delay_max_blocks` Zcash blocks (8 on the judge deployment) between commitment and broadcast, inside the 120-block expiry (D32, RT-13). Outside a local fork the network config refuses a maximum of 0, and `GET /status` shows both delays | coordinator |
 | L24 | Tier 3 records and violation journals linking to Zcash | A commitment holds only keyed tags, a keyed payout reference, salted claim references and output indexes; a journal adds an anchor header and, for F3, the value the claimant received. No txid, note commitment or address (docs/TIER3.md § 11) | `policy/src/derive.rs`, `tier2/statement`, contracts |
+| L25 | A refund proof (journal v2, Refund mode) writing a non-conforming note's exact value on Base, where an activation writes a shared denomination: the note's sender knows the amount and the time | The app asks only for the denomination (ZIP 321 request built locally), so such a note is a sender's mistake; stated in docs/TIER2.md § 2.1 | app, `tier2/statement` |
 
 ## Attacks on the signer network
 
