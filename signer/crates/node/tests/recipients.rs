@@ -43,6 +43,7 @@ fn node(dir: &std::path::Path) -> Node {
         payout_delay_max_blocks: 0,
         commit_depth_blocks: 3,
         local_fork: true,
+        open_vault: Default::default(),
     };
     let id = Identity {
         index: 1,

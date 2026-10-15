@@ -13,6 +13,8 @@ anyhow.workspace = true
 serde.workspace = true
 serde_json.workspace = true
 hex.workspace = true
+# H-01: the open-vault stamp (already in the lock file, through alloy and the Zcash crates).
+sha2 = "0.10"
 
 [dev-dependencies]
 tokio.workspace = true

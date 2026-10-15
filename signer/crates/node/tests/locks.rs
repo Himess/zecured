@@ -86,6 +86,7 @@ async fn a_hanging_light_wallet_server_does_not_lock_the_store() {
         payout_delay_max_blocks: 0,
         commit_depth_blocks: 3,
         local_fork: true,
+        open_vault: Default::default(),
     };
     let id = Identity {
         index: 1,

@@ -10,6 +10,7 @@ import { api as defaultApi, type Api, type OpenVaultResult } from "./api";
 import { prepareDestination, decodeUnifiedAddress, isIronwoodOnly } from "./commitment";
 import { config as appConfig, type AppConfig } from "./config";
 import { signerSet, storedVault, textHash, verifyVaultOpened, VaultProofError, type VaultCheck } from "./signers";
+import { solveStamp, STAMP_DEFAULT_BITS } from "./stamp";
 import {
   deadlineIn,
   destinationTypedData,
@@ -31,6 +32,8 @@ export interface OwnerContext {
   signers?: readonly Address[];
   config?: AppConfig;
   now?: number;
+  /** Compute the open-vault stamp with these zero bits instead of the backend's (tests). */
+  stampBits?: number;
 }
 
 /** The configuration forbids owner signatures (H-6: pins and backend disagree, or no Registry pin). */
@@ -92,9 +95,11 @@ export interface OpenedVault extends OpenVaultResult {
 }
 
 /**
- * POST /vaults with a fresh OpenVault signature. Throws `VaultProofError` unless all five
- * signers signed `VaultOpened` for the returned address and viewing key and for this request:
- * nothing it returns may be shown or stored as payable before that.
+ * POST /vaults with a fresh OpenVault signature and the request's hashcash stamp (review H-01:
+ * a second or two of work in this browser, with the zero bits `GET /config` reports). Throws
+ * `VaultProofError` unless all five signers signed `VaultOpened` for the returned address and
+ * viewing key and for this request: nothing it returns may be shown or stored as payable
+ * before that.
  */
 export async function openVault(loan: StoredLoan, ctx: OwnerContext = {}): Promise<OpenedVault> {
   const a = ctx.api ?? defaultApi;
@@ -103,10 +108,14 @@ export async function openVault(loan: StoredLoan, ctx: OwnerContext = {}): Promi
   // A build that cannot check the signers' signatures opens no vault (no DKG for nothing).
   if (!ctx.signers) signerSet(c);
   const amount = BigInt(loan.amount);
+  // The stamp binds the request id and the owner key: a retry of the same loan finds the same
+  // one, which the backend accepts again unless a vault opened with it. Computed first, so the
+  // work does not eat into the request's deadline.
+  const stamp = await solveStamp(loan.requestId, loan.owner, ctx.stampBits ?? c.openVaultStampBits ?? STAMP_DEFAULT_BITS);
   const deadline = deadlineIn(REQUEST_TTL_SECONDS, ctx.now);
   const message = { owner: loan.owner, account: loan.account, amount, requestId: loan.requestId, deadline };
   const signature = await signWithOwnerKey(loan.ownerKey, openVaultTypedData(registry, message));
-  const res = await a.openVault({ ...message, signature });
+  const res = await a.openVault({ ...message, signature, stamp });
   if (res.amount !== amount) throw new Error("The backend opened a vault for a different amount.");
   const check = await verifyVaultOpened(
     {

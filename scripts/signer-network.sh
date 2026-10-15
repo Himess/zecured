@@ -164,6 +164,13 @@ cfg = {
     "payout_delay_max_blocks": int(os.environ.get("PAYOUT_DELAY_MAX_BLOCKS", "0" if local else "8")),
     # T3-4: Base blocks under a payout's commitment before round 2 (3 = ~6 s at 2 s blocks).
     "commit_depth_blocks": int(os.environ.get("COMMIT_DEPTH_BLOCKS", "3")),
+    # H-01: a hashcash stamp on every vault opening (20 bits: about a million hashes), a vault
+    # without a seen deposit stops holding one of the 512 slots after 30 minutes.
+    "open_vault": {
+        "stamp_bits": int(os.environ.get("OPEN_VAULT_STAMP_BITS", "20")),
+        "pending_slot_secs": int(os.environ.get("OPEN_VAULT_SLOT_SECS", "1800")),
+        "max_pending": int(os.environ.get("OPEN_VAULT_MAX_PENDING", "512")),
+    },
 }
 json.dump(cfg, open(out, "w"), indent=2)
 print(f"wrote {out} (registry {registry})")

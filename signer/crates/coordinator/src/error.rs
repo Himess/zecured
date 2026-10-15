@@ -18,6 +18,8 @@ pub enum PublicError {
     AlreadyBound,
     /// Too many vaults are waiting for their deposit (M-8).
     Busy,
+    /// The open-vault request's hashcash stamp is missing or too weak (H-01).
+    BadStamp,
     InvalidReceiver,
     NotOwner,
     Expired,
@@ -40,6 +42,7 @@ impl PublicError {
             Self::NotDenomination => "not_a_denomination",
             Self::AlreadyBound => "already_bound",
             Self::Busy => "busy",
+            Self::BadStamp => "bad_stamp",
             Self::InvalidReceiver => "invalid_receiver",
             Self::NotOwner => "not_owner",
             Self::Expired => "expired",
@@ -59,6 +62,7 @@ impl PublicError {
             Self::NotDenomination => "Not a standard collateral denomination.",
             Self::AlreadyBound => "This account or owner key already has a vault.",
             Self::Busy => "Too many vaults are waiting for a deposit. Try again later.",
+            Self::BadStamp => "The request's proof of work is missing or too weak.",
             Self::InvalidReceiver => "Not a valid unified address with an Ironwood (Orchard-protocol) receiver.",
             Self::NotOwner => "Not signed by the vault owner.",
             Self::Expired => "The request has expired.",
@@ -78,6 +82,7 @@ impl PublicError {
             Self::UnknownVault => 404,
             Self::AlreadyBound | Self::NonceUsed => 409,
             Self::NotDenomination | Self::InvalidReceiver | Self::Expired | Self::SignersRefused => 422,
+            Self::BadStamp => 422,
             Self::Busy => 429,
             Self::Internal => 500,
             Self::SignersUnavailable | Self::ChainUnavailable => 503,

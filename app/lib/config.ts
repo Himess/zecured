@@ -11,9 +11,10 @@
  * The backend's `GET /config` never overrides a pin. It is a consistency check: any
  * disagreement is a hard stop (owner signatures, Base reads and sponsored transactions are
  * disabled; `problems` says why). It does provide the values that carry no authority: whether
- * sponsored transactions are available, the denominations, the confirmations and the deposit
- * window. Only a development build (`next dev`) may take unpinned addresses from it, and the UI
- * then says so; a production build with a missing pin keeps Base disabled.
+ * sponsored transactions are available, the denominations, the confirmations, the deposit
+ * window and the zero bits of the open-vault stamp. Only a development build (`next dev`) may
+ * take unpinned addresses from it, and the UI then says so; a production build with a missing
+ * pin keeps Base disabled.
  *
  * `config` is updated in place once `loadRuntimeConfig()` (lib/api.ts) has fetched `/config`;
  * components/ConfigGate.tsx renders pages only after that, so nothing may read the config at
@@ -80,6 +81,8 @@ export interface AppConfig {
   confirmations: number | null;
   /** Zcash blocks a vault accepts its deposit for (expiry height = birthday + this); null until known. */
   vaultExpiryBlocks: number | null;
+  /** Zero bits `POST /vaults`'s hashcash stamp needs (review H-01; lib/stamp.ts); null until known. */
+  openVaultStampBits: number | null;
   /** `GET /config`: not fetched yet, checked and applied, or unavailable (`remoteError` says why). */
   remote: "pending" | "loaded" | "unavailable";
   remoteError: string | null;
@@ -103,6 +106,8 @@ export interface RemoteConfig {
   denominations: bigint[];
   confirmations: number;
   vaultExpiryBlocks: number;
+  /** Zero bits of the open-vault stamp (review H-01); null from a backend that predates it. */
+  openVaultStampBits: number | null;
   /** Bundler, paymaster and paymaster allowlist all configured on the backend. */
   sponsorship: boolean;
 }
@@ -271,6 +276,7 @@ export function buildConfig(env: ConfigEnv, remote?: RemoteConfigResult): AppCon
   let denominations: readonly bigint[] = DENOMINATIONS;
   let confirmations: number | null = null;
   let vaultExpiryBlocks: number | null = null;
+  let openVaultStampBits: number | null = null;
   let status: AppConfig["remote"] = "pending";
   let remoteError: string | null = null;
   if (remote && "error" in remote) {
@@ -282,6 +288,7 @@ export function buildConfig(env: ConfigEnv, remote?: RemoteConfigResult): AppCon
     if (remote.denominations.length > 0) denominations = remote.denominations;
     confirmations = remote.confirmations;
     vaultExpiryBlocks = remote.vaultExpiryBlocks;
+    openVaultStampBits = remote.openVaultStampBits;
     if (remote.chainId !== CHAIN_ID) {
       problems.push(`The backend is configured for chain ${remote.chainId}, this app for Base Sepolia (${CHAIN_ID}).`);
     } else {
@@ -359,6 +366,7 @@ export function buildConfig(env: ConfigEnv, remote?: RemoteConfigResult): AppCon
     denominations,
     confirmations,
     vaultExpiryBlocks,
+    openVaultStampBits,
     remote: status,
     remoteError,
     problems,

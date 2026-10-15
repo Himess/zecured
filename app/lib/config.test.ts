@@ -44,6 +44,7 @@ describe("build-time pins (production rules)", () => {
     expect(c).toMatchObject({ contractsDeployed: false, ownerSigning: false, sponsorship: false, remote: "pending", signersPinned: false });
     expect(c.denominations).toEqual([1_000_000n, 5_000_000n, 12_500_000n]);
     expect(c.confirmations).toBeNull();
+    expect(c.openVaultStampBits).toBeNull();
     expect(configIssues(c)).toEqual([
       `This build does not pin ${ALL_PINS}. Owner signatures, Base reads and sponsored transactions stay disabled until the app is rebuilt with them (see app/.env.example).`,
     ]);
@@ -115,6 +116,7 @@ describe("GET /config is a consistency check, never a source of addresses (H-6)"
       denominations: [1_000_000n, 5_000_000n, 10_000_000n],
       confirmations: 3,
       vaultExpiryBlocks: 288,
+      openVaultStampBits: 20,
       remote: "loaded",
       problems: [],
     });

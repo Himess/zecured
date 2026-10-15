@@ -21,6 +21,7 @@ import {
   submitDestination,
 } from "./owner";
 import { textHash, vaultOpenedMessage, VaultProofError } from "./signers";
+import { isValidStamp } from "./stamp";
 import { encodeUnifiedAddress, TYPECODE_ORCHARD, TYPECODE_SAPLING } from "./ua";
 
 const REGISTRY: Address = "0x1111111111111111111111111111111111111111";
@@ -85,11 +86,14 @@ describe("openVault", () => {
     const loan = createLoan(1_000_000n);
     const answer = await opened(loan);
     const { api, bodies } = backend(() => answer);
-    const res = await openVault(loan, { api, registry: REGISTRY, signers: SIGNERS, now: NOW });
+    const res = await openVault(loan, { api, registry: REGISTRY, signers: SIGNERS, now: NOW, stampBits: 8 });
     expect(res).toMatchObject({ vaultId: VAULT, address: vaultUa, expiryHeight: EXPIRY, ufvkHash: textHash(UFVK), check: "pinned" });
     expect(res.signatures).toHaveLength(5);
     const b = bodies[0]!;
     expect(b).toMatchObject({ owner: loan.owner, account: loan.account, amount: "1000000", requestId: loan.requestId, deadline: "1700000600" });
+    // H-01: the request's stamp, a decimal string, with the bits asked for.
+    expect(b.stamp).toMatch(/^\d+$/);
+    expect(isValidStamp(loan.requestId, loan.owner, BigInt(b.stamp!), 8)).toBe(true);
     const signer = await recoverTypedDataAddress({
       ...openVaultTypedData(REGISTRY, {
         owner: loan.owner,
@@ -107,14 +111,14 @@ describe("openVault", () => {
     const loan = createLoan(1_000_000n);
     const answer = { ...(await opened(loan)), amount: "5000000" };
     const { api } = backend(() => answer);
-    await expect(openVault(loan, { api, registry: REGISTRY, signers: SIGNERS })).rejects.toThrow(/different amount/);
+    await expect(openVault(loan, { api, registry: REGISTRY, signers: SIGNERS, stampBits: 8 })).rejects.toThrow(/different amount/);
   });
 
   /** Security review C-4: a compromised backend hands out an address of its own. */
   it("refuses a vault that not every pinned signer vouches for", async () => {
     const loan = createLoan(1_000_000n);
     const attacker = encodeUnifiedAddress("test", [{ typecode: TYPECODE_ORCHARD, data: new Uint8Array(43).fill(0x66) }]);
-    const ctx = { registry: REGISTRY, signers: SIGNERS };
+    const ctx = { registry: REGISTRY, signers: SIGNERS, stampBits: 8 };
     const answers = [
       // The signers' signatures, relayed with the backend's own (well-formed, Ironwood-only) address.
       await opened(loan, { address: attacker, signedAddress: vaultUa }),
@@ -142,6 +146,20 @@ describe("openVault", () => {
     expect(config.ownerSigning).toBe(true);
     await expect(openVault(loan, { api, config })).rejects.toBeInstanceOf(VaultProofError);
     expect(bodies).toHaveLength(0);
+  });
+
+  /** Review H-01: the stamp has the zero bits the backend's GET /config asks for. */
+  it("stamps the request with the backend's bits", async () => {
+    const loan = createLoan(1_000_000n);
+    const answer = await opened(loan);
+    const { api, bodies } = backend(() => answer);
+    const config = { ...buildConfig({}), openVaultStampBits: 12 };
+    await openVault(loan, { api, config, registry: REGISTRY, signers: SIGNERS });
+    const stamp = BigInt(bodies[0]!.stamp!);
+    expect(isValidStamp(loan.requestId, loan.owner, stamp, 12)).toBe(true);
+    // The first such nonce: a retry of the same loan sends the same stamp.
+    await openVault(loan, { api, config, registry: REGISTRY, signers: SIGNERS });
+    expect(bodies[1]!.stamp).toBe(bodies[0]!.stamp);
   });
 });
 

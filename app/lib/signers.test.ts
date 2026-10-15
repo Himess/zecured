@@ -142,6 +142,7 @@ describe("which signer set (never the backend's in production)", () => {
     denominations: [1_000_000n],
     confirmations: 3,
     vaultExpiryBlocks: 288,
+    openVaultStampBits: 20,
     sponsorship: false,
   });
 

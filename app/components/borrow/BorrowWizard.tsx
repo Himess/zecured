@@ -260,7 +260,8 @@ function AmountStep({
       </div>
       {open.busy ? (
         <p className="mt-3 text-sm text-muted" aria-live="polite">
-          The five signer nodes are generating the vault&apos;s threshold key. This can take a little while.
+          This browser first computes a small proof of work (a few seconds; it keeps vault openings from being
+          spammed), then the five signer nodes generate the vault&apos;s threshold key. This can take a little while.
         </p>
       ) : null}
       {open.error ? (

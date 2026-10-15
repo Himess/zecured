@@ -13,6 +13,7 @@ use anyhow::{Context, Result, anyhow, ensure};
 
 pub mod events;
 pub mod relay;
+pub mod stamp;
 pub mod theft_demo_guard;
 pub mod verify;
 

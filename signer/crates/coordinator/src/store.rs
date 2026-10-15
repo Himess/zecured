@@ -141,6 +141,9 @@ pub struct CoordVault {
     /// payouts are planned from the same lineage root as the signers'.
     #[serde(default)]
     pub activated_tag: Option<[u8; 32]>,
+    /// When the vault was opened (Unix seconds; 0 for vaults opened before H-01).
+    #[serde(default)]
+    pub opened_at: u64,
 }
 
 impl CoordVault {
@@ -149,6 +152,19 @@ impl CoordVault {
         matches!(self.status, VaultStatus::Expired | VaultStatus::Closed | VaultStatus::Cancelled)
             && self.inflight.is_none()
             && self.refunds.iter().all(|r| r.done)
+    }
+
+    /// A conforming deposit was classified (P1): it is mined and has its confirmations.
+    pub fn deposit_seen(&self) -> bool {
+        self.decisions.iter().any(|(_, c)| *c == Classification::Conforming)
+    }
+
+    /// H-01: whether the vault holds one of the slots of vaults waiting for their deposit: for
+    /// `slot_secs` after it opened, or longer once its deposit is seen. Only the count changes: the
+    /// vault itself waits for its deposit, is scanned and takes a late one exactly as before.
+    pub fn holds_slot(&self, now: u64, slot_secs: u64) -> bool {
+        self.status == VaultStatus::AwaitingDeposit
+            && (now < self.opened_at.saturating_add(slot_secs) || self.deposit_seen())
     }
 }
 
@@ -233,9 +249,9 @@ impl Store {
         self.vaults.values().any(|v| v.account == account || v.owner == owner)
     }
 
-    /// Vaults still waiting for their deposit.
-    pub fn pending(&self) -> usize {
-        self.vaults.values().filter(|v| v.status == VaultStatus::AwaitingDeposit).count()
+    /// H-01: vaults holding a slot among those waiting for their deposit ([`CoordVault::holds_slot`]).
+    pub fn holding_slots(&self, now: u64, slot_secs: u64) -> usize {
+        self.vaults.values().filter(|v| v.holds_slot(now, slot_secs)).count()
     }
 }
 
@@ -286,6 +302,7 @@ pub(crate) mod tests {
             opened_signatures: vec![],
             cancellable: None,
             activated_tag: None,
+            opened_at: 0,
         }
     }
 
@@ -359,7 +376,51 @@ pub(crate) mod tests {
         v.refunds.push(refund(2));
         assert!(!v.is_idle(), "a pending refund keeps it busy");
         store.save(v).unwrap();
-        store.save(vault(2)).unwrap();
-        assert_eq!(store.pending(), 1);
+        let mut waiting = vault(2);
+        waiting.opened_at = 1_000;
+        store.save(waiting).unwrap();
+        assert_eq!(store.holding_slots(1_000, 1_800), 1);
+    }
+
+    /// H-01: a vault without a deposit releases its slot `slot_secs` after it opened, one with a
+    /// conforming deposit keeps it, and any other status holds none. The released vault itself is
+    /// unchanged: still waiting for its deposit and scanned on every pass (not idle), so a deposit
+    /// that comes later is taken exactly as before.
+    #[test]
+    fn a_vault_without_a_deposit_releases_its_slot() {
+        let position = NotePosition {
+            height: 4_486_100,
+            tx_index: 1,
+            action_index: 0,
+        };
+        let opened = 1_700_000_000;
+        let mut v = vault(1);
+        v.opened_at = opened;
+        assert!(v.holds_slot(opened, 1_800));
+        assert!(v.holds_slot(opened + 1_799, 1_800));
+        assert!(!v.holds_slot(opened + 1_800, 1_800), "released after 30 minutes");
+        assert_eq!(v.status, VaultStatus::AwaitingDeposit);
+        assert!(!v.is_idle(), "still scanned on every pass");
+        // A non-conforming payment does not hold the slot; a conforming deposit does.
+        let wrong_amount = zecured_policy::classify::NonConformingReason::SecondPayment;
+        v.decisions.push((position, Classification::NonConforming(wrong_amount)));
+        assert!(!v.holds_slot(opened + 3_600, 1_800));
+        let later = NotePosition {
+            height: position.height + 1,
+            ..position
+        };
+        v.decisions.push((later, Classification::Conforming));
+        assert!(v.deposit_seen() && v.holds_slot(opened + 3_600, 1_800));
+        for status in [
+            VaultStatus::DepositSeen,
+            VaultStatus::Active,
+            VaultStatus::Expired,
+            VaultStatus::Cancelled,
+        ] {
+            v.status = status;
+            assert!(!v.holds_slot(opened, 1_800), "{status:?}");
+        }
+        // Vaults opened before H-01 (no opening time) hold no slot unless their deposit is seen.
+        assert!(!vault(2).holds_slot(opened, 1_800));
     }
 }

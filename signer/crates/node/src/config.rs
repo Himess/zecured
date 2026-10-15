@@ -67,6 +67,34 @@ pub struct NetworkConfig {
     /// A local fork (anvil): the only network on which the privacy delays may be 0 (review H-05).
     #[serde(default)]
     pub local_fork: bool,
+    /// Review H-01: the cost of opening a vault and the vaults that may wait for a deposit.
+    #[serde(default)]
+    pub open_vault: OpenVaultLimits,
+}
+
+/// Review H-01: what opening a vault costs its requester, and how many vaults may wait for their
+/// deposit at once. The coordinator applies them; the stamp's bits are public (`GET /config`).
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(default)]
+pub struct OpenVaultLimits {
+    /// Zero bits the open-vault stamp must start with (`zecured_base::stamp`); 0: no stamp.
+    pub stamp_bits: u32,
+    /// Seconds a vault waiting for its deposit holds one of the `max_pending` slots while no deposit
+    /// is seen. Only the slot is released: the vault stays open, and a deposit is accepted, until
+    /// its expiry height as before.
+    pub pending_slot_secs: u64,
+    /// Most vaults holding a slot at once.
+    pub max_pending: usize,
+}
+
+impl Default for OpenVaultLimits {
+    fn default() -> Self {
+        Self {
+            stamp_bits: zecured_base::stamp::DEFAULT_BITS,
+            pending_slot_secs: 30 * 60,
+            max_pending: 512,
+        }
+    }
 }
 
 fn default_commit_depth() -> u64 {
@@ -97,6 +125,16 @@ impl NetworkConfig {
             self.payout_delay_max_blocks <= max_delay,
             "payout_delay_max_blocks must leave {PAYOUT_DELAY_HEADROOM} of the payout's {} expiry blocks (at most {max_delay})",
             zecured_zcash_ops::spend::PAYOUT_EXPIRY_DELTA
+        );
+        // H-01: a stamp a browser can still compute, and room for at least one vault.
+        anyhow::ensure!(
+            self.open_vault.stamp_bits <= zecured_base::stamp::MAX_BITS,
+            "open_vault.stamp_bits must be at most {}",
+            zecured_base::stamp::MAX_BITS
+        );
+        anyhow::ensure!(
+            self.open_vault.max_pending >= 1 && self.open_vault.pending_slot_secs >= 60,
+            "open_vault needs max_pending >= 1 and pending_slot_secs >= 60"
         );
         // H-05: the delays that hide a payout's and a mint's timing (L23, L5) may only be off on a
         // local fork.
@@ -218,6 +256,7 @@ mod tests {
             payout_delay_max_blocks: 8,
             commit_depth_blocks: 3,
             local_fork: false,
+            open_vault: OpenVaultLimits::default(),
         }
     }
 
@@ -249,5 +288,36 @@ mod tests {
         cfg.payout_delay_max_blocks = 0;
         cfg.local_fork = true;
         cfg.check().unwrap();
+    }
+
+    /// H-01: a network config written before the open-vault limits gets the defaults (a 20-bit
+    /// stamp, a 30-minute slot, 512 slots); the limits stay within reason.
+    #[test]
+    fn open_vault_limits_default_and_are_checked() {
+        let mut old = serde_json::to_value(judge_config()).unwrap();
+        old.as_object_mut().unwrap().remove("open_vault");
+        let cfg: NetworkConfig = serde_json::from_value(old).unwrap();
+        assert_eq!(cfg.open_vault, OpenVaultLimits::default());
+        assert_eq!(
+            (cfg.open_vault.stamp_bits, cfg.open_vault.pending_slot_secs, cfg.open_vault.max_pending),
+            (20, 1_800, 512)
+        );
+        cfg.check().unwrap();
+        let partial: OpenVaultLimits = serde_json::from_value(serde_json::json!({ "stamp_bits": 0 })).unwrap();
+        assert_eq!((partial.stamp_bits, partial.max_pending), (0, 512));
+
+        let mut cfg = judge_config();
+        cfg.open_vault.stamp_bits = zecured_base::stamp::MAX_BITS + 1;
+        assert!(cfg.check().is_err());
+        cfg.open_vault = OpenVaultLimits {
+            max_pending: 0,
+            ..OpenVaultLimits::default()
+        };
+        assert!(cfg.check().is_err());
+        cfg.open_vault = OpenVaultLimits {
+            pending_slot_secs: 59,
+            ..OpenVaultLimits::default()
+        };
+        assert!(cfg.check().is_err());
     }
 }

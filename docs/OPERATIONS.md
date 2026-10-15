@@ -19,6 +19,7 @@ This page lists what that takes (reviews G1–G7). The server setup is in
 | `eth_getLogs` range | `ZECURED_LOG_RANGE` (default 2,000; a refused range is halved automatically) |
 | Base depth before a payout's shares are released | `network.json` `commit_depth_blocks` (default 3) |
 | Bot intervals, relayer batch and standby | `--every-secs`, `--batch`, `RELAYER_STANDBY_LAG` |
+| Cost and capacity of vault openings (H-01) | `network.json` `open_vault`: `stamp_bits` (zero bits of the hashcash stamp every `POST /vaults` carries; 20 by default, at most 32; each bit doubles the work in the user's browser), `pending_slot_secs` (a vault without a seen deposit stops counting against the cap this long after it opened; 1,800 by default, at least 60) and `max_pending` (most vaults waiting for their deposit at once; 512 by default). Missing fields take their defaults; the backend reads them at startup, and the app and the CLI read the stamp's bits from `GET /config` and from `network.json` |
 | Deposit proofs run at once (H-12) | `DEPOSIT_PROOF_CONCURRENCY` in `backend.env` (1 by default, 2 at most); the others wait in a first-in-first-out queue, one job per vault, and `GET /status` shows `depositProofs: { queued, running, concurrency }` |
 | Alarm thresholds and channel | `watchdog.env` |
 

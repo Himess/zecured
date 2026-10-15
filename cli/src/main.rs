@@ -408,6 +408,27 @@ struct NetworkParams {
     chain_id: u64,
     #[serde(default)]
     nodes: Vec<SignerParams>,
+    /// H-01: the network's open-vault limits; only the stamp's bits matter here.
+    #[serde(default)]
+    open_vault: OpenVaultParams,
+}
+
+#[derive(Deserialize)]
+struct OpenVaultParams {
+    #[serde(default = "default_stamp_bits")]
+    stamp_bits: u32,
+}
+
+impl Default for OpenVaultParams {
+    fn default() -> Self {
+        Self {
+            stamp_bits: default_stamp_bits(),
+        }
+    }
+}
+
+fn default_stamp_bits() -> u32 {
+    zecured_base::stamp::DEFAULT_BITS
 }
 
 fn network_params() -> Result<NetworkParams> {
@@ -758,12 +779,22 @@ async fn loan(wallet: &Path, lwd_url: &str, backend: &str, cmd: LoanCmd) -> Resu
             let amount = zats(amount)?;
             let mut rid = [0u8; 32];
             OsRng.fill_bytes(&mut rid);
+            let request_id = B256::from(rid);
+            // H-01: the request's hashcash stamp, with the bits of the local network config,
+            // computed before the request's deadline starts.
+            let bits = net.open_vault.stamp_bits;
+            ensure!(
+                bits <= zecured_base::stamp::MAX_BITS,
+                "the network config asks for a {bits}-bit stamp, more than {}",
+                zecured_base::stamp::MAX_BITS
+            );
+            let stamp = zecured_base::stamp::solve(&request_id, &owner.address(), bits, 0);
             let deadline = now() + REQUEST_TTL_SECS;
             let msg = OpenVault {
                 owner: owner.address(),
                 account,
                 amount,
-                requestId: B256::from(rid),
+                requestId: request_id,
                 deadline,
             };
             let sig = sign_typed(&owner, &registry_domain(net.chain_id, net.registry), &msg)?;
@@ -771,7 +802,8 @@ async fn loan(wallet: &Path, lwd_url: &str, backend: &str, cmd: LoanCmd) -> Resu
                 backend,
                 "/vaults",
                 json!({ "owner": owner.address(), "account": account, "amount": amount.to_string(),
-                        "requestId": B256::from(rid), "deadline": deadline.to_string(), "signature": sig }),
+                        "requestId": request_id, "deadline": deadline.to_string(), "signature": sig,
+                        "stamp": stamp.to_string() }),
             )
             .await?;
             // C-4: nothing is kept or shown unless every signer vouches for the vault.
@@ -1035,6 +1067,7 @@ mod vault_checks {
                 registry: Address::repeat_byte(0x11),
                 chain_id: 84_532,
                 nodes,
+                open_vault: OpenVaultParams::default(),
             },
             keys,
             owner: Address::repeat_byte(0xaa),
@@ -1094,8 +1127,21 @@ mod vault_checks {
             registry: f.net.registry,
             chain_id: f.net.chain_id,
             nodes: vec![],
+            open_vault: OpenVaultParams::default(),
         };
         assert!(check_vault_opened(&bare, f.owner, f.account, 1_000_000, &v).is_err());
+    }
+
+    /// H-01: the stamp's bits come from the local network config, the network's default otherwise.
+    #[test]
+    fn the_stamp_bits_come_from_the_network_config() {
+        let base = json!({ "registry": Address::repeat_byte(0x11), "chain_id": 84_532 });
+        let net: NetworkParams = serde_json::from_value(base.clone()).unwrap();
+        assert_eq!(net.open_vault.stamp_bits, zecured_base::stamp::DEFAULT_BITS);
+        let mut set = base;
+        set["open_vault"] = json!({ "stamp_bits": 12, "max_pending": 512 });
+        let net: NetworkParams = serde_json::from_value(set).unwrap();
+        assert_eq!(net.open_vault.stamp_bits, 12);
     }
 
     #[test]

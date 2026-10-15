@@ -20,6 +20,7 @@ import {
   type RemoteMarket,
 } from "./config";
 import type { CloseRequestMessage } from "./eip712";
+import { STAMP_MAX_BITS } from "./stamp";
 
 // ------------------------------------------------------------------ types
 
@@ -79,6 +80,8 @@ export interface OpenVaultBody {
   requestId: Hex;
   deadline: bigint;
   signature: Hex;
+  /** Nonce of the request's hashcash stamp (review H-01; lib/stamp.ts). */
+  stamp: bigint;
 }
 
 /** One signer node's signature, by node index. */
@@ -320,6 +323,9 @@ export function parseRemoteConfig(raw: unknown): RemoteConfig {
   const confirmations = uint(r.confirmations, "config.confirmations");
   const vaultExpiryBlocks = uint(r.vaultExpiryBlocks, "config.vaultExpiryBlocks");
   if (vaultExpiryBlocks === 0) throw invalid("config.vaultExpiryBlocks");
+  // H-01: absent from backends that predate the stamp.
+  const openVaultStampBits = optional(r.openVaultStampBits, (x) => uint(x, "config.openVaultStampBits")) ?? null;
+  if (openVaultStampBits !== null && openVaultStampBits > STAMP_MAX_BITS) throw invalid("config.openVaultStampBits");
   if (typeof r.sponsorship !== "boolean") throw invalid("config.sponsorship");
   if (!Array.isArray(r.denominations) || r.denominations.length === 0) throw invalid("config.denominations");
   const denominations = [...new Set(r.denominations.map((d) => big(d, "config.denominations")))].sort((a, b) =>
@@ -367,6 +373,7 @@ export function parseRemoteConfig(raw: unknown): RemoteConfig {
     denominations,
     confirmations,
     vaultExpiryBlocks,
+    openVaultStampBits,
     sponsorship: r.sponsorship,
   };
 }
@@ -528,7 +535,7 @@ export function createApi(options: ApiOptions = {}) {
       return parseRemoteConfig(await call("GET", "/config", undefined, { timeoutMs: RUNTIME_CONFIG_TIMEOUT_MS }));
     },
 
-    /** POST /vaults — open a vault off-chain (OpenVault signed by the owner key). */
+    /** POST /vaults — open a vault off-chain (OpenVault signed by the owner key, with its hashcash stamp). */
     async openVault(b: OpenVaultBody): Promise<OpenVaultResult> {
       const r = await call(
         "POST",
@@ -540,6 +547,7 @@ export function createApi(options: ApiOptions = {}) {
           requestId: b.requestId,
           deadline: b.deadline.toString(),
           signature: b.signature,
+          stamp: b.stamp.toString(),
         },
         { timeoutMs: TIMEOUT.open },
       );

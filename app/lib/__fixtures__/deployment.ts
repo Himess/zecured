@@ -46,6 +46,7 @@ export const DRY_RUN_CONFIG = {
     morphoBlue: "0xBBBBBbbBBb9cC5e90e3b3Af64bdAF62C37EEFFCb",
     oracle: "0xcFf71125555a66A7f9D593A73961A8ec026d97D4",
   },
+  openVaultStampBits: 20,
   registry: "0xbdb942d882882bf795aa9c0cd20ade2115c73aac",
   sponsorship: true,
   vaultExpiryBlocks: 288,
