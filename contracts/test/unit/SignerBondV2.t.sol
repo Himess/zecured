@@ -366,6 +366,25 @@ contract SignerBondV2Test is Test {
         assertLe(3 * effective, 5 * cheapest, "any three signers lose at least 3/5 of it");
     }
 
+    /// A deposit never lowers the effective bond (test/halmos/SignerBondV2Rules.t.sol proves the steps of this but its
+    /// two monotonicity steps, which the solvers cannot do), and raises it by at most 5/3 of the deposit, rounded up: the
+    /// sum grows by the deposit and the three smallest bonds by at most that much.
+    function testFuzz_deposit_neverLowersTheEffectiveBond(uint256[5] memory amounts, uint8 signer, uint256 amount)
+        public
+    {
+        _replaceBond(_config());
+        for (uint8 i; i < 5; ++i) {
+            amounts[i] = bound(amounts[i], 0, 1e15); // up to a billion USDC each
+            if (amounts[i] != 0) _deposit(i, amounts[i]);
+        }
+        amount = bound(amount, 1, 1e15);
+        uint256 before = bond.effectiveBond();
+        _deposit(signer % 5, amount);
+        uint256 afterwards = bond.effectiveBond();
+        assertGe(afterwards, before, "never lower");
+        assertLe(afterwards, before + (5 * amount + 2) / 3, "at most 5/3 of the deposit higher");
+    }
+
     function test_fullyBonded_needsMinBondFromAllFive() public {
         _replaceBond(_config());
         assertFalse(bond.fullyBonded());
