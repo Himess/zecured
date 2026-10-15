@@ -89,7 +89,7 @@ txids) and how to reproduce every run: [docs/TESTING.md](docs/TESTING.md).
 
 ## Running it
 
-Prerequisites: Rust (the repo pins 1.99.0 via `rust-toolchain.toml`), Foundry, `jq`, Python 3.
+Prerequisites: Rust (the repo pins 1.99.0 via `rust-toolchain.toml`), Foundry 1.8.5 (`foundryup -i 1.8.5`, the version CI runs), `jq`, Python 3, and pnpm 10 for the app (`app/package.json` pins it).
 The Zcash side talks to `https://testnet.zec.rocks:443` (the public light wallet server on NU7).
 
 ```bash

@@ -224,13 +224,31 @@ fn keep_destination(commitment: B256, salt: &[u8; 32], receiver: &[u8; 43]) -> R
 
 /// Writes `data` to `path` atomically, readable by its owner only.
 fn write_private(path: &Path, data: &[u8]) -> Result<()> {
-    use std::os::unix::fs::{DirBuilderExt, OpenOptionsExt, PermissionsExt};
     if let Some(dir) = path.parent().filter(|d| !d.as_os_str().is_empty()) {
-        fs::DirBuilder::new().recursive(true).mode(0o700).create(dir)?;
+        let mut builder = fs::DirBuilder::new();
+        builder.recursive(true);
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::DirBuilderExt;
+            builder.mode(0o700);
+        }
+        builder.create(dir)?;
     }
     let tmp = path.with_extension("tmp");
-    let mut f = fs::OpenOptions::new().write(true).create(true).truncate(true).mode(0o600).open(&tmp)?;
-    f.set_permissions(fs::Permissions::from_mode(0o600))?;
+    let mut options = fs::OpenOptions::new();
+    options.write(true).create(true).truncate(true);
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::OpenOptionsExt;
+        options.mode(0o600);
+    }
+    let mut f = options.open(&tmp)?;
+    // `mode` only applies to a new file; a leftover temporary file keeps its permissions.
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        f.set_permissions(fs::Permissions::from_mode(0o600))?;
+    }
     f.write_all(data)?;
     f.sync_all()?;
     fs::rename(&tmp, path)?;
@@ -312,7 +330,6 @@ mod tests {
     /// layout `zecured-wallet watch-claims` reads.
     #[tokio::test]
     async fn every_commitment_is_kept_with_its_salt() {
-        use std::os::unix::fs::PermissionsExt;
         let path = std::env::temp_dir().join(format!("zecured-bots-destinations-{}.json", std::process::id()));
         keep_destinations_in(path);
         let file = DESTINATIONS.get().unwrap();
@@ -323,7 +340,11 @@ mod tests {
         let salt: [u8; 32] = hex::decode(mine["salt"].as_str().unwrap()).unwrap().try_into().unwrap();
         assert_eq!(commitment(&salt, &ours), c);
         assert_eq!(mine["receiver"], json!(hex::encode(ours)));
-        assert_eq!(fs::metadata(file).unwrap().permissions().mode() & 0o777, 0o600);
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            assert_eq!(fs::metadata(file).unwrap().permissions().mode() & 0o777, 0o600);
+        }
         let _ = fs::remove_file(file);
     }
 

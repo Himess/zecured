@@ -1,0 +1,96 @@
+# Tests on every push to main and every pull request (review H-07, H-08): the contracts (build, EIP-170 and EIP-3860
+# sizes, every test that needs no RPC, the Halmos checks), the Rust workspace with its feature-gated suites, and the
+# app. The fork tests need a Base Sepolia RPC: they run only when the repository has a BASE_SEPOLIA_RPC_URL secret.
+name: ci
+
+on:
+  workflow_dispatch:
+  push:
+    branches: [main]
+  pull_request:
+
+permissions:
+  contents: read
+
+jobs:
+  contracts:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 60
+    defaults:
+      run:
+        working-directory: contracts
+    env:
+      BASE_SEPOLIA_RPC_URL: ${{ secrets.BASE_SEPOLIA_RPC_URL }}
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          submodules: recursive
+
+      # The version the suite and the Halmos profile are tested with (README, "Running it").
+      - name: Foundry 1.8.5
+        uses: foundry-rs/foundry-toolchain@v1
+        with:
+          version: v1.8.5
+
+      # Raised to 1,024 bytes once the Registry no longer sits within 1 KB of EIP-170.
+      - name: Build and contract sizes
+        run: python3 script/check_sizes.py 0
+
+      - name: Tests that need no RPC (unit, relay)
+        run: forge test --match-path "test/{unit,relay}/**"
+
+      - name: Fork tests (real Morpho on Base Sepolia)
+        if: env.BASE_SEPOLIA_RPC_URL != ''
+        run: forge test --isolate --match-path "test/{fork,invariant,spike}/**"
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: Halmos 0.3.3 (symbolic checks)
+        run: |
+          pip install halmos==0.3.3
+          FOUNDRY_PROFILE=halmos halmos
+
+  rust:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 90
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Rust toolchain (rust-toolchain.toml)
+        run: rustup show active-toolchain || rustup toolchain install
+
+      - uses: Swatinem/rust-cache@v2
+
+      - name: Workspace
+        run: cargo test --workspace --locked
+
+      - name: Node with the demo feature, backend with its test hooks
+        run: |
+          cargo test --locked -p zecured-node --features demo
+          cargo test --locked -p zecured-backend --features test-hooks
+
+  app:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 20
+    defaults:
+      run:
+        working-directory: app
+    steps:
+      - uses: actions/checkout@v4
+
+      # The pnpm version comes from app/package.json's packageManager field.
+      - uses: pnpm/action-setup@v4
+        with:
+          package_json_file: app/package.json
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: pnpm
+          cache-dependency-path: app/pnpm-lock.yaml
+
+      - run: pnpm install --frozen-lockfile
+      - run: pnpm test
+      - run: pnpm typecheck
