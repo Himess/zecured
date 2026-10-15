@@ -734,7 +734,7 @@ async fn health() -> Json<serde_json::Value> {
 }
 
 /// What `GET /status` shows that never changes while the backend runs: the commit it was built
-/// from and the deployment it serves (review G5).
+/// from, the deployment it serves (review G5) and the privacy delays it runs with (H-05).
 #[derive(Clone)]
 struct StatusInfo {
     fixed: Arc<serde_json::Value>,
@@ -747,7 +747,7 @@ type NodeModes = (Instant, Vec<serde_json::Value>);
 
 const STATUS_NODES_TTL: Duration = Duration::from_secs(15);
 
-fn status_info(dep: &serde_json::Value) -> StatusInfo {
+fn status_info(dep: &serde_json::Value, cfg: &NetworkConfig) -> StatusInfo {
     let field = |path: &[&str]| path.iter().fold(dep, |v, k| &v[*k]).clone();
     let fixed = json!({
         "commit": env!("ZECURED_COMMIT"),
@@ -765,6 +765,12 @@ fn status_info(dep: &serde_json::Value) -> StatusInfo {
             "violationImageId": field(&["tier3", "violationImageId"]),
             "challengeWindow": field(&["tier3", "challengeWindow"]),
             "theftDemo": field(&["tier3", "theftDemo"]),
+        },
+        // L5 and L23: the random delays that hide when a deposit is minted and when a payout is broadcast.
+        "privacyDelays": {
+            "attestMaxBlocks": cfg.attest_delay_max_blocks,
+            "payoutMaxBlocks": cfg.payout_delay_max_blocks,
+            "localFork": cfg.local_fork,
         },
     });
     StatusInfo {
@@ -1059,7 +1065,7 @@ async fn main() -> Result<()> {
 
     let wiring = Wiring {
         public_config: PublicConfig(Arc::new(public_config_json(&coordinator.cfg, &deployment, sponsorship))),
-        status: status_info(&deployment),
+        status: status_info(&deployment, &coordinator.cfg),
         admin_token: AdminToken(Arc::new(cli.admin_token.clone())),
         modes,
         oracle: Oracle {
@@ -1294,9 +1300,10 @@ mod tests {
             proxy::Proxy::new("http://127.0.0.1:9".into(), "http://127.0.0.1:9".into(), None, None, None, None)
                 .unwrap(),
         );
+        let status = status_info(&serde_json::Value::Null, &coordinator.cfg);
         let wiring = Wiring {
             public_config: PublicConfig(Arc::new(json!({}))),
-            status: status_info(&serde_json::Value::Null),
+            status,
             admin_token: AdminToken(Arc::new("tok".into())),
             modes: ModePolicy::parse("4,5", &[1, 2, 3, 4, 5]).unwrap(),
             oracle: Oracle {
@@ -1342,6 +1349,8 @@ mod tests {
         let (status, body, _) = call(Method::GET, "/status", "").await;
         assert_eq!(status, StatusCode::OK);
         assert_eq!(body["commit"], env!("ZECURED_COMMIT"));
+        // H-05: the privacy delays the network runs with are public.
+        assert_eq!(body["privacyDelays"], json!({ "attestMaxBlocks": 0, "payoutMaxBlocks": 0, "localFork": false }));
         let nodes = body["nodes"].as_array().expect("nodes");
         assert_eq!(nodes.len(), 5);
         assert!(nodes.iter().all(|n| n.as_object().is_some_and(|o| o.len() == 2) && n["mode"] == "unreachable"));

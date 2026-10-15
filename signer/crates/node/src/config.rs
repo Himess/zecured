@@ -64,6 +64,9 @@ pub struct NetworkConfig {
     /// time.
     #[serde(default = "default_commit_depth")]
     pub commit_depth_blocks: u64,
+    /// A local fork (anvil): the only network on which the privacy delays may be 0 (review H-05).
+    #[serde(default)]
+    pub local_fork: bool,
 }
 
 fn default_commit_depth() -> u64 {
@@ -73,6 +76,9 @@ fn default_commit_depth() -> u64 {
 /// Blocks of a payout's expiry window kept free of the L23 delay: signing, a rebroadcast or two
 /// and the inclusion itself (RT-15).
 pub const PAYOUT_DELAY_HEADROOM: u32 = 40;
+
+/// L5 (D15): the least `attest_delay_max_blocks` outside a local fork (review H-05).
+pub const MIN_ATTEST_DELAY_MAX_BLOCKS: u32 = 2;
 
 impl NetworkConfig {
     pub fn load(path: &Path) -> Result<Self> {
@@ -92,6 +98,18 @@ impl NetworkConfig {
             "payout_delay_max_blocks must leave {PAYOUT_DELAY_HEADROOM} of the payout's {} expiry blocks (at most {max_delay})",
             zecured_zcash_ops::spend::PAYOUT_EXPIRY_DELTA
         );
+        // H-05: the delays that hide a payout's and a mint's timing (L23, L5) may only be off on a
+        // local fork.
+        if !self.local_fork {
+            anyhow::ensure!(
+                self.payout_delay_max_blocks >= 1,
+                "payout_delay_max_blocks must be at least 1 outside a local fork (L23; 8 on the judge deployment)"
+            );
+            anyhow::ensure!(
+                self.attest_delay_max_blocks >= MIN_ATTEST_DELAY_MAX_BLOCKS,
+                "attest_delay_max_blocks must be at least {MIN_ATTEST_DELAY_MAX_BLOCKS} outside a local fork (L5)"
+            );
+        }
         Ok(())
     }
 
@@ -182,10 +200,9 @@ mod tests {
         }
     }
 
-    /// RT-15: the L23 delay must leave room in the payout's expiry window.
-    #[test]
-    fn the_payout_delay_leaves_room_before_expiry() {
-        let mut cfg = NetworkConfig {
+    /// The judge deployment's values.
+    fn judge_config() -> NetworkConfig {
+        NetworkConfig {
             lightwalletd_url: String::new(),
             base_rpc_url: String::new(),
             chain_id: 84_532,
@@ -197,10 +214,17 @@ mod tests {
             denominations: vec![1_000_000],
             nodes: (1..=5).map(node).collect(),
             coordinator: None,
-            attest_delay_max_blocks: 0,
+            attest_delay_max_blocks: MIN_ATTEST_DELAY_MAX_BLOCKS,
             payout_delay_max_blocks: 8,
             commit_depth_blocks: 3,
-        };
+            local_fork: false,
+        }
+    }
+
+    /// RT-15: the L23 delay must leave room in the payout's expiry window.
+    #[test]
+    fn the_payout_delay_leaves_room_before_expiry() {
+        let mut cfg = judge_config();
         cfg.check().unwrap();
         cfg.payout_delay_max_blocks = zecured_zcash_ops::spend::PAYOUT_EXPIRY_DELTA - PAYOUT_DELAY_HEADROOM;
         cfg.check().unwrap();
@@ -209,5 +233,21 @@ mod tests {
         cfg.payout_delay_max_blocks = 8;
         cfg.nodes.pop();
         assert!(cfg.check().is_err(), "five nodes");
+    }
+
+    /// H-05: the privacy delays (L23, L5) can only be switched off on a local fork.
+    #[test]
+    fn the_privacy_delays_are_on_outside_a_local_fork() {
+        let mut cfg = judge_config();
+        cfg.payout_delay_max_blocks = 0;
+        assert!(cfg.check().is_err(), "no payout delay");
+        cfg.payout_delay_max_blocks = 1;
+        cfg.check().unwrap();
+        cfg.attest_delay_max_blocks = MIN_ATTEST_DELAY_MAX_BLOCKS - 1;
+        assert!(cfg.check().is_err(), "attestation delay below the minimum");
+        cfg.attest_delay_max_blocks = 0;
+        cfg.payout_delay_max_blocks = 0;
+        cfg.local_fork = true;
+        cfg.check().unwrap();
     }
 }

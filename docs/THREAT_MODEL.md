@@ -35,7 +35,7 @@ review and their status are in [SECURITY_REVIEW.md](SECURITY_REVIEW.md).
 | L2 | Depositing with transparent inputs | P1 never attests such a deposit; P5 refunds it | `signer/crates/zcash-ops/src/tx.rs`, `policy/src/classify.rs` |
 | L3 | Amount fingerprinting | Standard denominations only (testnet 0.01 / 0.05 / 0.125 TAZ, the last what the Valar faucet pays, D29; 2–3 buckets on mainnet) | node P0 (`dkg::check_open`), app |
 | L4 | The deposit transaction revealed on Base | The attestation carries only vault id, account, amount and a keyed tag; no Zcash data ever reaches Base | `policy/src/derive.rs`, contracts |
-| L5 | Timing correlation (deposit ↔ mint) | Confirmations before attesting; optional random delay (roadmap); small testnet volume stated openly | coordinator |
+| L5 | Timing correlation (deposit ↔ mint) | Confirmations before attesting, plus a random 0 to `attest_delay_max_blocks` extra confirmations per vault (D15; at least 2 outside a local fork, which the network config enforces); small testnet volume stated openly | coordinator |
 | L6 | The return address published on Base | Off-chain owner-signed destination; Base only sees a salted commitment | node `destination`, `ledger::commitment` |
 | L7 | Deshielding the returned amount right away | Warning and guidance in the app | app |
 | L8 | Reusing a vault | A fresh vault (fresh FROST key) per loan; one account ↔ one vault | DKG per vault; Registry I4 |
@@ -53,7 +53,7 @@ review and their status are in [SECURITY_REVIEW.md](SECURITY_REVIEW.md).
 | L20 | Registering the vault on Base just before the deposit | Vaults are opened off-chain; the first Base trace is the attested deposit | coordinator, Registry |
 | L21 | The light wallet server learns which transactions the signers look up (deposits, payouts) | Each signer can use its own server; roadmap: every signer on its own full node | node config ([OPERATORS.md](OPERATORS.md)) |
 | L22 | A Tier 2 deposit proof revealing the deposit or the vault's address on Base | The journal holds the anchor header (a later block, not the deposit's), vault id, account, amount, tag and the `VaultOpened` struct hash; the deposit's block, transaction, note and the address hash stay inside the proof (D22). Base learns only that the deposit precedes the anchor | `tier2/statement`, `ZecuredRegistry.attestDepositWithProof` |
-| L23 | A payout's Tier 3 commitment lands on Base seconds before its broadcast, pointing at the next Zcash blocks | A random delay of 0 to `payout_delay_max_blocks` Zcash blocks (8 on the judge deployment) between commitment and broadcast, inside the 120-block expiry (D32) | coordinator |
+| L23 | A payout's Tier 3 commitment lands on Base seconds before its broadcast, pointing at the next Zcash blocks | A random delay of 1 to `payout_delay_max_blocks` Zcash blocks (8 on the judge deployment) between commitment and broadcast, inside the 120-block expiry (D32, RT-13). Outside a local fork the network config refuses a maximum of 0, and `GET /status` shows both delays | coordinator |
 | L24 | Tier 3 records and violation journals linking to Zcash | A commitment holds only keyed tags, a keyed payout reference, salted claim references and output indexes; a journal adds an anchor header and, for F3, the value the claimant received. No txid, note commitment or address (docs/TIER3.md § 11) | `policy/src/derive.rs`, `tier2/statement`, contracts |
 
 ## Attacks on the signer network
