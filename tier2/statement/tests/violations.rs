@@ -10,7 +10,7 @@ use zcash_address::unified::{self, Container, Encoding, Fvk};
 use zcash_primitives::transaction::Transaction;
 use zcash_protocol::consensus::BranchId;
 use zecured_deposit_statement::{
-    Error, MAINNET, NU6_3_BRANCH_ID, TESTNET, Witness, deposit_tag, keccak256,
+    Error, MAINNET, NU6_3_BRANCH_ID, TESTNET, Witness, deposit_tag, keccak256, tag_key,
     violation::{
         Detail, Kind, ViolationError, ViolationJournal, ViolationWitness, claim_ref, paid_to, payout_ref,
         verify_violation_on,
@@ -42,6 +42,11 @@ fn vault_ufvk() -> String {
         Detail::Uncommitted { vault_ufvk, .. } => vault_ufvk,
         _ => unreachable!("the F1 fixture"),
     }
+}
+
+/// The vault's tag key K.
+fn vault_k() -> [u8; 32] {
+    tag_key(&vault_ufvk())
 }
 
 /// The fixture's transaction and inclusion, with the given violation detail.
@@ -102,7 +107,7 @@ fn word(n: u64) -> String {
 
 const ANCHOR: &str = "a27b5e3c30e3dc292138c751bf10c85fd842fb759be90c7e9397d0477d0b0000";
 const DEPOSIT_TAG: &str = "d8ad478d40e42d2acd10a3846eeebc19d3ff0146c406e765654395b778ab813e";
-/// `payoutRef` of the fixture transaction under the vault's key.
+/// `payoutRef` of the fixture transaction under the vault's K.
 const PAYOUT_REF: &str = "46b19981da842f7bf81342fa8db82ecd88933c3f9d777816c80bc712ef931496";
 
 // ------------------------------------------------------------------ references
@@ -112,7 +117,7 @@ const PAYOUT_REF: &str = "46b19981da842f7bf81342fa8db82ecd88933c3f9d777816c80bc7
 #[test]
 fn references_match_the_signers_derivations() {
     assert_eq!(
-        payout_ref("uviewtest1a", &[0x42; 32]),
+        payout_ref(&tag_key("uviewtest1a"), &[0x42; 32]),
         h32("fe5ff98dd5dd2edcc9663d2ce6c4ed236521d441c34d44ebf2329198d80366df")
     );
     assert_eq!(
@@ -120,7 +125,7 @@ fn references_match_the_signers_derivations() {
         h32("51d4b707b5a706e51817d290a91ae40d0363befaad5013b6658f20cd87ddcdd6")
     );
     assert_eq!(deposit_tag(&vault_ufvk(), &deposit_cmx()), h32(DEPOSIT_TAG));
-    assert_eq!(payout_ref(&vault_ufvk(), &txid()), h32(PAYOUT_REF));
+    assert_eq!(payout_ref(&vault_k(), &txid()), h32(PAYOUT_REF));
     // The note tag vector `zecured_policy::derive` pins (red-team review § 4: both implementations).
     assert_eq!(
         deposit_tag("uviewtest1a", &[7; 32]),
@@ -130,13 +135,15 @@ fn references_match_the_signers_derivations() {
 
 /// Cross-language vectors (red-team review § 4): the F3 and F4 journals of the fixture standing in
 /// for a payout X (salt 0x5a * 32, the vault's own receiver, output 1), byte for byte what
-/// `contracts/test/fork/RedTeamRegressions.t.sol` proves with (`test_vector_*`).
+/// `contracts/test/fork/RedTeamRegressions.t.sol` proves with (`test_vector_*`). The guest round
+/// left them unchanged: F4 now gets the vault's K instead of its UFVK, and K gives the same
+/// `payoutRef`.
 #[test]
 fn journals_are_pinned_across_languages() {
     let receiver = deposit().note_recipient;
     let ivk = vault_fvk().to_ivk(Scope::External).to_bytes().to_vec();
     let f3 = words(verify_violation(&misdirected(receiver.clone(), ivk, paid_action())).unwrap());
-    let f4 = words(verify_violation(&wrong_claim_ref(vault_ufvk(), receiver)).unwrap());
+    let f4 = words(verify_violation(&wrong_claim_ref(vault_k(), receiver)).unwrap());
     const BENEFICIARY_W: &str = "000000000000000000000000bebebebebebebebebebebebebebebebebebebebe";
     const CLAIM_REF: &str = "62840e8e15455e60905714b51e12fa370ec8cc849cd2cbf30b696ce139950869";
     const DEST: &str = "0144dce00498a1cb4e3d04161414ccf1cd42b09f70fe83ddcf745973c522a0a7";
@@ -217,16 +224,16 @@ fn f2_the_reference_is_keyed_by_the_vault() {
     *vault_ufvk = other.to_owned();
     let j = verify_violation(&w).unwrap();
     assert_ne!(j.reference, h32(PAYOUT_REF));
-    assert_eq!(j.reference, payout_ref(other, &txid()));
+    assert_eq!(j.reference, payout_ref(&tag_key(other), &txid()));
 }
 
 // ------------------------------------------------------------------ F4: wrong claim reference
 
-fn wrong_claim_ref(vault_ufvk: String, receiver: Vec<u8>) -> ViolationWitness {
+fn wrong_claim_ref(tag_key: [u8; 32], receiver: Vec<u8>) -> ViolationWitness {
     violation(
         Kind::WrongClaimRef,
         Detail::WrongClaimRef {
-            vault_ufvk,
+            tag_key,
             salt: SALT,
             receiver,
         },
@@ -238,19 +245,26 @@ fn wrong_claim_ref(vault_ufvk: String, receiver: Vec<u8>) -> ViolationWitness {
 #[test]
 fn f4_gives_the_reference_an_honest_commitment_names_the_claim_by() {
     let receiver = deposit().note_recipient;
-    let j = verify_violation(&wrong_claim_ref(vault_ufvk(), receiver.clone())).unwrap();
+    let j = verify_violation(&wrong_claim_ref(vault_k(), receiver.clone())).unwrap();
     assert_eq!(j.kind, Kind::WrongClaimRef);
-    assert_eq!(j.reference, payout_ref(&vault_ufvk(), &txid()));
+    assert_eq!(j.reference, payout_ref(&vault_k(), &txid()));
     assert_eq!(j.note_tag, claim_ref(&SALT, &txid()));
     assert_eq!(j.dest_commitment, keccak256(&[SALT.as_slice(), &receiver].concat()));
     assert_eq!((j.value, j.output_index), (0, 0));
 }
 
+/// F4 needs only K (the guest round, Claude Web § 2): the prover is not given the UFVK. A wrong K
+/// names another payout, for which Base has no commitment (the slasher refuses the case); the
+/// receiver must still be a receiver.
 #[test]
-fn f4_needs_the_vaults_key_and_a_receiver() {
+fn f4_needs_only_the_tag_key_and_a_receiver() {
     let receiver = deposit().note_recipient;
-    assert_eq!(verify_violation(&wrong_claim_ref("uviewtest1x".into(), receiver)), Err(ViolationError::Ufvk));
-    assert_eq!(verify_violation(&wrong_claim_ref(vault_ufvk(), vec![1; 42])), Err(ViolationError::Receiver));
+    let mut other = vault_k();
+    other[0] ^= 1;
+    let j = verify_violation(&wrong_claim_ref(other, receiver.clone())).unwrap();
+    assert_ne!(j.reference, h32(PAYOUT_REF), "another K names no commitment of X");
+    assert_eq!(j.note_tag, claim_ref(&SALT, &txid()));
+    assert_eq!(verify_violation(&wrong_claim_ref(vault_k(), vec![1; 42])), Err(ViolationError::Receiver));
 }
 
 // ------------------------------------------------------------------ F3: misdirected payment
@@ -351,6 +365,49 @@ fn f3_a_key_that_does_not_own_the_receiver_proves_nothing() {
     assert_eq!(verify_violation(&misdirected(receiver, vec![0; 63], p)), Err(ViolationError::Ivk));
 }
 
+// ------------------------------------------------------------------ Included (T-05)
+
+fn included(tag_key: [u8; 32]) -> ViolationWitness {
+    violation(Kind::Included, Detail::Included { tag_key })
+}
+
+/// "A payout with this payoutRef is in a block under the anchor": kind 5, the anchor and X's
+/// reference under the vault's K; no bounty and nothing else.
+#[test]
+fn included_names_the_payout_by_its_reference_only() {
+    let j = verify_violation(&included(vault_k())).expect("X is in the anchored history");
+    assert_eq!(j.kind, Kind::Included);
+    assert_eq!(j.beneficiary, [0; 20], "no bounty, whatever the witness says");
+    assert_eq!(
+        words(j),
+        [
+            word(5),
+            ANCHOR.into(),
+            word(0),
+            PAYOUT_REF.into(),
+            word(0),
+            word(0),
+            word(0),
+            word(0)
+        ]
+    );
+}
+
+/// The proof is about inclusion: X must be in T's history, and a wrong K names a payout Base never
+/// committed.
+#[test]
+fn included_needs_the_transaction_in_the_anchored_history() {
+    let mut w = included(vault_k());
+    w.txid_path[0][0] ^= 1;
+    assert_eq!(verify_violation(&w), Err(ViolationError::Inclusion(Error::TxidNotInBlock)));
+    let mut w = included(vault_k());
+    w.tip_header[80] ^= 1;
+    assert_eq!(verify_violation(&w), Err(ViolationError::Inclusion(Error::HistoryNotCommitted)));
+    let mut k = vault_k();
+    k[0] ^= 1;
+    assert_ne!(verify_violation(&included(k)).unwrap().reference, h32(PAYOUT_REF));
+}
+
 // ------------------------------------------------------------------ F1: uncommitted spend
 
 /// The fixture transaction creates the vault's note but does not spend it: no F1.
@@ -382,6 +439,11 @@ fn kind_and_detail_must_agree() {
     assert_eq!(verify_violation(&w), Err(ViolationError::KindMismatch));
     w.kind = Kind::WrongClaimRef;
     assert_eq!(verify_violation(&w), Err(ViolationError::KindMismatch));
+    w.kind = Kind::Included;
+    assert_eq!(verify_violation(&w), Err(ViolationError::KindMismatch));
+    let mut w = included(vault_k());
+    w.kind = Kind::WrongClaimRef;
+    assert_eq!(verify_violation(&w), Err(ViolationError::KindMismatch));
 }
 
 #[test]
@@ -404,18 +466,20 @@ fn the_epoch_is_one_the_build_allows_and_xs_own() {
     w.branch_id = NU6_3_BRANCH_ID;
     assert_eq!(verify_violation_on(&TESTNET, &w), Err(ViolationError::Inclusion(Error::BranchNotAllowed)));
     // Mainnet allows NU6.3, but this NU7 history does not open under it.
-    let mut w = withheld([7; 32], 1);
+    let mut w = included(vault_k());
     w.branch_id = NU6_3_BRANCH_ID;
     assert_eq!(verify_violation_on(&MAINNET, &w), Err(ViolationError::Inclusion(Error::HistoryPath)));
 }
 
-/// On a Mainnet build, a Testnet UFVK is no vault's key.
+/// On a Mainnet build, a Testnet UFVK is no vault's key (F1, F2). F4 and Included carry only K.
 #[test]
 fn a_mainnet_build_takes_mainnet_viewing_keys_only() {
     assert_eq!(verify_violation_on(&MAINNET, &f1()), Err(ViolationError::Ufvk));
     assert_eq!(verify_violation_on(&MAINNET, &withheld([7; 32], 1)), Err(ViolationError::Ufvk));
-    let receiver = deposit().note_recipient;
-    assert_eq!(verify_violation_on(&MAINNET, &wrong_claim_ref(vault_ufvk(), receiver)), Err(ViolationError::Ufvk));
+    assert_eq!(
+        verify_violation_on(&MAINNET, &included(vault_k())),
+        verify_violation_on(&TESTNET, &included(vault_k()))
+    );
 }
 
 /// The journal is `abi.encode(ViolationJournal)` of IZecuredSlasher.sol: kind, anchor,
@@ -452,7 +516,7 @@ fn f1_a_real_payout_spends_the_vaults_deposit_note() {
     assert_eq!(j.anchor, h32("e47bcc107dbac24aa6026bdc610e8605642035559a33ec4e1fb6e4423f2a0000"));
     assert_eq!(j.beneficiary, [0xbe; 20]);
     assert_eq!(j.note_tag, h32(DEPOSIT_TAG), "the deposit tag the Registry activated the vault with");
-    assert_eq!(j.reference, payout_ref(&vault_ufvk(), x.txid().as_ref()));
+    assert_eq!(j.reference, payout_ref(&vault_k(), x.txid().as_ref()));
     assert_eq!((j.value, j.dest_commitment), (0, [0; 32]));
 }
 
@@ -531,5 +595,5 @@ fn f2_the_real_payouts_change_is_delivered() {
     };
     assert_eq!(verify_violation(&withheld(value)), Err(ViolationError::ChangeDelivered));
     let j = verify_violation(&withheld(value + 1)).expect("not the committed value");
-    assert_eq!(j.reference, payout_ref(&ufvk, x.txid().as_ref()));
+    assert_eq!(j.reference, payout_ref(&tag_key(&ufvk), x.txid().as_ref()));
 }

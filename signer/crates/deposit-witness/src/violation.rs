@@ -1,7 +1,8 @@
 //! Tier 3 violation witnesses (docs/TIER3.md § 6), built from public chain data plus what the
-//! prover holds: the vault's viewing key (F1, F2) or the claimant's salt, receiver and incoming
-//! viewing key (F3). Each is checked with the statement natively before anything is proven. The
-//! witness contains a viewing key: keep it on the prover's machine.
+//! prover holds: the vault's viewing key (F1, F2), the claimant's salt, receiver and incoming
+//! viewing key (F3), or only the vault's tag key K (F4, Included; derived here from the viewing key
+//! when the builder has it). Each is checked with the statement natively before anything is
+//! proven. An F1, F2 or F3 witness contains a viewing key: keep it on the prover's machine.
 
 use std::path::Path;
 
@@ -18,8 +19,9 @@ use zcash_protocol::{
     TxId,
     consensus::{BlockHeight, BranchId, Network},
 };
-use zecured_deposit_statement::violation::{
-    Detail, Kind, ViolationJournal, ViolationWitness, paid_to, verify_violation,
+use zecured_deposit_statement::{
+    tag_key,
+    violation::{Detail, Kind, ViolationJournal, ViolationWitness, paid_to, verify_violation},
 };
 use zecured_zcash_ops::lwd::{self, LwdClient};
 
@@ -152,7 +154,8 @@ pub async fn misdirected(
 
 /// F4: committed payout `txid` of the vault (viewing key `ufvk`) names the claim of recipient
 /// `(salt, receiver)` under a reference other than `keccak256(salt || txid)` (review RT-1). The
-/// borrower proves it for its own claims; the signers, who hold every salt, for any claim.
+/// borrower proves it for its own claims; the signers, who hold every salt, for any claim. The
+/// witness carries the vault's tag key K, not the viewing key.
 #[allow(clippy::too_many_arguments)]
 pub async fn wrong_claim_ref(
     client: &mut LwdClient,
@@ -167,11 +170,26 @@ pub async fn wrong_claim_ref(
 ) -> Result<(ViolationWitness, ViolationJournal)> {
     let at = locate(client, headers_path, summaries_path, txid, tip).await?;
     let detail = Detail::WrongClaimRef {
-        vault_ufvk: ufvk.to_owned(),
+        tag_key: tag_key(ufvk),
         salt,
         receiver: receiver.to_vec(),
     };
     checked(witness(Kind::WrongClaimRef, beneficiary, at, detail)?)
+}
+
+/// Included (design notes T-05): payout `txid` of the vault (tag key `K`) is in a block under
+/// header `tip`. Not a violation: the journal names the payout by its `payoutRef` for a contract
+/// that confirms payouts by proof; the v2 slasher refuses it. The witness carries K only.
+pub async fn included(
+    client: &mut LwdClient,
+    headers_path: &Path,
+    summaries_path: &Path,
+    tag_key: [u8; 32],
+    txid: TxId,
+    tip: u32,
+) -> Result<(ViolationWitness, ViolationJournal)> {
+    let at = locate(client, headers_path, summaries_path, txid, tip).await?;
+    checked(witness(Kind::Included, [0; 20], at, Detail::Included { tag_key })?)
 }
 
 /// What a claimant keeps to prove F3: written by `zecured-wallet watch --claims-of` when a
