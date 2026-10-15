@@ -83,6 +83,11 @@ pub async fn make_seal(
 ) -> Result<SealFile> {
     let expiry_height = l.expiry_height.context("this loan file has no expiry height (opened before Tier 2)")?;
     ensure!(l.opened_signatures.len() == 5, "this loan file has no VaultOpened signatures (opened before C-4)");
+    // The deposit guest computes VaultOpened v2 (`tagKeyHash`); v1 signatures (`ufvkHash`) never match it.
+    ensure!(
+        l.tag_key_hash.is_some(),
+        "this loan's vault was opened under VaultOpened v1, which the deposit guest no longer proves"
+    );
     let txid = TxId::from_hex(txid).context("deposit txid")?;
     let mut client = lwd::connect(lwd_url).await?;
     let (_, height) = lwd::raw_transaction(&mut client, &txid).await?;

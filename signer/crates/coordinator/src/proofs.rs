@@ -25,7 +25,10 @@ use anyhow::{Context, Result, ensure};
 use serde::Deserialize;
 use tracing::{debug, info, warn};
 use zcash_protocol::TxId;
-use zecured_base::events::{IZcashHeaderRelay, IZecuredRegistry};
+use zecured_base::{
+    events::{IZcashHeaderRelay, IZecuredRegistry},
+    journal::{MODE_ACTIVATE, decode_deposit_journal},
+};
 use zecured_deposit_witness::{
     p2p,
     witness::{self, Mode},
@@ -241,7 +244,10 @@ impl Coordinator {
     }
 
     async fn submit_seal(&self, id: &B256, s: SealFile) -> Result<()> {
-        ensure!(s.journal.len() == 192 && s.journal[32..64] == id.0, "the proof is for another vault");
+        // Journal v2 (T-09); an activation, not a refund (those land through T-02's claim flow).
+        let journal = decode_deposit_journal(&s.journal)?;
+        ensure!(journal.vaultId == *id, "the proof is for another vault");
+        ensure!(journal.mode == MODE_ACTIVATE, "a refund proof does not activate a vault");
         let provider = ProviderBuilder::new()
             .wallet(EthereumWallet::from(self.gas.clone()))
             .connect_http(self.cfg.base_rpc_url.parse()?);

@@ -12,6 +12,7 @@ use alloy::{
 use anyhow::{Context, Result, anyhow, ensure};
 
 pub mod events;
+pub mod journal;
 pub mod relay;
 pub mod theft_demo_guard;
 pub mod verify;
