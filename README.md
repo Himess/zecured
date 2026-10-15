@@ -61,7 +61,7 @@ txids) and how to reproduce every run: [docs/TESTING.md](docs/TESTING.md).
 | Shielded Ironwood transactions on Zcash testnet (NU7) | ZEC/USD price: `MockZecOracle` (owner-set) until the RedStone feed is wired, behind `DemoShockOracle` (DEMO: an owner-set shock, in public steps, to show a liquidation) |
 | 3-of-5 FROST threshold vaults (re-randomized FROST, RedPallas), keys per ZIP 2005 | `MockUSDC` on the local fork only; Base Sepolia uses Circle's testnet USDC |
 | Per-payout policy checks by every signer (P0–P6) | Signer independence (all 5 nodes run by us); the Tier 3 bonds show the mechanism, not economic security |
-| Morpho Blue market on Base Sepolia (the real Morpho deployment) | Morpho in the symbolic checks only (`MockMorphoForHalmos`, test only: Halmos has no fork mode; the fork tests use the real Morpho deployment) |
+| Morpho Blue market on Base Sepolia (the real Morpho deployment) | Morpho in the symbolic checks and the compensator's unit tests only (`MockMorphoForHalmos`, `MockMorphoForCompensator`, test only: Halmos has no fork mode; the fork tests use the real Morpho deployment). The compensator's unit tests also use MOCK peers (`MockCompensatorRegistry`, `MockCompensatorSlasher`, `MockCompensatorBond`, test only) |
 | ZZEC / ZecuredRegistry / SettlementAdapter contracts | |
 | Liquidation, close from collateral, refunds of non-conforming deposits | |
 | Own RPC / bundler / paymaster proxy with a sponsorship allowlist | |
