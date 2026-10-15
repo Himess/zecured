@@ -13,8 +13,12 @@ import {ZZEC} from "../../src/ZZEC.sol";
 import {ZecuredRegistry} from "../../src/ZecuredRegistry.sol";
 import {ZecuredSpendLogic} from "../../src/registry/ZecuredSpendLogic.sol";
 import {SettlementAdapter} from "../../src/SettlementAdapter.sol";
-import {SignerBond} from "../../src/SignerBond.sol";
+import {IERC20} from "@openzeppelin/contracts/token/ERC20/IERC20.sol";
+import {IOracle} from "morpho-blue/src/interfaces/IOracle.sol";
+import {SignerBondV2} from "../../src/SignerBondV2.sol";
 import {ZecuredSlasher} from "../../src/ZecuredSlasher.sol";
+import {ZecuredCompensator} from "../../src/ZecuredCompensator.sol";
+import {BondConfig} from "../../src/interfaces/v3/ISignerBond.sol";
 import {CloseRequest, SpendCommit} from "../../src/libraries/ZecuredEIP712.sol";
 import {VaultStatus, ClaimKind, ClaimStatus, RegistryConfig} from "../../src/interfaces/v3/IZecuredRegistry.sol";
 import {IntakeConfig, WorkTier} from "../../src/interfaces/v3/IZecuredIntake.sol";
@@ -25,7 +29,8 @@ import {IntakeHarness} from "./IntakeHarness.sol";
 
 /// @notice Shared fixture of the fork tests: a fork of Base Sepolia with the REAL Morpho Blue and AdaptiveCurveIRM, plus
 ///         freshly deployed MockUSDC + MockZecOracle (MOCK) and the production v3 contracts (ZZEC, ZecuredSpendLogic,
-///         ZecuredRegistry, SettlementAdapter, the Intake, and with `_bonded()` a SignerBond and the ZecuredSlasher),
+///         ZecuredRegistry, SettlementAdapter, the Intake, and with `_bonded()` SignerBondV2, the ZecuredSlasher and
+///         the ZecuredCompensator),
 ///         wired like script/DeployZecured.s.sol (predicted CREATE addresses). The Intake is `IntakeHarness`: the
 ///         production contract plus TEST-ONLY shortcuts that activate a vault without a proof (`_attest`).
 /// @dev RPC: $BASE_SEPOLIA_RPC_URL, or https://sepolia.base.org when unset. Block: $ZECURED_FORK_BLOCK, default
@@ -74,6 +79,17 @@ abstract contract ZecuredFixture is Test {
     uint64 internal constant PENDING_REFUND_DELAY = 1 days;
     uint64 internal constant MIN_REFUND = 20_000;
     uint64 internal constant ABANDON_PERIOD = 30 days;
+    /// SignerBondV2 and ZecuredCompensator (the judge deployment's values): 100 USDC bonds, a 10 % bounty capped at half
+    /// a bond, liveness after a day (two hours of grace for an in-flight payout), unbonding over the window plus that.
+    uint256 internal constant MIN_BOND = 100e6;
+    uint256 internal constant BOUNTY_BPS = 1_000;
+    uint256 internal constant BOUNTY_CAP = 50e6;
+    uint64 internal constant LIVENESS_PERIOD = 1 days;
+    uint64 internal constant COMMIT_GRACE = 2 hours;
+    uint16 internal constant LIVENESS_PREMIUM_BPS = 500;
+    uint64 internal constant UNBONDING_PERIOD = 54 hours;
+    uint64 internal constant INCIDENT_WINDOW = 3 days;
+    address internal constant LEFTOVER_SINK = 0x000000000000000000000000000000000000dEaD;
 
     /// @notice The Intake's deposit-proof setup (`_proofSetup`).
     struct ProofSetup {
@@ -111,8 +127,9 @@ abstract contract ZecuredFixture is Test {
     SettlementAdapter internal adapter;
     IntakeHarness internal intake;
     /// With `_bonded()` only.
-    SignerBond internal bond;
+    SignerBondV2 internal bond;
     ZecuredSlasher internal slasher;
+    ZecuredCompensator internal compensator;
     /// The Intake's relay and verifier (MOCKs unless a suite's `_proofSetup` says otherwise).
     IZcashHeaderRelay internal headerRelay;
     IRiscZeroVerifier internal proofVerifier;
@@ -180,7 +197,8 @@ abstract contract ZecuredFixture is Test {
         });
     }
 
-    /// Tier 3: deploy a SignerBond and the ZecuredSlasher with the system (Tier3Base and some suites).
+    /// Tier 3: deploy SignerBondV2, the ZecuredSlasher and the ZecuredCompensator with the system (Tier3Base and some
+    /// suites).
     function _bonded() internal virtual returns (bool) {
         return false;
     }
@@ -221,10 +239,11 @@ abstract contract ZecuredFixture is Test {
         address intake;
         address bond;
         address slasher;
+        address compensator;
     }
 
     /// Same ordering as script/DeployZecured.s.sol: ZZEC, the spend logic, the Registry, the Adapter, the Intake, and
-    /// (bonded) the SignerBond and the slasher, at the deployer's next nonces.
+    /// (bonded) the bond, the slasher and the compensator, at the deployer's next nonces.
     function _deploySystem() internal {
         usdc = new MockUSDC(address(this));
         oracle = new MockZecOracle(address(this), PRICE_40);
@@ -236,9 +255,10 @@ abstract contract ZecuredFixture is Test {
         bool bonded = _bonded();
         address mockBond = _mockBondAndSlasher();
         bytes32 violationImage = _violationImageId();
-        compensatorAddress = _compensator();
+        address otherCompensator = _compensator();
 
-        Predicted memory p = _predict(bonded, mockBond);
+        Predicted memory p = _predict(bonded, mockBond, otherCompensator);
+        compensatorAddress = p.compensator;
         zzec = new ZZEC(p.registry, p.adapter, address(MORPHO));
         spendLogic = new ZecuredSpendLogic(p.registry, signerSet);
         registry = new ZecuredRegistry(_registryConfig(p, fee));
@@ -266,13 +286,18 @@ abstract contract ZecuredFixture is Test {
         }
     }
 
-    function _predict(bool bonded, address mockBond) internal view returns (Predicted memory p) {
+    function _predict(bool bonded, address mockBond, address otherCompensator)
+        internal
+        view
+        returns (Predicted memory p)
+    {
         uint64 n = vm.getNonce(address(this));
         p.registry = vm.computeCreateAddress(address(this), n + 2);
         p.adapter = vm.computeCreateAddress(address(this), n + 3);
         p.intake = vm.computeCreateAddress(address(this), n + 4);
         p.bond = bonded ? vm.computeCreateAddress(address(this), n + 5) : mockBond;
         p.slasher = bonded ? vm.computeCreateAddress(address(this), n + 6) : mockBond;
+        p.compensator = bonded ? vm.computeCreateAddress(address(this), n + 7) : otherCompensator;
     }
 
     function _registryConfig(Predicted memory p, FeeSetup memory fee) internal view returns (RegistryConfig memory) {
@@ -289,7 +314,7 @@ abstract contract ZecuredFixture is Test {
             intake: p.intake,
             signerBond: p.bond,
             slasher: p.slasher,
-            compensator: compensatorAddress,
+            compensator: p.compensator,
             feeBps: fee.feeBps,
             minFeeZat: fee.minFeeZat,
             feeCommitment: fee.feeCommitment,
@@ -298,11 +323,28 @@ abstract contract ZecuredFixture is Test {
     }
 
     function _deployBondAndSlasher(Predicted memory p, bytes32 violationImage) internal {
-        bond = new SignerBond(p.registry, p.slasher, WINDOW);
+        bond = new SignerBondV2(
+            BondConfig({
+                registry: p.registry,
+                slasher: p.slasher,
+                intake: p.intake,
+                compensator: p.compensator,
+                usdc: IERC20(address(usdc)),
+                oracle: IOracle(address(oracle)),
+                minBond: MIN_BOND,
+                unbondingPeriod: UNBONDING_PERIOD,
+                challengeWindow: WINDOW,
+                bountyBps: BOUNTY_BPS,
+                bountyCap: BOUNTY_CAP,
+                livenessPeriod: LIVENESS_PERIOD,
+                commitGrace: COMMIT_GRACE,
+                livenessPremiumBps: LIVENESS_PREMIUM_BPS
+            })
+        );
         slasher = new ZecuredSlasher(
             p.registry,
             p.bond,
-            compensatorAddress,
+            p.compensator,
             proofs.relay,
             proofs.verifier,
             violationImage,
@@ -310,8 +352,23 @@ abstract contract ZecuredFixture is Test {
             SLASH_WORK,
             WINDOW
         );
+        compensator = new ZecuredCompensator(
+            p.registry, p.slasher, p.bond, IERC20(address(usdc)), INCIDENT_WINDOW, LEFTOVER_SINK
+        );
         assertEq(address(bond), p.bond, "bond address prediction");
         assertEq(address(slasher), p.slasher, "slasher address prediction");
+        assertEq(address(compensator), p.compensator, "compensator address prediction");
+    }
+
+    /// Every signer deposits `MIN_BOND` of MockUSDC (minted here): all five bonded.
+    function _bondAll() internal {
+        for (uint256 i; i < 5; ++i) {
+            usdc.mint(signerSet[i], MIN_BOND);
+            vm.startPrank(signerSet[i]);
+            usdc.approve(address(bond), MIN_BOND);
+            bond.deposit(MIN_BOND);
+            vm.stopPrank();
+        }
     }
 
     function _intakeConfig(address bond_, address slasher_, CapSetup memory cap)

@@ -180,11 +180,7 @@ contract RealViolationSealTest is ZecuredFixture {
 
     function setUp() public override {
         super.setUp();
-        for (uint256 i; i < 5; ++i) {
-            vm.deal(signerSet[i], 1 ether);
-            vm.prank(signerSet[i]);
-            bond.deposit{value: 0.01 ether}();
-        }
+        _bondAll();
     }
 
     function _totalBonds() internal view returns (uint256 sum) {
@@ -211,7 +207,7 @@ contract RealViolationSealTest is ZecuredFixture {
         vm.warp(block.timestamp + WINDOW);
         slasher.executeSlash(caseId);
         assertEq(_totalBonds(), 0, "all five bonds slashed");
-        assertEq(bond.bountyOf(BENEFICIARY), 0.005 ether, "the bounty goes to the journal's beneficiary");
+        assertEq(bond.bountyOf(BENEFICIARY), BOUNTY_CAP, "the bounty goes to the journal's beneficiary");
         assertTrue(bond.halted(), "minting halted");
     }
 

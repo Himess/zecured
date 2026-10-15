@@ -2,7 +2,7 @@
 pragma solidity 0.8.28;
 
 import {ZecuredSlasher} from "../../src/ZecuredSlasher.sol";
-import {ISignerBond} from "../../src/interfaces/ISignerBond.sol";
+import {ISignerBond} from "../../src/interfaces/v3/ISignerBond.sol";
 import {
     IZecuredSlasher,
     ViolationKind,
@@ -19,7 +19,8 @@ import {MessageHashUtils} from "@openzeppelin/contracts/utils/cryptography/Messa
 
 /// @notice Tier 3 end to end on a Base Sepolia fork (docs/TIER3.md §§ 6, 7): the five bonds, each violation kind proven
 ///         with the MOCK verifier against Registry records and a MOCK relay's anchors, the challenge window, dismissal,
-///         the slash, the bounty, the halt and the bond withdrawal rules.
+///         the slash, the bounty, the halt, the hand-off to the compensator and the bonds' exit rules (SignerBondV2,
+///         USDC).
 contract Tier3SlashingTest is ZecuredFixture {
     bytes32 internal constant DEPOSIT_IMAGE = keccak256("zecured.test.tier3.depositImage");
     bytes32 internal constant SUITE_VIOLATION_IMAGE = keccak256("zecured.test.tier3.violationImage");
@@ -65,14 +66,6 @@ contract Tier3SlashingTest is ZecuredFixture {
     }
 
     // ------------------------------------------------------------------ helpers
-
-    function _bondAll() internal {
-        for (uint256 i; i < 5; ++i) {
-            vm.deal(signerSet[i], 1 ether);
-            vm.prank(signerSet[i]);
-            bond.deposit{value: 0.01 ether}();
-        }
-    }
 
     function _journal(ViolationKind kind, bytes32 ref, bytes32 noteTag, uint64 value, bytes32 dest)
         internal
@@ -144,13 +137,21 @@ contract Tier3SlashingTest is ZecuredFixture {
 
     function test_bond_depositRules() public {
         assertTrue(bond.fullyBonded());
-        vm.deal(stranger, 1 ether);
-        vm.prank(stranger);
+        assertEq(bond.effectiveBond(), 5 * MIN_BOND);
+        usdc.mint(stranger, MIN_BOND);
+        vm.startPrank(stranger);
+        usdc.approve(address(bond), MIN_BOND);
         vm.expectRevert(abi.encodeWithSelector(ISignerBond.NotASigner.selector, stranger));
-        bond.deposit{value: 0.01 ether}();
-        vm.prank(signerSet[0]);
-        vm.expectRevert(abi.encodeWithSelector(ISignerBond.AlreadyBonded.selector, 0));
-        bond.deposit{value: 0.01 ether}();
+        bond.deposit(MIN_BOND);
+        vm.stopPrank();
+        // A signer may add to its bond (until a halt).
+        usdc.mint(signerSet[0], MIN_BOND);
+        vm.startPrank(signerSet[0]);
+        usdc.approve(address(bond), MIN_BOND);
+        bond.deposit(MIN_BOND);
+        vm.stopPrank();
+        assertEq(bond.bondOf(0), 2 * MIN_BOND);
+        assertEq(bond.effectiveBond(), 5 * MIN_BOND, "capped by 5/3 of the three smallest");
         vm.prank(stranger);
         vm.expectRevert(abi.encodeWithSelector(ISignerBond.NotTheSlasher.selector, stranger));
         bond.slash(bytes32(0), 0x1f, stranger);
@@ -182,12 +183,14 @@ contract Tier3SlashingTest is ZecuredFixture {
 
         vm.warp(block.timestamp + WINDOW);
         vm.expectEmit(address(slasher));
-        emit IZecuredSlasher.ViolationExecuted(caseId, 0.05 ether);
+        emit IZecuredSlasher.ViolationExecuted(caseId, 5 * MIN_BOND);
         slasher.executeSlash(caseId);
         assertEq(_totalBonds(), 0);
         assertTrue(bond.halted());
-        assertEq(bond.bountyOf(watcher), 0.005 ether, "10 %, capped at half a bond");
-        assertEq(bond.compensationPool(), 0.045 ether);
+        assertEq(bond.bountyOf(watcher), BOUNTY_CAP, "10 %, capped at half a bond");
+        assertEq(compensator.funds(), 5 * MIN_BOND - BOUNTY_CAP, "the rest goes to the compensator");
+        assertEq(usdc.balanceOf(address(compensator)), 5 * MIN_BOND - BOUNTY_CAP);
+        assertEq(compensator.victim(vaultId).incident, compensator.currentIncident(), "the vault is a victim");
         assertEq(slasher.openCaseCount(), 0);
         vm.expectRevert(abi.encodeWithSelector(IZecuredSlasher.CaseAlreadyExecuted.selector, caseId));
         slasher.executeSlash(caseId);
@@ -200,7 +203,7 @@ contract Tier3SlashingTest is ZecuredFixture {
         assertEq(uint8(_status(_vaultIdFor(late))), uint8(VaultStatus.Cancelled));
         vm.prank(watcher);
         bond.claimBounty();
-        assertEq(watcher.balance, 0.005 ether);
+        assertEq(usdc.balanceOf(watcher), BOUNTY_CAP);
         vm.prank(watcher);
         vm.expectRevert(abi.encodeWithSelector(ISignerBond.NothingToClaim.selector, watcher));
         bond.claimBounty();
@@ -217,7 +220,7 @@ contract Tier3SlashingTest is ZecuredFixture {
         vm.expectEmit(address(slasher));
         emit IZecuredSlasher.ViolationDismissed(caseId);
         slasher.executeSlash(caseId);
-        assertEq(_totalBonds(), 0.05 ether);
+        assertEq(_totalBonds(), 5 * MIN_BOND);
         assertFalse(bond.halted());
         assertEq(slasher.openCaseCount(), 0);
         assertEq(uint8(slasher.caseOf(caseId).kind), uint8(ViolationKind.None), "deleted");
@@ -246,7 +249,7 @@ contract Tier3SlashingTest is ZecuredFixture {
         vm.expectEmit(address(slasher));
         emit IZecuredSlasher.ViolationDismissed(caseId);
         slasher.executeSlash(caseId);
-        assertEq(_totalBonds(), 0.05 ether);
+        assertEq(_totalBonds(), 5 * MIN_BOND);
     }
 
     /// Cross-language vector: the journal the Rust statement (tier2/statement, violations.rs) computes for a real
@@ -277,7 +280,7 @@ contract Tier3SlashingTest is ZecuredFixture {
         vm.warp(block.timestamp + WINDOW);
         slasher.executeSlash(caseId);
         assertEq(_totalBonds(), 0);
-        assertEq(bond.bountyOf(address(0xBEbeBeBEbeBebeBeBEBEbebEBeBeBebeBeBebebe)), 0.005 ether);
+        assertEq(bond.bountyOf(address(0xBEbeBeBEbeBebeBeBEBEbebEBeBeBebeBeBebebe)), BOUNTY_CAP);
     }
 
     /// E2 with the real slasher: a deposit proven but not yet activated is spent (F1); the vault is not activated while
@@ -329,11 +332,12 @@ contract Tier3SlashingTest is ZecuredFixture {
         assertEq(slasher.caseOf(caseId).signerBitmap, 0x1a, "signers 1, 3 and 4");
         vm.warp(block.timestamp + WINDOW);
         slasher.executeSlash(caseId);
-        assertEq(bond.bondOf(0), 0.01 ether);
-        assertEq(bond.bondOf(2), 0.01 ether);
+        assertEq(bond.bondOf(0), MIN_BOND);
+        assertEq(bond.bondOf(2), MIN_BOND);
         assertEq(bond.bondOf(1) + bond.bondOf(3) + bond.bondOf(4), 0);
-        assertEq(bond.bountyOf(watcher), 0.003 ether);
-        assertEq(bond.compensationPool(), 0.027 ether);
+        uint256 bounty = 3 * MIN_BOND * BOUNTY_BPS / 10_000;
+        assertEq(bond.bountyOf(watcher), bounty, "10 % of three bonds, under the cap");
+        assertEq(compensator.funds(), 3 * MIN_BOND - bounty);
         assertTrue(bond.halted());
     }
 
@@ -368,7 +372,7 @@ contract Tier3SlashingTest is ZecuredFixture {
         assertEq(slasher.caseOf(caseId).signerBitmap, 0x15, "the record's signers 0, 2, 4");
         vm.warp(block.timestamp + WINDOW);
         slasher.executeSlash(caseId);
-        assertEq(bond.bondOf(1) + bond.bondOf(3), 0.02 ether);
+        assertEq(bond.bondOf(1) + bond.bondOf(3), 2 * MIN_BOND);
         assertTrue(bond.halted());
     }
 
@@ -459,12 +463,12 @@ contract Tier3SlashingTest is ZecuredFixture {
         );
     }
 
-    // ================================================================== bond withdrawal (S5)
+    // ================================================================== the bonds' exit (S5, T-01)
 
-    function test_withdraw_onlyOnceNothingIsAtStake() public {
+    function test_fullExit_onlyOnceNothingIsAtStake() public {
         vm.prank(signerSet[2]);
-        vm.expectRevert(abi.encodeWithSelector(ISignerBond.WithdrawalLocked.selector, 1, 0, WINDOW));
-        bond.withdraw(payable(signerSet[2]));
+        vm.expectRevert(abi.encodeWithSelector(ISignerBond.FullExitLocked.selector, 1, 0, WINDOW));
+        bond.requestUnbond(MIN_BOND);
 
         // The vault closes and its last claim is paid.
         vm.startPrank(account);
@@ -480,14 +484,16 @@ contract Tier3SlashingTest is ZecuredFixture {
         uint64 unlocksAt = uint64(block.timestamp) + WINDOW;
 
         vm.prank(signerSet[2]);
-        vm.expectRevert(abi.encodeWithSelector(ISignerBond.WithdrawalLocked.selector, 0, 0, unlocksAt));
-        bond.withdraw(payable(signerSet[2]));
+        vm.expectRevert(abi.encodeWithSelector(ISignerBond.FullExitLocked.selector, 0, 0, unlocksAt));
+        bond.requestUnbond(MIN_BOND);
 
         vm.warp(unlocksAt);
-        uint256 before = signerSet[2].balance;
         vm.prank(signerSet[2]);
-        bond.withdraw(payable(signerSet[2]));
-        assertEq(signerSet[2].balance, before + 0.01 ether);
+        bond.requestUnbond(MIN_BOND);
+        (uint256 unbonding, uint64 readyAt) = bond.unbondingOf(2);
+        assertEq(unbonding, MIN_BOND, "still slashable until withdrawn");
+        assertEq(readyAt, unlocksAt + UNBONDING_PERIOD);
+        assertEq(bond.bondOf(2), 0);
         assertFalse(bond.fullyBonded(), "no new vault activates now");
         address next = makeAddr("zecured.tier3.next");
         relay.setTipHeight(1_000);
@@ -496,12 +502,50 @@ contract Tier3SlashingTest is ZecuredFixture {
         vm.warp(block.timestamp + FINALIZE_DELAY);
         vm.expectRevert(IZecuredIntake.SignersNotBonded.selector);
         intake.finalizeActivation(_vaultIdFor(next));
-        vm.prank(signerSet[2]);
-        vm.expectRevert(abi.encodeWithSelector(ISignerBond.NoBond.selector, 2));
-        bond.withdraw(payable(signerSet[2]));
+
+        vm.startPrank(signerSet[2]);
+        vm.expectRevert(abi.encodeWithSelector(ISignerBond.UnbondingNotReady.selector, readyAt));
+        bond.withdrawUnbonded(signerSet[2]);
+        vm.warp(readyAt);
+        bond.withdrawUnbonded(signerSet[2]);
+        assertEq(usdc.balanceOf(signerSet[2]), MIN_BOND);
+        vm.expectRevert(abi.encodeWithSelector(ISignerBond.NothingUnbonding.selector, uint8(2)));
+        bond.withdrawUnbonded(signerSet[2]);
+        vm.stopPrank();
     }
 
-    function test_withdraw_lockedWhileACaseIsOpen() public {
+    /// A partial exit keeps at least `minBond`, needs no open case, and asks the Intake whether the coverage still holds
+    /// (here the coverage cap is off); vaults may stay open.
+    function test_partialExit_keepsTheMinimum() public {
+        usdc.mint(signerSet[1], MIN_BOND);
+        vm.startPrank(signerSet[1]);
+        usdc.approve(address(bond), MIN_BOND);
+        bond.deposit(MIN_BOND);
+        vm.expectRevert(abi.encodeWithSelector(ISignerBond.BelowMinBond.selector, MIN_BOND / 2, MIN_BOND));
+        bond.requestUnbond(MIN_BOND + MIN_BOND / 2);
+        bond.requestUnbond(MIN_BOND); // the vault is still open
+        vm.stopPrank();
+        assertEq(bond.bondOf(1), MIN_BOND);
+        assertTrue(bond.fullyBonded());
+
+        bytes32 caseId = _prove(_journal(ViolationKind.Uncommitted, THEFT_REF, depositTag, 0, bytes32(0)));
+        usdc.mint(signerSet[3], MIN_BOND);
+        vm.startPrank(signerSet[3]);
+        usdc.approve(address(bond), MIN_BOND);
+        bond.deposit(MIN_BOND);
+        vm.expectRevert(abi.encodeWithSelector(ISignerBond.CaseOpen.selector, uint256(1)));
+        bond.requestUnbond(MIN_BOND);
+        vm.stopPrank();
+        vm.warp(block.timestamp + UNBONDING_PERIOD);
+        vm.prank(signerSet[1]);
+        vm.expectRevert(abi.encodeWithSelector(ISignerBond.CaseOpen.selector, uint256(1)));
+        bond.withdrawUnbonded(signerSet[1]); // no withdrawal while a case is open: the unbonding is still slashable
+        slasher.executeSlash(caseId);
+        (uint256 unbonding,) = bond.unbondingOf(1);
+        assertEq(unbonding, 0, "slashed with the bond");
+    }
+
+    function test_fullExit_lockedWhileACaseIsOpen() public {
         vm.startPrank(account);
         MORPHO.setAuthorization(address(registry), true);
         bytes32 claimId = registry.requestRelease(vaultId, RELEASE_COMMITMENT);
@@ -515,8 +559,8 @@ contract Tier3SlashingTest is ZecuredFixture {
         vm.warp(block.timestamp + WINDOW);
         uint64 unlocksAt = registry.lastVaultSettledAt() + WINDOW;
         vm.prank(signerSet[0]);
-        vm.expectRevert(abi.encodeWithSelector(ISignerBond.WithdrawalLocked.selector, 0, 1, unlocksAt));
-        bond.withdraw(payable(signerSet[0]));
+        vm.expectRevert(abi.encodeWithSelector(ISignerBond.FullExitLocked.selector, 0, 1, unlocksAt));
+        bond.requestUnbond(MIN_BOND);
         slasher.executeSlash(caseId);
     }
 
@@ -528,14 +572,15 @@ contract Tier3SlashingTest is ZecuredFixture {
         address b = address(bond);
         address rl = address(relay);
         address v = address(verifier);
+        address cmp = address(compensator);
         // The bond and the Registry name another slasher (the one the fixture deployed).
         vm.expectRevert(IZecuredSlasher.InvalidConfig.selector);
-        new ZecuredSlasher(r, b, address(0), rl, v, SUITE_VIOLATION_IMAGE, selector, SLASH_WORK, WINDOW);
+        new ZecuredSlasher(r, b, cmp, rl, v, SUITE_VIOLATION_IMAGE, selector, SLASH_WORK, WINDOW);
         vm.expectRevert(IZecuredSlasher.ZeroWindow.selector);
-        new ZecuredSlasher(r, b, address(0), rl, v, SUITE_VIOLATION_IMAGE, selector, SLASH_WORK, 0);
+        new ZecuredSlasher(r, b, cmp, rl, v, SUITE_VIOLATION_IMAGE, selector, SLASH_WORK, 0);
         vm.expectRevert(IZecuredSlasher.ZeroAddress.selector);
-        new ZecuredSlasher(address(0), b, address(0), rl, v, SUITE_VIOLATION_IMAGE, selector, SLASH_WORK, WINDOW);
+        new ZecuredSlasher(address(0), b, cmp, rl, v, SUITE_VIOLATION_IMAGE, selector, SLASH_WORK, WINDOW);
         vm.expectRevert(IZecuredSlasher.InvalidConfig.selector);
-        new ZecuredSlasher(r, b, address(0), rl, v, bytes32(0), selector, SLASH_WORK, WINDOW);
+        new ZecuredSlasher(r, b, cmp, rl, v, bytes32(0), selector, SLASH_WORK, WINDOW);
     }
 }

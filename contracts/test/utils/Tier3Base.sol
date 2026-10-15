@@ -1,15 +1,14 @@
 // SPDX-License-Identifier: MIT
 pragma solidity 0.8.28;
 
-// Tier 3 test base (adopted from the red-team review of 2026-10-14): the real Registry, Intake, SignerBond and
-// ZecuredSlasher on a Base Sepolia fork, with the MOCK verifier, the MOCK relay and a MOCK compensator the tests drive by
-// hand (the real compensator has its own suite); all five signers bonded.
+// Tier 3 test base (adopted from the red-team review of 2026-10-14): the real Registry, Intake, SignerBondV2,
+// ZecuredSlasher and ZecuredCompensator on a Base Sepolia fork, with the MOCK verifier and the MOCK relay; all five
+// signers bonded (MockUSDC).
 
 import {ViolationKind, ViolationJournal} from "../../src/interfaces/v3/IZecuredSlasher.sol";
 import {SpendCommit} from "../../src/libraries/ZecuredEIP712.sol";
 import {MockRiscZeroVerifier} from "../../src/mocks/MockRiscZeroVerifier.sol";
 import {MockHeaderRelay} from "../mocks/MockHeaderRelay.sol";
-import {MockCompensator} from "../mocks/MockCompensator.sol";
 import {ZecuredFixture} from "./ZecuredFixture.sol";
 import {MessageHashUtils} from "@openzeppelin/contracts/utils/cryptography/MessageHashUtils.sol";
 
@@ -19,7 +18,6 @@ abstract contract Tier3Base is ZecuredFixture {
 
     MockHeaderRelay internal relay;
     MockRiscZeroVerifier internal verifier;
-    MockCompensator internal compensator;
 
     address internal watcher = makeAddr("tier3.watcher");
 
@@ -41,18 +39,9 @@ abstract contract Tier3Base is ZecuredFixture {
         return true;
     }
 
-    function _compensator() internal virtual override returns (address) {
-        compensator = new MockCompensator();
-        return address(compensator);
-    }
-
     function setUp() public virtual override {
         super.setUp();
-        for (uint256 i; i < 5; ++i) {
-            vm.deal(signerSet[i], 1 ether);
-            vm.prank(signerSet[i]);
-            bond.deposit{value: 0.01 ether}();
-        }
+        _bondAll();
         relay.setBlock(ANCHOR, true, SLASH_WORK);
     }
 

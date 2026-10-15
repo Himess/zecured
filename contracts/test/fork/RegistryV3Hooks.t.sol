@@ -25,7 +25,7 @@ contract RegistryV3HooksTest is ZecuredFixture {
     uint64 internal constant FEE_005 = 25_000;
 
     MockSignerBond internal gates;
-    address internal compensator = makeAddr("zecured.hooks.compensator");
+    address internal compensatorRole = makeAddr("zecured.hooks.compensator");
     address internal account;
     uint256 internal accountKey;
 
@@ -35,7 +35,7 @@ contract RegistryV3HooksTest is ZecuredFixture {
     }
 
     function _compensator() internal view override returns (address) {
-        return compensator;
+        return compensatorRole;
     }
 
     function _feeSetup() internal pure override returns (FeeSetup memory) {
@@ -324,7 +324,7 @@ contract RegistryV3HooksTest is ZecuredFixture {
         _authorizeBoth(account);
         _borrow(account, 500_000);
         uint64 outstanding = _outstanding(vaultId);
-        vm.prank(compensator);
+        vm.prank(compensatorRole);
         vm.expectRevert(abi.encodeWithSelector(IZecuredRegistry.NotRetirable.selector, vaultId));
         registry.retireVault(vaultId, outstanding); // not compromised
 
@@ -333,7 +333,7 @@ contract RegistryV3HooksTest is ZecuredFixture {
         vm.prank(stranger);
         vm.expectRevert(abi.encodeWithSelector(IZecuredRegistry.OnlyCompensator.selector, stranger));
         registry.retireVault(vaultId, outstanding);
-        vm.startPrank(compensator);
+        vm.startPrank(compensatorRole);
         vm.expectRevert(abi.encodeWithSelector(IZecuredRegistry.DebtOutstanding.selector, vaultId));
         registry.retireVault(vaultId, outstanding);
         vm.expectRevert(IZecuredRegistry.ZeroAmount.selector);
@@ -350,7 +350,7 @@ contract RegistryV3HooksTest is ZecuredFixture {
         bytes32 retiredId = registry.claimIdOf(vaultId, registry.claimCount(vaultId));
         vm.expectEmit(address(registry));
         emit IZecuredRegistry.VaultRetired(vaultId, retiredId, outstanding);
-        vm.prank(compensator);
+        vm.prank(compensatorRole);
         assertEq(registry.retireVault(vaultId, outstanding), outstanding);
 
         assertEq(uint8(_status(vaultId)), uint8(VaultStatus.Closed));
@@ -361,11 +361,11 @@ contract RegistryV3HooksTest is ZecuredFixture {
         assertEq(registry.lockedZatoshi(), FEE_005, "only the fee claim is left");
         assertEq(registry.openVaultCount(), 1, "the fee claim keeps it open");
 
-        vm.prank(compensator);
+        vm.prank(compensatorRole);
         registry.settleCompensatedClaim(feeId);
         assertEq(registry.openVaultCount(), 0);
         assertEq(registry.lockedZatoshi(), 0);
-        vm.prank(compensator);
+        vm.prank(compensatorRole);
         vm.expectRevert(abi.encodeWithSelector(IZecuredRegistry.NotRetirable.selector, vaultId));
         registry.retireVault(vaultId, 1);
     }
@@ -383,12 +383,12 @@ contract RegistryV3HooksTest is ZecuredFixture {
 
         // 600,000 of debt needs 600,000 / 0.625 = 960,000 USDC units of collateral: 2,400,000 zat at $40.
         uint64 burnable = outstanding - 2_400_000;
-        vm.prank(compensator);
+        vm.prank(compensatorRole);
         vm.expectRevert(bytes("insufficient collateral"));
         registry.retireVault(vaultId, burnable + 1);
 
         bytes32 retiredId = registry.claimIdOf(vaultId, registry.claimCount(vaultId));
-        vm.prank(compensator);
+        vm.prank(compensatorRole);
         assertEq(registry.retireVault(vaultId, burnable), burnable);
         assertEq(uint8(_status(vaultId)), uint8(VaultStatus.Active), "still active, with its residual debt");
         assertEq(_outstanding(vaultId), 2_400_000);
@@ -408,14 +408,14 @@ contract RegistryV3HooksTest is ZecuredFixture {
     function test_retireVault_needsTheAccountsAuthorization() public {
         bytes32 vaultId = _attest(account, VAULT_001);
         gates.setCompromised(vaultId, true);
-        vm.prank(compensator);
+        vm.prank(compensatorRole);
         vm.expectRevert(bytes("unauthorized"));
         registry.retireVault(vaultId, VAULT_001);
     }
 
     function test_settleCompensatedClaim() public {
         (bytes32 vaultId, bytes32 releaseId) = _released(VAULT_001);
-        vm.prank(compensator);
+        vm.prank(compensatorRole);
         vm.expectRevert(abi.encodeWithSelector(IZecuredRegistry.NotCompensable.selector, releaseId));
         registry.settleCompensatedClaim(releaseId); // not compromised
 
@@ -425,12 +425,12 @@ contract RegistryV3HooksTest is ZecuredFixture {
         registry.settleCompensatedClaim(releaseId);
         vm.expectEmit(address(registry));
         emit IZecuredRegistry.ClaimCompensated(vaultId, releaseId);
-        vm.prank(compensator);
+        vm.prank(compensatorRole);
         registry.settleCompensatedClaim(releaseId);
         _assertClaim(releaseId, vaultId, ClaimKind.Release, VAULT_001, RELEASE_COMMITMENT, ClaimStatus.Compensated);
         assertEq(registry.openVaultCount(), 0, "its last claim settled");
         assertEq(registry.lockedZatoshi(), 0);
-        vm.prank(compensator);
+        vm.prank(compensatorRole);
         vm.expectRevert(abi.encodeWithSelector(IZecuredRegistry.NotCompensable.selector, releaseId));
         registry.settleCompensatedClaim(releaseId);
     }

@@ -70,7 +70,7 @@ contract RedTeamRegressionsTest is Tier3Base {
         slasher.executeSlash(caseId);
         assertTrue(bond.halted());
         assertEq(bond.bondOf(0) + bond.bondOf(2) + bond.bondOf(4), 0, "the record's signers are slashed");
-        assertEq(bond.bondOf(1) + bond.bondOf(3), 0.02 ether);
+        assertEq(bond.bondOf(1) + bond.bondOf(3), 2 * MIN_BOND);
     }
 
     function test_RT1_anHonestClaimRefIsNotF4() public {
@@ -272,18 +272,29 @@ contract RedTeamRegressionsTest is Tier3Base {
         assertTrue(bond.halted());
 
         // T-04: the slash compromised the bad vault. Its signers can no longer confirm or pay its claims, nor can its
-        // account leave; the compensator (a MOCK here) retires it and takes its pending claim over.
+        // account leave; the compensator takes it over with the slashed bonds of signers 1, 3 and 4.
         bytes[] memory confirmSigs = _threeSigs(registry.hashPayoutConfirmation(badVault, _one(claimId)));
         vm.expectRevert(abi.encodeWithSelector(IZecuredRegistry.VaultCompromised.selector, badVault));
         registry.confirmPayout(badVault, _one(claimId), confirmSigs);
         vm.prank(thief);
         vm.expectRevert(abi.encodeWithSelector(IZecuredRegistry.VaultFrozen.selector, badVault));
         registry.requestRelease(badVault, keccak256("rt6.dest2"));
-        assertEq(compensator.caseCount(), 1, "the slasher handed the case to the compensator");
-        assertEq(compensator.retire(registry, badVault, VAULT_005 - 1_000_000), VAULT_005 - 1_000_000);
-        compensator.settle(registry, claimId);
+        uint256 slashed = 3 * MIN_BOND;
+        assertEq(compensator.funds(), slashed - slashed * BOUNTY_BPS / 10_000, "the slashed bonds less the bounty");
+
+        compensator.tallyClaim(claimId); // the claim leaves the Registry's books: the compensator owes it now
+        compensator.tallyVault(badVault);
+        vm.warp(block.timestamp + INCIDENT_WINDOW);
+        compensator.finalizeIncident(compensator.currentIncident());
+        compensator.settleVault(badVault); // no debt: retired in full
+        assertEq(uint8(_status(badVault)), uint8(VaultStatus.Closed));
         (,,,, ClaimStatus settled) = registry.claim(claimId);
         assertEq(uint8(settled), uint8(ClaimStatus.Compensated));
+        assertEq(zzec.balanceOf(address(MORPHO)), 0, "the bad vault's unbacked zZEC is burned");
+        // The owner is paid in USDC at the incident's price: its released claim and the vault's equity, here in full.
+        compensator.withdrawEntitlement(claimId);
+        compensator.withdrawEquity(badVault);
+        assertEq(usdc.balanceOf(thief), uint256(VAULT_005) * PRICE_40 / 1e36, "0.05 ZEC at $40");
 
         // The innocent pending deposit can never finalize: anyone turns it into a refund (T-02), whose destination its
         // account gives, and the signers pay it with a committed payout like any claim.
@@ -296,12 +307,21 @@ contract RedTeamRegressionsTest is Tier3Base {
         _send(_spendCommit(innocentVault, keccak256("rt6.tag"), _one(refund), "rt6.refund"));
         _confirm(innocentVault, _one(refund));
 
-        // Every vault has settled: once the window has passed, the signers the slash did not name take their bonds.
+        // Every vault has settled: once the window has passed, the signers the slash did not name take their bonds,
+        // and what the compensator did not need goes to the leftover sink, never back to the signers.
         assertEq(registry.openVaultCount(), 0);
         vm.warp(block.timestamp + WINDOW);
-        vm.prank(signerSet[0]);
-        bond.withdraw(payable(signerSet[0]));
+        vm.startPrank(signerSet[0]);
+        bond.requestUnbond(MIN_BOND);
+        vm.warp(block.timestamp + UNBONDING_PERIOD);
+        bond.withdrawUnbonded(signerSet[0]);
+        vm.stopPrank();
         assertEq(bond.bondOf(0), 0);
+        assertEq(usdc.balanceOf(signerSet[0]), MIN_BOND);
+        uint256 leftover = compensator.sweepLeftover();
+        assertGt(leftover, 0);
+        assertEq(usdc.balanceOf(LEFTOVER_SINK), leftover);
+        assertEq(usdc.balanceOf(address(compensator)), 0);
     }
 
     function test_RT6_withoutAHaltADropStillNeedsTheAnchorOffTheBestChain() public {
@@ -361,7 +381,9 @@ contract RedTeamRegressionsTest is Tier3Base {
 
         vm.warp(block.timestamp + WINDOW);
         vm.prank(signerSet[1]);
-        bond.withdraw(payable(signerSet[1]));
+        bond.requestUnbond(MIN_BOND); // the full exit: nothing is at stake any more
+        (uint256 unbonding,) = bond.unbondingOf(1);
+        assertEq(unbonding, MIN_BOND);
     }
 
     function test_RT8_onlyUncommittedDustOfAClosedVaultIsWrittenOff() public {
