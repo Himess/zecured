@@ -117,7 +117,8 @@ SpendCommit(bytes32 vaultId,bytes32 inputTag,bytes32[] claimIds,bytes32[] claimR
   (`salt_i` of its recipient commitment, § 1). Txids in internal byte order.
 - `claimOutputs[i]` is the index of the payout's action whose output pays `claimIds[i]`; the indexes
   are distinct, so two claims never share one output (E1, D34).
-- `claimIds[0]` bears the payout's ZIP 317 fee. Arrays are hashed as EIP-712 requires
+- `claimIds[0]` bears the payout's ZIP 317 fee. A payout settles 1 to 8 claims (review İ-01), in
+  the queue's order, with distinct receivers and salts (E1). Arrays are hashed as EIP-712 requires
   (`keccak256` of the concatenated elements); signatures as in § 2.2.
 
 ## 3. Contracts (Base Sepolia)

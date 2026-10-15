@@ -74,13 +74,21 @@ Every payout returns the vault's still-unpaid value to the vault's internal addr
 
 - Each Base event creates one claim per recipient (a close creates two). Claims are paid in
   Base order, one transaction at a time; the next starts once the previous change is mined.
-- Each payment bears its own ZIP-317 fee, deducted from its recipient's output (in a close
-  pair, the borrower pays). zZEC is always burned in full on Base.
+- One transaction settles up to 8 claims of the vault (the Registry's limit; review İ-01): the
+  first payable claim (or close pair), then the later payable claims in Base order. A claim that
+  would pay a receiver of the transaction a second time, or name one of its salts again (E1), is
+  skipped for a later transaction, and the claims after it still ride along: a liquidation split
+  into many small claims to one receiver (review H-06) delays only itself.
+- The transaction's ZIP-317 fee (5,000 zat per output, at least 10,000) is deducted from the first
+  claim's output; the others are paid in full. A claim rides along only while the first one stays
+  above the fee. zZEC is always burned in full on Base.
 - A claim whose recipient is unknown is set aside (its value stays in the vault) and the queue
   moves on. Exception: a close waits up to 2 minutes for the market maker's recipient so both
-  outputs share one transaction; after that the borrower is paid alone.
-- A claim not larger than its fee is dust and stays in the vault. The Adapter enforces a
-  minimum liquidation size, so dust cannot be used to clog the queue.
+  outputs share one transaction; after that the borrower is paid alone. A close pair is never
+  split to ride along.
+- A claim not larger than the fee of a transaction paying it alone is dust and stays in the vault
+  (it never rides along on another claim's fee either). The Adapter enforces a minimum liquidation
+  size, so dust cannot be used to clog the queue.
 - Claim ids are never paid twice. A transaction that misses its expiry height is rebuilt for
   the same claims. Zcash transaction ids are never written to Base.
 
