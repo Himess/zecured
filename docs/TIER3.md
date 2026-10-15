@@ -170,12 +170,14 @@ proofs of concept with their outcome reversed).
 5. Return the signature with its FROST commitments.
 
 **Coordinator.** Collect at least 3 `SpendCommit` signatures and send `commitSpend`. Wait until it is
-a few Base blocks deep, then run round 2, handing every node the signatures it used.
+as deep as the nodes check (below), then run round 2, handing every node the signatures it used.
 
 **Round 2 (each node, T3-4).** Release the share only when both hold:
 - the node holds **every** signature the `commitSpend` used;
 - it sees `spendRecord(payoutRef).recordHash` equal to the struct hash it signed, on **two independent
-  RPC providers**, at least a few blocks deep.
+  RPC providers**, at Base's `safe` head or, while that lags, in a block `commit_depth_secs` old
+  (default 120 s), and at least `commit_depth_blocks` deep (review H-11: a depth in seconds or at
+  the safe head keeps its meaning with 200 ms blocks).
 
 Holding the signatures lets anyone resubmit the commitment, since `commitSpend` needs no
 permission. The coordinator keeps every in-flight payout's commitment and its signatures and, on

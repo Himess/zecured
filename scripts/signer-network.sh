@@ -162,7 +162,9 @@ cfg = {
     "local_fork": local,
     "attest_delay_max_blocks": int(os.environ.get("ATTEST_DELAY_MAX_BLOCKS", "0" if local else "2")),
     "payout_delay_max_blocks": int(os.environ.get("PAYOUT_DELAY_MAX_BLOCKS", "0" if local else "8")),
-    # T3-4: Base blocks under a payout's commitment before round 2 (3 = ~6 s at 2 s blocks).
+    # T3-4, H-11: a payout's commitment must be under Base's safe head before round 2, or, while
+    # that lags, this many seconds old (at most 180); and in any case this many blocks deep.
+    "commit_depth_secs": int(os.environ.get("COMMIT_DEPTH_SECS", "120")),
     "commit_depth_blocks": int(os.environ.get("COMMIT_DEPTH_BLOCKS", "3")),
     # H-01: a hashcash stamp on every vault opening (20 bits: about a million hashes), a vault
     # without a seen deposit stops holding one of the 512 slots after 30 minutes.

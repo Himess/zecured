@@ -131,16 +131,17 @@ pub const MAX_PENDING_DKGS: usize = 64;
 /// Sync rounds a Registry event contradicted by the primary RPC's own state is retried before
 /// it is skipped for good (C-2, M-9).
 const MAX_EVENT_REJECTIONS: u32 = 3;
-/// Largest `eth_getLogs` block range (public RPCs refuse larger ones).
-const MAX_LOG_RANGE: u64 = 2_000;
 /// Blocks below both providers' latest block at which an event is checked when the state at its
 /// own block is gone (non-archive nodes keep only the last ~128 states).
 const RECENT_STATE_MARGIN: u64 = 2;
 
-/// T3-4: Base blocks a payout's commitment must be under, on every provider, before this node
-/// releases a share for the payout (about 6 seconds with 2 s blocks), unless the network config
-/// sets `commit_depth_blocks`.
+/// T3-4: Base blocks a payout's commitment must at least be under, on every provider, before this
+/// node releases a share for the payout, unless the network config sets `commit_depth_blocks`.
 pub const DEFAULT_COMMIT_DEPTH: u64 = 3;
+/// Review H-11, T3-4: seconds a payout's commitment must have been on Base before this node
+/// releases a share while Base's `safe` head has not reached it yet, unless the network config sets
+/// `commit_depth_secs` (60 blocks at 2 s, 600 at 200 ms).
+pub const DEFAULT_COMMIT_DEPTH_SECS: u64 = 120;
 
 /// I6: signatures a commitment needs.
 const COMMIT_THRESHOLD: usize = 3;
@@ -741,7 +742,8 @@ impl Node {
 
     /// T3-4: the shares of a payout leave this node only if it holds every signature its
     /// commitment was recorded with (so it can submit it again) and every Base provider it uses
-    /// shows that very record, `commit_depth_blocks` deep.
+    /// shows that very record deep enough: at its `safe` head, or, while that lags, in a block
+    /// `commit_depth_secs` old (review H-11), and in any case `commit_depth_blocks` deep.
     async fn check_commitment_on_base(&self, record: &SpendCommitRecord, sigs: &[Bytes]) -> Result<()> {
         let msg = record.message();
         let domain = self.domain();
@@ -758,18 +760,37 @@ impl Node {
         let bitmap = signer_bitmap(&set, &signers);
         let hash = msg.eip712_hash_struct();
         for provider in self.base_providers()? {
-            let latest = provider.get_block_number().await.context("Base block number")?;
-            let at = BlockId::number(latest.saturating_sub(self.cfg.commit_depth_blocks));
-            let on_base = IZecuredRegistry::new(self.cfg.registry, &provider)
-                .spendRecord(record.payout_ref)
-                .block(at)
-                .call()
-                .await
-                .context("Registry.spendRecord")?;
+            let registry = IZecuredRegistry::new(self.cfg.registry, &provider);
+            let recorded_at = |block: u64| {
+                let call = registry.spendRecord(record.payout_ref).block(BlockId::number(block));
+                async move {
+                    let on_base = call.call().await.context("Registry.spendRecord")?;
+                    anyhow::Ok(
+                        on_base.recordHash == hash
+                            && on_base.vaultId == record.vault_id
+                            && on_base.signerBitmap == bitmap,
+                    )
+                }
+            };
+            let latest = events::latest_block(&provider).await.context("Base latest block")?;
+            let safe = events::safe_head(&provider).await.ok();
+            let timestamp_of = |number: u64| {
+                let provider = &provider;
+                async move {
+                    Ok(provider
+                        .get_block_by_number(number.into())
+                        .await
+                        .context("get block")?
+                        .context("block not found")?
+                        .header
+                        .timestamp)
+                }
+            };
+            let deep = commitment_deep_enough(&self.cfg, latest, safe, timestamp_of, recorded_at).await?;
             ensure!(
-                on_base.recordHash == hash && on_base.vaultId == record.vault_id && on_base.signerBitmap == bitmap,
-                "the payout's commitment is not on Base {} blocks deep with these signatures",
-                self.cfg.commit_depth_blocks
+                deep,
+                "the payout's commitment is on Base neither under the safe head nor {} s deep with these signatures",
+                self.cfg.commit_depth_secs
             );
         }
         Ok(())
@@ -894,18 +915,23 @@ impl Node {
         let primary = chain::base_provider(&self.cfg.base_rpc_url)?;
         let witness = self.base_rpc_witness.as_deref().map(chain::base_provider).transpose()?;
         let mut safe = events::safe_head(&primary).await?;
-        let mut latest = primary.get_block_number().await.context("Base block number")?;
         if let Some(w) = &witness {
             safe = safe.min(events::safe_head(w).await.context("witness Base RPC")?);
-            latest = latest.min(w.get_block_number().await.context("witness Base RPC")?);
         }
-        // Where events are checked if the state at their own block is gone: a recent block both
-        // providers still have the state of.
-        let recent = latest.saturating_sub(RECENT_STATE_MARGIN).max(safe);
+        // H-11: as many blocks per step as `eth_getLogs` is allowed (`ZECURED_LOG_RANGE`).
+        let step = events::log_range_ceiling();
         let mut from = cursor.max(self.cfg.registry_from_block.saturating_sub(1)).saturating_add(1);
         let mut applied = 0;
         while from <= safe {
-            let to = from.saturating_add(MAX_LOG_RANGE - 1).min(safe);
+            // Where events are checked if the state at their own block is gone: a recent block both
+            // providers still have the state of. Taken again for every step (H-11): at 200 ms
+            // blocks, a non-archive provider's ~128 recent states last about 25 seconds.
+            let mut latest = primary.get_block_number().await.context("Base block number")?;
+            if let Some(w) = &witness {
+                latest = latest.min(w.get_block_number().await.context("witness Base RPC")?);
+            }
+            let recent = latest.saturating_sub(RECENT_STATE_MARGIN).max(safe);
+            let to = from.saturating_add(step - 1).min(safe);
             let mut proven: Vec<VaultEvent> = vec![];
             let mut refused = None;
             for ev in events::fetch(&primary, self.cfg.registry, from, to).await? {
@@ -995,12 +1021,88 @@ fn refund_allowed_by_registry(status: u8, tag_used: bool) -> Result<()> {
     }
 }
 
+/// Review H-11, T3-4: whether a payout's commitment is deep enough on one Base provider, whose
+/// latest block is `latest` (number, timestamp) and safe head `safe` (if it has one):
+/// `recorded_at(n)` tells whether block `n`'s state holds the very record. It must, at Base's safe
+/// head (derived from L1 data, so a Base reorg can no longer drop it) or, while that lags, in a
+/// block `commit_depth_secs` old (`timestamp_of` finds one), and in any case `commit_depth_blocks`
+/// below the latest block, the minimum from before H-11.
+pub async fn commitment_deep_enough<T, TF, R, RF>(
+    cfg: &NetworkConfig,
+    latest: (u64, u64),
+    safe: Option<u64>,
+    timestamp_of: T,
+    mut recorded_at: R,
+) -> Result<bool>
+where
+    T: FnMut(u64) -> TF,
+    TF: std::future::Future<Output = Result<u64>>,
+    R: FnMut(u64) -> RF,
+    RF: std::future::Future<Output = Result<bool>>,
+{
+    let floor = latest.0.saturating_sub(cfg.commit_depth_blocks);
+    if let Some(safe) = safe
+        && recorded_at(safe.min(floor)).await?
+    {
+        return Ok(true);
+    }
+    let old = events::block_secs_deep_by(latest, cfg.commit_depth_secs, timestamp_of).await?;
+    recorded_at(old.min(floor)).await
+}
+
 #[cfg(test)]
 mod tests {
     use alloy::primitives::Address;
     use zecured_policy::ledger::{Claim, ClaimKind};
 
     use super::*;
+
+    fn depth_config(blocks: u64, secs: u64) -> NetworkConfig {
+        serde_json::from_value(serde_json::json!({
+            "lightwalletd_url": "http://127.0.0.1:1", "base_rpc_url": "http://127.0.0.1:1", "chain_id": 84_532,
+            "registry": Address::repeat_byte(0x11), "adapter": Address::repeat_byte(0x22), "registry_from_block": 1,
+            "confirmations": 3, "vault_expiry_blocks": 288, "denominations": [1_000_000], "nodes": [],
+            "commit_depth_blocks": blocks, "commit_depth_secs": secs,
+        }))
+        .unwrap()
+    }
+
+    /// Whether a commitment recorded in block `committed` is deep enough when the chain's latest
+    /// block is `latest`, its safe head `safe`, and block `n` has timestamp `chain(n)`.
+    async fn deep(cfg: &NetworkConfig, chain: fn(u64) -> u64, committed: u64, latest: u64, safe: Option<u64>) -> bool {
+        let timestamp_of = |n: u64| async move { Ok(chain(n)) };
+        let recorded_at = |n: u64| async move { Ok(n >= committed) };
+        commitment_deep_enough(cfg, (latest, chain(latest)), safe, timestamp_of, recorded_at).await.unwrap()
+    }
+
+    /// H-11, T3-4: a share is released once the commitment is under the safe head, or, while that
+    /// lags or is missing, once it is `commit_depth_secs` old, whatever the block time; never before
+    /// it is `commit_depth_blocks` deep.
+    #[tokio::test]
+    async fn a_commitment_must_be_under_the_safe_head_or_old_enough() {
+        let cfg = depth_config(3, 120);
+        let two_secs: fn(u64) -> u64 = |n| 1_700_000_000 + 2 * n;
+        let fifth: fn(u64) -> u64 = |n| 1_700_000_000 + n / 5;
+        let c = 5_000_000;
+        // Under the safe head and 3 blocks deep: released.
+        assert!(deep(&cfg, two_secs, c, c + 3, Some(c)).await);
+        // Under the safe head but not yet 3 blocks deep: not yet.
+        assert!(!deep(&cfg, two_secs, c, c + 2, Some(c + 2)).await);
+        // The safe head lags (or the provider has none): released once 120 s old, at 2 s blocks
+        // (60 blocks) and at 200 ms blocks (600) alike, not before.
+        for safe in [Some(c - 1_000), None] {
+            assert!(!deep(&cfg, two_secs, c, c + 59, safe).await);
+            assert!(deep(&cfg, two_secs, c, c + 61, safe).await);
+            assert!(!deep(&cfg, fifth, c, c + 590, safe).await);
+            assert!(deep(&cfg, fifth, c, c + 610, safe).await);
+        }
+        // Not recorded at all: never.
+        assert!(!deep(&cfg, two_secs, c + 10_000, c + 5_000, Some(c + 4_000)).await);
+        // An operator's larger block minimum still holds (here 100 blocks).
+        let strict = depth_config(100, 120);
+        assert!(!deep(&strict, two_secs, c, c + 61, None).await);
+        assert!(deep(&strict, two_secs, c, c + 100, None).await);
+    }
 
     /// D18, T3-6: never a signing threshold of compromisable nodes, except in the theft demo's
     /// own build, where exactly three can be.

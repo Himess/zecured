@@ -59,11 +59,17 @@ pub struct NetworkConfig {
     /// commitment on Base and its broadcast (docs/TIER3.md § 11; 0 broadcasts at once).
     #[serde(default)]
     pub payout_delay_max_blocks: u32,
-    /// T3-4: Base blocks a payout's commitment must be under before any node releases a share.
-    /// Configurable (G1): a faster Base (Denim's 200 ms blocks) needs more blocks for the same
-    /// time.
+    /// T3-4: Base blocks a payout's commitment must at least be under before any node releases a
+    /// share. Since review H-11 a minimum only: the commitment must also be under Base's `safe`
+    /// head, or `commit_depth_secs` deep.
     #[serde(default = "default_commit_depth")]
     pub commit_depth_blocks: u64,
+    /// Review H-11, T3-4: a node releases a payout's share once its commitment is at or below Base's
+    /// `safe` head, or, while that lags, once the commitment has been on Base this many seconds (by
+    /// block timestamps), whichever comes first. Seconds, unlike blocks, keep their meaning when
+    /// Base's blocks go from 2 s to 200 ms (Denim). At most [`MAX_COMMIT_DEPTH_SECS`].
+    #[serde(default = "default_commit_depth_secs")]
+    pub commit_depth_secs: u64,
     /// A local fork (anvil): the only network on which the privacy delays may be 0 (review H-05).
     #[serde(default)]
     pub local_fork: bool,
@@ -101,6 +107,15 @@ fn default_commit_depth() -> u64 {
     crate::DEFAULT_COMMIT_DEPTH
 }
 
+fn default_commit_depth_secs() -> u64 {
+    crate::DEFAULT_COMMIT_DEPTH_SECS
+}
+
+/// The most `commit_depth_secs` may be: the wait for the depth, the commitment's own transaction
+/// and round 2 must fit in a signing session (`SESSION_TTL`, 300 s), or no payout could be signed
+/// while Base's safe head lags.
+pub const MAX_COMMIT_DEPTH_SECS: u64 = 180;
+
 /// Blocks of a payout's expiry window kept free of the L23 delay: signing, a rebroadcast or two
 /// and the inclusion itself (RT-15).
 pub const PAYOUT_DELAY_HEADROOM: u32 = 40;
@@ -125,6 +140,12 @@ impl NetworkConfig {
             self.payout_delay_max_blocks <= max_delay,
             "payout_delay_max_blocks must leave {PAYOUT_DELAY_HEADROOM} of the payout's {} expiry blocks (at most {max_delay})",
             zecured_zcash_ops::spend::PAYOUT_EXPIRY_DELTA
+        );
+        // H-11: the commitment depth's time fallback fits in a signing session.
+        anyhow::ensure!(
+            self.commit_depth_secs <= MAX_COMMIT_DEPTH_SECS,
+            "commit_depth_secs must be at most {MAX_COMMIT_DEPTH_SECS} (a signing session lasts {} s)",
+            crate::SESSION_TTL.as_secs()
         );
         // H-01: a stamp a browser can still compute, and room for at least one vault.
         anyhow::ensure!(
@@ -255,6 +276,7 @@ mod tests {
             attest_delay_max_blocks: MIN_ATTEST_DELAY_MAX_BLOCKS,
             payout_delay_max_blocks: 8,
             commit_depth_blocks: 3,
+            commit_depth_secs: 120,
             local_fork: false,
             open_vault: OpenVaultLimits::default(),
         }
@@ -288,6 +310,24 @@ mod tests {
         cfg.payout_delay_max_blocks = 0;
         cfg.local_fork = true;
         cfg.check().unwrap();
+    }
+
+    /// H-11: a network config written before the time depth gets 120 s; the depth fits in a
+    /// signing session.
+    #[test]
+    fn the_commitment_depth_defaults_and_fits_a_session() {
+        let mut old = serde_json::to_value(judge_config()).unwrap();
+        old.as_object_mut().unwrap().remove("commit_depth_secs");
+        old.as_object_mut().unwrap().remove("commit_depth_blocks");
+        let cfg: NetworkConfig = serde_json::from_value(old).unwrap();
+        assert_eq!((cfg.commit_depth_blocks, cfg.commit_depth_secs), (3, 120));
+        cfg.check().unwrap();
+        let mut cfg = judge_config();
+        cfg.commit_depth_secs = MAX_COMMIT_DEPTH_SECS;
+        cfg.check().unwrap();
+        assert!(MAX_COMMIT_DEPTH_SECS + 60 < crate::SESSION_TTL.as_secs());
+        cfg.commit_depth_secs = MAX_COMMIT_DEPTH_SECS + 1;
+        assert!(cfg.check().is_err());
     }
 
     /// H-01: a network config written before the open-vault limits gets the defaults (a 20-bit

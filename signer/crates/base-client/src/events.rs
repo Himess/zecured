@@ -177,9 +177,111 @@ pub async fn safe_head<P: Provider>(provider: &P) -> Result<u64> {
     Ok(block.header.number)
 }
 
+/// The latest block's number and timestamp (Unix seconds).
+pub async fn latest_block<P: Provider>(provider: &P) -> Result<(u64, u64)> {
+    let block = provider
+        .get_block_by_number(BlockNumberOrTag::Latest)
+        .await
+        .context("get latest block")?
+        .context("node has no latest block")?;
+    Ok((block.header.number, block.header.timestamp))
+}
+
+/// Review H-11: a block `secs` older than `latest` (number, timestamp), on `provider`; see
+/// [`block_secs_deep_by`].
+pub async fn block_secs_deep<P: Provider>(provider: &P, latest: (u64, u64), secs: u64) -> Result<u64> {
+    block_secs_deep_by(latest, secs, |number| async move {
+        Ok(provider
+            .get_block_by_number(number.into())
+            .await
+            .context("get block")?
+            .context("block not found")?
+            .header
+            .timestamp)
+    })
+    .await
+}
+
+/// Seconds by which [`block_secs_deep_by`] may answer an older block than the newest one that
+/// qualifies (a coarser answer is safe, and saves lookups).
+pub const SECS_DEEP_SLACK: u64 = 1;
+
+/// Review H-11: a block whose timestamp is at least `secs` below the latest block's (`latest`:
+/// its number and timestamp), at most [`SECS_DEEP_SLACK`] seconds older than the newest such
+/// block; 0 if the chain is younger. Depths in time instead of blocks hold whatever Base's block
+/// time is (2 s, then 200 ms with Denim, and both across the switch).
+///
+/// `timestamp_of(n)` gives block `n`'s timestamp. The search interpolates on timestamps from a
+/// bracket found by stepping back from the latest block, so it takes a few lookups.
+pub async fn block_secs_deep_by<F, Fut>(latest: (u64, u64), secs: u64, mut timestamp_of: F) -> Result<u64>
+where
+    F: FnMut(u64) -> Fut,
+    Fut: Future<Output = Result<u64>>,
+{
+    const MAX_LOOKUPS: u32 = 48;
+    let (number, timestamp) = latest;
+    let Some(target) = timestamp.checked_sub(secs) else {
+        return Ok(0);
+    };
+    if secs == 0 {
+        return Ok(number);
+    }
+    // `hi` is newer than the target; step back, doubling the step, until `lo` is old enough.
+    let (mut hi, mut t_hi) = (number, timestamp);
+    let mut step = secs.max(1);
+    let mut lookups = 0;
+    let (mut lo, mut t_lo) = loop {
+        if hi == 0 {
+            return Ok(0); // even the first block is newer than the target
+        }
+        let candidate = hi.saturating_sub(step);
+        let t = timestamp_of(candidate).await?;
+        lookups += 1;
+        if t <= target {
+            break (candidate, t);
+        }
+        (hi, t_hi) = (candidate, t);
+        step = step.saturating_mul(2);
+    };
+    // Interpolate between the two (timestamps grow with block numbers), bisecting if that stalls.
+    while hi - lo > 1 && t_hi.saturating_sub(t_lo) > SECS_DEEP_SLACK && lookups < MAX_LOOKUPS {
+        let span = hi - lo;
+        let guess = if t_hi > t_lo {
+            let frac = (target - t_lo) as f64 / (t_hi - t_lo) as f64;
+            lo + (span as f64 * frac) as u64
+        } else {
+            lo + span / 2
+        };
+        let mid = if lookups % 4 == 3 {
+            lo + span / 2
+        } else {
+            guess.clamp(lo + 1, hi - 1)
+        };
+        let t = timestamp_of(mid).await?;
+        lookups += 1;
+        if t <= target {
+            (lo, t_lo) = (mid, t);
+        } else {
+            (hi, t_hi) = (mid, t);
+        }
+    }
+    Ok(lo)
+}
+
 /// The `eth_getLogs` block range asked for first: `ZECURED_LOG_RANGE`, or 2,000. Providers allow
 /// less (Base Sepolia's public RPC: 200 blocks), so a refused range is halved (G1).
 pub const DEFAULT_LOG_RANGE: u64 = 2_000;
+
+/// The largest `eth_getLogs` range asked for (`ZECURED_LOG_RANGE`, or [`DEFAULT_LOG_RANGE`]); every
+/// scanner (nodes, coordinator, liquidator) also steps through Base by it, so one setting scales
+/// them all to a provider that allows more, as 200 ms blocks call for (review H-11).
+pub fn log_range_ceiling() -> u64 {
+    std::env::var("ZECURED_LOG_RANGE")
+        .ok()
+        .and_then(|v| v.parse().ok())
+        .filter(|r: &u64| *r > 0)
+        .unwrap_or(DEFAULT_LOG_RANGE)
+}
 
 /// The range this process last saw accepted (0: not learned yet).
 static LEARNED_LOG_RANGE: AtomicU64 = AtomicU64::new(0);
@@ -194,11 +296,7 @@ where
     Fut: Future<Output = Result<Vec<Log>>>,
 {
     const GROW_AFTER: u32 = 8;
-    let ceiling = std::env::var("ZECURED_LOG_RANGE")
-        .ok()
-        .and_then(|v| v.parse().ok())
-        .filter(|r: &u64| *r > 0)
-        .unwrap_or(DEFAULT_LOG_RANGE);
+    let ceiling = log_range_ceiling();
     let mut range = match LEARNED_LOG_RANGE.load(Ordering::Relaxed) {
         0 => ceiling,
         learned => learned.min(ceiling),
@@ -353,6 +451,58 @@ pub fn parse_b256(s: &str) -> Result<B256> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// A chain whose block `n` has timestamp `timestamp(n)`; the search's lookups are counted.
+    async fn secs_deep(chain: &dyn Fn(u64) -> u64, latest: u64, secs: u64) -> (u64, usize) {
+        let lookups = std::sync::Mutex::new(0usize);
+        let found = block_secs_deep_by((latest, chain(latest)), secs, |n| {
+            *lookups.lock().unwrap() += 1;
+            let t = chain(n);
+            async move { Ok(t) }
+        })
+        .await
+        .unwrap();
+        (found, lookups.into_inner().unwrap())
+    }
+
+    /// H-11: the block a time depth reads at is old enough, close to the newest that is, and found
+    /// in a few lookups: at 2 s blocks, at 200 ms blocks (several blocks per second, as Denim's
+    /// seconds-resolution timestamps give), across the switch from one to the other, and on a chain
+    /// younger than the depth.
+    #[tokio::test]
+    async fn a_time_depth_finds_a_block_that_old() {
+        let two_secs = |n: u64| 1_700_000_000 + 2 * n;
+        let fifth = |n: u64| 1_700_000_000 + n / 5;
+        // Denim at block 1,000,000: 2 s blocks before, 200 ms after.
+        let denim = |n: u64| {
+            if n <= 1_000_000 {
+                1_700_000_000 + 2 * n
+            } else {
+                1_702_000_000 + (n - 1_000_000) / 5
+            }
+        };
+        let chains: [(&dyn Fn(u64) -> u64, u64); 4] = [
+            (&two_secs, 2_000_000),
+            (&fifth, 9_000_000),
+            (&denim, 1_000_300),
+            (&denim, 1_100_000),
+        ];
+        for (chain, latest) in chains {
+            for secs in [1, 6, 120, 180, 600, 7_200] {
+                let (b, lookups) = secs_deep(chain, latest, secs).await;
+                let target = chain(latest) - secs;
+                assert!(chain(b) <= target, "old enough: block {b} for {secs} s");
+                assert!(chain(b) + SECS_DEEP_SLACK + 1 >= target, "close to the newest such block: {b} for {secs} s");
+                assert!(lookups <= 30, "{lookups} lookups for {secs} s");
+            }
+        }
+        // No depth: the latest block. A chain younger than the depth: block 0.
+        assert_eq!(secs_deep(&two_secs, 500, 0).await.0, 500);
+        assert_eq!(secs_deep(&two_secs, 50, 120).await.0, 0);
+        let young = |n: u64| 1_000 + 2 * n;
+        assert_eq!(secs_deep(&young, 10, 5_000).await.0, 0);
+    }
+
     /// G1: a provider that refuses ranges over 200 blocks (Base Sepolia's public RPC) is still
     /// asked for every block, once and in order; a provider that refuses even one block fails.
     #[tokio::test]

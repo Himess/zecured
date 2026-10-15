@@ -104,6 +104,10 @@ const VAULT_PASS_TIMEOUT: Duration = Duration::from_secs(15 * 60);
 const BASE_SYNC_TIMEOUT: Duration = Duration::from_secs(5 * 60);
 /// Wait for a Base transaction's receipt at most this long (alloy's default is forever).
 pub(crate) const RECEIPT_TIMEOUT: Duration = Duration::from_secs(120);
+/// H-11: seconds past `commit_depth_secs` the coordinator still waits for a commitment to be
+/// deep enough (a node's provider may lag a little; `MAX_COMMIT_DEPTH_SECS` plus this, the
+/// commitment's transaction and round 2 fit in a signing session).
+const COMMIT_WAIT_MARGIN_SECS: u64 = 30;
 
 alloy::sol! {
     #[sol(rpc)]
@@ -900,10 +904,11 @@ impl Coordinator {
         let safe = events::safe_head(&provider).await?;
         let cursor = self.store.lock().await.base_cursor;
         let start = cursor.max(self.cfg.registry_from_block.saturating_sub(1)) + 1;
-        const MAX_RANGE: u64 = 2_000;
+        // H-11: as many blocks per step as `eth_getLogs` is allowed (`ZECURED_LOG_RANGE`).
+        let step = events::log_range_ceiling();
         let mut from = start;
         while from <= safe {
-            let to = (from + MAX_RANGE - 1).min(safe);
+            let to = (from + step - 1).min(safe);
             let evs = events::fetch(&provider, self.cfg.registry, from, to).await?;
             let mut store = self.store.lock().await;
             for ev in evs {
@@ -1493,8 +1498,9 @@ impl Coordinator {
 
     /// Tier 3 (docs/TIER3.md § 5): records a payout's commitment on Base with the round-1
     /// signatures of the chosen signers, each checked against its node's attestation address and
-    /// sent in signer order, then waits until it is `commit_depth_blocks` deep, where the nodes
-    /// read it before they release a share. A commitment already on Base comes from an earlier
+    /// sent in signer order, then waits until it is as deep as the nodes check before they release
+    /// a share: under Base's `safe` head, or `commit_depth_secs` old (review H-11), and in any case
+    /// `commit_depth_blocks` deep. A commitment already on Base comes from an earlier
     /// session whose signatures this coordinator no longer has: the payout is built again (a new
     /// transaction, so a new commitment).
     async fn commit_spend(&self, record: &SpendCommitRecord, signed: &[(u16, Bytes)]) -> Result<Vec<Bytes>> {
@@ -1528,9 +1534,22 @@ impl Coordinator {
             .context("commitSpend receipt")?;
         ensure!(receipt.status(), "commitSpend reverted");
         let block = receipt.block_number.context("commitSpend receipt without a block")?;
+        let committed_at = provider
+            .get_block_by_number(block.into())
+            .await
+            .context("Base block of the commitment")?
+            .context("Base block of the commitment not found")?
+            .header
+            .timestamp;
+        let wait = Duration::from_secs(self.cfg.commit_depth_secs + COMMIT_WAIT_MARGIN_SECS);
         let started = Instant::now();
-        while provider.get_block_number().await.context("Base block number")? <= block + self.cfg.commit_depth_blocks {
-            ensure!(started.elapsed() < RECEIPT_TIMEOUT, "Base did not move past the commitment");
+        loop {
+            let (latest, now_on_base) = events::latest_block(&provider).await.context("Base latest block")?;
+            let safe = events::safe_head(&provider).await.ok();
+            if ready_for_round_two(&self.cfg, block, committed_at, latest, now_on_base, safe) {
+                break;
+            }
+            ensure!(started.elapsed() < wait, "Base did not take the commitment deep enough in time");
             tokio::time::sleep(Duration::from_secs(1)).await;
         }
         info!(vault = %short(&record.vault_id), "payout committed on Base");
@@ -1603,6 +1622,27 @@ impl Coordinator {
         info!(vault = %short(id), "vault cancelled on Base");
         Ok(())
     }
+}
+
+/// H-11, T3-4: whether a commitment mined in Base block `block` (at Unix time `committed_at`) is
+/// as deep as the nodes check before they release a share (`zecured_node::commitment_deep_enough`),
+/// with Base's latest block `latest` at `now_on_base` and its safe head `safe` (if the provider has
+/// one): at least `commit_depth_blocks` deep, and under the safe head or `commit_depth_secs` old.
+/// The age carries the slack of the nodes' search for a block that old and a second for a node
+/// whose provider lags.
+fn ready_for_round_two(
+    cfg: &NetworkConfig,
+    block: u64,
+    committed_at: u64,
+    latest: u64,
+    now_on_base: u64,
+    safe: Option<u64>,
+) -> bool {
+    let floor = latest > block.saturating_add(cfg.commit_depth_blocks);
+    let under_safe = safe.is_some_and(|s| s >= block);
+    let margin = cfg.commit_depth_secs.saturating_add(events::SECS_DEEP_SLACK + 1);
+    let old_enough = now_on_base >= committed_at.saturating_add(margin);
+    floor && (under_safe || old_enough)
 }
 
 /// RT-5: whether Base lacks the commitment whose struct hash is `record_hash` (so it must be
@@ -1993,6 +2033,28 @@ mod tests {
         let far = B256::repeat_byte(9);
         c.claim_open_request(far, u64::MAX).unwrap().keep();
         assert!(c.open_requests.lock().unwrap()[&far] <= now() + OPEN_REQUEST_MEMORY_SECS);
+    }
+
+    /// H-11: the coordinator moves on to round 2 once the commitment is under Base's safe head or
+    /// `commit_depth_secs` old (with the nodes' slack), and never before `commit_depth_blocks`.
+    #[test]
+    fn a_commitment_is_deep_enough_under_the_safe_head_or_after_its_seconds() {
+        let (c, _dir) = offline("depth");
+        let cfg = &c.cfg;
+        assert_eq!((cfg.commit_depth_blocks, cfg.commit_depth_secs), (3, 120));
+        let (block, at) = (1_000_000, 1_800_000_000);
+        // Just mined: neither safe nor old.
+        assert!(!ready_for_round_two(cfg, block, at, block + 1, at + 2, Some(block - 500)));
+        // Under the safe head, but not yet `commit_depth_blocks` deep.
+        assert!(!ready_for_round_two(cfg, block, at, block + 3, at + 6, Some(block)));
+        // Under the safe head and deep enough: go.
+        assert!(ready_for_round_two(cfg, block, at, block + 4, at + 8, Some(block)));
+        // The safe head lags (or the provider has none): after 120 s and the slack, at 2 s or at
+        // 200 ms blocks alike.
+        for (blocks, provider_safe) in [(60, Some(block - 1)), (600, None)] {
+            assert!(!ready_for_round_two(cfg, block, at, block + blocks, at + 121, provider_safe));
+            assert!(ready_for_round_two(cfg, block, at, block + blocks, at + 122, provider_safe));
+        }
     }
 
     /// M-8: an unsigned destination or refund is refused without asking five nodes.
