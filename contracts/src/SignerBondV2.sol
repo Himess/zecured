@@ -299,7 +299,14 @@ contract SignerBondV2 is ISignerBond, ReentrancyGuardTransient {
     ///      so the second term is the smaller one; the `min` states the bound. Every bond is held here, so the sum fits,
     ///      and `5 * S3 <= 3 * sum` could only overflow for a token supply above 2^256 / 3.
     function _effectiveBond(uint256[5] memory bonds) internal pure returns (uint256) {
-        uint256 sum;
+        (uint256 sum, uint256 cheapestThree) = _sumAndCheapestThree(bonds);
+        uint256 capped = cheapestThree * 5 / 3;
+        // A plain comparison rather than Math.min's branch-free product, so that the symbolic checks stay linear.
+        return capped < sum ? capped : sum;
+    }
+
+    /// @dev The sum of the bonds, and the sum of the three smallest (the sum less the two largest).
+    function _sumAndCheapestThree(uint256[5] memory bonds) internal pure returns (uint256 sum, uint256 cheapestThree) {
         uint256 largest;
         uint256 second;
         for (uint256 i; i < SIGNER_COUNT; ++i) {
@@ -312,7 +319,7 @@ contract SignerBondV2 is ISignerBond, ReentrancyGuardTransient {
                 second = b;
             }
         }
-        return Math.min(sum, (sum - largest - second) * 5 / 3);
+        cheapestThree = sum - largest - second;
     }
 
     /// @dev Kind Release, Liquidation, CloseUser, CloseMarketMaker or Refund (not Fee, not Retired); pending; not paid
