@@ -388,9 +388,11 @@ contract DepositProofsTest is ZecuredFixture, RelayFixtures {
             1_000_000,
             4_486_288,
             0x4871c7074d79798b7991d7f71f57e723823958fec9d143805fd5127ccfa55f59,
-            0xd35968aa50b8474e84cfea69d0eff1947f4ca7211cff9741684554da48617ad5
+            0xd35968aa50b8474e84cfea69d0eff1947f4ca7211cff9741684554da48617ad5 // tagKeyHash (any 32 bytes here)
         );
-        assertEq(structHash, 0xf0129c9f652ed078d85e4562accaf93d8d5d818272a92a9dba931bbc372e6302);
+        // VaultOpened v2 (the tag key's hash), recomputed independently with `cast abi-encode` and `cast keccak`; the
+        // unit suite pins the vector of a real tag key (test/unit/ZecuredEIP712.t.sol).
+        assertEq(structHash, 0xcb1157d9c2fcb81a66281f750f8c2b2d51a688d158d63d986bfca146fa5bb9ab);
         bytes32 domain = keccak256(
             abi.encode(
                 keccak256("EIP712Domain(string name,string version,uint256 chainId,address verifyingContract)"),
@@ -402,7 +404,7 @@ contract DepositProofsTest is ZecuredFixture, RelayFixtures {
         );
         assertEq(
             MessageHashUtils.toTypedDataHash(domain, structHash),
-            0x1932a4dbbbf80e6972e48b0115a69e3ed93e16a745c88a2f1347c21ed3addbf4
+            0x804f353ce8dff686e3d102b105f230cefaa2a114b343393a5597c4ee05b7bfd1
         );
     }
 
