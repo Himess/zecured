@@ -7,16 +7,17 @@
 #   scripts/local-fork.sh stop
 #   scripts/local-fork.sh status
 #
-# With TIER2=1 the deployment also accepts deposit proofs (docs/TIER2.md): a Zcash header relay
-# checkpointed at the current Testnet tip and kept fed by scripts/relay-feed.sh, the deposit
-# guest's image id, and MockRiscZeroVerifier (MOCK: no Groth16 prover on this machine). Then
-# start the backend with DEPOSIT_PROOF_HOST=$PWD/tier2/target/release/zecured-tier2-host
-# DEPOSIT_PROOF_MOCK=true to have the coordinator prove deposits instead of attesting them.
+# v3 mints only against deposit proofs (docs/TIER2.md), so the fork always gets: a Zcash header
+# relay checkpointed at the current Testnet tip and kept fed by scripts/relay-feed.sh, the
+# deposit and violation guests' image ids, and MockRiscZeroVerifier (MOCK: no Groth16 prover on
+# this machine). Start the backend with DEPOSIT_PROOF_HOST=$PWD/tier2/target/release/zecured-tier2-host
+# DEPOSIT_PROOF_MOCK=true to have the coordinator prove deposits.
 #
-# Then run the signer network against the fork:
+# Then run the signer network against the fork and bond its five signers (MockUSDC, which the
+# deployer mints; nothing is minted on Base before all five bonds are in):
 #   export ZECURED_DEPLOYMENTS=$PWD/contracts/deployments/anvil.json BASE_SEPOLIA_RPC_URL=http://127.0.0.1:8545 \
 #          BUNDLER_URL=http://127.0.0.1:4337 PAYMASTER_URL=http://127.0.0.1:4338
-#   scripts/signer-network.sh init && scripts/signer-network.sh start
+#   scripts/signer-network.sh init && scripts/bond-signers.sh && scripts/signer-network.sh start
 #
 # Keys come from the repo-root .env (DEPLOYER_PRIVATE_KEY, SIGNER_ADDRESSES and the service
 # addresses). Nothing here touches a public network: anvil only reads Base Sepolia state.
@@ -73,7 +74,7 @@ cmd_start() {
     fi
   done
 
-  if [[ -n "${TIER2:-}" && ! -f "$STATE/deployed" ]]; then
+  if [[ ! -f "$STATE/deployed" ]]; then
     tier2_setup
   fi
 
@@ -114,7 +115,7 @@ cmd_start() {
   fi
 }
 
-# Tier 2: relay from a checkpoint at the Testnet tip (headers over P2P), the guest's image id
+# Tier 2: relay from a checkpoint at the Testnet tip (headers over P2P), the guests' image ids
 # and the MOCK verifier, exported for the Zecured deployment; then the relay feeder.
 tier2_setup() {
   local headers="$ROOT/data/tier2/headers_nu7.json" host="$ROOT/tier2/target/release/zecured-tier2-host"
@@ -146,8 +147,10 @@ PY
   ZCASH_RELAY="$(python3 -I -c 'import json,sys; print(json.load(open(sys.argv[1]))["ZcashHeaderRelay"])' \
     "$ROOT/contracts/deployments/anvil.relay.json")"
   DEPOSIT_IMAGE_ID="$("$host" image-id)"
-  export ZCASH_RELAY DEPOSIT_IMAGE_ID RISC0_VERIFIER_MOCK=true MIN_CONFIRMATION_WORK="${MIN_CONFIRMATION_WORK:-1000000}"
-  echo "relay $ZCASH_RELAY, deposit guest $DEPOSIT_IMAGE_ID (MOCK verifier)"
+  VIOLATION_IMAGE_ID="$("$host" violation image-id)"
+  # The work tiers and every other parameter: contracts/config/zecured-anvil.json.
+  export ZCASH_RELAY DEPOSIT_IMAGE_ID VIOLATION_IMAGE_ID RISC0_VERIFIER_MOCK=true
+  echo "relay $ZCASH_RELAY, deposit guest $DEPOSIT_IMAGE_ID, violation guest $VIOLATION_IMAGE_ID (MOCK verifier)"
   if ! running relay-feed; then
     RELAY_RPC_URL="$RPC" "$ROOT/scripts/relay-feed.sh" "$ZCASH_RELAY" > "$STATE/relay-feed.log" 2>&1 &
     echo $! > "$STATE/relay-feed.pid"

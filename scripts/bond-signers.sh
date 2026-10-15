@@ -1,13 +1,14 @@
 #!/usr/bin/env bash
-# Tier 3 (docs/TIER3.md § 7): each of the five signers deposits its bond from its own attestation
-# key, which lives in its node's identity file. The Registry mints nothing until all five have.
+# Tier 3 (docs/TIER3.md § 7): each of the five signers deposits its USDC bond (BOND_USDC whole
+# USDC each, default the bond's minimum) from its own attestation key, which lives in its node's
+# identity file. Nothing is minted until all five have.
 #
 #   scripts/bond-signers.sh                 # the judge network (signer/data/, deployments/base-sepolia.json)
 #   THEFT_DEMO=1 scripts/bond-signers.sh    # the theft demo's network (signer/data-theft-demo/, T3-6)
 #
 # The keys reach forge through its environment only: never the command line, the terminal or a log.
-# DEPLOYER_PRIVATE_KEY (repo-root .env) tops up a signer that cannot cover its bond and some gas.
-# Sends real Base Sepolia transactions.
+# DEPLOYER_PRIVATE_KEY (repo-root .env) tops up a signer that lacks the USDC or some gas (on a
+# local fork it mints the MockUSDC). Sends real transactions to BASE_SEPOLIA_RPC_URL.
 set -euo pipefail
 
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
