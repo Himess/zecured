@@ -129,8 +129,9 @@ pub struct CoordVault {
     /// and then (M-10).
     #[serde(default)]
     pub non_conforming: Vec<NoteView>,
-    /// Every signer's `VaultOpened` signature for `address` and `ufvk`, ordered by node index:
-    /// what the owner checked before paying the vault (C-4). Empty for vaults opened before.
+    /// Every signer's `VaultOpened` signature for `address` and the tag key of `ufvk`, ordered by
+    /// node index: what the owner checked before paying the vault (C-4), and what a deposit proof
+    /// is submitted with. Empty for vaults opened before.
     #[serde(default)]
     pub opened_signatures: Vec<NodeSignature>,
     /// The conforming deposit of a vault that was never activated, once its deposit window is

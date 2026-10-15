@@ -43,9 +43,10 @@ pub fn vault_sk(vault_id: &[u8; 32], contributions_in_signer_order: &[[u8; 32]])
 }
 
 /// The vault's tag key `K = BLAKE2b-256("Zecured_TagKey__", UFVK string)` (D24): every value Base
-/// sees about a vault's notes and payouts is a PRF under it, unlinkable to Zcash without the
-/// viewing key.
-fn tag_key(ufvk: &str) -> [u8; 32] {
+/// sees about a vault's notes and payouts is a PRF under it, unlinkable to Zcash without K. The
+/// signers bind it to the vault in `VaultOpened` (`tagKeyHash = keccak256(K)`), and a deposit
+/// proof's witness carries K instead of the viewing key (tier2/statement `tag_key`).
+pub fn tag_key(ufvk: &str) -> [u8; 32] {
     blake2b_256(TAG_KEY, None, &[ufvk.as_bytes()])
 }
 
@@ -109,6 +110,16 @@ mod tests {
     fn deposit_tag_vector() {
         let tag = deposit_tag("uviewtest1a", &[7u8; 32]);
         assert_eq!(hex::encode(tag), "add8548e79e01888ca52988bc44b01d0be125fdc5569db7597bd040f335f25aa");
+    }
+
+    /// Python's hashlib.blake2b(b"uviewtest1a", digest_size=32, person=b"Zecured_TagKey__"), the
+    /// same value as tier2/statement's `tag_key`.
+    #[test]
+    fn tag_key_vector() {
+        assert_eq!(
+            hex::encode(tag_key("uviewtest1a")),
+            "99b01fef42e44f44cbc75bfb5f80588989e52b4f7f7e3cb914fa5778eb034dea"
+        );
     }
 
     /// Python's hashlib.blake2b(txid, digest_size=32, key=K, person=b"Zecured_PayRef__"), with

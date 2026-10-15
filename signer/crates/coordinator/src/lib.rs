@@ -128,9 +128,10 @@ pub struct OpenVaultResponse {
     pub zip321: String,
     pub amount: u64,
     pub expiry_height: u32,
-    /// `keccak256` of the vault's UFVK, as the signers signed it in `VaultOpened`: the owner
-    /// needs it to check the signatures now and the viewing key later.
-    pub ufvk_hash: B256,
+    /// `keccak256` of the vault's tag key `K = BLAKE2b-256("Zecured_TagKey__", UFVK)`, as the
+    /// signers signed it in `VaultOpened`: the owner needs it to check the signatures now and the
+    /// viewing key later (it must derive this K).
+    pub tag_key_hash: B256,
     /// Every signer's `VaultOpened` signature, ordered by node index (C-4).
     pub signatures: Vec<NodeSignature>,
 }
@@ -324,7 +325,7 @@ fn finish_open(
         address: vault.address.clone(),
         amount: vault.amount,
         expiry_height: vault.expiry_height,
-        ufvk_hash: opened.ufvkHash,
+        tag_key_hash: opened.tagKeyHash,
         signatures,
     };
     Ok((vault, response))
@@ -1758,7 +1759,7 @@ mod tests {
         answers.reverse(); // the order nodes answer in does not matter
         let (vault, resp) = finish_open(&cfg, &domain, &open, &answers).unwrap();
         assert_eq!(resp.signatures.iter().map(|s| s.index).collect::<Vec<_>>(), vec![1, 2, 3, 4, 5]);
-        assert_eq!(resp.ufvk_hash, zecured_base::text_hash(UFVK));
+        assert_eq!(resp.tag_key_hash, zecured_base::tag_key_hash(UFVK));
         assert_eq!((resp.address.as_str(), resp.amount, resp.expiry_height), ("utest1vault", 1_000_000, 4_486_288));
         assert_eq!(resp.zip321, "zcash:utest1vault?amount=0.01");
         assert_eq!(vault.opened_signatures, resp.signatures);

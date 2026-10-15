@@ -95,8 +95,8 @@ export interface OpenVaultResult {
   zip321: string;
   amount: bigint;
   expiryHeight: number;
-  /** keccak256 of the vault's UFVK, as the signers signed it (VaultOpened). */
-  ufvkHash: Hex;
+  /** keccak256 of the vault's tag key (derived from its UFVK), as the signers signed it (VaultOpened v2). */
+  tagKeyHash: Hex;
   /** Every signer's VaultOpened signature (docs/INTERFACES.md § 2.5): unchecked as parsed here. */
   signatures: VaultSignature[];
 }
@@ -398,7 +398,7 @@ export function parseOpenVault(raw: unknown): OpenVaultResult {
     zip321: str(r.zip321, "zip321"),
     amount: big(r.amount, "amount"),
     expiryHeight,
-    ufvkHash: hex32(r.ufvkHash, "ufvkHash"),
+    tagKeyHash: hex32(r.tagKeyHash, "tagKeyHash"),
     signatures: r.signatures.map((s) => {
       const o = obj(s, "signature");
       return { index: uint(o.index, "signature index"), signature: sig65(o.signature, "signature") };

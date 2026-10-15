@@ -80,9 +80,11 @@ sol! {
         uint64 deadline;
     }
 
-    /// Off-chain, signed by every signer node once the vault's DKG is complete, with values the
-    /// node derived or checked itself; verified by the owner (app, CLI) against its own pinned
-    /// signer set before the vault's address is shown (security review C-4).
+    /// Signed by every signer node once the vault's DKG is complete, with values the node derived
+    /// or checked itself; verified by the owner (app, CLI) against its own pinned signer set before
+    /// the vault's address is shown (security review C-4), and on Base against the struct hash a
+    /// deposit proof computes. v2 (guest round, T-09): `tagKeyHash` binds the vault's tag key, so a
+    /// proof can derive its deposit tag with that key only.
     #[derive(Debug, PartialEq, Eq)]
     struct VaultOpened {
         bytes32 vaultId;
@@ -91,7 +93,7 @@ sol! {
         uint64 amount;
         uint32 expiryHeight;
         bytes32 addressHash;
-        bytes32 ufvkHash;
+        bytes32 tagKeyHash;
     }
 
     /// Tier 3 (docs/TIER3.md § 3): signed by signer nodes in FROST round 1, before any share is
@@ -167,10 +169,18 @@ pub fn claim_ids_hash(claim_ids: &[B256]) -> B256 {
     keccak256(packed)
 }
 
-/// `keccak256` of a string's UTF-8 bytes. `VaultOpened.addressHash` is this of the vault's unified
-/// address and `.ufvkHash` of its unified full viewing key, each exactly as the owner gets it.
+/// `keccak256` of a string's UTF-8 bytes: `VaultOpened.addressHash` is this of the vault's unified
+/// address, exactly as the owner gets it.
 pub fn text_hash(text: &str) -> B256 {
     keccak256(text.as_bytes())
+}
+
+/// `VaultOpened.tagKeyHash`: `keccak256(K)` of the vault's tag key
+/// `K = BLAKE2b-256("Zecured_TagKey__", UFVK string)` (D24), the UFVK exactly as the owner gets it.
+/// Binding K rather than the viewing key lets a deposit proof carry K alone, and makes every tag
+/// it derives the vault's own (design review, Claude Web § 2).
+pub fn tag_key_hash(ufvk: &str) -> B256 {
+    keccak256(zecured_policy::derive::tag_key(ufvk))
 }
 
 /// The `VaultOpened` message for a vault's address and viewing key (C-4).
@@ -190,7 +200,7 @@ pub fn vault_opened(
         amount,
         expiryHeight: expiry_height,
         addressHash: text_hash(address),
-        ufvkHash: text_hash(ufvk),
+        tagKeyHash: tag_key_hash(ufvk),
     }
 }
 
@@ -346,7 +356,7 @@ mod tests {
         );
         assert_eq!(
             VaultOpened::eip712_encode_type(),
-            "VaultOpened(bytes32 vaultId,address owner,address account,uint64 amount,uint32 expiryHeight,bytes32 addressHash,bytes32 ufvkHash)"
+            "VaultOpened(bytes32 vaultId,address owner,address account,uint64 amount,uint32 expiryHeight,bytes32 addressHash,bytes32 tagKeyHash)"
         );
         assert_eq!(
             SpendCommit::eip712_encode_type(),
@@ -428,30 +438,47 @@ mod tests {
         )
     }
 
-    /// Cross-language vector (C-4), generated here and asserted byte for byte by the app
-    /// (app/lib/signers.test.ts): hashes, digest and the signature of Foundry's test key.
+    /// Cross-language vector (C-4, VaultOpened v2), asserted byte for byte by the app
+    /// (app/lib/signers.test.ts), tier2/statement and contracts/test/unit/ZecuredEIP712.t.sol: the
+    /// tag key and the hashes (also computed with Python's hashlib and pycryptodome), the digest
+    /// and the signature of Foundry's test key.
     #[test]
     fn vault_opened_golden_vector() {
         let b = |h: &str| h.parse::<B256>().unwrap();
         let rd = registry_domain(BASE_SEPOLIA_CHAIN_ID, Address::repeat_byte(0x11));
         let msg = vector_vault_opened();
+        assert_eq!(
+            B256::from(zecured_policy::derive::tag_key(VECTOR_UFVK)),
+            b("0x2f30a290051344422e07e110c75334c79f0fe84e23db3ea0d7666c0bedab8066")
+        );
         assert_eq!(msg.addressHash, b("0x4871c7074d79798b7991d7f71f57e723823958fec9d143805fd5127ccfa55f59"));
-        assert_eq!(msg.ufvkHash, b("0xd35968aa50b8474e84cfea69d0eff1947f4ca7211cff9741684554da48617ad5"));
+        assert_eq!(msg.tagKeyHash, b("0x4998e90f251bfc9d596388325cf58132bb23a71bf6e71f6ff15275e11ad308b6"));
+        assert_eq!(msg.eip712_hash_struct(), b("0xd63b647d9eba421dde278de2765b71900dc7372c7013dc925ae63dd3c28f5d13"));
         assert_eq!(
             msg.eip712_signing_hash(&rd),
-            b("0x1932a4dbbbf80e6972e48b0115a69e3ed93e16a745c88a2f1347c21ed3addbf4")
+            b("0x9b9497f4504df5fad1cae863057ab04daad3c761561ca930f7da90fddbcf080f")
         );
         let key: PrivateKeySigner = TEST_KEY.parse().unwrap();
         assert_eq!(key.address(), "0xf39Fd6e51aad88F6F4ce6aB8827279cffFb92266".parse::<Address>().unwrap());
         let signature = sign_typed(&key, &rd, &msg).unwrap();
-        // Identical to `cast wallet sign --data` (Foundry 1.4.2) of the same typed data.
+        // Identical to `cast wallet sign --data` (Foundry 1.8.5) of the same typed data, and to
+        // `cast wallet sign --no-hash` of the digest.
         assert_eq!(
             signature,
-            "0xfe9a489467c520b22c87d6b39a74fd182105b865db21e972e0f6393a91db27e92fe53661655207b10761c9d4dd106e5eaea61a3d9561bc705de2c2c0bf8d4d971c"
+            "0x71640f0953e8ee9f7149ff3245a7aa8af5d3035d573ae9b85b23f2c04403798d75bb84946c4620fa2d3519759d95713b2269c2cc3cc0ca9905895d5145876f7d1b"
                 .parse::<Bytes>()
                 .unwrap()
         );
         assert_eq!(recover_typed(&rd, &msg, &signature).unwrap(), key.address());
+    }
+
+    /// `tagKeyHash` is keccak256 of the 32 bytes of K, not of the viewing key's text.
+    #[test]
+    fn tag_key_hash_is_keccak_of_the_tag_key() {
+        let k = zecured_policy::derive::tag_key(VECTOR_UFVK);
+        assert_eq!(tag_key_hash(VECTOR_UFVK), keccak256(k));
+        assert_ne!(tag_key_hash(VECTOR_UFVK), text_hash(VECTOR_UFVK));
+        assert_ne!(tag_key_hash(VECTOR_UFVK), tag_key_hash(&format!("{VECTOR_UFVK} ")));
     }
 
     #[test]
@@ -493,14 +520,14 @@ mod tests {
         let mut extra = all.clone();
         extra.push((6, sign(&keys[0], &msg)));
         assert!(refused(&extra, &msg));
-        // The same signatures do not vouch for another address, viewing key, expiry or owner.
+        // The same signatures do not vouch for another address, tag key, expiry or owner.
         let other = |f: fn(&mut VaultOpened)| {
             let mut m = vector_vault_opened();
             f(&mut m);
             m
         };
         assert!(refused(&all, &other(|m| m.addressHash = text_hash("utest1attacker"))));
-        assert!(refused(&all, &other(|m| m.ufvkHash = text_hash("uviewtest1attacker"))));
+        assert!(refused(&all, &other(|m| m.tagKeyHash = tag_key_hash("uviewtest1attacker"))));
         assert!(refused(&all, &other(|m| m.expiryHeight += 1)));
         assert!(refused(&all, &other(|m| m.owner = Address::repeat_byte(0x99))));
         // Unusable signer sets.

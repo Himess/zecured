@@ -168,7 +168,7 @@ function AmountStep({
         vaultId: res.vaultId,
         vaultAddress: res.address,
         expiryHeight: res.expiryHeight,
-        ufvkHash: res.ufvkHash,
+        tagKeyHash: res.tagKeyHash,
         vaultSignatures: res.signatures,
       });
       return res;
@@ -337,8 +337,8 @@ function DepositStep({ loan, vault, vaultError }: { loan: StoredLoan; vault: Vau
         {awaiting && proof.state === "legacy" ? (
           <Notice tone="danger" title="This vault's address cannot be checked">
             <p>
-              It was opened before the signers signed vault addresses, so nothing shows that the signers control it. Do
-              not pay it: let it expire and start a new loan.
+              It was opened by an earlier version of Zecured, whose vault signatures this app does not check, so nothing
+              shows that the signers control it. Do not pay it: let it expire and start a new loan.
             </p>
           </Notice>
         ) : null}

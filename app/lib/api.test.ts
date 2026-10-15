@@ -36,7 +36,7 @@ const OPENED = {
   zip321: "zcash:utest1vault?amount=0.01",
   amount: "1000000",
   expiryHeight: 4_600_288,
-  ufvkHash: `0x${"EE".repeat(32)}`,
+  tagKeyHash: `0x${"EE".repeat(32)}`,
   signatures: [1, 2, 3, 4, 5].map((index) => ({ index, signature: `0x${String(index).repeat(130)}` })),
 };
 
@@ -69,18 +69,20 @@ describe("owner endpoints", () => {
       zip321: "zcash:utest1vault?amount=0.01",
       amount: 1_000_000n,
       expiryHeight: 4_600_288,
-      ufvkHash: `0x${"ee".repeat(32)}`,
+      tagKeyHash: `0x${"ee".repeat(32)}`,
       signatures: OPENED.signatures,
     });
   });
 
-  it("POST /vaults: the signers' signatures and the viewing key hash are required (C-4)", () => {
+  it("POST /vaults: the signers' signatures and the tag key hash are required (C-4)", () => {
     const { signatures: _s, ...unsigned } = OPENED;
-    const { ufvkHash: _h, ...unhashed } = OPENED;
+    const { tagKeyHash: _h, ...unhashed } = OPENED;
     const broken: [string, unknown][] = [
       ["signatures", unsigned],
       ["signatures", { ...OPENED, signatures: "0x11" }],
-      ["ufvkHash", unhashed],
+      ["tagKeyHash", unhashed],
+      // A VaultOpened v1 answer (the hash of the viewing key itself).
+      ["tagKeyHash", { ...unhashed, ufvkHash: OPENED.tagKeyHash }],
       ["signature", { ...OPENED, signatures: [{ index: 1, signature: "0x1234" }] }],
       ["signature index", { ...OPENED, signatures: [{ index: -1, signature: OPENED.signatures[0]!.signature }] }],
       ["expiryHeight", { ...OPENED, expiryHeight: 2 ** 32 }],

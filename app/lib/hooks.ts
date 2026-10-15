@@ -60,9 +60,9 @@ export type VaultProofState =
   /** The loan has no vault yet. */
   | { state: "none" }
   | { state: "checking" }
-  /** Every signer vouches for the stored address and viewing key hash (C-4). */
+  /** Every signer vouches for the stored address and tag key hash (C-4). */
   | { state: "vouched"; check: VaultCheck }
-  /** Opened before vaults were signed: its address cannot be checked. */
+  /** Opened before vaults were signed, or under `VaultOpened` v1: its address cannot be checked. */
   | { state: "legacy" }
   /** The signatures do not check out, or this build cannot check them: never pay it. */
   | { state: "refused"; message: string };
@@ -80,7 +80,7 @@ export function useVaultProof(loan: StoredLoan | null): VaultProofState {
         loan.vaultId,
         loan.vaultAddress,
         loan.expiryHeight,
-        loan.ufvkHash,
+        loan.tagKeyHash,
         loan.amount,
         loan.owner,
         loan.account,

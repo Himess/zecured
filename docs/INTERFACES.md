@@ -82,25 +82,33 @@ collateral, at most `maxCollateral` (price-move protection); the nonce space is 
 ### 2.5 Signed by signer nodes, verified off-chain by the vault owner (app, CLI)
 
 ```
-VaultOpened(bytes32 vaultId,address owner,address account,uint64 amount,uint32 expiryHeight,bytes32 addressHash,bytes32 ufvkHash)
+VaultOpened(bytes32 vaultId,address owner,address account,uint64 amount,uint32 expiryHeight,bytes32 addressHash,bytes32 tagKeyHash)
 ```
 
+- Version 2 (the guest round, design notes T-09): `tagKeyHash` replaces v1's `ufvkHash`
+  (keccak256 of the UFVK's text), so the type, and every digest, differ from v1's.
 - Each node signs it with its attestation key when it completes the vault's DKG (round 3),
   from values it derived or checked itself: the `OpenVault` it verified (`owner`, `account`,
   `amount`), the expiry height it checked against its own Zcash tip, and the vault's address and
   UFVK as it derived them.
 - Never submitted to Base as such: a Tier 2 deposit proof computes its EIP-712 struct hash
   inside the proof, and `attestDepositWithProof` checks all five signatures against that hash
-  (D22), so `addressHash` and `ufvkHash` never appear on Base.
-- `addressHash = keccak256(UTF-8 bytes of the vault's unified address)` and `ufvkHash =
-  keccak256(UTF-8 bytes of its UFVK)`, each string exactly as the owner receives it (`POST
-  /vaults`, `POST /vaults/:id/viewing-key`).
+  (D22), so `addressHash` and `tagKeyHash` never appear on Base.
+- `addressHash = keccak256(UTF-8 bytes of the vault's unified address)`, the string exactly as
+  the owner receives it (`POST /vaults`).
+- `tagKeyHash = keccak256(K)`, the 32 bytes of the vault's tag key `K = BLAKE2b-256(personal =
+  "Zecured_TagKey__", UTF-8 bytes of its UFVK)` (the key of its deposit tags, § 2.2), the UFVK
+  exactly as the owner receives it (`POST /vaults/:id/viewing-key`). A deposit proof's witness
+  carries K, not the UFVK, and the proof derives its deposit tag with the K whose hash it puts in
+  the struct: a proof under any other K names a `VaultOpened` nobody signed, so every tag that
+  lands is the vault's own and one note cannot land twice under two tags (design review,
+  Claude Web § 2).
 - 65-byte `r || s || v` signatures (v = 27/28, low s), as in § 2.2.
 - The app and the CLI accept a vault only if all five signers of the set pinned in their own
   build signed it (app: `NEXT_PUBLIC_SIGNERS`, compared as a set; CLI: the node `eth` addresses
   of its network config, by index), never a set obtained from the backend. Only then do they show
-  the address or the payment request. They keep `ufvkHash` and show a viewing key only if it
-  hashes to it.
+  the address or the payment request. They keep `tagKeyHash` and show a viewing key only if its
+  tag key hashes to it.
 
 ### 2.6 Tier 3: signed by signer nodes before they sign a payout (Registry v2, Deploy 2)
 
@@ -331,7 +339,7 @@ addresses, salts, viewing keys or IPs.
 
 | Method & path | Body | Response |
 |---|---|---|
-| `POST /vaults` | `{ owner, account, amount, requestId, deadline, signature }` (`OpenVault`) | `{ vaultId, address (Ironwood-only UA), zip321, amount, expiryHeight, ufvkHash, signatures: [{ index, signature }] }`; `signatures`: every signer's `VaultOpened` (§ 2.5), ordered by node index; the client checks all five before showing `address` and builds the payment URI itself |
+| `POST /vaults` | `{ owner, account, amount, requestId, deadline, signature }` (`OpenVault`) | `{ vaultId, address (Ironwood-only UA), zip321, amount, expiryHeight, tagKeyHash, signatures: [{ index, signature }] }`; `signatures`: every signer's `VaultOpened` (§ 2.5), ordered by node index; the client checks all five before showing `address` and builds the payment URI itself |
 | `GET /vaults/:id` | — | `{ vaultId, status, amount, address, expiryHeight, birthdayHeight, tipHeight, outstanding, payoutInFlight, nonConforming: [{ noteId, amount }], claims: [{ claimId, kind, amount, paid }] }`; `kind` ∈ `Release`, `Liquidation`, `CloseUser`, `CloseMarketMaker` |
 | `POST /vaults/:id/destination` | `{ receiver (UA), salt, nonce, deadline, signature }` (`Destination`) | `{ commitment }` — validated **before** any Base tx that burns zZEC |
 | `POST /vaults/:id/refund` | `{ noteId, receiver, salt, nonce, deadline, signature }` (`RefundRequest`) | `{ accepted: true }` |

@@ -249,9 +249,9 @@ async fn open_vault(State(c): App, Body(b): Body<OpenBody>) -> ApiResult {
     Ok(Json(open_vault_json(&r)))
 }
 
-/// `POST /vaults` response: the vault, the hash of its viewing key and every signer's
-/// `VaultOpened` signature for them, which the app and the CLI check against the signer set
-/// pinned in their build before showing the address (C-4).
+/// `POST /vaults` response: the vault, the hash of its tag key and every signer's `VaultOpened`
+/// signature for them, which the app and the CLI check against the signer set pinned in their
+/// build before showing the address (C-4).
 fn open_vault_json(r: &OpenVaultResponse) -> serde_json::Value {
     json!({
         "vaultId": r.vault_id,
@@ -259,7 +259,7 @@ fn open_vault_json(r: &OpenVaultResponse) -> serde_json::Value {
         "zip321": r.zip321,
         "amount": r.amount.to_string(),
         "expiryHeight": r.expiry_height,
-        "ufvkHash": r.ufvk_hash,
+        "tagKeyHash": r.tag_key_hash,
         "signatures": r.signatures.iter().map(|s| json!({ "index": s.index, "signature": s.signature })).collect::<Vec<_>>(),
     })
 }
@@ -1151,7 +1151,7 @@ mod tests {
         assert_eq!(nodes[0], json!({ "index": 1, "mode": "normal", "vaults": 2, "compromisable": false }));
     }
 
-    /// C-4: the vault comes with the hash of its viewing key and every signer's signature.
+    /// C-4: the vault comes with the hash of its tag key and every signer's signature.
     #[test]
     fn open_vault_answers_with_the_signers_signatures() {
         let signature = |b: u8| Bytes::from(vec![b; 65]);
@@ -1161,7 +1161,7 @@ mod tests {
             zip321: "zcash:utest1vault?amount=0.01".into(),
             amount: 1_000_000,
             expiry_height: 4_486_288,
-            ufvk_hash: B256::repeat_byte(9),
+            tag_key_hash: B256::repeat_byte(9),
             signatures: (1..=5u8)
                 .map(|i| zecured_coordinator::NodeSignature {
                     index: u16::from(i),
@@ -1172,7 +1172,8 @@ mod tests {
         let v = open_vault_json(&r);
         assert_eq!(v["vaultId"], json!(B256::repeat_byte(7)));
         assert_eq!((v["amount"].as_str(), v["expiryHeight"].as_u64()), (Some("1000000"), Some(4_486_288)));
-        assert_eq!(v["ufvkHash"], json!(format!("0x{}", "09".repeat(32))));
+        assert_eq!(v["tagKeyHash"], json!(format!("0x{}", "09".repeat(32))));
+        assert!(v.get("ufvkHash").is_none(), "VaultOpened v2 signs no hash of the viewing key");
         let sigs = v["signatures"].as_array().unwrap();
         assert_eq!(sigs.len(), 5);
         assert_eq!(sigs[1], json!({ "index": 2, "signature": format!("0x{}", "02".repeat(65)) }));

@@ -11,7 +11,7 @@ use alloy::{
 };
 use rand_core_06::OsRng;
 use x25519_dalek::{PublicKey, StaticSecret};
-use zecured_base::{VaultOpened, check_signed_by_all, registry_domain, text_hash, vault_opened};
+use zecured_base::{VaultOpened, check_signed_by_all, registry_domain, tag_key_hash, text_hash, vault_opened};
 use zecured_node::{
     config::{NetworkConfig, NodeInfo},
     dkg::{self, Round1Out, Round2In, Round3In, Sealed, VaultOpen},
@@ -172,14 +172,14 @@ fn five_nodes_agree_on_the_vault() {
     }
     assert!(outs[0].address.starts_with("utest1"));
 
-    // C-4: each node signed `VaultOpened` for that address and viewing key with its own
-    // attestation key; all five together vouch for them.
+    // C-4: each node signed `VaultOpened` for that address and the viewing key's tag key with its
+    // own attestation key; all five together vouch for them.
     let domain = registry_domain(cfg.chain_id, cfg.registry);
     let signatures: Vec<(u16, Bytes)> = outs.iter().map(|o| (o.index, o.signature.clone())).collect();
     let opened = opened_for(&outs[0].address, &outs[0].ufvk);
     check_signed_by_all(&domain, &opened, &signer_set(&cfg), &signatures).unwrap();
-    // They vouch for nothing else: not another address or viewing key (a coordinator's own),
-    // nor another expiry height or owner than the request each node checked.
+    // They vouch for nothing else: not another address or tag key (a coordinator's own), nor
+    // another expiry height or owner than the request each node checked.
     let mut forged = opened_for("utest1attacker", &outs[0].ufvk);
     assert!(check_signed_by_all(&domain, &forged, &signer_set(&cfg), &signatures).is_err());
     forged = opened_for(&outs[0].address, "uviewtest1attacker");
@@ -191,6 +191,7 @@ fn five_nodes_agree_on_the_vault() {
     forged.owner = Address::repeat_byte(0x99);
     assert!(check_signed_by_all(&domain, &forged, &signer_set(&cfg), &signatures).is_err());
     assert_eq!(opened.addressHash, text_hash(&nodes[0].store.vaults[&open().vault_id].address));
+    assert_eq!(opened.tagKeyHash, tag_key_hash(&nodes[0].store.vaults[&open().vault_id].ufvk));
     // Four of five signatures are not enough.
     assert!(check_signed_by_all(&domain, &opened, &signer_set(&cfg), &signatures[1..]).is_err());
 
