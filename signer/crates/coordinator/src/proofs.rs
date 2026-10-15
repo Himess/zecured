@@ -4,15 +4,18 @@
 //! deposit, but the Registry trusts only the proof, so a dishonest coordinator can delay a mint,
 //! never forge one, and anyone else (the borrower's own machine) can prove instead. Proving runs
 //! in the background (seconds with a MOCK seal, minutes to hours for a real one, depending on the
-//! machine); each vault pass only starts a job or submits a finished seal.
+//! machine); each vault pass only queues a job or submits a finished seal. Jobs run from one
+//! first-in-first-out queue, one or two at a time, one per vault (review H-12, [`crate::queue`]),
+//! and the witness, which holds the vault's viewing key, reaches the prover through its standard
+//! input: it is never written to disk.
 
 use std::{
-    collections::HashSet,
+    ffi::OsStr,
     fs,
     io::Write,
     path::{Path, PathBuf},
-    process::Command,
-    sync::{Arc, Mutex as StdMutex},
+    process::{Command, Stdio},
+    sync::Arc,
 };
 
 use alloy::{
@@ -29,7 +32,13 @@ use zecured_base::events::{IZcashHeaderRelay, IZecuredRegistry};
 use zecured_deposit_witness::{p2p, witness};
 use zecured_zcash_ops::lwd;
 
-use crate::{Coordinator, RECEIPT_TIMEOUT, error::scrubbed, short, store::VaultStatus};
+use crate::{
+    Coordinator, RECEIPT_TIMEOUT,
+    error::scrubbed,
+    queue::{Enqueued, ProvingQueue, QueueCounts},
+    short,
+    store::VaultStatus,
+};
 
 /// Where and how deposit proofs are made.
 #[derive(Clone, Debug)]
@@ -43,17 +52,22 @@ pub struct DepositProofs {
     /// NU7-epoch header file (JSON Lines, extended over P2P) and per-block summary cache.
     pub headers: PathBuf,
     pub summaries: PathBuf,
+    /// Proofs run at once, 1 (the default) or 2 (H-12: each one takes about 10 GB of RAM on a CPU,
+    /// 13 GB of GPU memory).
+    pub concurrency: usize,
 }
 
 pub(crate) struct Prover {
     settings: DepositProofs,
-    /// Witnesses (with viewing keys) while a job runs, and finished seals; owner-only.
+    /// Finished seals and succinct receipts (no witness ever: it goes through the host's standard
+    /// input); owner-only.
     dir: PathBuf,
-    running: Arc<StdMutex<HashSet<B256>>>,
+    queue: Arc<ProvingQueue>,
 }
 
 impl Prover {
     pub(crate) fn new(settings: DepositProofs, data_dir: &Path) -> Result<Self> {
+        let queue = ProvingQueue::new(settings.concurrency)?;
         let dir = data_dir.join("proofs");
         fs::create_dir_all(&dir)?;
         #[cfg(unix)]
@@ -61,11 +75,14 @@ impl Prover {
             use std::os::unix::fs::PermissionsExt;
             fs::set_permissions(&dir, fs::Permissions::from_mode(0o700))?;
         }
-        Ok(Self {
-            settings,
-            dir,
-            running: Arc::default(),
-        })
+        // Witness files of jobs from before H-12 hold viewing keys: remove any left by a crash.
+        for entry in fs::read_dir(&dir)? {
+            let path = entry?.path();
+            if path.file_name().and_then(OsStr::to_str).is_some_and(|n| n.ends_with(".witness.json")) {
+                let _ = fs::remove_file(&path);
+            }
+        }
+        Ok(Self { settings, dir, queue })
     }
 
     fn seal_path(&self, id: &B256) -> PathBuf {
@@ -90,30 +107,47 @@ struct Job {
     anchor: u32,
     lwd: String,
     settings: DepositProofs,
-    witness_path: PathBuf,
     seal_path: PathBuf,
 }
 
-fn write_private(path: &Path, bytes: &[u8]) -> Result<()> {
-    let mut options = fs::OpenOptions::new();
-    options.write(true).create(true).truncate(true);
-    #[cfg(unix)]
-    {
-        use std::os::unix::fs::OpenOptionsExt;
-        options.mode(0o600);
-    }
-    options.open(path)?.write_all(bytes)?;
-    Ok(())
-}
+/// The witness argument that makes the host read its standard input: the host reads the witness
+/// from a path, and on Unix `/dev/stdin` is the process's own standard input (a pipe here, never a
+/// file). The zkVM provers run on Linux and macOS only.
+#[cfg(unix)]
+const WITNESS_FROM_STDIN: Option<&str> = Some("/dev/stdin");
+#[cfg(not(unix))]
+const WITNESS_FROM_STDIN: Option<&str> = None;
 
-fn run_host(host: &Path, args: &[&Path], command: &str) -> Result<()> {
-    let out = Command::new(host).arg(command).args(args).output().context("run the zkVM host")?;
-    ensure!(out.status.success(), "zkVM host {command} failed");
+/// Runs `host command args..`, writing `input` (if any) to its standard input and closing it.
+fn run_host(host: &Path, command: &str, args: &[&OsStr], input: Option<&[u8]>) -> Result<()> {
+    let mut child = Command::new(host)
+        .arg(command)
+        .args(args)
+        .stdin(if input.is_some() { Stdio::piped() } else { Stdio::null() })
+        .stdout(Stdio::null())
+        .stderr(Stdio::null())
+        .spawn()
+        .context("run the zkVM host")?;
+    if let Some(bytes) = input {
+        // The host reads all of it before anything else; dropping the pipe closes it (end of file).
+        let mut stdin = child.stdin.take().context("the zkVM host's standard input")?;
+        let written = stdin.write_all(bytes);
+        drop(stdin);
+        if let Err(e) = written {
+            let _ = child.kill();
+            let _ = child.wait();
+            return Err(anyhow::Error::from(e).context("pass the witness to the zkVM host"));
+        }
+    }
+    let status = child.wait().context("wait for the zkVM host")?;
+    ensure!(status.success(), "zkVM host {command} failed");
     Ok(())
 }
 
 impl Job {
     async fn run(self) -> Result<()> {
+        let stdin =
+            WITNESS_FROM_STDIN.context("deposit proofs need a Unix host (the witness goes through /dev/stdin)")?;
         let headers = self.settings.headers.clone();
         let last = tokio::task::spawn_blocking(move || p2p::extend_file(&headers, &p2p::seed_peers())).await??;
         ensure!(last >= self.anchor, "the P2P peers are behind the relay");
@@ -127,25 +161,24 @@ impl Job {
             self.anchor,
         )
         .await?;
-        write_private(&self.witness_path, &serde_json::to_vec(&built.witness)?)?;
+        // In memory only: the witness holds the vault's viewing key (H-12).
+        let witness = serde_json::to_vec(&built.witness)?;
+        drop(built);
         let tmp = self.seal_path.with_extension("tmp");
-        let (host, mock, witness_path, tmp2) =
-            (self.settings.host.clone(), self.settings.mock, self.witness_path.clone(), tmp.clone());
-        let sealed = tokio::task::spawn_blocking(move || -> Result<()> {
+        let (host, mock, tmp2) = (self.settings.host.clone(), self.settings.mock, tmp.clone());
+        tokio::task::spawn_blocking(move || -> Result<()> {
             if mock {
-                run_host(&host, &[&witness_path, &tmp2], "mock-seal")
+                run_host(&host, "mock-seal", &[stdin.as_ref(), tmp2.as_os_str()], Some(&witness))
             } else {
                 let receipt = tmp2.with_extension("receipt");
-                run_host(&host, &[&witness_path, &receipt], "prove")?;
-                let wrapped = run_host(&host, &[&receipt, &tmp2], "groth16");
+                run_host(&host, "prove", &[stdin.as_ref(), receipt.as_os_str()], Some(&witness))?;
+                drop(witness);
+                let wrapped = run_host(&host, "groth16", &[receipt.as_os_str(), tmp2.as_os_str()], None);
                 let _ = fs::remove_file(&receipt);
                 wrapped
             }
         })
-        .await?;
-        // The witness holds the viewing key: gone as soon as the host is done with it.
-        let _ = fs::remove_file(&self.witness_path);
-        sealed?;
+        .await??;
         fs::rename(&tmp, &self.seal_path)?;
         Ok(())
     }
@@ -162,14 +195,20 @@ impl Coordinator {
         self.proofs.is_some()
     }
 
-    /// Starts proving the vault's conforming deposit, or submits the finished proof.
+    /// H-12: the deposit-proof queue's counts (`None` without deposit proofs), for `GET /status`.
+    pub fn proving_status(&self) -> Option<QueueCounts> {
+        self.proofs.as_ref().map(|p| p.queue.counts())
+    }
+
+    /// Queues a proof of the vault's conforming deposit, or submits the finished proof.
     pub(crate) async fn prove_deposit(&self, id: &B256, txid: TxId, deposit_height: u32) -> Result<()> {
         let prover = self.proofs.as_ref().context("deposit proofs are not configured")?;
         let seal_path = prover.seal_path(id);
         if seal_path.exists() {
             return self.submit_proof(id, &seal_path).await;
         }
-        if prover.running.lock().unwrap_or_else(|p| p.into_inner()).contains(id) {
+        // H-12: one job per vault, queued or running.
+        if prover.queue.contains(id) {
             return Ok(());
         }
         let Some(anchor) = self.anchor_above(deposit_height).await? else {
@@ -191,13 +230,11 @@ impl Coordinator {
             anchor,
             lwd: self.cfg.lightwalletd_url.clone(),
             settings: prover.settings.clone(),
-            witness_path: prover.dir.join(format!("{}.witness.json", hex::encode(id))),
             seal_path,
         };
-        let running = prover.running.clone();
-        running.lock().unwrap_or_else(|p| p.into_inner()).insert(*id);
         let vault_id = *id;
-        tokio::spawn(async move {
+        let queued = prover.queue.enqueue(vault_id, async move {
+            info!(vault = %short(&vault_id), "proving the deposit");
             match job.run().await {
                 Ok(()) => info!(vault = %short(&vault_id), "deposit proof ready"),
                 Err(e) => {
@@ -205,9 +242,10 @@ impl Coordinator {
                     debug!(vault = %short(&vault_id), error = %scrubbed(&e), "deposit proof failed");
                 }
             }
-            running.lock().unwrap_or_else(|p| p.into_inner()).remove(&vault_id);
         });
-        info!(vault = %short(id), "proving the deposit");
+        if queued == Enqueued::Queued {
+            info!(vault = %short(id), "deposit proof queued");
+        }
         Ok(())
     }
 
@@ -382,17 +420,63 @@ mod tests {
         assert_eq!(s.image_id[0], 0x1a);
     }
 
-    #[test]
-    fn private_files_are_owner_only() {
-        let dir = std::env::temp_dir().join(format!("zecured-proofs-{}", std::process::id()));
-        fs::create_dir_all(&dir).unwrap();
-        let p = dir.join("w.json");
-        write_private(&p, b"secret").unwrap();
-        #[cfg(unix)]
-        {
-            use std::os::unix::fs::PermissionsExt;
-            assert_eq!(fs::metadata(&p).unwrap().permissions().mode() & 0o777, 0o600);
+    fn settings(concurrency: usize) -> DepositProofs {
+        DepositProofs {
+            host: PathBuf::from("zecured-tier2-host"),
+            mock: true,
+            headers: PathBuf::new(),
+            summaries: PathBuf::new(),
+            concurrency,
         }
-        fs::remove_dir_all(&dir).unwrap();
+    }
+
+    /// H-12: the prover's directory never keeps a witness (a crash of a job from before the queue
+    /// could have left one), and the concurrency is 1 or 2.
+    #[test]
+    fn the_prover_keeps_no_witness_and_runs_one_or_two_proofs() {
+        let dir = crate::store::tests::TempDir::new("prover");
+        let proofs = dir.0.join("proofs");
+        fs::create_dir_all(&proofs).unwrap();
+        let (witness, seal) = (proofs.join(format!("{}.witness.json", "07".repeat(32))), proofs.join("x.seal.json"));
+        fs::write(&witness, b"{\"vault_ufvk\":\"uviewtest1...\"}").unwrap();
+        fs::write(&seal, b"{}").unwrap();
+        let prover = Prover::new(settings(1), &dir.0).unwrap();
+        assert!(!witness.exists() && seal.exists(), "the witness is removed, a finished seal kept");
+        assert_eq!(prover.queue.counts().concurrency, 1);
+        assert!(Prover::new(settings(0), &dir.0).is_err());
+        assert!(Prover::new(settings(3), &dir.0).is_err());
+    }
+
+    /// A program that copies its standard input to `out`, reading it the way the host reads its
+    /// witness argument: on Unix as the path `/dev/stdin`, which is what the host is given.
+    fn copy_stdin(out: &Path) -> (PathBuf, String, Vec<std::ffi::OsString>) {
+        if cfg!(unix) {
+            let script = format!("cat {} > \"$0\"", WITNESS_FROM_STDIN.unwrap_or_default());
+            (PathBuf::from("/bin/sh"), "-c".into(), vec![script.into(), out.as_os_str().to_owned()])
+        } else {
+            let path = out.display().to_string().replace('\'', "''");
+            let script = format!("$w = [Console]::In.ReadToEnd(); [IO.File]::WriteAllText('{path}', $w)");
+            (
+                PathBuf::from("powershell"),
+                "-NoProfile".into(),
+                vec!["-NonInteractive".into(), "-Command".into(), script.into()],
+            )
+        }
+    }
+
+    /// H-12: the witness reaches the prover through its standard input, all of it (more than a
+    /// pipe's buffer), and the input is closed so that the prover sees its end.
+    #[test]
+    fn the_witness_goes_through_the_standard_input() {
+        let dir = crate::store::tests::TempDir::new("stdin");
+        let out = dir.0.join("seen.json");
+        let witness: Vec<u8> = (0..200_000).map(|i| b"{\"vault_ufvk\":\"uviewtest1\"}"[i % 26]).collect();
+        let (program, command, args) = copy_stdin(&out);
+        let args: Vec<&OsStr> = args.iter().map(|a| a.as_os_str()).collect();
+        run_host(&program, &command, &args, Some(&witness)).unwrap();
+        assert_eq!(fs::read(&out).unwrap(), witness);
+        // A host that cannot start, or fails, is an error.
+        let e = run_host(Path::new("zecured-no-such-host"), "prove", &[], Some(b"{}")).unwrap_err();
+        assert!(format!("{e:#}").contains("run the zkVM host"));
     }
 }

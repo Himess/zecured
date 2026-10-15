@@ -118,6 +118,10 @@ struct Cli {
     deposit_proof_headers: PathBuf,
     #[arg(long, env = "DEPOSIT_PROOF_SUMMARIES", default_value = "data/tier2/summaries.json")]
     deposit_proof_summaries: PathBuf,
+    /// Deposit proofs run at once, 1 or 2 (review H-12: a proof takes about 10 GB of RAM on a CPU,
+    /// 13 GB of GPU memory); the others wait in a first-in-first-out queue, one job per vault.
+    #[arg(long, env = "DEPOSIT_PROOF_CONCURRENCY", default_value_t = 1)]
+    deposit_proof_concurrency: usize,
 }
 
 // ------------------------------------------------------------------------- errors (L-2)
@@ -780,7 +784,8 @@ fn status_info(dep: &serde_json::Value, cfg: &NetworkConfig) -> StatusInfo {
 }
 
 /// `GET /status`: the running commit and image ids (G5), the Zcash tip of the last coordinator
-/// pass, and each signer node's mode. Nothing about any vault or user.
+/// pass, each signer node's mode and the deposit-proof queue's counts (H-12). Nothing about any
+/// vault or user.
 async fn status(State(c): App, axum::Extension(s): axum::Extension<StatusInfo>) -> Json<serde_json::Value> {
     let nodes = {
         let mut cache = s.nodes.lock().await;
@@ -801,6 +806,8 @@ async fn status(State(c): App, axum::Extension(s): axum::Extension<StatusInfo>) 
     let mut out = (*s.fixed).clone();
     out["zcashTip"] = c.zcash_tip().into();
     out["nodes"] = nodes.into();
+    // Counts only (`null` without deposit proofs): proofs waiting, running, and run at once.
+    out["depositProofs"] = serde_json::to_value(c.proving_status()).unwrap_or_default();
     Json(out)
 }
 
@@ -1050,10 +1057,18 @@ async fn main() -> Result<()> {
                 mock: cli.deposit_proof_mock,
                 headers: cli.deposit_proof_headers.clone(),
                 summaries: cli.deposit_proof_summaries.clone(),
+                concurrency: cli.deposit_proof_concurrency,
             },
             &cli.data,
         )?;
-        info!(mock = cli.deposit_proof_mock, "deposits are activated with Tier 2 proofs");
+        info!(
+            mock = cli.deposit_proof_mock,
+            concurrency = cli.deposit_proof_concurrency,
+            "deposits are activated with Tier 2 proofs"
+        );
+        if !cfg!(unix) {
+            warn!("deposit proofs need a Unix host: the witness reaches the prover through /dev/stdin");
+        }
     }
     let coordinator = Arc::new(coordinator);
 
@@ -1351,6 +1366,8 @@ mod tests {
         assert_eq!(body["commit"], env!("ZECURED_COMMIT"));
         // H-05: the privacy delays the network runs with are public.
         assert_eq!(body["privacyDelays"], json!({ "attestMaxBlocks": 0, "payoutMaxBlocks": 0, "localFork": false }));
+        // H-12: no deposit-proof queue on this backend.
+        assert_eq!(body["depositProofs"], serde_json::Value::Null);
         let nodes = body["nodes"].as_array().expect("nodes");
         assert_eq!(nodes.len(), 5);
         assert!(nodes.iter().all(|n| n.as_object().is_some_and(|o| o.len() == 2) && n["mode"] == "unreachable"));
@@ -1381,6 +1398,34 @@ mod tests {
         // Other routes have their own buckets.
         let (status, _, _) = call(Method::POST, "/recipients", "{}").await;
         assert_eq!(status, StatusCode::BAD_REQUEST);
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// H-12: `/status` shows the deposit-proof queue's counts, and nothing else about it.
+    #[tokio::test]
+    async fn status_counts_the_deposit_proofs() {
+        let dir = std::env::temp_dir().join(format!("zecured-backend-test-{}", hex::encode(keccak256(b"proof-queue"))));
+        let nodes: Vec<serde_json::Value> = (1..=5u8)
+            .map(|i| json!({ "index": i, "url": "http://127.0.0.1:9", "x25519": "00", "eth": Address::repeat_byte(i) }))
+            .collect();
+        let cfg: NetworkConfig = serde_json::from_value(json!({
+            "lightwalletd_url": "http://127.0.0.1:9", "base_rpc_url": "http://127.0.0.1:9", "chain_id": 84_532,
+            "registry": Address::repeat_byte(0x11), "adapter": Address::repeat_byte(0x22), "registry_from_block": 1,
+            "confirmations": 3, "vault_expiry_blocks": 288, "denominations": [1_000_000], "nodes": nodes,
+        }))
+        .unwrap();
+        let key = hex::encode(alloy::signers::local::PrivateKeySigner::random().to_bytes());
+        let proofs = DepositProofs {
+            host: PathBuf::from("zecured-tier2-host"),
+            mock: true,
+            headers: PathBuf::new(),
+            summaries: PathBuf::new(),
+            concurrency: 2,
+        };
+        let coordinator = Coordinator::new(cfg, &dir, &key).unwrap().with_deposit_proofs(proofs, &dir).unwrap();
+        let info = status_info(&serde_json::Value::Null, &coordinator.cfg);
+        let Json(body) = status(State(Arc::new(coordinator)), axum::Extension(info)).await;
+        assert_eq!(body["depositProofs"], json!({ "queued": 0, "running": 0, "concurrency": 2 }));
         let _ = std::fs::remove_dir_all(&dir);
     }
 

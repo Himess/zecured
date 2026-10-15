@@ -19,6 +19,7 @@ This page lists what that takes (reviews G1–G7). The server setup is in
 | `eth_getLogs` range | `ZECURED_LOG_RANGE` (default 2,000; a refused range is halved automatically) |
 | Base depth before a payout's shares are released | `network.json` `commit_depth_blocks` (default 3) |
 | Bot intervals, relayer batch and standby | `--every-secs`, `--batch`, `RELAYER_STANDBY_LAG` |
+| Deposit proofs run at once (H-12) | `DEPOSIT_PROOF_CONCURRENCY` in `backend.env` (1 by default, 2 at most); the others wait in a first-in-first-out queue, one job per vault, and `GET /status` shows `depositProofs: { queued, running, concurrency }` |
 | Alarm thresholds and channel | `watchdog.env` |
 
 ## 2. Restarts, health and alarms (G2)
