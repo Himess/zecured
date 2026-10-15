@@ -26,7 +26,10 @@ use zecured_base::{
     gas_with_headroom,
     relay::anchor_above,
 };
-use zecured_deposit_witness::{p2p, witness};
+use zecured_deposit_witness::{
+    p2p,
+    witness::{self, Mode},
+};
 use zecured_zcash_ops::lwd;
 
 use crate::{LoanFile, NetworkParams};
@@ -35,7 +38,7 @@ pub struct Paths {
     pub host: PathBuf,
     pub headers: PathBuf,
     pub summaries: PathBuf,
-    /// Owner-only directory for the witness (it holds the viewing key) and the seal.
+    /// Owner-only directory for the witness (it holds the vault's tag key) and the seal.
     pub work: PathBuf,
 }
 
@@ -103,7 +106,9 @@ pub async fn make_seal(
         expiry_height,
         amount: l.amount,
     };
-    let built = witness::build(&mut client, &paths.headers, &paths.summaries, txid, &vault, anchor).await?;
+    let built =
+        witness::build(&mut client, &paths.headers, &paths.summaries, txid, &vault, Mode::Activate, None, anchor)
+            .await?;
     fs::create_dir_all(&paths.work)?;
     #[cfg(unix)]
     {

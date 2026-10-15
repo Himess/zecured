@@ -1,6 +1,6 @@
 [package]
 name = "zecured-deposit-k4"
-description = "K4: the catalog of single changes to a real deposit witness and the error each must cause, run natively by the statement's tests and in the zkVM executor by the host"
+description = "K4: the catalog of single changes to a real deposit witness and the outcome each must have, run natively by the statement's tests and in the zkVM executor by the host"
 version = "0.1.0"
 edition = "2024"
 license = "MIT"
@@ -9,7 +9,7 @@ publish = false
 # Explicit versions, as in zecured-deposit-statement (it is also built outside this workspace).
 [dependencies]
 zecured-deposit-statement = { path = "../statement" }
-orchard = { version = "0.16", default-features = false, features = ["std"] }
 zcash_address = "=0.14.0-pre.1"
 zcash_history = "0.6"
+zcash_primitives = { version = "=0.31.0-pre.1", default-features = false }
 zcash_protocol = "=0.11.0-pre.0"

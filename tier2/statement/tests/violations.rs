@@ -10,16 +10,38 @@ use zcash_address::unified::{self, Container, Encoding, Fvk};
 use zcash_primitives::transaction::Transaction;
 use zcash_protocol::consensus::BranchId;
 use zecured_deposit_statement::{
-    Error, Witness, deposit_tag, keccak256,
-    violation::{Detail, Kind, ViolationError, ViolationWitness, claim_ref, paid_to, payout_ref, verify_violation},
+    Error, MAINNET, NU6_3_BRANCH_ID, TESTNET, Witness, deposit_tag, keccak256,
+    violation::{
+        Detail, Kind, ViolationError, ViolationJournal, ViolationWitness, claim_ref, paid_to, payout_ref,
+        verify_violation_on,
+    },
 };
 
 const FIXTURE: &str = concat!(env!("CARGO_MANIFEST_DIR"), "/tests/fixtures/TEST-ONLY_vault9_witness.json");
+const F1_FIXTURE: &str = concat!(env!("CARGO_MANIFEST_DIR"), "/tests/fixtures/TEST-ONLY_vault9_f1_witness.json");
 const BENEFICIARY: [u8; 20] = [0xbe; 20];
 const SALT: [u8; 32] = [0x5a; 32];
 
 fn deposit() -> Witness {
     serde_json::from_slice(&fs::read(FIXTURE).expect("fixture")).expect("witness JSON")
+}
+
+fn f1() -> ViolationWitness {
+    serde_json::from_slice(&fs::read(F1_FIXTURE).expect("fixture")).expect("violation witness JSON")
+}
+
+/// The fixtures are Testnet transactions: these tests check them on Testnet whatever the build's
+/// network (`verify_violation_on(&MAINNET, ..)` where a test is about Mainnet).
+fn verify_violation(w: &ViolationWitness) -> Result<ViolationJournal, ViolationError> {
+    verify_violation_on(&TESTNET, w)
+}
+
+/// The vault's UFVK: F1 witnesses keep it (a deposit witness carries only the tag key).
+fn vault_ufvk() -> String {
+    match f1().detail {
+        Detail::Uncommitted { vault_ufvk, .. } => vault_ufvk,
+        _ => unreachable!("the F1 fixture"),
+    }
 }
 
 /// The fixture's transaction and inclusion, with the given violation detail.
@@ -28,6 +50,7 @@ fn violation(kind: Kind, detail: Detail) -> ViolationWitness {
     ViolationWitness {
         kind,
         beneficiary: BENEFICIARY,
+        branch_id: d.branch_id,
         tx: d.tx,
         tx_index: d.tx_index,
         txid_path: d.txid_path,
@@ -54,7 +77,7 @@ fn deposit_cmx() -> [u8; 32] {
 }
 
 fn vault_fvk() -> FullViewingKey {
-    let (_, _, keys) = unified::Ufvk::decode(&deposit().vault_ufvk).unwrap();
+    let (_, _, keys) = unified::Ufvk::decode(&vault_ufvk()).unwrap();
     keys.items()
         .iter()
         .find_map(|k| match k {
@@ -69,8 +92,18 @@ fn h32(s: &str) -> [u8; 32] {
     b.try_into().unwrap()
 }
 
+fn words(j: ViolationJournal) -> Vec<String> {
+    j.abi_encode().chunks(32).map(|w| w.iter().map(|b| format!("{b:02x}")).collect()).collect()
+}
+
+fn word(n: u64) -> String {
+    format!("{n:064x}")
+}
+
 const ANCHOR: &str = "a27b5e3c30e3dc292138c751bf10c85fd842fb759be90c7e9397d0477d0b0000";
 const DEPOSIT_TAG: &str = "d8ad478d40e42d2acd10a3846eeebc19d3ff0146c406e765654395b778ab813e";
+/// `payoutRef` of the fixture transaction under the vault's key.
+const PAYOUT_REF: &str = "46b19981da842f7bf81342fa8db82ecd88933c3f9d777816c80bc712ef931496";
 
 // ------------------------------------------------------------------ references
 
@@ -86,7 +119,8 @@ fn references_match_the_signers_derivations() {
         claim_ref(&[0x11; 32], &[0x42; 32]),
         h32("51d4b707b5a706e51817d290a91ae40d0363befaad5013b6658f20cd87ddcdd6")
     );
-    assert_eq!(deposit_tag(&deposit().vault_ufvk, &deposit_cmx()), h32(DEPOSIT_TAG));
+    assert_eq!(deposit_tag(&vault_ufvk(), &deposit_cmx()), h32(DEPOSIT_TAG));
+    assert_eq!(payout_ref(&vault_ufvk(), &txid()), h32(PAYOUT_REF));
     // The note tag vector `zecured_policy::derive` pins (red-team review § 4: both implementations).
     assert_eq!(
         deposit_tag("uviewtest1a", &[7; 32]),
@@ -101,21 +135,16 @@ fn references_match_the_signers_derivations() {
 fn journals_are_pinned_across_languages() {
     let receiver = deposit().note_recipient;
     let ivk = vault_fvk().to_ivk(Scope::External).to_bytes().to_vec();
-    let words = |j: zecured_deposit_statement::violation::ViolationJournal| -> Vec<String> {
-        j.abi_encode().chunks(32).map(|w| w.iter().map(|b| format!("{b:02x}")).collect()).collect()
-    };
     let f3 = words(verify_violation(&misdirected(receiver.clone(), ivk, paid_action())).unwrap());
-    let f4 = words(verify_violation(&wrong_claim_ref(deposit().vault_ufvk, receiver)).unwrap());
-    const ANCHOR_W: &str = "a27b5e3c30e3dc292138c751bf10c85fd842fb759be90c7e9397d0477d0b0000";
+    let f4 = words(verify_violation(&wrong_claim_ref(vault_ufvk(), receiver)).unwrap());
     const BENEFICIARY_W: &str = "000000000000000000000000bebebebebebebebebebebebebebebebebebebebe";
     const CLAIM_REF: &str = "62840e8e15455e60905714b51e12fa370ec8cc849cd2cbf30b696ce139950869";
     const DEST: &str = "0144dce00498a1cb4e3d04161414ccf1cd42b09f70fe83ddcf745973c522a0a7";
-    let word = |n: u64| format!("{n:064x}");
     assert_eq!(
         f3,
         [
             word(3),
-            ANCHOR_W.into(),
+            ANCHOR.into(),
             BENEFICIARY_W.into(),
             CLAIM_REF.into(),
             word(0),
@@ -128,9 +157,9 @@ fn journals_are_pinned_across_languages() {
         f4,
         [
             word(4),
-            ANCHOR_W.into(),
+            ANCHOR.into(),
             BENEFICIARY_W.into(),
-            "46b19981da842f7bf81342fa8db82ecd88933c3f9d777816c80bc712ef931496".into(),
+            PAYOUT_REF.into(),
             CLAIM_REF.into(),
             word(0),
             DEST.into(),
@@ -145,7 +174,7 @@ fn withheld(change_tag: [u8; 32], change_value: u64) -> ViolationWitness {
     violation(
         Kind::WithheldChange,
         Detail::WithheldChange {
-            vault_ufvk: deposit().vault_ufvk,
+            vault_ufvk: vault_ufvk(),
             change_tag,
             change_value,
         },
@@ -167,7 +196,7 @@ fn f2_a_change_of_another_value_or_tag_is_proven_withheld() {
     assert_eq!(j.kind, Kind::WithheldChange);
     assert_eq!(j.anchor, h32(ANCHOR));
     assert_eq!(j.beneficiary, BENEFICIARY);
-    assert_eq!(j.reference, payout_ref(&deposit().vault_ufvk, &txid()));
+    assert_eq!(j.reference, h32(PAYOUT_REF));
     assert_eq!(j.note_tag, h32(DEPOSIT_TAG));
     assert_eq!(j.value, 999_999);
     assert_eq!(j.dest_commitment, [0; 32]);
@@ -187,7 +216,7 @@ fn f2_the_reference_is_keyed_by_the_vault() {
     let other = "uviewtest1rl58wrlhq2eqws08m2jxqg0gjpn2yd7me5f9cfkwmf4axnq0vjvjgvjs5t70tsny62rxklz3ha8t5cr8k30jltjmjr0xxsdhpqeqpf55w3dx0mracz99uvrvyf4hpsfxs2nc5jykraqvnt22zpkdce6tcj85lkty9lcpduhl72vz80l8ygn0q3sxn04w8";
     *vault_ufvk = other.to_owned();
     let j = verify_violation(&w).unwrap();
-    assert_ne!(j.reference, payout_ref(&deposit().vault_ufvk, &txid()));
+    assert_ne!(j.reference, h32(PAYOUT_REF));
     assert_eq!(j.reference, payout_ref(other, &txid()));
 }
 
@@ -209,9 +238,9 @@ fn wrong_claim_ref(vault_ufvk: String, receiver: Vec<u8>) -> ViolationWitness {
 #[test]
 fn f4_gives_the_reference_an_honest_commitment_names_the_claim_by() {
     let receiver = deposit().note_recipient;
-    let j = verify_violation(&wrong_claim_ref(deposit().vault_ufvk, receiver.clone())).unwrap();
+    let j = verify_violation(&wrong_claim_ref(vault_ufvk(), receiver.clone())).unwrap();
     assert_eq!(j.kind, Kind::WrongClaimRef);
-    assert_eq!(j.reference, payout_ref(&deposit().vault_ufvk, &txid()));
+    assert_eq!(j.reference, payout_ref(&vault_ufvk(), &txid()));
     assert_eq!(j.note_tag, claim_ref(&SALT, &txid()));
     assert_eq!(j.dest_commitment, keccak256(&[SALT.as_slice(), &receiver].concat()));
     assert_eq!((j.value, j.output_index), (0, 0));
@@ -221,7 +250,7 @@ fn f4_gives_the_reference_an_honest_commitment_names_the_claim_by() {
 fn f4_needs_the_vaults_key_and_a_receiver() {
     let receiver = deposit().note_recipient;
     assert_eq!(verify_violation(&wrong_claim_ref("uviewtest1x".into(), receiver)), Err(ViolationError::Ufvk));
-    assert_eq!(verify_violation(&wrong_claim_ref(deposit().vault_ufvk, vec![1; 42])), Err(ViolationError::Receiver));
+    assert_eq!(verify_violation(&wrong_claim_ref(vault_ufvk(), vec![1; 42])), Err(ViolationError::Receiver));
 }
 
 // ------------------------------------------------------------------ F3: misdirected payment
@@ -333,7 +362,7 @@ fn f1_a_note_the_transaction_does_not_spend_proves_nothing() {
     let w = violation(
         Kind::Uncommitted,
         Detail::Uncommitted {
-            vault_ufvk: d.vault_ufvk.clone(),
+            vault_ufvk: vault_ufvk(),
             action_index: d.action_index,
             note_recipient: d.note_recipient.clone(),
             note_value: d.note_value,
@@ -365,6 +394,30 @@ fn the_transaction_must_be_in_the_anchored_history() {
     assert_eq!(verify_violation(&w), Err(ViolationError::Inclusion(Error::HistoryNotCommitted)));
 }
 
+/// The epoch is a build parameter: the witness names one the build allows, and X's block and T
+/// must be of it.
+#[test]
+fn the_epoch_is_one_the_build_allows_and_xs_own() {
+    let mut w = withheld([7; 32], 1);
+    w.branch_id = 0xdead_beef;
+    assert_eq!(verify_violation(&w), Err(ViolationError::Inclusion(Error::BranchNotAllowed)));
+    w.branch_id = NU6_3_BRANCH_ID;
+    assert_eq!(verify_violation_on(&TESTNET, &w), Err(ViolationError::Inclusion(Error::BranchNotAllowed)));
+    // Mainnet allows NU6.3, but this NU7 history does not open under it.
+    let mut w = withheld([7; 32], 1);
+    w.branch_id = NU6_3_BRANCH_ID;
+    assert_eq!(verify_violation_on(&MAINNET, &w), Err(ViolationError::Inclusion(Error::HistoryPath)));
+}
+
+/// On a Mainnet build, a Testnet UFVK is no vault's key.
+#[test]
+fn a_mainnet_build_takes_mainnet_viewing_keys_only() {
+    assert_eq!(verify_violation_on(&MAINNET, &f1()), Err(ViolationError::Ufvk));
+    assert_eq!(verify_violation_on(&MAINNET, &withheld([7; 32], 1)), Err(ViolationError::Ufvk));
+    let receiver = deposit().note_recipient;
+    assert_eq!(verify_violation_on(&MAINNET, &wrong_claim_ref(vault_ufvk(), receiver)), Err(ViolationError::Ufvk));
+}
+
 /// The journal is `abi.encode(ViolationJournal)` of IZecuredSlasher.sol: kind, anchor,
 /// beneficiary, reference, note tag, value, destination commitment, one word each.
 #[test]
@@ -387,12 +440,6 @@ fn the_journal_is_the_slashers_abi() {
 
 // ------------------------------------------------------------------ F1 on a real vault spend
 
-const F1_FIXTURE: &str = concat!(env!("CARGO_MANIFEST_DIR"), "/tests/fixtures/TEST-ONLY_vault9_f1_witness.json");
-
-fn f1() -> ViolationWitness {
-    serde_json::from_slice(&fs::read(F1_FIXTURE).expect("fixture")).expect("violation witness JSON")
-}
-
 /// The first payout of the fixture vault spends its deposit note: as a violation proof, X
 /// spends the lineage note Base knows by the deposit tag. (That payout was committed in its
 /// time; under Tier 3 the slasher would find its commitment and refuse the case.)
@@ -405,7 +452,7 @@ fn f1_a_real_payout_spends_the_vaults_deposit_note() {
     assert_eq!(j.anchor, h32("e47bcc107dbac24aa6026bdc610e8605642035559a33ec4e1fb6e4423f2a0000"));
     assert_eq!(j.beneficiary, [0xbe; 20]);
     assert_eq!(j.note_tag, h32(DEPOSIT_TAG), "the deposit tag the Registry activated the vault with");
-    assert_eq!(j.reference, payout_ref(&deposit().vault_ufvk, x.txid().as_ref()));
+    assert_eq!(j.reference, payout_ref(&vault_ufvk(), x.txid().as_ref()));
     assert_eq!((j.value, j.dest_commitment), (0, [0; 32]));
 }
 
@@ -471,7 +518,7 @@ fn f2_the_real_payouts_change_is_delivered() {
             .map(|(n, _, _)| (a.cmx().to_bytes(), n.value().inner()))
         })
         .expect("the payout's change");
-    let ufvk = deposit().vault_ufvk;
+    let ufvk = vault_ufvk();
     let change_tag = deposit_tag(&ufvk, &cmx);
     let withheld = |change_value| ViolationWitness {
         kind: Kind::WithheldChange,

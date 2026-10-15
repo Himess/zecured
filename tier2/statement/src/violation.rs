@@ -1,9 +1,10 @@
 //! Tier 3 violation statements (docs/TIER3.md § 6): what a proof that the signers took
-//! collateral proves. One statement, four kinds, one zkVM guest.
+//! collateral proves. One statement, four kinds, one zkVM guest per network.
 //!
 //! Every kind first shows that a transaction X (whose txid is computed from its bytes) is in a
-//! block committed by a later header T, with the Tier 2 inclusion code ([`check_inclusion`]).
-//! Then:
+//! block committed by a later header T of the same epoch, with the Tier 2 inclusion code
+//! ([`check_inclusion`]); the epoch's branch id is one the build allows ([`crate::NETWORK`]) and
+//! X's own. Then:
 //!
 //! - **F1, Uncommitted.** X spends a note of the vault: the witness opens the note, whose
 //!   nullifier (under the full viewing key of the vault's UFVK) is the nullifier of one of X's
@@ -41,9 +42,11 @@ use serde::{Deserialize, Serialize};
 use zcash_address::unified::{self, Container, Encoding, Fvk};
 use zcash_note_encryption::try_note_decryption;
 use zcash_primitives::transaction::{Transaction, TxVersion};
-use zcash_protocol::consensus::{BranchId, NetworkType};
+use zcash_protocol::consensus::BranchId;
 
-use crate::{Inclusion, MmrStep, blake2b_256, check_inclusion, deposit_tag, keccak256, tag_key};
+use crate::{
+    Error, Inclusion, MmrStep, NETWORK, Network, blake2b_256, check_inclusion, deposit_tag, keccak256, tag_key,
+};
 
 /// The three violations; the values are `ViolationKind` in contracts/src/interfaces/IZecuredSlasher.sol.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
@@ -61,6 +64,8 @@ pub struct ViolationWitness {
     pub kind: Kind,
     /// Receives the bounty; bound inside the proof.
     pub beneficiary: [u8; 20],
+    /// Consensus branch ID of the epoch of X's block and of T (one the build allows).
+    pub branch_id: u32,
     /// Transaction X, serialized (v6).
     pub tx: Vec<u8>,
     /// Where X is (as [`Inclusion`]).
@@ -150,10 +155,12 @@ impl ViolationJournal {
 }
 
 /// Why a witness proves no violation.
-#[derive(Debug, PartialEq, Eq)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum ViolationError {
     Transaction,
     NoIronwoodBundle,
+    /// X is not where the witness says: not in the anchored history, or not of an epoch the build
+    /// allows (`BranchNotAllowed`), or not of the witness's epoch (`WrongEpoch`).
     Inclusion(crate::Error),
     Ufvk,
     NoSuchAction,
@@ -195,10 +202,10 @@ pub fn paid_to<A>(action: &orchard::Action<A>, ivk: &PreparedIncomingViewingKey,
     }
 }
 
-/// The Orchard-protocol full viewing key of a Testnet UFVK string.
-fn vault_fvk(ufvk: &str) -> Result<FullViewingKey, ViolationError> {
+/// The Orchard-protocol full viewing key of a UFVK string of network `net`.
+fn vault_fvk(net: &Network, ufvk: &str) -> Result<FullViewingKey, ViolationError> {
     let (network, _, keys) = unified::Ufvk::decode(ufvk).map_err(|_| ViolationError::Ufvk)?;
-    if network != NetworkType::Test {
+    if network != net.address_network {
         return Err(ViolationError::Ufvk);
     }
     keys.items()
@@ -210,10 +217,21 @@ fn vault_fvk(ufvk: &str) -> Result<FullViewingKey, ViolationError> {
         .ok_or(ViolationError::Ufvk)
 }
 
-/// Checks the witness and returns the public output, or why it proves no violation.
+/// Checks the witness on this build's network and returns the public output, or why it proves
+/// no violation.
 pub fn verify_violation(w: &ViolationWitness) -> Result<ViolationJournal, ViolationError> {
+    verify_violation_on(&NETWORK, w)
+}
+
+/// [`verify_violation`] on network `net` (the guests only ever use [`NETWORK`]).
+pub fn verify_violation_on(net: &Network, w: &ViolationWitness) -> Result<ViolationJournal, ViolationError> {
+    // The epoch: one this build proves.
+    if !net.allows(w.branch_id) {
+        return Err(ViolationError::Inclusion(Error::BranchNotAllowed));
+    }
+    let branch = BranchId::try_from(w.branch_id).map_err(|_| ViolationError::Inclusion(Error::BranchNotAllowed))?;
     // X: any v6 transaction with an Ironwood bundle (a theft need not follow the payout format).
-    let tx = Transaction::read(&w.tx[..], BranchId::Nu7).map_err(|_| ViolationError::Transaction)?;
+    let tx = Transaction::read(&w.tx[..], branch).map_err(|_| ViolationError::Transaction)?;
     if !matches!(tx.version(), TxVersion::V6) {
         return Err(ViolationError::Transaction);
     }
@@ -222,6 +240,7 @@ pub fn verify_violation(w: &ViolationWitness) -> Result<ViolationJournal, Violat
     let included = check_inclusion(
         &txid,
         &Inclusion {
+            branch_id: w.branch_id,
             tx_index: w.tx_index,
             txid_path: &w.txid_path,
             block_header: &w.block_header,
@@ -234,6 +253,9 @@ pub fn verify_violation(w: &ViolationWitness) -> Result<ViolationJournal, Violat
         },
     )
     .map_err(ViolationError::Inclusion)?;
+    if tx.consensus_branch_id() != branch {
+        return Err(ViolationError::Inclusion(Error::WrongEpoch));
+    }
     let mut journal = ViolationJournal {
         kind: w.kind,
         anchor: included.tip_hash,
@@ -257,7 +279,7 @@ pub fn verify_violation(w: &ViolationWitness) -> Result<ViolationJournal, Violat
             },
             Kind::Uncommitted,
         ) => {
-            let fvk = vault_fvk(vault_ufvk)?;
+            let fvk = vault_fvk(net, vault_ufvk)?;
             let action = bundle.actions().get(*action_index as usize).ok_or(ViolationError::NoSuchAction)?;
             let recipient: [u8; 43] = note_recipient.clone().try_into().map_err(|_| ViolationError::Note)?;
             let recipient =
@@ -290,7 +312,7 @@ pub fn verify_violation(w: &ViolationWitness) -> Result<ViolationJournal, Violat
             },
             Kind::WithheldChange,
         ) => {
-            let fvk = vault_fvk(vault_ufvk)?;
+            let fvk = vault_fvk(net, vault_ufvk)?;
             // Change is the vault's internal-scope note (RT-9): honest payouts send it there.
             let ivk = PreparedIncomingViewingKey::new(&fvk.to_ivk(Scope::Internal));
             for action in bundle.actions() {
@@ -343,7 +365,7 @@ pub fn verify_violation(w: &ViolationWitness) -> Result<ViolationJournal, Violat
             },
             Kind::WrongClaimRef,
         ) => {
-            vault_fvk(vault_ufvk)?;
+            vault_fvk(net, vault_ufvk)?;
             let receiver: [u8; 43] = receiver.clone().try_into().map_err(|_| ViolationError::Receiver)?;
             Option::<Address>::from(Address::from_raw_address_bytes(&receiver)).ok_or(ViolationError::Receiver)?;
             // X under the vault's key (the commitment of X is found by it), and the reference an

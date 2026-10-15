@@ -3,12 +3,13 @@
 //! trial decryption with the viewing key), then checks it with the statement natively.
 //!
 //!   cargo run -p zecured-deposit-witness --bin build-witness -- \
-//!     --deposit-txid <txid> --vault vault.json --tip <height> \
+//!     --deposit-txid <txid> --vault vault.json --tip <height> [--mode refund [--action <i>]] \
 //!     --headers data/tier2/headers_nu7.json [--update-headers] --out witness.json
 //!
 //! `vault.json` holds `vault_id`, `owner`, `account`, `address`, `ufvk`, `expiry_height` and
 //! `amount`, the values of the vault's `VaultOpened` (a coordinator vault record has them). The
-//! witness contains the vault's viewing key: keep it local.
+//! witness holds the vault's tag key K, not its viewing key: whoever proves it can link the
+//! vault's notes and payouts on Zcash, so hand it only to a prover you trust with that.
 
 use std::{fs, path::PathBuf};
 
@@ -17,7 +18,7 @@ use clap::Parser;
 use zcash_protocol::TxId;
 use zecured_deposit_witness::{
     p2p,
-    witness::{self, Vault},
+    witness::{self, Mode, Vault},
 };
 use zecured_zcash_ops::lwd;
 
@@ -32,6 +33,13 @@ struct Args {
     /// Height of the header the proof is anchored to (after the deposit's block).
     #[arg(long)]
     tip: u32,
+    /// `activate`: the vault's deposit (D5, its amount, by its expiry height). `refund`: any
+    /// Ironwood note to the vault's address, refunded through a claim (T-02).
+    #[arg(long, default_value = "activate", value_parser = ["activate", "refund"])]
+    mode: String,
+    /// The action of the transaction that creates the note (default: the first that fits).
+    #[arg(long)]
+    action: Option<u32>,
     /// JSON Lines headers from NU7 activation on.
     #[arg(long)]
     headers: PathBuf,
@@ -75,19 +83,30 @@ async fn main() -> Result<()> {
     }
     let mut client = lwd::connect(&args.lwd).await?;
     let txid = TxId::from_hex(&args.deposit_txid).context("txid")?;
-    let b = witness::build(&mut client, &args.headers, &args.summaries, txid, &vault, args.tip).await?;
+    let mode = if args.mode == "refund" {
+        Mode::Refund
+    } else {
+        Mode::Activate
+    };
+    let b =
+        witness::build(&mut client, &args.headers, &args.summaries, txid, &vault, mode, args.action, args.tip).await?;
     fs::write(&args.out, serde_json::to_vec(&b.witness)?)?;
     println!(
         "deposit at {} (tx {} of {}), leaf {} of {}, path {} steps, peak {} of {}",
         b.deposit_height, b.tx_index, b.block_transactions, b.leaf_index, b.leaves, b.path_len, b.peak_index, b.peaks
     );
     println!(
-        "journal: tip {} amount {} tag {} VaultOpened {}",
+        "journal: mode {} branch 0x{:08x} tip {} amount {} tag {} VaultOpened {}",
+        b.journal.mode,
+        b.journal.branch_id,
         hex::encode(b.journal.tip_hash),
         b.journal.amount,
         hex::encode(b.journal.tag),
         hex::encode(b.journal.vault_opened_hash)
     );
-    println!("witness written to {} (keep it local: it contains the vault's viewing key)", args.out.display());
+    println!(
+        "witness written to {} (it holds the vault's tag key: it links the vault's notes)",
+        args.out.display()
+    );
     Ok(())
 }

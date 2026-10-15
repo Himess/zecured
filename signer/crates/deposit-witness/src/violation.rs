@@ -26,9 +26,11 @@ use zecured_zcash_ops::lwd::{self, LwdClient};
 use crate::witness::{Located, locate, ufvk_fvk};
 
 fn witness(kind: Kind, beneficiary: [u8; 20], at: Located, detail: Detail) -> Result<ViolationWitness> {
+    let branch_id = u32::from(at.transaction()?.consensus_branch_id());
     Ok(ViolationWitness {
         kind,
         beneficiary,
+        branch_id,
         tx: at.raw_tx,
         tx_index: u32::try_from(at.tx_index)?,
         txid_path: at.txid_path,
