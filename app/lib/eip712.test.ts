@@ -92,11 +92,21 @@ function sample(type: string, i: number): unknown {
   }
 }
 
+/**
+ * Spec types the app deliberately does not implement: the signers' payout commitment, and the
+ * self-deleverage request the app does not offer yet. A new spec type fails the next test until
+ * it is either implemented here or listed with its reason.
+ */
+const NOT_IN_APP: Record<string, string> = {
+  SpendCommit: "signed by the signer nodes only (Tier 3)",
+  DeleverageRequest: "no deleverage screen in the app yet (review E-10)",
+};
+
 describe("type strings (docs/INTERFACES.md § 2)", () => {
   const spec = specTypeStrings();
 
-  it("the spec defines exactly the app's nine types", () => {
-    expect([...spec.keys()].sort()).toEqual(Object.keys(types).sort());
+  it("the spec defines exactly the app's types plus the ones it deliberately leaves out", () => {
+    expect([...spec.keys()].sort()).toEqual([...Object.keys(types), ...Object.keys(NOT_IN_APP)].sort());
   });
 
   it.each(Object.keys(types) as PrimaryType[])("%s matches the spec byte for byte", (name) => {
