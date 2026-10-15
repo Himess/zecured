@@ -179,13 +179,18 @@ leaving zZEC unbacked:
   minting and lying data sources, not theft.
 - **The vault key.** All five signers vouch that the address and viewing key in `VaultOpened` are those of the DKG
   they ran. A vault key controlled by one party could otherwise back a mint that party later spends away.
-- **The relay**: its checkpoint (hash, height, 113 context entries) is trusted constructor input; someone must
-  submit headers (anyone can: `scripts/relay-feed.sh`); ~6.3 × 10^5 gas per header.
+- **The relay**: its checkpoint (hash, height, 113 context entries) and its network's consensus parameters
+  (`contracts/config/relay-<network>.json`, sources in docs/ref/FACTS.md) are trusted constructor input; someone
+  must submit headers (anyone can: `scripts/relay-feed.sh`); ~6.3 × 10^5 gas per header on Testnet after NU7,
+  ~5.8 × 10^5 on Mainnet before NU7.
 - **RISC Zero**: the soundness of its proof system and the router's governance (its owner can add or remove verifier
   versions; an e-stop wrapper can disable one). The Registry pins the guest image id and the verifier selector.
 - **Testnet** proof of work is weak: a single Equihash ASIC out-mines the whole Testnet about 40 times over, so the
   pending activation and `minConfirmationWork` are demonstrative on Testnet; on mainnet they inherit Zcash's proof of
-  work, with the depth chosen by the value at risk.
+  work, with the depth chosen by the value at risk. The relay is the same code on both networks: deployed with the
+  Mainnet parameters (`networkId()` = keccak256("zcash-mainnet"): Mainnet PoWLimit, no minimum-difficulty blocks)
+  it accepts real Mainnet headers (180 in its tests, contracts/src/relay/README.md). The Mainnet NU7 height is to
+  be set on 2026-10-20 (ZIP 259); a Mainnet relay that must cross NU7 is deployed with it.
 
 ## 8. Remaining work
 
@@ -196,7 +201,8 @@ leaving zZEC unbacked:
    in its own kernel, TESTING.md § 2b), so the wrap uses Docker on x86: about a minute per seal. Its input is the
    succinct receipt, which holds no viewing key. Both seals pass RISC Zero's router (done). The witness does hold the vault's viewing key, so proving it on rented hardware is a
    documented testnet trade-off; the private alternative keeps the STARK on the depositor's machine.
-2. **Base Sepolia**: deploy a relay from a recent checkpoint (`script/DeployRelay.s.sol`), keep it fed, deploy the
+2. **Base Sepolia**: deploy a relay from a recent checkpoint (`script/DeployRelay.s.sol`, Testnet parameters by
+   default; the relay deployed on 2026-10-12 predates them and has no `networkId()`), keep it fed, deploy the
    Registry `ProofOnly` with the router, the image id below and the relay.
 3. **Fewer cycles** (optional once proving runs on a GPU): one note commitment instead of three (own ZIP 212
    recovery), Pallas point operations through RISC Zero's elliptic-curve accelerator.
