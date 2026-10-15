@@ -52,6 +52,7 @@ describe("owner endpoints", () => {
       requestId: `0x${"33".repeat(32)}`,
       deadline: 1_800_000_000n,
       signature: SIG,
+      stamp: 2n ** 40n + 7n,
     });
     expect(calls[0]!.url).toBe(`${BASE}/vaults`);
     expect(calls[0]!.init.method).toBe("POST");
@@ -62,6 +63,7 @@ describe("owner endpoints", () => {
       requestId: `0x${"33".repeat(32)}`,
       deadline: "1800000000",
       signature: SIG,
+      stamp: "1099511627783",
     });
     expect(r).toEqual({
       vaultId: VAULT,
@@ -361,8 +363,13 @@ describe("GET /config", () => {
       denominations: [1_000_000n, 5_000_000n],
       confirmations: 3,
       vaultExpiryBlocks: 288,
+      openVaultStampBits: 20,
       sponsorship: true,
     });
+    // H-01: a backend from before the stamp does not report its bits.
+    const { openVaultStampBits: _bits, ...older } = DRY_RUN_CONFIG;
+    expect(parseRemoteConfig(older).openVaultStampBits).toBeNull();
+    expect(parseRemoteConfig({ ...DRY_RUN_CONFIG, openVaultStampBits: 0 }).openVaultStampBits).toBe(0);
   });
 
   it("reads the loan token and the shock oracle of an RQ-06 deployment first", () => {
@@ -404,6 +411,9 @@ describe("GET /config", () => {
       ["config.denominations", { denominations: "1000000" }],
       ["config.confirmations", { confirmations: -1 }],
       ["config.vaultExpiryBlocks", { vaultExpiryBlocks: 0 }],
+      ["config.openVaultStampBits", { openVaultStampBits: 33 }],
+      ["config.openVaultStampBits", { openVaultStampBits: -1 }],
+      ["config.openVaultStampBits", { openVaultStampBits: "20 bits" }],
       ["config.sponsorship", { sponsorship: "true" }],
     ];
     for (const [what, patch] of broken) {

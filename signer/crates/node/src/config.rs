@@ -59,19 +59,62 @@ pub struct NetworkConfig {
     /// commitment on Base and its broadcast (docs/TIER3.md § 11; 0 broadcasts at once).
     #[serde(default)]
     pub payout_delay_max_blocks: u32,
-    /// T3-4: Base blocks a payout's commitment must be under before any node releases a share.
-    /// Configurable (G1): a faster Base (Denim's 200 ms blocks) needs more blocks for the same
-    /// time.
+    /// T3-4: Base blocks a payout's commitment must at least be under before any node releases a
+    /// share. Since review H-11 a minimum only: the commitment must also be under Base's `safe`
+    /// head, or `commit_depth_secs` deep.
     #[serde(default = "default_commit_depth")]
     pub commit_depth_blocks: u64,
+    /// Review H-11, T3-4: a node releases a payout's share once its commitment is at or below Base's
+    /// `safe` head, or, while that lags, once the commitment has been on Base this many seconds (by
+    /// block timestamps), whichever comes first. Seconds, unlike blocks, keep their meaning when
+    /// Base's blocks go from 2 s to 200 ms (Denim). At most [`MAX_COMMIT_DEPTH_SECS`].
+    #[serde(default = "default_commit_depth_secs")]
+    pub commit_depth_secs: u64,
     /// A local fork (anvil): the only network on which the privacy delays may be 0 (review H-05).
     #[serde(default)]
     pub local_fork: bool,
+    /// Review H-01: the cost of opening a vault and the vaults that may wait for a deposit.
+    #[serde(default)]
+    pub open_vault: OpenVaultLimits,
+}
+
+/// Review H-01: what opening a vault costs its requester, and how many vaults may wait for their
+/// deposit at once. The coordinator applies them; the stamp's bits are public (`GET /config`).
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(default)]
+pub struct OpenVaultLimits {
+    /// Zero bits the open-vault stamp must start with (`zecured_base::stamp`); 0: no stamp.
+    pub stamp_bits: u32,
+    /// Seconds a vault waiting for its deposit holds one of the `max_pending` slots while no deposit
+    /// is seen. Only the slot is released: the vault stays open, and a deposit is accepted, until
+    /// its expiry height as before.
+    pub pending_slot_secs: u64,
+    /// Most vaults holding a slot at once.
+    pub max_pending: usize,
+}
+
+impl Default for OpenVaultLimits {
+    fn default() -> Self {
+        Self {
+            stamp_bits: zecured_base::stamp::DEFAULT_BITS,
+            pending_slot_secs: 30 * 60,
+            max_pending: 512,
+        }
+    }
 }
 
 fn default_commit_depth() -> u64 {
     crate::DEFAULT_COMMIT_DEPTH
 }
+
+fn default_commit_depth_secs() -> u64 {
+    crate::DEFAULT_COMMIT_DEPTH_SECS
+}
+
+/// The most `commit_depth_secs` may be: the wait for the depth, the commitment's own transaction
+/// and round 2 must fit in a signing session (`SESSION_TTL`, 300 s), or no payout could be signed
+/// while Base's safe head lags.
+pub const MAX_COMMIT_DEPTH_SECS: u64 = 180;
 
 /// Blocks of a payout's expiry window kept free of the L23 delay: signing, a rebroadcast or two
 /// and the inclusion itself (RT-15).
@@ -97,6 +140,22 @@ impl NetworkConfig {
             self.payout_delay_max_blocks <= max_delay,
             "payout_delay_max_blocks must leave {PAYOUT_DELAY_HEADROOM} of the payout's {} expiry blocks (at most {max_delay})",
             zecured_zcash_ops::spend::PAYOUT_EXPIRY_DELTA
+        );
+        // H-11: the commitment depth's time fallback fits in a signing session.
+        anyhow::ensure!(
+            self.commit_depth_secs <= MAX_COMMIT_DEPTH_SECS,
+            "commit_depth_secs must be at most {MAX_COMMIT_DEPTH_SECS} (a signing session lasts {} s)",
+            crate::SESSION_TTL.as_secs()
+        );
+        // H-01: a stamp a browser can still compute, and room for at least one vault.
+        anyhow::ensure!(
+            self.open_vault.stamp_bits <= zecured_base::stamp::MAX_BITS,
+            "open_vault.stamp_bits must be at most {}",
+            zecured_base::stamp::MAX_BITS
+        );
+        anyhow::ensure!(
+            self.open_vault.max_pending >= 1 && self.open_vault.pending_slot_secs >= 60,
+            "open_vault needs max_pending >= 1 and pending_slot_secs >= 60"
         );
         // H-05: the delays that hide a payout's and a mint's timing (L23, L5) may only be off on a
         // local fork.
@@ -217,7 +276,9 @@ mod tests {
             attest_delay_max_blocks: MIN_ATTEST_DELAY_MAX_BLOCKS,
             payout_delay_max_blocks: 8,
             commit_depth_blocks: 3,
+            commit_depth_secs: 120,
             local_fork: false,
+            open_vault: OpenVaultLimits::default(),
         }
     }
 
@@ -249,5 +310,54 @@ mod tests {
         cfg.payout_delay_max_blocks = 0;
         cfg.local_fork = true;
         cfg.check().unwrap();
+    }
+
+    /// H-11: a network config written before the time depth gets 120 s; the depth fits in a
+    /// signing session.
+    #[test]
+    fn the_commitment_depth_defaults_and_fits_a_session() {
+        let mut old = serde_json::to_value(judge_config()).unwrap();
+        old.as_object_mut().unwrap().remove("commit_depth_secs");
+        old.as_object_mut().unwrap().remove("commit_depth_blocks");
+        let cfg: NetworkConfig = serde_json::from_value(old).unwrap();
+        assert_eq!((cfg.commit_depth_blocks, cfg.commit_depth_secs), (3, 120));
+        cfg.check().unwrap();
+        let mut cfg = judge_config();
+        cfg.commit_depth_secs = MAX_COMMIT_DEPTH_SECS;
+        cfg.check().unwrap();
+        assert!(MAX_COMMIT_DEPTH_SECS + 60 < crate::SESSION_TTL.as_secs());
+        cfg.commit_depth_secs = MAX_COMMIT_DEPTH_SECS + 1;
+        assert!(cfg.check().is_err());
+    }
+
+    /// H-01: a network config written before the open-vault limits gets the defaults (a 20-bit
+    /// stamp, a 30-minute slot, 512 slots); the limits stay within reason.
+    #[test]
+    fn open_vault_limits_default_and_are_checked() {
+        let mut old = serde_json::to_value(judge_config()).unwrap();
+        old.as_object_mut().unwrap().remove("open_vault");
+        let cfg: NetworkConfig = serde_json::from_value(old).unwrap();
+        assert_eq!(cfg.open_vault, OpenVaultLimits::default());
+        assert_eq!(
+            (cfg.open_vault.stamp_bits, cfg.open_vault.pending_slot_secs, cfg.open_vault.max_pending),
+            (20, 1_800, 512)
+        );
+        cfg.check().unwrap();
+        let partial: OpenVaultLimits = serde_json::from_value(serde_json::json!({ "stamp_bits": 0 })).unwrap();
+        assert_eq!((partial.stamp_bits, partial.max_pending), (0, 512));
+
+        let mut cfg = judge_config();
+        cfg.open_vault.stamp_bits = zecured_base::stamp::MAX_BITS + 1;
+        assert!(cfg.check().is_err());
+        cfg.open_vault = OpenVaultLimits {
+            max_pending: 0,
+            ..OpenVaultLimits::default()
+        };
+        assert!(cfg.check().is_err());
+        cfg.open_vault = OpenVaultLimits {
+            pending_slot_secs: 59,
+            ..OpenVaultLimits::default()
+        };
+        assert!(cfg.check().is_err());
     }
 }

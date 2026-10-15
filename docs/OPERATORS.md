@@ -34,9 +34,10 @@ decision from its own view of both chains:
 - **The network configuration** (`network.json`): the Registry and Adapter addresses, chain id,
   denominations, confirmations, the five nodes' public keys and the coordinator's address. Check
   it against the deployment (the Registry's `signers()` must list the five node addresses). It
-  also holds `commit_depth_blocks`, the Base blocks a payout's commitment must be under before any
-  share is released (default 3, about 6 s at Base's 2 s blocks; raise it if Base's blocks get
-  faster, as its planned Denim upgrade's 200 ms blocks would), and the L23 and D15 random delays.
+  also holds how deep a payout's commitment must be on Base before any share is released: under
+  Base's `safe` head or, while that lags, `commit_depth_secs` old (default 120, at most 180), and in
+  any case `commit_depth_blocks` deep (default 3); seconds keep their meaning when Base's Denim
+  upgrade brings 200 ms blocks (review H-11). It also holds the L23 and D15 random delays.
 
 The coordinator is trusted for liveness only: it schedules work, builds PCZTs and relays
 messages. It holds no key share and cannot make a node sign anything outside policy.

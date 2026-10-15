@@ -118,6 +118,10 @@ struct Cli {
     deposit_proof_headers: PathBuf,
     #[arg(long, env = "DEPOSIT_PROOF_SUMMARIES", default_value = "data/tier2/summaries.json")]
     deposit_proof_summaries: PathBuf,
+    /// Deposit proofs run at once, 1 or 2 (review H-12: a proof takes about 10 GB of RAM on a CPU,
+    /// 13 GB of GPU memory); the others wait in a first-in-first-out queue, one job per vault.
+    #[arg(long, env = "DEPOSIT_PROOF_CONCURRENCY", default_value_t = 1)]
+    deposit_proof_concurrency: usize,
 }
 
 // ------------------------------------------------------------------------- errors (L-2)
@@ -151,6 +155,9 @@ impl ApiError {
     );
     const MM_REFUSED: Self =
         Self::new(StatusCode::BAD_GATEWAY, "market_maker_refused", "The market maker refused the request.");
+    /// The same answer as the rate-limit middleware's (`limits::too_many_requests`).
+    const RATE_LIMITED: Self =
+        Self::new(StatusCode::TOO_MANY_REQUESTS, "rate_limited", "Too many requests. Try again later.");
 }
 
 impl From<PublicError> for ApiError {
@@ -233,19 +240,35 @@ struct OpenBody {
     request_id: B256,
     deadline: serde_json::Value,
     signature: Bytes,
+    /// H-01: the nonce of the request's hashcash stamp (decimal string or number).
+    #[serde(default)]
+    stamp: serde_json::Value,
 }
 
-async fn open_vault(State(c): App, Body(b): Body<OpenBody>) -> ApiResult {
-    let r = c
-        .open_vault(OpenVaultRequest {
-            owner: b.owner,
-            account: b.account,
-            amount: num(&b.amount)?,
-            request_id: b.request_id,
-            deadline: num(&b.deadline)?,
-            signature: b.signature,
-        })
-        .await?;
+/// `POST /vaults`'s rate limit. Only a request whose stamp checks out takes a token (H-01), so
+/// requests without the work can no longer use the limit up for everyone.
+#[derive(Clone)]
+struct OpenVaultLimiter(Arc<limits::TokenBucket>);
+
+async fn open_vault(
+    State(c): App,
+    axum::Extension(limiter): axum::Extension<OpenVaultLimiter>,
+    Body(b): Body<OpenBody>,
+) -> ApiResult {
+    let req = OpenVaultRequest {
+        owner: b.owner,
+        account: b.account,
+        amount: num(&b.amount)?,
+        request_id: b.request_id,
+        deadline: num(&b.deadline)?,
+        signature: b.signature,
+        stamp: if b.stamp.is_null() { 0 } else { num(&b.stamp)? },
+    };
+    c.check_open_stamp(&req)?;
+    if !limiter.0.try_take() {
+        return Err(ApiError::RATE_LIMITED);
+    }
+    let r = c.open_vault(req).await?;
     Ok(Json(open_vault_json(&r)))
 }
 
@@ -780,7 +803,8 @@ fn status_info(dep: &serde_json::Value, cfg: &NetworkConfig) -> StatusInfo {
 }
 
 /// `GET /status`: the running commit and image ids (G5), the Zcash tip of the last coordinator
-/// pass, and each signer node's mode. Nothing about any vault or user.
+/// pass, each signer node's mode and the deposit-proof queue's counts (H-12). Nothing about any
+/// vault or user.
 async fn status(State(c): App, axum::Extension(s): axum::Extension<StatusInfo>) -> Json<serde_json::Value> {
     let nodes = {
         let mut cache = s.nodes.lock().await;
@@ -801,6 +825,8 @@ async fn status(State(c): App, axum::Extension(s): axum::Extension<StatusInfo>) 
     let mut out = (*s.fixed).clone();
     out["zcashTip"] = c.zcash_tip().into();
     out["nodes"] = nodes.into();
+    // Counts only (`null` without deposit proofs): proofs waiting, running, and run at once.
+    out["depositProofs"] = serde_json::to_value(c.proving_status()).unwrap_or_default();
     Json(out)
 }
 
@@ -836,6 +862,8 @@ fn public_config_json(cfg: &NetworkConfig, dep: &serde_json::Value, sponsorship:
         "denominations": cfg.denominations.iter().map(|d| d.to_string()).collect::<Vec<_>>(),
         "confirmations": cfg.confirmations,
         "vaultExpiryBlocks": cfg.vault_expiry_blocks,
+        // H-01: the zero bits `POST /vaults`'s stamp needs.
+        "openVaultStampBits": cfg.open_vault.stamp_bits,
         "sponsorship": sponsorship,
     })
 }
@@ -926,7 +954,12 @@ fn router(
         .route("/admin/vaults/{id}/drain", post(admin_drain))
         .route("/admin/oracle", get(admin_get_oracle).post(admin_set_oracle))
         .route("/admin/shock", post(admin_set_shock))
-        .merge(Router::new().route("/vaults", post(open_vault)).route_layer(limited(&limits.open_vault)))
+        // H-01: the open-vault limit is taken inside the handler, once the request's stamp checks out.
+        .merge(
+            Router::new()
+                .route("/vaults", post(open_vault))
+                .route_layer(axum::Extension(OpenVaultLimiter(limits.open_vault.clone()))),
+        )
         .merge(Router::new().route("/recipients", post(recipients)).route_layer(limited(&limits.recipients)))
         .merge(
             Router::new()
@@ -1050,10 +1083,18 @@ async fn main() -> Result<()> {
                 mock: cli.deposit_proof_mock,
                 headers: cli.deposit_proof_headers.clone(),
                 summaries: cli.deposit_proof_summaries.clone(),
+                concurrency: cli.deposit_proof_concurrency,
             },
             &cli.data,
         )?;
-        info!(mock = cli.deposit_proof_mock, "deposits are activated with Tier 2 proofs");
+        info!(
+            mock = cli.deposit_proof_mock,
+            concurrency = cli.deposit_proof_concurrency,
+            "deposits are activated with Tier 2 proofs"
+        );
+        if !cfg!(unix) {
+            warn!("deposit proofs need a Unix host: the witness reaches the prover through /dev/stdin");
+        }
     }
     let coordinator = Arc::new(coordinator);
 
@@ -1199,6 +1240,8 @@ mod tests {
         let dep = json!({ "contracts": {}, "signers": reversed });
         let c = public_config_json(&cfg, &dep, true);
         assert_eq!(c["signers"], json!(keys));
+        // H-01: the stamp's bits, the default when the network config sets none.
+        assert_eq!(c["openVaultStampBits"], 20);
         assert!(signer_sets_agree(&cfg, &dep));
         // Another set: reported as is (the app then refuses it), and flagged at startup.
         let other = json!({ "signers": [Address::repeat_byte(9), keys[1], keys[2], keys[3], keys[4]] });
@@ -1293,6 +1336,7 @@ mod tests {
             "lightwalletd_url": "http://127.0.0.1:9", "base_rpc_url": "http://127.0.0.1:9", "chain_id": 84_532,
             "registry": Address::repeat_byte(0x11), "adapter": Address::repeat_byte(0x22), "registry_from_block": 1,
             "confirmations": 3, "vault_expiry_blocks": 288, "denominations": [1_000_000], "nodes": nodes,
+            "open_vault": { "stamp_bits": 8 },
         }))
         .unwrap();
         let key = hex::encode(alloy::signers::local::PrivateKeySigner::random().to_bytes());
@@ -1352,6 +1396,8 @@ mod tests {
         assert_eq!(body["commit"], env!("ZECURED_COMMIT"));
         // H-05: the privacy delays the network runs with are public.
         assert_eq!(body["privacyDelays"], json!({ "attestMaxBlocks": 0, "payoutMaxBlocks": 0, "localFork": false }));
+        // H-12: no deposit-proof queue on this backend.
+        assert_eq!(body["depositProofs"], serde_json::Value::Null);
         let nodes = body["nodes"].as_array().expect("nodes");
         assert_eq!(nodes.len(), 5);
         assert!(nodes.iter().all(|n| n.as_object().is_some_and(|o| o.len() == 2) && n["mode"] == "unreachable"));
@@ -1372,16 +1418,64 @@ mod tests {
             .map(|n| (n["index"].as_u64().unwrap(), n["compromisable"].as_bool().unwrap()))
             .collect();
         assert_eq!(compromisable, [(1, false), (2, false), (3, false), (4, true), (5, true)]);
-        // M-8: POST /vaults allows a burst of 3, then answers 429.
-        for _ in 0..3 {
+        // M-8, H-01: POST /vaults allows a burst of 3 stamped requests, then answers 429. A request
+        // without a valid stamp never spends the limit: malformed, unstamped or under-stamped ones.
+        for _ in 0..5 {
             let (status, body, _) = call(Method::POST, "/vaults", "{}").await;
             assert_eq!((status, body["code"].as_str()), (StatusCode::BAD_REQUEST, Some("bad_request")));
         }
-        let (status, body, cors) = call(Method::POST, "/vaults", "{}").await;
+        let open_body = |owner: Address, stamped: bool| -> &'static str {
+            let request_id = B256::repeat_byte(0x44);
+            let valid = |nonce: u64| zecured_base::stamp::is_valid(&request_id, &owner, nonce, 8);
+            let stamp = (0u64..).find(|n| valid(*n) == stamped).unwrap();
+            let body = json!({
+                "owner": owner, "account": Address::repeat_byte(0x55), "amount": "1000000", "requestId": request_id,
+                "deadline": "99999999999", "signature": "0x", "stamp": stamp.to_string(),
+            });
+            Box::leak(body.to_string().into_boxed_str())
+        };
+        for i in 0..5u8 {
+            let (status, body, _) = call(Method::POST, "/vaults", open_body(Address::repeat_byte(i), false)).await;
+            assert_eq!((status, body["code"].as_str()), (StatusCode::UNPROCESSABLE_ENTITY, Some("bad_stamp")));
+        }
+        // Stamped but not signed by the owner: each takes a token, then the coordinator refuses it.
+        for i in 0..3u8 {
+            let (status, body, _) = call(Method::POST, "/vaults", open_body(Address::repeat_byte(i), true)).await;
+            assert_eq!((status, body["code"].as_str()), (StatusCode::FORBIDDEN, Some("not_owner")));
+        }
+        let (status, body, cors) = call(Method::POST, "/vaults", open_body(Address::repeat_byte(9), true)).await;
         assert_eq!((status, body["code"].as_str(), cors), (StatusCode::TOO_MANY_REQUESTS, Some("rate_limited"), true));
         // Other routes have their own buckets.
         let (status, _, _) = call(Method::POST, "/recipients", "{}").await;
         assert_eq!(status, StatusCode::BAD_REQUEST);
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// H-12: `/status` shows the deposit-proof queue's counts, and nothing else about it.
+    #[tokio::test]
+    async fn status_counts_the_deposit_proofs() {
+        let dir = std::env::temp_dir().join(format!("zecured-backend-test-{}", hex::encode(keccak256(b"proof-queue"))));
+        let nodes: Vec<serde_json::Value> = (1..=5u8)
+            .map(|i| json!({ "index": i, "url": "http://127.0.0.1:9", "x25519": "00", "eth": Address::repeat_byte(i) }))
+            .collect();
+        let cfg: NetworkConfig = serde_json::from_value(json!({
+            "lightwalletd_url": "http://127.0.0.1:9", "base_rpc_url": "http://127.0.0.1:9", "chain_id": 84_532,
+            "registry": Address::repeat_byte(0x11), "adapter": Address::repeat_byte(0x22), "registry_from_block": 1,
+            "confirmations": 3, "vault_expiry_blocks": 288, "denominations": [1_000_000], "nodes": nodes,
+        }))
+        .unwrap();
+        let key = hex::encode(alloy::signers::local::PrivateKeySigner::random().to_bytes());
+        let proofs = DepositProofs {
+            host: PathBuf::from("zecured-tier2-host"),
+            mock: true,
+            headers: PathBuf::new(),
+            summaries: PathBuf::new(),
+            concurrency: 2,
+        };
+        let coordinator = Coordinator::new(cfg, &dir, &key).unwrap().with_deposit_proofs(proofs, &dir).unwrap();
+        let info = status_info(&serde_json::Value::Null, &coordinator.cfg);
+        let Json(body) = status(State(Arc::new(coordinator)), axum::Extension(info)).await;
+        assert_eq!(body["depositProofs"], json!({ "queued": 0, "running": 0, "concurrency": 2 }));
         let _ = std::fs::remove_dir_all(&dir);
     }
 

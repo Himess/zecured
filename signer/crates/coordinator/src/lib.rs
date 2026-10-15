@@ -14,6 +14,7 @@ mod frost;
 pub mod inflight;
 pub mod nodes;
 pub mod proofs;
+pub mod queue;
 pub mod select;
 pub mod store;
 
@@ -86,9 +87,10 @@ use crate::{
 const NETWORK: Network = Network::TestNetwork;
 const ZATS_PER_ZEC: u64 = 100_000_000;
 
-/// Most vaults that may wait for their deposit at once (M-8): each one cost a 5-node DKG and
-/// is scanned on every pass until it expires.
-pub const MAX_PENDING_VAULTS: usize = 32;
+/// H-01: how long a request id that opened a vault (or is opening one) is remembered at most, to
+/// refuse its stamp again; past its deadline the request is refused anyway, and once its vault is
+/// open its owner is bound.
+const OPEN_REQUEST_MEMORY_SECS: u64 = 24 * 60 * 60;
 /// The vault birthday is set this many blocks below the coordinator's Zcash tip, so signers
 /// whose tip lags slightly still accept it (nodes refuse a birthday above their own tip).
 const BIRTHDAY_MARGIN: u32 = 3;
@@ -102,6 +104,10 @@ const VAULT_PASS_TIMEOUT: Duration = Duration::from_secs(15 * 60);
 const BASE_SYNC_TIMEOUT: Duration = Duration::from_secs(5 * 60);
 /// Wait for a Base transaction's receipt at most this long (alloy's default is forever).
 pub(crate) const RECEIPT_TIMEOUT: Duration = Duration::from_secs(120);
+/// H-11: seconds past `commit_depth_secs` the coordinator still waits for a commitment to be
+/// deep enough (a node's provider may lag a little; `MAX_COMMIT_DEPTH_SECS` plus this, the
+/// commitment's transaction and round 2 fit in a signing session).
+const COMMIT_WAIT_MARGIN_SECS: u64 = 30;
 
 alloy::sol! {
     #[sol(rpc)]
@@ -119,6 +125,9 @@ pub struct OpenVaultRequest {
     pub request_id: B256,
     pub deadline: u64,
     pub signature: Bytes,
+    /// H-01: the nonce of the request's hashcash stamp (`zecured_base::stamp`).
+    #[serde(default)]
+    pub stamp: u64,
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
@@ -195,9 +204,34 @@ pub struct Coordinator {
     idle_scans: std::sync::Mutex<HashMap<B256, Instant>>,
     /// Tier 2: activate vaults on deposit proofs made here instead of signer attestations.
     proofs: Option<proofs::Prover>,
+    /// H-01: request ids whose stamp is opening a vault or opened one, and until when they are
+    /// remembered (Unix seconds).
+    open_requests: std::sync::Mutex<HashMap<B256, u64>>,
     /// TEST ONLY: see [`TEST_WITHHOLD_FLAG`].
     #[cfg(feature = "test-hooks")]
     withhold_flag: std::path::PathBuf,
+}
+
+/// H-01: a request id taken for one vault opening. Dropped without [`Self::keep`] (the opening
+/// failed, or its caller went away), it is released so that the owner can retry the same request.
+struct OpenRequestClaim<'a> {
+    requests: &'a std::sync::Mutex<HashMap<B256, u64>>,
+    id: B256,
+    kept: bool,
+}
+
+impl OpenRequestClaim<'_> {
+    fn keep(mut self) {
+        self.kept = true;
+    }
+}
+
+impl Drop for OpenRequestClaim<'_> {
+    fn drop(&mut self) {
+        if !self.kept {
+            self.requests.lock().unwrap_or_else(|p| p.into_inner()).remove(&self.id);
+        }
+    }
 }
 
 /// TEST ONLY (cargo feature `test-hooks`, off by default): while this file exists in the
@@ -318,6 +352,7 @@ fn finish_open(
         opened_signatures: signatures.clone(),
         cancellable: None,
         activated_tag: None,
+        opened_at: now(),
     };
     let response = OpenVaultResponse {
         vault_id: vault.vault_id,
@@ -389,6 +424,7 @@ impl Coordinator {
             last_tip: AtomicU32::new(0),
             idle_scans: std::sync::Mutex::default(),
             proofs: None,
+            open_requests: std::sync::Mutex::default(),
             #[cfg(feature = "test-hooks")]
             withhold_flag: data_dir.join(TEST_WITHHOLD_FLAG),
             cfg,
@@ -428,8 +464,32 @@ impl Coordinator {
 
     // ------------------------------------------------------------------ vault opening
 
+    /// H-01: whether the request carries a stamp with the network's zero bits. One hash: checked
+    /// before anything else about the request, and before the API spends a rate-limit token on it.
+    pub fn check_open_stamp(&self, req: &OpenVaultRequest) -> Result<()> {
+        let bits = self.cfg.open_vault.stamp_bits;
+        ensure!(zecured_base::stamp::is_valid(&req.request_id, &req.owner, req.stamp, bits), PublicError::BadStamp);
+        Ok(())
+    }
+
+    /// H-01: one stamp per request id. The id is taken while its vault opens and kept once it has
+    /// opened (until the request's deadline, a day at most); a failed opening releases it.
+    fn claim_open_request(&self, id: B256, deadline: u64) -> Result<OpenRequestClaim<'_>> {
+        let now = now();
+        let mut requests = self.open_requests.lock().unwrap_or_else(|p| p.into_inner());
+        requests.retain(|_, until| *until >= now);
+        ensure!(!requests.contains_key(&id), PublicError::NonceUsed);
+        requests.insert(id, deadline.min(now.saturating_add(OPEN_REQUEST_MEMORY_SECS)));
+        Ok(OpenRequestClaim {
+            requests: &self.open_requests,
+            id,
+            kept: false,
+        })
+    }
+
     pub async fn open_vault(&self, req: OpenVaultRequest) -> Result<OpenVaultResponse> {
         ensure!(self.cfg.denominations.contains(&req.amount), PublicError::NotDenomination);
+        self.check_open_stamp(&req)?;
         // Checked here too (every node checks it), so a forged or stale request costs no DKG.
         let msg = OpenVault {
             owner: req.owner,
@@ -444,8 +504,12 @@ impl Coordinator {
         {
             let store = self.store.lock().await;
             ensure!(!store.is_bound(req.account, req.owner), PublicError::AlreadyBound);
-            ensure!(store.pending() < MAX_PENDING_VAULTS, PublicError::Busy);
+            // H-01: a vault without a deposit holds its slot for `pending_slot_secs`, not until it
+            // expires (about two hours), so filling every slot needs a stamp per slot every half hour.
+            let limits = &self.cfg.open_vault;
+            ensure!(store.holding_slots(now(), limits.pending_slot_secs) < limits.max_pending, PublicError::Busy);
         }
+        let claim = self.claim_open_request(req.request_id, req.deadline)?;
         let tip = self.zcash.lock().await.tip().await.context(PublicError::ChainUnavailable)?;
         let birthday = tip.saturating_sub(BIRTHDAY_MARGIN).max(1);
         let mut id = [0u8; 32];
@@ -499,6 +563,7 @@ impl Coordinator {
         let (vault, resp) = finish_open(&self.cfg, &self.domain(), &open, &r3)?;
         // Kept with the vault, so the signatures can be served again.
         self.store.lock().await.save(vault)?;
+        claim.keep();
         info!(vault = %short(&resp.vault_id), "vault opened");
         Ok(resp)
     }
@@ -840,10 +905,11 @@ impl Coordinator {
         let safe = events::safe_head(&provider).await?;
         let cursor = self.store.lock().await.base_cursor;
         let start = cursor.max(self.cfg.registry_from_block.saturating_sub(1)) + 1;
-        const MAX_RANGE: u64 = 2_000;
+        // H-11: as many blocks per step as `eth_getLogs` is allowed (`ZECURED_LOG_RANGE`).
+        let step = events::log_range_ceiling();
         let mut from = start;
         while from <= safe {
-            let to = (from + MAX_RANGE - 1).min(safe);
+            let to = (from + step - 1).min(safe);
             let evs = events::fetch(&provider, self.cfg.registry, from, to).await?;
             let mut store = self.store.lock().await;
             for ev in evs {
@@ -1433,8 +1499,9 @@ impl Coordinator {
 
     /// Tier 3 (docs/TIER3.md § 5): records a payout's commitment on Base with the round-1
     /// signatures of the chosen signers, each checked against its node's attestation address and
-    /// sent in signer order, then waits until it is `commit_depth_blocks` deep, where the nodes
-    /// read it before they release a share. A commitment already on Base comes from an earlier
+    /// sent in signer order, then waits until it is as deep as the nodes check before they release
+    /// a share: under Base's `safe` head, or `commit_depth_secs` old (review H-11), and in any case
+    /// `commit_depth_blocks` deep. A commitment already on Base comes from an earlier
     /// session whose signatures this coordinator no longer has: the payout is built again (a new
     /// transaction, so a new commitment).
     async fn commit_spend(&self, record: &SpendCommitRecord, signed: &[(u16, Bytes)]) -> Result<Vec<Bytes>> {
@@ -1468,9 +1535,22 @@ impl Coordinator {
             .context("commitSpend receipt")?;
         ensure!(receipt.status(), "commitSpend reverted");
         let block = receipt.block_number.context("commitSpend receipt without a block")?;
+        let committed_at = provider
+            .get_block_by_number(block.into())
+            .await
+            .context("Base block of the commitment")?
+            .context("Base block of the commitment not found")?
+            .header
+            .timestamp;
+        let wait = Duration::from_secs(self.cfg.commit_depth_secs + COMMIT_WAIT_MARGIN_SECS);
         let started = Instant::now();
-        while provider.get_block_number().await.context("Base block number")? <= block + self.cfg.commit_depth_blocks {
-            ensure!(started.elapsed() < RECEIPT_TIMEOUT, "Base did not move past the commitment");
+        loop {
+            let (latest, now_on_base) = events::latest_block(&provider).await.context("Base latest block")?;
+            let safe = events::safe_head(&provider).await.ok();
+            if ready_for_round_two(&self.cfg, block, committed_at, latest, now_on_base, safe) {
+                break;
+            }
+            ensure!(started.elapsed() < wait, "Base did not take the commitment deep enough in time");
             tokio::time::sleep(Duration::from_secs(1)).await;
         }
         info!(vault = %short(&record.vault_id), "payout committed on Base");
@@ -1543,6 +1623,27 @@ impl Coordinator {
         info!(vault = %short(id), "vault cancelled on Base");
         Ok(())
     }
+}
+
+/// H-11, T3-4: whether a commitment mined in Base block `block` (at Unix time `committed_at`) is
+/// as deep as the nodes check before they release a share (`zecured_node::commitment_deep_enough`),
+/// with Base's latest block `latest` at `now_on_base` and its safe head `safe` (if the provider has
+/// one): at least `commit_depth_blocks` deep, and under the safe head or `commit_depth_secs` old.
+/// The age carries the slack of the nodes' search for a block that old and a second for a node
+/// whose provider lags.
+fn ready_for_round_two(
+    cfg: &NetworkConfig,
+    block: u64,
+    committed_at: u64,
+    latest: u64,
+    now_on_base: u64,
+    safe: Option<u64>,
+) -> bool {
+    let floor = latest > block.saturating_add(cfg.commit_depth_blocks);
+    let under_safe = safe.is_some_and(|s| s >= block);
+    let margin = cfg.commit_depth_secs.saturating_add(events::SECS_DEEP_SLACK + 1);
+    let old_enough = now_on_base >= committed_at.saturating_add(margin);
+    floor && (under_safe || old_enough)
 }
 
 /// RT-5: whether Base lacks the commitment whose struct hash is `record_hash` (so it must be
@@ -1685,14 +1786,31 @@ mod tests {
             requestId: request_id,
             deadline,
         };
-        OpenVaultRequest {
-            owner: owner.address(),
-            account: msg.account,
-            amount: msg.amount,
-            request_id,
-            deadline,
-            signature: sign_typed(owner, &c.domain(), &msg).unwrap(),
-        }
+        stamped(
+            OpenVaultRequest {
+                owner: owner.address(),
+                account: msg.account,
+                amount: msg.amount,
+                request_id,
+                deadline,
+                signature: sign_typed(owner, &c.domain(), &msg).unwrap(),
+                stamp: 0,
+            },
+            c,
+        )
+    }
+
+    /// `req` with a stamp of the coordinator's bits for its request id and owner.
+    fn stamped(mut req: OpenVaultRequest, c: &Coordinator) -> OpenVaultRequest {
+        req.stamp = zecured_base::stamp::solve(&req.request_id, &req.owner, c.cfg.open_vault.stamp_bits, 0);
+        req
+    }
+
+    /// A coordinator as `offline`, with an 8-bit stamp (quick to compute in tests).
+    fn offline_with_stamps(tag: &str) -> (Coordinator, TempDir) {
+        let (mut c, dir) = offline(tag);
+        c.cfg.open_vault.stamp_bits = 8;
+        (c, dir)
     }
 
     const UFVK: &str = "uviewtest1vaultkey";
@@ -1811,22 +1929,133 @@ mod tests {
     /// M-8: forged, expired or excess vault openings are refused before any DKG work.
     #[tokio::test]
     async fn open_vault_refuses_before_reaching_the_signers() {
-        let (c, _dir) = offline("open");
+        let (mut c, _dir) = offline_with_stamps("open");
+        c.cfg.open_vault.max_pending = 4;
         let owner = PrivateKeySigner::random();
 
         let mut forged = open_request(&owner, &c, now() + 600);
         forged.owner = Address::repeat_byte(0x99);
-        let e = c.open_vault(forged).await.unwrap_err();
+        let e = c.open_vault(stamped(forged, &c)).await.unwrap_err();
         assert_eq!(public_error(&e), Some(PublicError::NotOwner));
 
         let e = c.open_vault(open_request(&owner, &c, now() - 1)).await.unwrap_err();
         assert_eq!(public_error(&e), Some(PublicError::Expired));
 
-        for i in 0..MAX_PENDING_VAULTS {
-            c.store.lock().await.save(vault(u8::try_from(i + 1).unwrap())).unwrap();
+        // H-01: the slots are held by vaults opened in the last `pending_slot_secs`.
+        for i in 1..=4u8 {
+            let mut v = vault(i);
+            v.opened_at = now();
+            c.store.lock().await.save(v).unwrap();
         }
         let e = c.open_vault(open_request(&owner, &c, now() + 600)).await.unwrap_err();
         assert_eq!(public_error(&e), Some(PublicError::Busy));
+        // Half an hour later, without deposits, they hold none: the request gets past the cap (and
+        // fails at the unreachable light wallet server).
+        let slot = c.cfg.open_vault.pending_slot_secs;
+        for i in 1..=4u8 {
+            c.store.lock().await.update(&B256::repeat_byte(i), |v| v.opened_at = now() - slot).unwrap();
+        }
+        let e = c.open_vault(open_request(&owner, &c, now() + 600)).await.unwrap_err();
+        assert_eq!(public_error(&e), Some(PublicError::ChainUnavailable));
+        assert!(c.store.lock().await.vaults.values().all(|v| v.status == VaultStatus::AwaitingDeposit));
+    }
+
+    /// H-01: the stamp is checked first, with the network's bits, over the request id and the owner.
+    #[tokio::test]
+    async fn open_vault_needs_a_stamp() {
+        let (c, _dir) = offline_with_stamps("stamp");
+        let owner = PrivateKeySigner::random();
+        let good = open_request(&owner, &c, now() + 600);
+        assert!(c.check_open_stamp(&good).is_ok());
+        let bits = |r: &OpenVaultRequest| {
+            zecured_base::stamp::leading_zero_bits(&zecured_base::stamp::digest(&r.request_id, &r.owner, r.stamp))
+        };
+        assert!(bits(&good) >= 8);
+        let mut weak = good.clone();
+        weak.stamp = (0..)
+            .find(|n| {
+                bits(&OpenVaultRequest {
+                    stamp: *n,
+                    ..good.clone()
+                }) < 8
+            })
+            .unwrap();
+        // Refused for its stamp before anything else is looked at (here: an expired, unsigned request).
+        let mut unsigned = weak.clone();
+        unsigned.signature = Bytes::new();
+        unsigned.deadline = 0;
+        for req in [weak, unsigned] {
+            let e = c.open_vault(req).await.unwrap_err();
+            assert_eq!(public_error(&e), Some(PublicError::BadStamp));
+        }
+        // A stamp is for one request id and one owner.
+        let mut other_id = good.clone();
+        other_id.request_id = B256::repeat_byte(4);
+        let mut other_owner = good.clone();
+        other_owner.owner = Address::repeat_byte(0x99);
+        assert!(bits(&other_id) < 8 || bits(&other_owner) < 8);
+        // Without stamps (0 bits), any nonce passes.
+        let (mut free, _dir2) = offline("no-stamp");
+        free.cfg.open_vault.stamp_bits = 0;
+        assert!(
+            free.check_open_stamp(&OpenVaultRequest {
+                stamp: 0,
+                ..good.clone()
+            })
+            .is_ok()
+        );
+        assert_eq!(PublicError::BadStamp.status(), 422);
+    }
+
+    /// H-01: one stamp per request id. While the request's vault opens, and once it has opened, the
+    /// same request is refused; a failed opening releases it, so the owner can retry it as is.
+    #[tokio::test]
+    async fn a_stamp_opens_one_vault() {
+        let (c, _dir) = offline_with_stamps("replay");
+        let owner = PrivateKeySigner::random();
+        let req = open_request(&owner, &c, now() + 600);
+        // The light wallet server is unreachable: the opening fails after taking the request id,
+        // and releases it.
+        for _ in 0..2 {
+            let e = c.open_vault(req.clone()).await.unwrap_err();
+            assert_eq!(public_error(&e), Some(PublicError::ChainUnavailable));
+        }
+        // While an opening of the request runs, the request is refused.
+        let running = c.claim_open_request(req.request_id, req.deadline).unwrap();
+        let e = c.open_vault(req.clone()).await.unwrap_err();
+        assert_eq!(public_error(&e), Some(PublicError::NonceUsed));
+        // Its vault opened: still refused, until the request's deadline.
+        running.keep();
+        let e = c.open_vault(req.clone()).await.unwrap_err();
+        assert_eq!(public_error(&e), Some(PublicError::NonceUsed));
+        let remembered = c.open_requests.lock().unwrap()[&req.request_id];
+        assert_eq!(remembered, req.deadline);
+        // A request with a far deadline is remembered a day at most (its owner is bound by then).
+        let far = B256::repeat_byte(9);
+        c.claim_open_request(far, u64::MAX).unwrap().keep();
+        assert!(c.open_requests.lock().unwrap()[&far] <= now() + OPEN_REQUEST_MEMORY_SECS);
+    }
+
+    /// H-11: the coordinator moves on to round 2 once the commitment is under Base's safe head or
+    /// `commit_depth_secs` old (with the nodes' slack), and never before `commit_depth_blocks`.
+    #[test]
+    fn a_commitment_is_deep_enough_under_the_safe_head_or_after_its_seconds() {
+        let (c, _dir) = offline("depth");
+        let cfg = &c.cfg;
+        assert_eq!((cfg.commit_depth_blocks, cfg.commit_depth_secs), (3, 120));
+        let (block, at) = (1_000_000, 1_800_000_000);
+        // Just mined: neither safe nor old.
+        assert!(!ready_for_round_two(cfg, block, at, block + 1, at + 2, Some(block - 500)));
+        // Under the safe head, but not yet `commit_depth_blocks` deep.
+        assert!(!ready_for_round_two(cfg, block, at, block + 3, at + 6, Some(block)));
+        // Under the safe head and deep enough: go.
+        assert!(ready_for_round_two(cfg, block, at, block + 4, at + 8, Some(block)));
+        // The safe head lags (or the provider has none): after 120 s and the slack, at 2 s or at
+        // 200 ms blocks alike.
+        for (blocks, provider_safe) in [(60, Some(block - 1)), (600, None)] {
+            assert!(!ready_for_round_two(cfg, block, at, block + blocks, at + 121, provider_safe));
+            assert!(ready_for_round_two(cfg, block, at, block + blocks, at + 122, provider_safe));
+        }
     }
 
     /// M-8: an unsigned destination or refund is refused without asking five nodes.

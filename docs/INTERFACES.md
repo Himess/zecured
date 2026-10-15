@@ -125,7 +125,8 @@ SpendCommit(bytes32 vaultId,bytes32 inputTag,bytes32[] claimIds,bytes32[] claimR
   (`salt_i` of its recipient commitment, § 1). Txids in internal byte order.
 - `claimOutputs[i]` is the index of the payout's action whose output pays `claimIds[i]`; the indexes
   are distinct, so two claims never share one output (E1, D34).
-- `claimIds[0]` bears the payout's ZIP 317 fee. Arrays are hashed as EIP-712 requires
+- `claimIds[0]` bears the payout's ZIP 317 fee. A payout settles 1 to 8 claims (review İ-01), in
+  the queue's order, with distinct receivers and salts (E1). Arrays are hashed as EIP-712 requires
   (`keccak256` of the concatenated elements); signatures as in § 2.2.
 
 ## 3. Contracts (Base Sepolia)
@@ -356,7 +357,7 @@ addresses, salts, viewing keys or IPs.
 
 | Method & path | Body | Response |
 |---|---|---|
-| `POST /vaults` | `{ owner, account, amount, requestId, deadline, signature }` (`OpenVault`) | `{ vaultId, address (Ironwood-only UA), zip321, amount, expiryHeight, tagKeyHash, signatures: [{ index, signature }] }`; `signatures`: every signer's `VaultOpened` (§ 2.5), ordered by node index; the client checks all five before showing `address` and builds the payment URI itself |
+| `POST /vaults` | `{ owner, account, amount, requestId, deadline, signature, stamp }` (`OpenVault`; `stamp`: the nonce of the request's hashcash stamp, below) | `{ vaultId, address (Ironwood-only UA), zip321, amount, expiryHeight, tagKeyHash, signatures: [{ index, signature }] }`; `signatures`: every signer's `VaultOpened` (§ 2.5), ordered by node index; the client checks all five before showing `address` and builds the payment URI itself |
 | `GET /vaults/:id` | — | `{ vaultId, status, amount, address, expiryHeight, birthdayHeight, tipHeight, outstanding, payoutInFlight, nonConforming: [{ noteId, amount }], claims: [{ claimId, kind, amount, paid }] }`; `kind` ∈ `Release`, `Liquidation`, `CloseUser`, `CloseMarketMaker` |
 | `POST /vaults/:id/destination` | `{ receiver (UA), salt, nonce, deadline, signature }` (`Destination`) | `{ commitment }` — validated **before** any Base tx that burns zZEC |
 | `POST /vaults/:id/refund` | `{ noteId, receiver, salt, nonce, deadline, signature }` (`RefundRequest`) | `{ accepted: true }` |
@@ -367,14 +368,28 @@ addresses, salts, viewing keys or IPs.
 | `POST /closes` | `{ request: CloseRequest (camelCase), signature }` | `{ txHash }` once `closeWithCollateral` is mined (relayed; executed by the market maker) |
 | `GET /quotes/deleverage/:vaultId?repay=<units>` | — | `{ executor, marginBps (number), repayAssets, mmAmount, remaining, expiresAt (number, Unix s) }` for repaying `repay` loan-token units of the debt (S18; relayed); refused with `repay_above_debt`, `deleverage_too_small` or `deleverage_too_large` |
 | `POST /deleverages` | `{ request: DeleverageRequest (camelCase), signature }` | `{ txHash }` once `deleverageWithCollateral` is mined (relayed; the market maker repays exactly the quoted amount) |
-| `GET /status` | — | `{ commit, treeClean, startedAt, deployment: { chainId, block, registry, slasher, signerBond, mintMode, verifierIsMock, depositImageId, violationImageId, challengeWindow, theftDemo }, zcashTip, nodes: [{ index, mode }] }`: the commit the backend was built from and the deployed image ids, so anyone can check that the running system is the submitted code (review G5); nothing about any vault or user; node modes cached 15 s |
-| `GET /config` | — | `{ chainId, registry, adapter, contracts, market, signers, denominations, confirmations, vaultExpiryBlocks, sponsorship }` (`signers`: the deployment's five signer addresses, ascending, or `null`) — the app pins contract addresses and signers at build time and uses this only as a consistency check (any mismatch disables Base actions); it takes `sponsorship` (bundler, paymaster and allowlist all configured), denominations, confirmations and the deposit window from it |
+| `GET /status` | — | `{ commit, treeClean, startedAt, deployment: { chainId, block, registry, slasher, signerBond, mintMode, verifierIsMock, depositImageId, violationImageId, challengeWindow, theftDemo }, zcashTip, nodes: [{ index, mode }], depositProofs: { queued, running, concurrency } }`: the commit the backend was built from and the deployed image ids, so anyone can check that the running system is the submitted code (review G5); `depositProofs`: the deposit proof queue's counts (review H-12; `null` without Tier 2 deposit proofs); nothing about any vault or user; node modes cached 15 s |
+| `GET /config` | — | `{ chainId, registry, adapter, contracts, market, signers, denominations, confirmations, vaultExpiryBlocks, openVaultStampBits, sponsorship }` (`signers`: the deployment's five signer addresses, ascending, or `null`; `openVaultStampBits`: the zero bits of the open-vault stamp) — the app pins contract addresses and signers at build time and uses this only as a consistency check (any mismatch disables Base actions); it takes `sponsorship` (bundler, paymaster and allowlist all configured), denominations, confirmations, the deposit window and the stamp's bits from it |
 | `POST /proxy/rpc` | JSON-RPC | Base RPC passthrough (read methods + `eth_sendRawTransaction` disallowed) |
 | `POST /proxy/bundler` | JSON-RPC | ERC-4337 bundler passthrough |
 | `POST /proxy/paymaster` | JSON-RPC | Sponsors only the allowlist below; rejects anything else |
 
 Vault status values: `awaiting_deposit`, `deposit_seen`, `active`, `closed`, `expired`.
 Amounts are decimal strings in zatoshis (ZEC) or 6-decimal units (USDC).
+
+**Opening a vault has a cost (review H-01).** Each opening costs the five signers a DKG, so
+`POST /vaults` carries a hashcash stamp: `stamp` is a decimal 64-bit nonce such that
+`sha256("zecured-open-vault-v1" || requestId (32 bytes) || owner (20 bytes) || stamp (8 bytes, big-endian))`
+starts with `openVaultStampBits` zero bits (`network.json` `open_vault.stamp_bits`, 20 by default:
+about a million hashes, a second or two in a browser). The backend checks it with one hash before
+anything else, and only a request whose stamp checks out takes a token of the open-vault rate limit;
+a missing or weak stamp is refused (`422 bad_stamp`). A request id opens at most one vault: while
+its opening runs, and once its vault is open, the same request id is refused (`409 nonce_used`); a
+failed opening releases it, so the owner can retry the same request. At most
+`open_vault.max_pending` vaults (512) wait for their deposit at once (`429 busy` beyond); a vault
+whose deposit has not been seen stops counting `open_vault.pending_slot_secs` (30 minutes) after it
+opened, and keeps accepting its deposit, as before, until its expiry height. Implementations:
+`signer/crates/base-client/src/stamp.rs` (backend, CLI) and `app/lib/stamp.ts` (same test vectors).
 
 ### 4.2 Demo control (header `x-admin-token`)
 

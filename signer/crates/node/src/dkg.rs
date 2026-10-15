@@ -384,7 +384,9 @@ mod tests {
             attest_delay_max_blocks: 0,
             payout_delay_max_blocks: 0,
             commit_depth_blocks: 3,
+            commit_depth_secs: 120,
             local_fork: true,
+            open_vault: Default::default(),
         }
     }
 
