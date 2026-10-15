@@ -26,7 +26,10 @@ use zecured_base::{
     gas_with_headroom,
     relay::anchor_above,
 };
-use zecured_deposit_witness::{p2p, witness};
+use zecured_deposit_witness::{
+    p2p,
+    witness::{self, Mode},
+};
 use zecured_zcash_ops::lwd;
 
 use crate::{LoanFile, NetworkParams};
@@ -35,7 +38,7 @@ pub struct Paths {
     pub host: PathBuf,
     pub headers: PathBuf,
     pub summaries: PathBuf,
-    /// Owner-only directory for the witness (it holds the viewing key) and the seal.
+    /// Owner-only directory for the witness (it holds the vault's tag key) and the seal.
     pub work: PathBuf,
 }
 
@@ -80,6 +83,11 @@ pub async fn make_seal(
 ) -> Result<SealFile> {
     let expiry_height = l.expiry_height.context("this loan file has no expiry height (opened before Tier 2)")?;
     ensure!(l.opened_signatures.len() == 5, "this loan file has no VaultOpened signatures (opened before C-4)");
+    // The deposit guest computes VaultOpened v2 (`tagKeyHash`); v1 signatures (`ufvkHash`) never match it.
+    ensure!(
+        l.tag_key_hash.is_some(),
+        "this loan's vault was opened under VaultOpened v1, which the deposit guest no longer proves"
+    );
     let txid = TxId::from_hex(txid).context("deposit txid")?;
     let mut client = lwd::connect(lwd_url).await?;
     let (_, height) = lwd::raw_transaction(&mut client, &txid).await?;
@@ -103,7 +111,9 @@ pub async fn make_seal(
         expiry_height,
         amount: l.amount,
     };
-    let built = witness::build(&mut client, &paths.headers, &paths.summaries, txid, &vault, anchor).await?;
+    let built =
+        witness::build(&mut client, &paths.headers, &paths.summaries, txid, &vault, Mode::Activate, None, anchor)
+            .await?;
     fs::create_dir_all(&paths.work)?;
     #[cfg(unix)]
     {

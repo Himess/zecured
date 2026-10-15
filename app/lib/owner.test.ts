@@ -20,7 +20,7 @@ import {
   requestRefund,
   submitDestination,
 } from "./owner";
-import { textHash, vaultOpenedMessage, VaultProofError } from "./signers";
+import { tagKeyHash, textHash, vaultOpenedMessage, VaultProofError } from "./signers";
 import { encodeUnifiedAddress, TYPECODE_ORCHARD, TYPECODE_SAPLING } from "./ua";
 
 const REGISTRY: Address = "0x1111111111111111111111111111111111111111";
@@ -45,7 +45,7 @@ async function vaultSignatures(loan: StoredLoan, address: string, keys: readonly
     amount: BigInt(loan.amount),
     expiryHeight: EXPIRY,
     address,
-    ufvkHash: textHash(ufvk),
+    tagKeyHash: tagKeyHash(ufvk),
   });
   const typedData = vaultOpenedTypedData(REGISTRY, message);
   return Promise.all(keys.map(async (k, i) => ({ index: i + 1, signature: await privateKeyToAccount(k).signTypedData(typedData) })));
@@ -60,7 +60,7 @@ async function opened(loan: StoredLoan, opts: { address?: string; signedAddress?
     zip321: `zcash:${address}?amount=0.01`,
     amount: loan.amount,
     expiryHeight: EXPIRY,
-    ufvkHash: textHash(UFVK),
+    tagKeyHash: tagKeyHash(UFVK),
     signatures: await vaultSignatures(loan, opts.signedAddress ?? address, opts.keys),
   };
 }
@@ -86,7 +86,7 @@ describe("openVault", () => {
     const answer = await opened(loan);
     const { api, bodies } = backend(() => answer);
     const res = await openVault(loan, { api, registry: REGISTRY, signers: SIGNERS, now: NOW });
-    expect(res).toMatchObject({ vaultId: VAULT, address: vaultUa, expiryHeight: EXPIRY, ufvkHash: textHash(UFVK), check: "pinned" });
+    expect(res).toMatchObject({ vaultId: VAULT, address: vaultUa, expiryHeight: EXPIRY, tagKeyHash: tagKeyHash(UFVK), check: "pinned" });
     expect(res.signatures).toHaveLength(5);
     const b = bodies[0]!;
     expect(b).toMatchObject({ owner: loan.owner, account: loan.account, amount: "1000000", requestId: loan.requestId, deadline: "1700000600" });
@@ -122,8 +122,10 @@ describe("openVault", () => {
       await opened(loan, { address: attacker, keys: Array.from({ length: 5 }, () => generatePrivateKey()) }),
       // Four of the five signers.
       { ...(await opened(loan)), signatures: (await opened(loan)).signatures.slice(1) },
-      // Another viewing key than the one they signed.
-      { ...(await opened(loan)), ufvkHash: textHash("uviewtest1attacker") },
+      // Another viewing key's tag key than the one they signed.
+      { ...(await opened(loan)), tagKeyHash: tagKeyHash("uviewtest1attacker") },
+      // VaultOpened v1's hash of the viewing key itself.
+      { ...(await opened(loan)), tagKeyHash: textHash(UFVK) },
     ];
     for (const answer of answers) {
       const { api } = backend(() => answer);
@@ -241,13 +243,13 @@ describe("the viewing key is the one the signers signed (C-4)", () => {
       vaultId: VAULT,
       vaultAddress: vaultUa,
       expiryHeight: EXPIRY,
-      ufvkHash: textHash(UFVK),
+      tagKeyHash: tagKeyHash(UFVK),
       vaultSignatures: await vaultSignatures(loan, vaultUa),
     };
   }
   const ctx = { registry: REGISTRY, signers: SIGNERS };
 
-  it("shows a key that hashes to the signed ufvkHash", async () => {
+  it("shows a key whose tag key hashes to the signed tagKeyHash", async () => {
     const loan = await signedLoan();
     const { api } = backend(() => ({ ufvk: UFVK }));
     expect(await fetchViewingKey(loan, VAULT, { api, ...ctx })).toEqual({ ufvk: UFVK, checked: true });
@@ -263,7 +265,7 @@ describe("the viewing key is the one the signers signed (C-4)", () => {
     const loan = await signedLoan();
     const { api, bodies } = backend(() => ({ ufvk: "uviewtest1attacker" }));
     // A record whose hash was swapped (say, in an imported backup) is refused before any request.
-    const tampered = { ...loan, ufvkHash: textHash("uviewtest1attacker") };
+    const tampered = { ...loan, tagKeyHash: tagKeyHash("uviewtest1attacker") };
     await expect(fetchViewingKey(tampered, VAULT, { api, ...ctx })).rejects.toBeInstanceOf(VaultProofError);
     await expect(fetchViewingKey(loan, `0x${"cd".repeat(32)}`, { api, ...ctx })).rejects.toThrow(/another vault/);
     expect(bodies).toHaveLength(0);

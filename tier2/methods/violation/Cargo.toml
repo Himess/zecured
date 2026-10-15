@@ -12,6 +12,11 @@ risc0-zkvm = { version = "=3.0.6", default-features = false, features = ["std"] 
 zecured-deposit-statement = { path = "../../statement" }
 bincode = "1"
 
+[features]
+# The network the guest proves on is a build parameter (design notes T-09): Testnet by default,
+# Mainnet with this feature (tier2/methods passes it when built with its own `mainnet`).
+mainnet = ["zecured-deposit-statement/mainnet"]
+
 [profile.release]
 lto = true
 

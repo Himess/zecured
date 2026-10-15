@@ -118,11 +118,14 @@ library ZecuredEIP712 {
         keccak256("PayoutConfirmation(bytes32 vaultId,bytes32 claimIdsHash)");
 
     /// @dev keccak256("VaultOpened(bytes32 vaultId,address owner,address account,uint64 amount,uint32 expiryHeight,
-    ///      bytes32 addressHash,bytes32 ufvkHash)") (one line, no spaces). Signed by all five signers when a vault's DKG
-    ///      completes (D20). The owner's app checks it off-chain; `attestDepositWithProof` checks it on-chain against the
-    ///      struct hash a deposit proof computed, so the address and viewing-key hashes never reach Base.
+    ///      bytes32 addressHash,bytes32 tagKeyHash)") (one line, no spaces). v2 (guest round, design notes T-09). Signed by
+    ///      all five signers when a vault's DKG completes (D20). The owner's app checks it off-chain;
+    ///      `attestDepositWithProof` checks it on-chain against the struct hash a deposit proof computed, so the address
+    ///      and tag-key hashes never reach Base. `tagKeyHash = keccak256(K)` of the vault's tag key
+    ///      K = BLAKE2b-256("Zecured_TagKey__", UFVK): the proof derives its deposit tag with the K it hashes here, so the
+    ///      signatures bind the tag to the vault and one note cannot land under two tags.
     bytes32 internal constant VAULT_OPENED_TYPEHASH = keccak256(
-        "VaultOpened(bytes32 vaultId,address owner,address account,uint64 amount,uint32 expiryHeight,bytes32 addressHash,bytes32 ufvkHash)"
+        "VaultOpened(bytes32 vaultId,address owner,address account,uint64 amount,uint32 expiryHeight,bytes32 addressHash,bytes32 tagKeyHash)"
     );
 
     /// @dev keccak256("VaultCancellation(bytes32 vaultId)"): signed by at least 3 signers before they refund the deposit
@@ -208,10 +211,10 @@ library ZecuredEIP712 {
         uint64 amount,
         uint32 expiryHeight,
         bytes32 addressHash,
-        bytes32 ufvkHash
+        bytes32 tagKeyHash
     ) internal pure returns (bytes32) {
         return keccak256(
-            abi.encode(VAULT_OPENED_TYPEHASH, vaultId, owner, account, amount, expiryHeight, addressHash, ufvkHash)
+            abi.encode(VAULT_OPENED_TYPEHASH, vaultId, owner, account, amount, expiryHeight, addressHash, tagKeyHash)
         );
     }
 

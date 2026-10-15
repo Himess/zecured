@@ -25,8 +25,14 @@ use anyhow::{Context, Result, ensure};
 use serde::Deserialize;
 use tracing::{debug, info, warn};
 use zcash_protocol::TxId;
-use zecured_base::events::{IZcashHeaderRelay, IZecuredRegistry};
-use zecured_deposit_witness::{p2p, witness};
+use zecured_base::{
+    events::{IZcashHeaderRelay, IZecuredRegistry},
+    journal::{MODE_ACTIVATE, decode_deposit_journal},
+};
+use zecured_deposit_witness::{
+    p2p,
+    witness::{self, Mode},
+};
 use zecured_zcash_ops::lwd;
 
 use crate::{Coordinator, RECEIPT_TIMEOUT, error::scrubbed, short, store::VaultStatus};
@@ -47,7 +53,7 @@ pub struct DepositProofs {
 
 pub(crate) struct Prover {
     settings: DepositProofs,
-    /// Witnesses (with viewing keys) while a job runs, and finished seals; owner-only.
+    /// Witnesses (with the vault's tag key) while a job runs, and finished seals; owner-only.
     dir: PathBuf,
     running: Arc<StdMutex<HashSet<B256>>>,
 }
@@ -124,6 +130,8 @@ impl Job {
             &self.settings.summaries,
             self.txid,
             &self.vault,
+            Mode::Activate,
+            None,
             self.anchor,
         )
         .await?;
@@ -143,7 +151,7 @@ impl Job {
             }
         })
         .await?;
-        // The witness holds the viewing key: gone as soon as the host is done with it.
+        // The witness holds the vault's tag key: gone as soon as the host is done with it.
         let _ = fs::remove_file(&self.witness_path);
         sealed?;
         fs::rename(&tmp, &self.seal_path)?;
@@ -236,7 +244,10 @@ impl Coordinator {
     }
 
     async fn submit_seal(&self, id: &B256, s: SealFile) -> Result<()> {
-        ensure!(s.journal.len() == 192 && s.journal[32..64] == id.0, "the proof is for another vault");
+        // Journal v2 (T-09); an activation, not a refund (those land through T-02's claim flow).
+        let journal = decode_deposit_journal(&s.journal)?;
+        ensure!(journal.vaultId == *id, "the proof is for another vault");
+        ensure!(journal.mode == MODE_ACTIVATE, "a refund proof does not activate a vault");
         let provider = ProviderBuilder::new()
             .wallet(EthereumWallet::from(self.gas.clone()))
             .connect_http(self.cfg.base_rpc_url.parse()?);

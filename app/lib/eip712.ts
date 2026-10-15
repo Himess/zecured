@@ -91,7 +91,7 @@ export const types = {
     { name: "amount", type: "uint64" },
     { name: "expiryHeight", type: "uint32" },
     { name: "addressHash", type: "bytes32" },
-    { name: "ufvkHash", type: "bytes32" },
+    { name: "tagKeyHash", type: "bytes32" },
   ],
 } as const;
 
@@ -148,8 +148,11 @@ export interface VaultOpenedMessage {
   expiryHeight: number;
   /** keccak256 of the vault address's UTF-8 bytes. */
   addressHash: Hex;
-  /** keccak256 of the vault UFVK's UTF-8 bytes. */
-  ufvkHash: Hex;
+  /**
+   * keccak256 of the vault's tag key K = BLAKE2b-256(personal "Zecured_TagKey__", UFVK string)
+   * (VaultOpened v2, lib/signers.ts `tagKeyHash`).
+   */
+  tagKeyHash: Hex;
 }
 
 // Typed-data builders (one per request kind, so every message is fully typed).

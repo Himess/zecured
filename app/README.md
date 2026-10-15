@@ -118,8 +118,8 @@ sponsored UserOp and follows the new Release claim until it is paid.
   resume an interrupted exit. The UFVK is shown once and never stored.
 - **The app checks the backend.** It shows a vault's address, as text or QR code, only once all
   five signers' `VaultOpened` signatures (INTERFACES § 2.5) verify against the signer set pinned
-  in the build (`NEXT_PUBLIC_SIGNERS`), and a viewing key only if it hashes to the `ufvkHash` they
-  signed (security review C-4; a development build without the pin falls back to the backend's set
+  in the build (`NEXT_PUBLIC_SIGNERS`), and a viewing key only if its tag key hashes to the
+  `tagKeyHash` they signed (VaultOpened v2; security review C-4; a development build without the pin falls back to the backend's set
   and says so, a production build refuses). It decodes the vault address itself and refuses to show a QR
   code unless it is an Ironwood-only testnet UA (one Orchard-protocol receiver, D4); it builds
   the ZIP 321 URI itself (no label, message or memo); it computes every commitment itself and

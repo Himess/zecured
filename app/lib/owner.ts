@@ -9,7 +9,7 @@ import type { Address, Hex } from "viem";
 import { api as defaultApi, type Api, type OpenVaultResult } from "./api";
 import { prepareDestination, decodeUnifiedAddress, isIronwoodOnly } from "./commitment";
 import { config as appConfig, type AppConfig } from "./config";
-import { signerSet, storedVault, textHash, verifyVaultOpened, VaultProofError, type VaultCheck } from "./signers";
+import { signerSet, storedVault, tagKeyHash, verifyVaultOpened, VaultProofError, type VaultCheck } from "./signers";
 import {
   deadlineIn,
   destinationTypedData,
@@ -93,7 +93,7 @@ export interface OpenedVault extends OpenVaultResult {
 
 /**
  * POST /vaults with a fresh OpenVault signature. Throws `VaultProofError` unless all five
- * signers signed `VaultOpened` for the returned address and viewing key and for this request:
+ * signers signed `VaultOpened` for the returned address and tag key and for this request:
  * nothing it returns may be shown or stored as payable before that.
  */
 export async function openVault(loan: StoredLoan, ctx: OwnerContext = {}): Promise<OpenedVault> {
@@ -116,7 +116,7 @@ export async function openVault(loan: StoredLoan, ctx: OwnerContext = {}): Promi
       amount,
       expiryHeight: res.expiryHeight,
       address: res.address,
-      ufvkHash: res.ufvkHash,
+      tagKeyHash: res.tagKeyHash,
     },
     res.signatures,
     { config: c, registry, signers: ctx.signers },
@@ -175,8 +175,9 @@ export async function requestRefund(
 export interface ViewingKey {
   ufvk: string;
   /**
-   * It hashes to the `ufvkHash` all five signers signed when the vault opened. False only for
-   * a loan opened before vaults were signed: nothing to check it against.
+   * Its tag key hashes to the `tagKeyHash` all five signers signed when the vault opened. False
+   * only for a loan opened before vaults were signed (or under `VaultOpened` v1): nothing this
+   * build can check it against.
    */
   checked: boolean;
 }
@@ -205,7 +206,7 @@ export async function fetchViewingKey(loan: StoredLoan, vaultId: Hex, ctx: Owner
   const signature = await signWithOwnerKey(loan.ownerKey, viewKeyRequestTypedData(registry, { vaultId, nonce, deadline }));
   const ufvk = await a.postViewingKey(vaultId, { nonce, deadline, signature });
   if (!stored) return { ufvk, checked: false };
-  if (textHash(ufvk) !== stored.fields.ufvkHash.toLowerCase()) {
+  if (tagKeyHash(ufvk) !== stored.fields.tagKeyHash.toLowerCase()) {
     throw new VaultProofError(
       "The backend returned a viewing key that the signers did not sign for this vault. It is not shown: do not trust it.",
     );

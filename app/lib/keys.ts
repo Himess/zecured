@@ -49,10 +49,11 @@ export interface StoredLoan {
   vaultAddress?: string;
   expiryHeight?: number;
   /**
-   * keccak256 of the vault's UFVK, as all five signers signed it when the vault opened
-   * (VaultOpened, security review C-4). Absent for loans opened before that check.
+   * keccak256 of the vault's tag key (derived from its UFVK), as all five signers signed it when
+   * the vault opened (VaultOpened v2, security review C-4). Absent for loans opened before that
+   * check, and for loans opened under VaultOpened v1 (whose `ufvkHash` is not kept).
    */
-  ufvkHash?: Hex;
+  tagKeyHash?: Hex;
   /** The signers' VaultOpened signatures, checked when the vault opened and again before use. */
   vaultSignatures?: VaultSignature[];
   /** The user confirmed they exported the key. */
@@ -121,7 +122,7 @@ export function parseLoan(raw: unknown): StoredLoan {
   if (isBytes32(r.vaultId)) loan.vaultId = r.vaultId.toLowerCase() as Hex;
   if (typeof r.vaultAddress === "string") loan.vaultAddress = r.vaultAddress;
   if (typeof r.expiryHeight === "number" && Number.isInteger(r.expiryHeight)) loan.expiryHeight = r.expiryHeight;
-  if (isBytes32(r.ufvkHash)) loan.ufvkHash = r.ufvkHash.toLowerCase() as Hex;
+  if (isBytes32(r.tagKeyHash)) loan.tagKeyHash = r.tagKeyHash.toLowerCase() as Hex;
   // Kept as stored; whether they vouch for the vault is checked before every use (lib/signers.ts).
   if (Array.isArray(r.vaultSignatures)) {
     const signatures = r.vaultSignatures.filter(

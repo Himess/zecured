@@ -3,25 +3,42 @@
  *
  * At the end of the DKG every signer node signs `VaultOpened` (docs/INTERFACES.md § 2.5) with
  * its attestation key: the vault id, the owner's request (owner, account, amount), the deposit
- * expiry height, and the hashes of the vault's address and viewing key as that node derived
- * them. The backend only relays the signatures, so it cannot hand out an address of its own (nor,
+ * expiry height, the hash of the vault's address and the hash of the vault's tag key K, derived
+ * from the viewing key, as that node derived them (v2: K binds every deposit proof to the vault).
+ * The backend only relays the signatures, so it cannot hand out an address of its own (nor,
  * later, a viewing key to match it). The app shows a vault's address, as text or as a QR code,
  * only once all five signatures verify against the signer set pinned in this build
- * (`NEXT_PUBLIC_SIGNERS`, never a set the backend reports), and shows a viewing key only if it
- * hashes to the `ufvkHash` they signed.
+ * (`NEXT_PUBLIC_SIGNERS`, never a set the backend reports), and shows a viewing key only if its
+ * tag key hashes to the `tagKeyHash` they signed.
  *
  * A development build without `NEXT_PUBLIC_SIGNERS` falls back to the signer set the backend
  * reports (or, without one, to no check at all) and says so; a production build refuses.
  */
+import { blake2b } from "@noble/hashes/blake2.js";
 import { isAddressEqual, keccak256, recoverTypedDataAddress, stringToBytes, type Address, type Hex } from "viem";
 import type { VaultSignature } from "./api";
 import { config as appConfig, SIGNER_COUNT, type AppConfig } from "./config";
 import { vaultOpenedTypedData, type VaultOpenedMessage } from "./eip712";
 import type { StoredLoan } from "./keys";
 
-/** keccak256 of a string's UTF-8 bytes (`VaultOpened.addressHash`, `.ufvkHash`); never read as hex. */
+/** keccak256 of a string's UTF-8 bytes (`VaultOpened.addressHash`); never read as hex. */
 export function textHash(text: string): Hex {
   return keccak256(stringToBytes(text));
+}
+
+const TAG_KEY_PERSONALIZATION = stringToBytes("Zecured_TagKey__");
+
+/**
+ * The vault's tag key `K = BLAKE2b-256(personal "Zecured_TagKey__", UFVK string)` (D24): every
+ * reference Base sees about the vault's notes and payouts is a PRF under it.
+ */
+export function tagKey(ufvk: string): Uint8Array {
+  return blake2b(stringToBytes(ufvk), { dkLen: 32, personalization: TAG_KEY_PERSONALIZATION });
+}
+
+/** `VaultOpened.tagKeyHash`: keccak256 of the 32 bytes of the tag key of a UFVK string. */
+export function tagKeyHash(ufvk: string): Hex {
+  return keccak256(tagKey(ufvk));
 }
 
 /** What the signers sign about a vault, with the address itself rather than its hash. */
@@ -34,7 +51,8 @@ export interface VaultOpenedFields {
   expiryHeight: number;
   /** The vault's unified address, exactly as the backend returned it. */
   address: string;
-  ufvkHash: Hex;
+  /** keccak256 of the vault's tag key (`tagKeyHash`), as the signers signed it. */
+  tagKeyHash: Hex;
 }
 
 export function vaultOpenedMessage(f: VaultOpenedFields): VaultOpenedMessage {
@@ -45,7 +63,7 @@ export function vaultOpenedMessage(f: VaultOpenedFields): VaultOpenedMessage {
     amount: f.amount,
     expiryHeight: f.expiryHeight,
     addressHash: textHash(f.address),
-    ufvkHash: f.ufvkHash,
+    tagKeyHash: f.tagKeyHash,
   };
 }
 
@@ -110,7 +128,7 @@ export async function checkSignatures(
     }
     if (!signers.some((a) => isAddressEqual(a, signer))) {
       throw new VaultProofError(
-        `Signer ${s.index}'s signature is not from the signer set pinned in this build, or not for this vault's address, viewing key, request and deadline. ${DO_NOT_PAY}`,
+        `Signer ${s.index}'s signature is not from the signer set pinned in this build, or not for this vault's address, tag key, request and expiry height. ${DO_NOT_PAY}`,
       );
     }
     if (seen.some((a) => isAddressEqual(a, signer))) {
@@ -153,11 +171,12 @@ export async function verifyVaultOpened(
 
 /**
  * What a loan stored about its vault when it opened: the signed fields and the signatures.
- * Null when it has no vault, or for a loan opened before the signers signed vaults.
+ * Null when it has no vault, or for a loan opened before the signers signed vaults or under
+ * `VaultOpened` v1 (which signed the hash of the viewing key itself, not of its tag key).
  */
 export function storedVault(loan: StoredLoan): { fields: VaultOpenedFields; signatures: VaultSignature[] } | null {
-  const { vaultId, vaultAddress, expiryHeight, ufvkHash, vaultSignatures } = loan;
-  if (!vaultId || !vaultAddress || expiryHeight === undefined || !ufvkHash || !vaultSignatures) return null;
+  const { vaultId, vaultAddress, expiryHeight, tagKeyHash: signedTagKeyHash, vaultSignatures } = loan;
+  if (!vaultId || !vaultAddress || expiryHeight === undefined || !signedTagKeyHash || !vaultSignatures) return null;
   return {
     fields: {
       vaultId,
@@ -166,7 +185,7 @@ export function storedVault(loan: StoredLoan): { fields: VaultOpenedFields; sign
       amount: BigInt(loan.amount),
       expiryHeight,
       address: vaultAddress,
-      ufvkHash,
+      tagKeyHash: signedTagKeyHash,
     },
     signatures: vaultSignatures,
   };
