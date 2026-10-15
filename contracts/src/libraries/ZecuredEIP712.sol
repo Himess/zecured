@@ -99,7 +99,11 @@ library ZecuredEIP712 {
     string internal constant REGISTRY_DOMAIN_NAME = "ZecuredRegistry";
     /// @notice Domain name of SettlementAdapter: CloseRequest and DeleverageRequest.
     string internal constant ADAPTER_DOMAIN_NAME = "ZecuredSettlementAdapter";
-    /// @notice Domain version of both domains.
+    /// @notice Domain name of ZecuredIntake (v3): PauseMinting, UnpauseMinting.
+    string internal constant INTAKE_DOMAIN_NAME = "ZecuredIntake";
+    /// @notice Domain name of ZecuredVersions (v3): ScheduleVersion, RemoveVersion, ScheduleAdapter, RemoveAdapter.
+    string internal constant VERSIONS_DOMAIN_NAME = "ZecuredVersions";
+    /// @notice Domain version of every domain.
     string internal constant DOMAIN_VERSION = "1";
 
     // ------------------------------------------------------------------ verified on-chain
@@ -143,6 +147,37 @@ library ZecuredEIP712 {
     bytes32 internal constant SPEND_COMMIT_TYPEHASH = keccak256(
         "SpendCommit(bytes32 vaultId,bytes32 inputTag,bytes32[] claimIds,bytes32[] claimRefs,uint8[] claimOutputs,bytes32 payoutRef,bytes32 changeTag,uint64 changeValue)"
     );
+
+    // ------------------------------------------------------------------ v3 (design notes T-03, T-05, T-07)
+
+    /// @dev Registry domain (T-05): three signers point a claim the bonds paid at the destination that reimburses them.
+    bytes32 internal constant REIMBURSE_DESTINATION_TYPEHASH =
+        keccak256("ReimburseDestination(bytes32 claimId,bytes32 commitment,uint64 deadline)");
+
+    /// @dev Intake domain (T-03): three signers pause new minting until `until` (at most 30 days ahead).
+    bytes32 internal constant PAUSE_MINTING_TYPEHASH =
+        keccak256("PauseMinting(uint64 until,uint256 nonce,uint64 deadline)");
+
+    /// @dev Intake domain (T-03): three signers lift the pause.
+    bytes32 internal constant UNPAUSE_MINTING_TYPEHASH = keccak256("UnpauseMinting(uint256 nonce,uint64 deadline)");
+
+    /// @dev Versions domain (T-07a): all five signers schedule a verifier version. `branches` is encoded as EIP-712
+    ///      encodes a fixed array: the keccak256 of its four 32-byte words.
+    bytes32 internal constant SCHEDULE_VERSION_TYPEHASH = keccak256(
+        "ScheduleVersion(uint8 kind,bytes4 selector,bytes32 imageId,uint32[4] branches,uint256 nonce,uint64 deadline)"
+    );
+
+    /// @dev Versions domain (T-07a): three signers remove a verifier version.
+    bytes32 internal constant REMOVE_VERSION_TYPEHASH =
+        keccak256("RemoveVersion(bytes32 versionId,uint256 nonce,uint64 deadline)");
+
+    /// @dev Versions domain (T-07b): all five signers schedule a SettlementAdapter.
+    bytes32 internal constant SCHEDULE_ADAPTER_TYPEHASH =
+        keccak256("ScheduleAdapter(address adapter,uint256 nonce,uint64 deadline)");
+
+    /// @dev Versions domain (T-07b): three signers remove a SettlementAdapter.
+    bytes32 internal constant REMOVE_ADAPTER_TYPEHASH =
+        keccak256("RemoveAdapter(address adapter,uint256 nonce,uint64 deadline)");
 
     // ------------------------------------------------------------------ verified off-chain (Registry domain)
     // Signed by the per-loan owner EOA and verified by every signer node (§ 2.3). Not used by the contracts; pinned here
@@ -228,6 +263,66 @@ library ZecuredEIP712 {
                 req.deadline
             )
         );
+    }
+
+    /// @notice EIP-712 struct hash of a ReimburseDestination (T-05).
+    function hashReimburseDestination(bytes32 claimId, bytes32 commitment, uint64 deadline)
+        internal
+        pure
+        returns (bytes32)
+    {
+        return keccak256(abi.encode(REIMBURSE_DESTINATION_TYPEHASH, claimId, commitment, deadline));
+    }
+
+    /// @notice EIP-712 struct hash of a PauseMinting (T-03).
+    function hashPauseMinting(uint64 until, uint256 nonce, uint64 deadline) internal pure returns (bytes32) {
+        return keccak256(abi.encode(PAUSE_MINTING_TYPEHASH, until, nonce, deadline));
+    }
+
+    /// @notice EIP-712 struct hash of an UnpauseMinting (T-03).
+    function hashUnpauseMinting(uint256 nonce, uint64 deadline) internal pure returns (bytes32) {
+        return keccak256(abi.encode(UNPAUSE_MINTING_TYPEHASH, nonce, deadline));
+    }
+
+    /// @notice EIP-712 struct hash of a ScheduleVersion (T-07a).
+    function hashScheduleVersion(
+        uint8 kind,
+        bytes4 selector,
+        bytes32 imageId,
+        uint32[4] memory branches,
+        uint256 nonce,
+        uint64 deadline
+    ) internal pure returns (bytes32) {
+        return keccak256(
+            abi.encode(
+                SCHEDULE_VERSION_TYPEHASH,
+                kind,
+                selector,
+                imageId,
+                keccak256(
+                    abi.encodePacked(
+                        uint256(branches[0]), uint256(branches[1]), uint256(branches[2]), uint256(branches[3])
+                    )
+                ),
+                nonce,
+                deadline
+            )
+        );
+    }
+
+    /// @notice EIP-712 struct hash of a RemoveVersion (T-07a).
+    function hashRemoveVersion(bytes32 versionId, uint256 nonce, uint64 deadline) internal pure returns (bytes32) {
+        return keccak256(abi.encode(REMOVE_VERSION_TYPEHASH, versionId, nonce, deadline));
+    }
+
+    /// @notice EIP-712 struct hash of a ScheduleAdapter (T-07b).
+    function hashScheduleAdapter(address adapter, uint256 nonce, uint64 deadline) internal pure returns (bytes32) {
+        return keccak256(abi.encode(SCHEDULE_ADAPTER_TYPEHASH, adapter, nonce, deadline));
+    }
+
+    /// @notice EIP-712 struct hash of a RemoveAdapter (T-07b).
+    function hashRemoveAdapter(address adapter, uint256 nonce, uint64 deadline) internal pure returns (bytes32) {
+        return keccak256(abi.encode(REMOVE_ADAPTER_TYPEHASH, adapter, nonce, deadline));
     }
 
     /// @notice EIP-712 struct hash of a CloseRequest.
