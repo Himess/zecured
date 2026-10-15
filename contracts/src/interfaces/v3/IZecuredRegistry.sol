@@ -3,6 +3,7 @@ pragma solidity 0.8.28;
 
 import {IMorpho, MarketParams, Id} from "morpho-blue/src/interfaces/IMorpho.sol";
 import {IZZEC} from "../IZZEC.sol";
+import {IZecuredSignerErrors} from "./IZecuredSignerErrors.sol";
 
 /// @notice Vault status on Base. Values are append-only (off-chain code reads them as numbers).
 /// - `None`: unknown to Base.
@@ -82,6 +83,8 @@ struct VaultDetails {
 /// @notice Constructor arguments of ZecuredRegistry v3 (a struct: too many for the stack).
 /// @param zzec Already deployed with `registry = address(this)` and `adapter = adapter` (predicted CREATE addresses).
 /// @param signers The five signer addresses, strictly increasing.
+/// @param spendLogic ZecuredSpendLogic, deployed first with this Registry's (predicted) address: `commitSpend` runs its
+///        code by delegatecall, on this Registry's storage (T-11: the Registry alone would exceed EIP-170).
 /// @param intake ZecuredIntake: the only caller of the deposit hooks (reserve, release, activate, refunds).
 /// @param signerBond SignerBond v2: the only caller of `markBondPaid` (T-05). Zero on deployments without bonds.
 /// @param slasher ZecuredSlasher: exits refuse a vault it reports frozen (T-04). Zero on deployments without bonds.
@@ -102,6 +105,7 @@ struct RegistryConfig {
     address irm;
     uint256 lltv;
     address[5] signers;
+    address spendLogic;
     address intake;
     address signerBond;
     address slasher;
@@ -126,7 +130,7 @@ struct RegistryConfig {
 ///      - exits refuse a vault the slasher reports frozen; the compensator retires a compromised vault (T-04);
 ///      - the bonds can pay an overdue claim, which three signers then point at a Reimburse destination (T-05);
 ///      - an optional opening fee, owed to the signers' treasury as a Fee claim (T-06).
-interface IZecuredRegistry {
+interface IZecuredRegistry is IZecuredSignerErrors {
     // ------------------------------------------------------------------ events
 
     /// @notice K2-a: `depositTag` names the note that backs the vault (the head of its lineage).
@@ -171,11 +175,9 @@ interface IZecuredRegistry {
 
     error ZeroAddress();
     error ZZECMisconfigured();
-    error InvalidSignerSet();
     error InvalidFeeConfig();
-    error InsufficientSignatures(uint256 provided);
-    error UnknownSigner(address recovered);
-    error SignaturesNotSorted(uint256 index);
+    /// @notice The spend logic was built for another Registry or signer set.
+    error SpendLogicMismatch();
     error SignatureExpired(uint64 deadline);
     error ZeroVaultId();
     error ZeroAccount();
@@ -253,7 +255,7 @@ interface IZecuredRegistry {
     ///         compromised.
     function confirmPayout(bytes32 vaultId, bytes32[] calldata claimIds, bytes[] calldata sigs) external;
 
-    /// @notice RT-8: as in v2.
+    /// @notice RT-8: as in v2; not on a compromised vault (the compensator settles its claims).
     function writeOffDust(bytes32 claimId) external;
 
     // ------------------------------------------------------------------ T-02: refunds
@@ -265,7 +267,8 @@ interface IZecuredRegistry {
 
     /// @notice Anyone. Writes off a Refund claim without a destination once `refundAbandonPeriod` has passed since it
     ///         was created, so that it no longer keeps the vault (and every bond) open. The note stays a lineage note:
-    ///         spending it without a commitment is still F1.
+    ///         spending it without a commitment is still F1. Not on a compromised vault (the compensator settles its
+    ///         claims).
     function abandonRefund(bytes32 claimId) external;
 
     // ------------------------------------------------------------------ T-05: claims the bonds paid
@@ -293,7 +296,10 @@ interface IZecuredRegistry {
 
     /// @notice T-02: a proven deposit that cannot activate the vault (or a Refund-mode proof): makes the note a lineage
     ///         note and creates a Refund claim of `amount` for the vault's account, without a destination. A `None`
-    ///         vault becomes `Cancelled` with this account; an existing vault must have this account.
+    ///         vault becomes `Cancelled` with this account; an existing vault must have this account and must not be
+    ///         compromised (`VaultCompromised`: its claims are the compensator's, and an unpayable late refund would
+    ///         keep it open for good). `convertToRefund` has no such rule: the compensator needs a compromised pending
+    ///         activation converted before it can tally the vault.
     function openRefund(bytes32 vaultId, address account, uint64 amount, bytes32 depositTag)
         external
         returns (bytes32 claimId);
@@ -342,6 +348,7 @@ interface IZecuredRegistry {
     function zzec() external view returns (IZZEC);
     function adapter() external view returns (address);
     function intake() external view returns (address);
+    function spendLogic() external view returns (address);
     function compensator() external view returns (address);
     function slasher() external view returns (address);
     function marketId() external view returns (Id);

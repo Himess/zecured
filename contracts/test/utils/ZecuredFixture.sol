@@ -2,21 +2,32 @@
 pragma solidity 0.8.28;
 
 import {Test} from "forge-std/Test.sol";
+import {MessageHashUtils} from "@openzeppelin/contracts/utils/cryptography/MessageHashUtils.sol";
 import {IMorpho, MarketParams, Id, Position} from "morpho-blue/src/interfaces/IMorpho.sol";
 import {MarketParamsLib} from "morpho-blue/src/libraries/MarketParamsLib.sol";
 import {MorphoBalancesLib} from "morpho-blue/src/libraries/periphery/MorphoBalancesLib.sol";
 import {MockUSDC} from "../../src/mocks/MockUSDC.sol";
 import {MockZecOracle} from "../../src/mocks/MockZecOracle.sol";
+import {MockRiscZeroVerifier} from "../../src/mocks/MockRiscZeroVerifier.sol";
 import {ZZEC} from "../../src/ZZEC.sol";
 import {ZecuredRegistry} from "../../src/ZecuredRegistry.sol";
-import {ISignerBond} from "../../src/interfaces/ISignerBond.sol";
+import {ZecuredSpendLogic} from "../../src/registry/ZecuredSpendLogic.sol";
 import {SettlementAdapter} from "../../src/SettlementAdapter.sol";
-import {DepositAttestation, CloseRequest, SpendCommit} from "../../src/libraries/ZecuredEIP712.sol";
-import {VaultStatus, ClaimKind, ClaimStatus, DepositProofConfig} from "../../src/interfaces/IZecuredRegistry.sol";
+import {SignerBond} from "../../src/SignerBond.sol";
+import {ZecuredSlasher} from "../../src/ZecuredSlasher.sol";
+import {CloseRequest, SpendCommit} from "../../src/libraries/ZecuredEIP712.sol";
+import {VaultStatus, ClaimKind, ClaimStatus, RegistryConfig} from "../../src/interfaces/v3/IZecuredRegistry.sol";
+import {IntakeConfig, WorkTier} from "../../src/interfaces/v3/IZecuredIntake.sol";
+import {IRiscZeroVerifier} from "../../src/interfaces/IRiscZeroVerifier.sol";
+import {IZcashHeaderRelay} from "../../src/relay/IZcashHeaderRelay.sol";
+import {MockHeaderRelay} from "../mocks/MockHeaderRelay.sol";
+import {IntakeHarness} from "./IntakeHarness.sol";
 
 /// @notice Shared fixture of the fork tests: a fork of Base Sepolia with the REAL Morpho Blue and AdaptiveCurveIRM, plus
-///         freshly deployed MockUSDC + MockZecOracle (MOCK) and the production ZZEC / ZecuredRegistry /
-///         SettlementAdapter, wired exactly like script/DeployZecured.s.sol does it (predicted CREATE addresses).
+///         freshly deployed MockUSDC + MockZecOracle (MOCK) and the production v3 contracts (ZZEC, ZecuredSpendLogic,
+///         ZecuredRegistry, SettlementAdapter, the Intake, and with `_bonded()` a SignerBond and the ZecuredSlasher),
+///         wired like script/DeployZecured.s.sol (predicted CREATE addresses). The Intake is `IntakeHarness`: the
+///         production contract plus TEST-ONLY shortcuts that activate a vault without a proof (`_attest`).
 /// @dev RPC: $BASE_SEPOLIA_RPC_URL, or https://sepolia.base.org when unset. Block: $ZECURED_FORK_BLOCK, default
 ///      47,948,000 (pinned so that Foundry caches the fork state on disk); 0 = latest.
 abstract contract ZecuredFixture is Test {
@@ -28,8 +39,6 @@ abstract contract ZecuredFixture is Test {
     IMorpho internal constant MORPHO = IMorpho(0xBBBBBbbBBb9cC5e90e3b3Af64bdAF62C37EEFFCb);
     address internal constant ADAPTIVE_CURVE_IRM = 0x46415998764C29aB2a25CbeA6254146D50D22687;
     uint256 internal constant LLTV = 0.625e18;
-    /// @dev Tier 3 bonds disabled (the Tier 3 tests deploy a SignerBond of their own).
-    ISignerBond internal constant NO_BOND = ISignerBond(address(0));
     uint256 internal constant BASE_SEPOLIA_CHAIN_ID = 84532;
     string internal constant DEFAULT_RPC_URL = "https://sepolia.base.org";
     uint256 internal constant DEFAULT_FORK_BLOCK = 47_948_000;
@@ -49,13 +58,67 @@ abstract contract ZecuredFixture is Test {
     bytes32 internal constant LIQUIDATOR_COMMITMENT = keccak256("zecured.test.commitment.liquidator");
     bytes32 internal constant RELEASE_COMMITMENT = keccak256("zecured.test.commitment.release");
 
+    // ------------------------------------------------------------------ deposit proofs and Tier 3 (defaults)
+
+    bytes32 internal constant DEFAULT_DEPOSIT_IMAGE = keccak256("zecured.test.depositImage");
+    bytes32 internal constant VIOLATION_IMAGE = keccak256("tier3.violationImage");
+    /// docs/TIER3.md § 4 / D26: the deposit-proof parameters of the deployments.
+    uint256 internal constant MIN_WORK = 3_500_000;
+    uint64 internal constant FINALIZE_DEPTH = 6;
+    uint64 internal constant FINALIZE_DELAY = 150;
+    /// docs/TIER3.md § 8: >= 100 normal Testnet blocks of work (~3.8e7), i.e. ~380,000 per block.
+    uint256 internal constant SLASH_WORK = 38_000_000;
+    uint256 internal constant WORK_PER_BLOCK = 380_000;
+    uint64 internal constant WINDOW = 1 days;
+    uint64 internal constant MAX_PAUSE = 30 days;
+    uint64 internal constant PENDING_REFUND_DELAY = 1 days;
+    uint64 internal constant MIN_REFUND = 20_000;
+    uint64 internal constant ABANDON_PERIOD = 30 days;
+
+    /// @notice The Intake's deposit-proof setup (`_proofSetup`).
+    struct ProofSetup {
+        address relay;
+        address verifier;
+        bytes32 imageId;
+        bytes4 sealSelector;
+        uint256 minWork;
+        uint64 finalizeDepth;
+        uint64 finalizeDelay;
+    }
+
+    /// @notice T-01 knobs of the Intake (`_capSetup`); all zero: no coverage cap.
+    struct CapSetup {
+        uint16 coverageBps;
+        uint64 maxTotalZat;
+        uint64 capPriceMaxAge;
+        address capOracle;
+    }
+
+    /// @notice T-06 knobs of the Registry (`_feeSetup`); all zero: no opening fee.
+    struct FeeSetup {
+        uint16 feeBps;
+        uint64 minFeeZat;
+        bytes32 feeCommitment;
+    }
+
     // ------------------------------------------------------------------ system
 
     MockUSDC internal usdc;
     MockZecOracle internal oracle;
     ZZEC internal zzec;
+    ZecuredSpendLogic internal spendLogic;
     ZecuredRegistry internal registry;
     SettlementAdapter internal adapter;
+    IntakeHarness internal intake;
+    /// With `_bonded()` only.
+    SignerBond internal bond;
+    ZecuredSlasher internal slasher;
+    /// The Intake's relay and verifier (MOCKs unless a suite's `_proofSetup` says otherwise).
+    IZcashHeaderRelay internal headerRelay;
+    IRiscZeroVerifier internal proofVerifier;
+    ProofSetup internal proofs;
+    /// The compensator the Registry names (`_compensator`).
+    address internal compensatorAddress;
     MarketParams internal params;
     Id internal marketId;
 
@@ -101,44 +164,90 @@ abstract contract ZecuredFixture is Test {
         }
     }
 
-    /// Tier 2 configuration of the Registry under test: deposit proofs disabled unless a suite overrides this (it may
-    /// deploy contracts; it runs before the ZZEC / Registry / Adapter addresses are predicted).
-    function _depositProofConfig() internal virtual returns (DepositProofConfig memory) {}
-
-    /// The Registry's bond contract: none by default; Tier 3 tests override it.
-    function _signerBond() internal virtual returns (ISignerBond) {
-        return NO_BOND;
+    /// The Intake's deposit proofs: a MOCK relay and the MOCK verifier unless a suite overrides this (it may deploy
+    /// contracts; it runs before the addresses are predicted).
+    function _proofSetup() internal virtual returns (ProofSetup memory) {
+        MockHeaderRelay mock = new MockHeaderRelay();
+        MockRiscZeroVerifier mockVerifier = new MockRiscZeroVerifier();
+        return ProofSetup({
+            relay: address(mock),
+            verifier: address(mockVerifier),
+            imageId: DEFAULT_DEPOSIT_IMAGE,
+            sealSelector: mockVerifier.SELECTOR(),
+            minWork: MIN_WORK,
+            finalizeDepth: FINALIZE_DEPTH,
+            finalizeDelay: FINALIZE_DELAY
+        });
     }
 
-    /// Deposit proofs disabled (all zero).
-    function _noProofs() internal pure returns (DepositProofConfig memory none) {}
+    /// Tier 3: deploy a SignerBond and the ZecuredSlasher with the system (Tier3Base and some suites).
+    function _bonded() internal virtual returns (bool) {
+        return false;
+    }
 
-    /// Same ordering as script/DeployZecured.s.sol: ZZEC, Registry, Adapter at the deployer's next three nonces.
+    /// The slasher's violation guest image id (a suite with real violation seals overrides it).
+    function _violationImageId() internal virtual returns (bytes32) {
+        return VIOLATION_IMAGE;
+    }
+
+    /// A MOCK named as both the bond and the slasher instead of deploying them (suites that drive their views by hand).
+    function _mockBondAndSlasher() internal virtual returns (address) {}
+
+    /// T-01: the coverage cap (off unless a suite turns it on).
+    function _capSetup() internal virtual returns (CapSetup memory) {}
+
+    /// T-06: the opening fee (none unless a suite sets one).
+    function _feeSetup() internal virtual returns (FeeSetup memory) {}
+
+    /// T-04: the compensator the Registry names (none unless a suite names one).
+    function _compensator() internal virtual returns (address) {}
+
+    /// T-08: the deposit-proof work tiers (one tier for every amount unless a suite sets more).
+    function _workTiers() internal view virtual returns (WorkTier[] memory tiers) {
+        tiers = new WorkTier[](1);
+        tiers[0] = WorkTier({maxAmountZat: type(uint64).max, minWork: proofs.minWork});
+    }
+
+    /// T-09: whether the Intake reads journal v2, and the branch ids it allows (v1 unless a suite says otherwise).
+    function _journalV2() internal view virtual returns (bool v2, uint32[4] memory branchIds) {}
+
+    /// T-03: whether an open F1/F2 case pauses minting (off unless a suite turns it on).
+    function _autoPauseOnCase() internal view virtual returns (bool) {}
+
+    /// The addresses the system's contracts will have (they name each other as immutables).
+    struct Predicted {
+        address registry;
+        address adapter;
+        address intake;
+        address bond;
+        address slasher;
+    }
+
+    /// Same ordering as script/DeployZecured.s.sol: ZZEC, the spend logic, the Registry, the Adapter, the Intake, and
+    /// (bonded) the SignerBond and the slasher, at the deployer's next nonces.
     function _deploySystem() internal {
         usdc = new MockUSDC(address(this));
         oracle = new MockZecOracle(address(this), PRICE_40);
-        DepositProofConfig memory proofs = _depositProofConfig();
-        ISignerBond bond = _signerBond();
+        proofs = _proofSetup();
+        headerRelay = IZcashHeaderRelay(proofs.relay);
+        proofVerifier = IRiscZeroVerifier(proofs.verifier);
+        CapSetup memory cap = _capSetup();
+        FeeSetup memory fee = _feeSetup();
+        bool bonded = _bonded();
+        address mockBond = _mockBondAndSlasher();
+        bytes32 violationImage = _violationImageId();
+        compensatorAddress = _compensator();
 
-        uint64 nonce = vm.getNonce(address(this));
-        address predictedRegistry = vm.computeCreateAddress(address(this), nonce + 1);
-        address predictedAdapter = vm.computeCreateAddress(address(this), nonce + 2);
-        zzec = new ZZEC(predictedRegistry, predictedAdapter, address(MORPHO));
-        registry = new ZecuredRegistry(
-            MORPHO,
-            zzec,
-            predictedAdapter,
-            address(usdc),
-            address(oracle),
-            ADAPTIVE_CURVE_IRM,
-            LLTV,
-            signerSet,
-            proofs,
-            bond
-        );
-        adapter = new SettlementAdapter(registry);
-        assertEq(address(registry), predictedRegistry, "registry address prediction");
-        assertEq(address(adapter), predictedAdapter, "adapter address prediction");
+        Predicted memory p = _predict(bonded, mockBond);
+        zzec = new ZZEC(p.registry, p.adapter, address(MORPHO));
+        spendLogic = new ZecuredSpendLogic(p.registry, signerSet);
+        registry = new ZecuredRegistry(_registryConfig(p, fee));
+        adapter = new SettlementAdapter(registry, MIN_SEIZE, 0, 500);
+        intake = new IntakeHarness(_intakeConfig(p.bond, p.slasher, cap));
+        if (bonded) _deployBondAndSlasher(p, violationImage);
+        assertEq(address(registry), p.registry, "registry address prediction");
+        assertEq(address(adapter), p.adapter, "adapter address prediction");
+        assertEq(address(intake), p.intake, "intake address prediction");
 
         params = registry.marketParams();
         marketId = params.id();
@@ -150,9 +259,89 @@ abstract contract ZecuredFixture is Test {
         vm.label(address(zzec), "zZEC");
         vm.label(address(registry), "ZecuredRegistry");
         vm.label(address(adapter), "SettlementAdapter");
+        vm.label(address(intake), "ZecuredIntake");
+        vm.label(address(spendLogic), "ZecuredSpendLogic");
         for (uint256 i; i < 5; ++i) {
             vm.label(signerSet[i], string.concat("signer", vm.toString(i)));
         }
+    }
+
+    function _predict(bool bonded, address mockBond) internal view returns (Predicted memory p) {
+        uint64 n = vm.getNonce(address(this));
+        p.registry = vm.computeCreateAddress(address(this), n + 2);
+        p.adapter = vm.computeCreateAddress(address(this), n + 3);
+        p.intake = vm.computeCreateAddress(address(this), n + 4);
+        p.bond = bonded ? vm.computeCreateAddress(address(this), n + 5) : mockBond;
+        p.slasher = bonded ? vm.computeCreateAddress(address(this), n + 6) : mockBond;
+    }
+
+    function _registryConfig(Predicted memory p, FeeSetup memory fee) internal view returns (RegistryConfig memory) {
+        return RegistryConfig({
+            morpho: MORPHO,
+            zzec: zzec,
+            adapter: p.adapter,
+            loanToken: address(usdc),
+            oracle: address(oracle),
+            irm: ADAPTIVE_CURVE_IRM,
+            lltv: LLTV,
+            signers: signerSet,
+            spendLogic: address(spendLogic),
+            intake: p.intake,
+            signerBond: p.bond,
+            slasher: p.slasher,
+            compensator: compensatorAddress,
+            feeBps: fee.feeBps,
+            minFeeZat: fee.minFeeZat,
+            feeCommitment: fee.feeCommitment,
+            refundAbandonPeriod: ABANDON_PERIOD
+        });
+    }
+
+    function _deployBondAndSlasher(Predicted memory p, bytes32 violationImage) internal {
+        bond = new SignerBond(p.registry, p.slasher, WINDOW);
+        slasher = new ZecuredSlasher(
+            p.registry,
+            p.bond,
+            compensatorAddress,
+            proofs.relay,
+            proofs.verifier,
+            violationImage,
+            proofs.sealSelector,
+            SLASH_WORK,
+            WINDOW
+        );
+        assertEq(address(bond), p.bond, "bond address prediction");
+        assertEq(address(slasher), p.slasher, "slasher address prediction");
+    }
+
+    function _intakeConfig(address bond_, address slasher_, CapSetup memory cap)
+        internal
+        view
+        returns (IntakeConfig memory)
+    {
+        (bool v2, uint32[4] memory branchIds) = _journalV2();
+        return IntakeConfig({
+            registry: address(registry),
+            signerBond: bond_,
+            slasher: slasher_,
+            verifier: IRiscZeroVerifier(proofs.verifier),
+            imageId: proofs.imageId,
+            sealSelector: proofs.sealSelector,
+            journalV2: v2,
+            allowedBranchIds: branchIds,
+            relay: IZcashHeaderRelay(proofs.relay),
+            workTiers: _workTiers(),
+            finalizeDepth: proofs.finalizeDepth,
+            finalizeDelay: proofs.finalizeDelay,
+            coverageBps: cap.coverageBps,
+            maxTotalZat: cap.maxTotalZat,
+            capPriceMaxAge: cap.capPriceMaxAge,
+            capOracle: cap.capOracle,
+            maxPause: MAX_PAUSE,
+            pendingRefundDelay: PENDING_REFUND_DELAY,
+            autoPauseOnCase: _autoPauseOnCase(),
+            minRefundZat: MIN_REFUND
+        });
     }
 
     function _supplyAsLender(uint256 amount) internal {
@@ -203,16 +392,23 @@ abstract contract ZecuredFixture is Test {
         return keccak256(abi.encode("zecured.test.depositTag", account));
     }
 
-    function _attestation(address account, uint64 amount) internal pure returns (DepositAttestation memory) {
-        return DepositAttestation({
-            vaultId: _vaultIdFor(account), account: account, amount: amount, depositTag: _depositTagFor(account)
-        });
+    /// Opens and activates the vault of `account` without a proof (TEST-ONLY harness of the Intake).
+    function _attest(address account, uint64 amount) internal returns (bytes32 vaultId) {
+        vaultId = _vaultIdFor(account);
+        intake.harnessActivate(vaultId, account, amount, _depositTagFor(account));
     }
 
-    function _attest(address account, uint64 amount) internal returns (bytes32 vaultId) {
-        DepositAttestation memory att = _attestation(account, amount);
-        registry.attestDeposit(att, _threeSigs(registry.hashDepositAttestation(att)));
-        return att.vaultId;
+    /// A deposit proof through the Intake with the fixture's default MOCK relay and MOCK verifier (v1 journal): the
+    /// anchor gets the work the Intake needs, the five signers sign the vault's (stand-in) `VaultOpened`.
+    function _mockProof(bytes32 vaultId, address account, uint64 amount, bytes32 tag, bytes32 anchor) internal {
+        MockHeaderRelay(address(headerRelay)).setBlock(anchor, true, proofs.minWork);
+        bytes32 opened = keccak256(abi.encode("zecured.test.opened", vaultId));
+        bytes memory journal = abi.encode(anchor, vaultId, account, amount, tag, opened);
+        bytes memory seal = MockRiscZeroVerifier(address(proofVerifier)).mockSeal(proofs.imageId, sha256(journal));
+        uint256[] memory five = new uint256[](5);
+        (five[0], five[1], five[2], five[3], five[4]) = (0, 1, 2, 3, 4);
+        bytes[] memory sigs = _signerSigs(MessageHashUtils.toTypedDataHash(registry.domainSeparator(), opened), five);
+        intake.attestDepositWithProof(journal, seal, sigs);
     }
 
     // ------------------------------------------------------------------ Tier 3 commitments

@@ -1,18 +1,15 @@
 // SPDX-License-Identifier: MIT
 pragma solidity 0.8.28;
 
-import {ZZEC} from "../../src/ZZEC.sol";
-import {ZecuredRegistry} from "../../src/ZecuredRegistry.sol";
-import {SettlementAdapter} from "../../src/SettlementAdapter.sol";
-import {ISignerBond} from "../../src/interfaces/ISignerBond.sol";
+import {IZecuredSignerErrors} from "../../src/interfaces/v3/IZecuredSignerErrors.sol";
 import {
-    IZecuredSpendCommits,
+    IZecuredSpendCommitsEvents,
     LineageNote,
     SpendRecord,
     ClaimPayment
-} from "../../src/interfaces/IZecuredSpendCommits.sol";
-import {IZecuredRegistry, ClaimKind, ClaimStatus} from "../../src/interfaces/IZecuredRegistry.sol";
-import {ZecuredEIP712, SpendCommit, DepositAttestation} from "../../src/libraries/ZecuredEIP712.sol";
+} from "../../src/interfaces/v3/IZecuredSpendCommits.sol";
+import {IZecuredRegistry, ClaimKind, ClaimStatus, VaultStatus} from "../../src/interfaces/v3/IZecuredRegistry.sol";
+import {ZecuredEIP712, SpendCommit} from "../../src/libraries/ZecuredEIP712.sol";
 import {ZecuredFixture} from "../utils/ZecuredFixture.sol";
 import {MockSignerBond} from "../mocks/MockSignerBond.sol";
 
@@ -30,6 +27,12 @@ contract SpendCommitsTest is ZecuredFixture {
     address internal account;
     bytes32 internal vaultId;
     bytes32 internal depositTag;
+    MockSignerBond internal mockBond;
+
+    function _mockBondAndSlasher() internal override returns (address) {
+        mockBond = new MockSignerBond();
+        return address(mockBond);
+    }
 
     function setUp() public override {
         super.setUp();
@@ -87,7 +90,7 @@ contract SpendCommitsTest is ZecuredFixture {
         assertEq(c.changeValue, VAULT_005 - 1_000_000);
 
         vm.expectEmit(address(registry));
-        emit IZecuredSpendCommits.SpendCommitted(
+        emit IZecuredSpendCommitsEvents.SpendCommitted(
             vaultId, c.payoutRef, depositTag, c.claimIds, c.claimRefs, c.changeTag, c.changeValue, BITMAP_0_2_4
         );
         vm.prank(stranger); // anyone may relay it
@@ -153,7 +156,8 @@ contract SpendCommitsTest is ZecuredFixture {
         _send(first);
         SpendCommit memory again = _spendCommit(vaultId, first.changeTag, _one(claimId), "again");
         _expectRevertOn(
-            again, abi.encodeWithSelector(IZecuredSpendCommits.ClaimBoundToAnotherInput.selector, claimId, depositTag)
+            again,
+            abi.encodeWithSelector(IZecuredSpendCommitsEvents.ClaimBoundToAnotherInput.selector, claimId, depositTag)
         );
 
         // A rebuild of the same payout from the same note (the first transaction expired) stays possible.
@@ -171,49 +175,55 @@ contract SpendCommitsTest is ZecuredFixture {
 
         c = _spendCommit(vaultId, depositTag, _one(claimId), "shape");
         c.payoutRef = bytes32(0);
-        _expectRevertOn(c, abi.encodeWithSelector(IZecuredSpendCommits.ZeroPayoutRef.selector));
+        _expectRevertOn(c, abi.encodeWithSelector(IZecuredSpendCommitsEvents.ZeroPayoutRef.selector));
 
         c = _spendCommit(vaultId, depositTag, _one(claimId), "shape");
         c.inputTag = keccak256("zecured.test.notLineage");
-        _expectRevertOn(c, abi.encodeWithSelector(IZecuredSpendCommits.NotALineageNote.selector, vaultId, c.inputTag));
+        _expectRevertOn(
+            c, abi.encodeWithSelector(IZecuredSpendCommitsEvents.NotALineageNote.selector, vaultId, c.inputTag)
+        );
 
         // Another vault's lineage note.
         address other = makeAddr("zecured.commits.other");
         bytes32 otherVault = _attest(other, VAULT_001);
         c = _spendCommit(vaultId, depositTag, _one(claimId), "shape");
         c.inputTag = _depositTagFor(other);
-        _expectRevertOn(c, abi.encodeWithSelector(IZecuredSpendCommits.NotALineageNote.selector, vaultId, c.inputTag));
+        _expectRevertOn(
+            c, abi.encodeWithSelector(IZecuredSpendCommitsEvents.NotALineageNote.selector, vaultId, c.inputTag)
+        );
         c.vaultId = otherVault; // ... and claimed for that vault: the claim is not its own
-        _expectRevertOn(c, abi.encodeWithSelector(IZecuredSpendCommits.ClaimNotPayable.selector, claimId));
+        _expectRevertOn(c, abi.encodeWithSelector(IZecuredSpendCommitsEvents.ClaimNotPayable.selector, claimId));
 
         c = _spendCommit(vaultId, depositTag, new bytes32[](0), "shape");
-        _expectRevertOn(c, abi.encodeWithSelector(IZecuredSpendCommits.InvalidClaimCount.selector, 0, 0));
+        _expectRevertOn(c, abi.encodeWithSelector(IZecuredSpendCommitsEvents.InvalidClaimCount.selector, 0, 0));
 
         bytes32[] memory nine = new bytes32[](9);
         c = _spendCommit(vaultId, depositTag, _one(claimId), "shape");
         c.claimIds = nine;
-        _expectRevertOn(c, abi.encodeWithSelector(IZecuredSpendCommits.InvalidClaimCount.selector, 9, 1));
+        _expectRevertOn(c, abi.encodeWithSelector(IZecuredSpendCommitsEvents.InvalidClaimCount.selector, 9, 1));
 
         c = _spendCommit(vaultId, depositTag, _one(claimId), "shape");
         c.claimRefs = new bytes32[](2);
-        _expectRevertOn(c, abi.encodeWithSelector(IZecuredSpendCommits.InvalidClaimCount.selector, 1, 2));
+        _expectRevertOn(c, abi.encodeWithSelector(IZecuredSpendCommitsEvents.InvalidClaimCount.selector, 1, 2));
 
         c = _spendCommit(vaultId, depositTag, _one(claimId), "shape");
         c.changeTag = bytes32(0); // change without a tag
         _expectRevertOn(
-            c, abi.encodeWithSelector(IZecuredSpendCommits.InvalidChange.selector, bytes32(0), c.changeValue)
+            c, abi.encodeWithSelector(IZecuredSpendCommitsEvents.InvalidChange.selector, bytes32(0), c.changeValue)
         );
 
         c = _spendCommit(vaultId, depositTag, _one(claimId), "shape");
         c.changeTag = depositTag; // a tag that is already a lineage note
         _expectRevertOn(
-            c, abi.encodeWithSelector(IZecuredSpendCommits.InvalidChange.selector, depositTag, c.changeValue)
+            c, abi.encodeWithSelector(IZecuredSpendCommitsEvents.InvalidChange.selector, depositTag, c.changeValue)
         );
 
         c = _spendCommit(vaultId, depositTag, _one(claimId), "shape");
         _send(c);
         c.changeTag = keccak256("zecured.test.anotherChange");
-        _expectRevertOn(c, abi.encodeWithSelector(IZecuredSpendCommits.PayoutAlreadyCommitted.selector, c.payoutRef));
+        _expectRevertOn(
+            c, abi.encodeWithSelector(IZecuredSpendCommitsEvents.PayoutAlreadyCommitted.selector, c.payoutRef)
+        );
     }
 
     /// Conservation: the lineage note's value is exactly the claims plus the change.
@@ -224,14 +234,14 @@ contract SpendCommitsTest is ZecuredFixture {
         _expectRevertOn(
             c,
             abi.encodeWithSelector(
-                IZecuredSpendCommits.ConservationBroken.selector, VAULT_005, 1_000_000, VAULT_005 - 1_000_000 - 1
+                IZecuredSpendCommitsEvents.ConservationBroken.selector, VAULT_005, 1_000_000, VAULT_005 - 1_000_000 - 1
             )
         );
         c.changeValue += 2;
         _expectRevertOn(
             c,
             abi.encodeWithSelector(
-                IZecuredSpendCommits.ConservationBroken.selector, VAULT_005, 1_000_000, VAULT_005 - 1_000_000 + 1
+                IZecuredSpendCommitsEvents.ConservationBroken.selector, VAULT_005, 1_000_000, VAULT_005 - 1_000_000 + 1
             )
         );
     }
@@ -244,23 +254,25 @@ contract SpendCommitsTest is ZecuredFixture {
         SpendCommit memory c;
 
         c = _spendCommit(vaultId, depositTag, _two(a, a), "claims");
-        _expectRevertOn(c, abi.encodeWithSelector(IZecuredSpendCommits.DuplicateClaim.selector, a));
+        _expectRevertOn(c, abi.encodeWithSelector(IZecuredSpendCommitsEvents.DuplicateClaim.selector, a));
 
         bytes32 unknown = keccak256("zecured.test.unknownClaim");
         c = _spendCommit(vaultId, depositTag, _one(a), "claims");
         c.claimIds[0] = unknown;
-        _expectRevertOn(c, abi.encodeWithSelector(IZecuredSpendCommits.ClaimNotPayable.selector, unknown));
+        _expectRevertOn(c, abi.encodeWithSelector(IZecuredSpendCommitsEvents.ClaimNotPayable.selector, unknown));
 
         // A claim ref that is zero, or already used by another payout.
         c = _spendCommit(vaultId, depositTag, _one(a), "claims");
         c.claimRefs[0] = bytes32(0);
-        _expectRevertOn(c, abi.encodeWithSelector(IZecuredSpendCommits.ClaimRefAlreadyUsed.selector, bytes32(0)));
+        _expectRevertOn(c, abi.encodeWithSelector(IZecuredSpendCommitsEvents.ClaimRefAlreadyUsed.selector, bytes32(0)));
         SpendCommit memory paid = _spendCommit(vaultId, depositTag, _one(a), "paid");
         _send(paid);
         // A rebuild of the same payout (same input, same claim set) with the first one's claim ref.
         c = _spendCommit(vaultId, depositTag, _one(a), "claims");
         c.claimRefs[0] = paid.claimRefs[0];
-        _expectRevertOn(c, abi.encodeWithSelector(IZecuredSpendCommits.ClaimRefAlreadyUsed.selector, c.claimRefs[0]));
+        _expectRevertOn(
+            c, abi.encodeWithSelector(IZecuredSpendCommitsEvents.ClaimRefAlreadyUsed.selector, c.claimRefs[0])
+        );
 
         // A claim already confirmed paid, named again from the paying payout's change.
         registry.confirmPayout(vaultId, _one(a), _threeSigs(registry.hashPayoutConfirmation(vaultId, _one(a))));
@@ -270,7 +282,7 @@ contract SpendCommitsTest is ZecuredFixture {
         c.claimOutputs = new uint8[](2);
         c.claimOutputs[1] = 1;
         c.changeValue = VAULT_005 - 3_000_000;
-        _expectRevertOn(c, abi.encodeWithSelector(IZecuredSpendCommits.ClaimNotPayable.selector, a));
+        _expectRevertOn(c, abi.encodeWithSelector(IZecuredSpendCommitsEvents.ClaimNotPayable.selector, a));
     }
 
     /// E1: each claim names its own output of the payout; two claims never share one, and every claim names one.
@@ -280,10 +292,10 @@ contract SpendCommitsTest is ZecuredFixture {
         SpendCommit memory c = _spendCommit(vaultId, depositTag, _two(a, b), "outputs");
         c.claimOutputs[1] = c.claimOutputs[0];
         _expectRevertOn(
-            c, abi.encodeWithSelector(IZecuredSpendCommits.DuplicateClaimOutput.selector, c.claimOutputs[0])
+            c, abi.encodeWithSelector(IZecuredSpendCommitsEvents.DuplicateClaimOutput.selector, c.claimOutputs[0])
         );
         c.claimOutputs = new uint8[](1);
-        _expectRevertOn(c, abi.encodeWithSelector(IZecuredSpendCommits.InvalidClaimCount.selector, 2, 1));
+        _expectRevertOn(c, abi.encodeWithSelector(IZecuredSpendCommitsEvents.InvalidClaimCount.selector, 2, 1));
 
         c = _spendCommit(vaultId, depositTag, _two(a, b), "outputs");
         (c.claimOutputs[0], c.claimOutputs[1]) = (3, 1);
@@ -322,7 +334,9 @@ contract SpendCommitsTest is ZecuredFixture {
         bytes32 a = _partial(1_000_000);
         _setClaimAmount(a, 10_000);
         SpendCommit memory c = _spendCommit(vaultId, depositTag, _one(a), "dust");
-        _expectRevertOn(c, abi.encodeWithSelector(IZecuredSpendCommits.FeeBearerIsDust.selector, a, 10_000, 10_000));
+        _expectRevertOn(
+            c, abi.encodeWithSelector(IZecuredSpendCommitsEvents.FeeBearerIsDust.selector, a, 10_000, 10_000)
+        );
         _setClaimAmount(a, 10_001);
         c = _spendCommit(vaultId, depositTag, _one(a), "dust");
         _send(c);
@@ -339,15 +353,15 @@ contract SpendCommitsTest is ZecuredFixture {
             digest, keccak256(abi.encodePacked(hex"1901", registry.domainSeparator(), ZecuredEIP712.hashSpendCommit(c)))
         );
 
-        vm.expectRevert(abi.encodeWithSelector(IZecuredRegistry.InsufficientSignatures.selector, 2));
+        vm.expectRevert(abi.encodeWithSelector(IZecuredSignerErrors.InsufficientSignatures.selector, 2));
         registry.commitSpend(c, _signerSigs(digest, _idx(0, 1)));
-        vm.expectRevert(abi.encodeWithSelector(IZecuredRegistry.SignaturesNotSorted.selector, 2));
+        vm.expectRevert(abi.encodeWithSelector(IZecuredSignerErrors.SignaturesNotSorted.selector, 2));
         registry.commitSpend(c, _signerSigs(digest, _idx(0, 2, 2)));
         // Signed over another record (here: another change value).
         SpendCommit memory other = _spendCommit(vaultId, depositTag, _one(claimId), "sigs");
         other.changeValue -= 1;
         bytes[] memory otherSigs = _threeSigs(registry.hashSpendCommit(other));
-        vm.expectPartialRevert(IZecuredRegistry.UnknownSigner.selector);
+        vm.expectPartialRevert(IZecuredSignerErrors.UnknownSigner.selector);
         registry.commitSpend(c, otherSigs);
 
         // The bitmap names exactly the signers whose signatures were used.
@@ -386,61 +400,39 @@ contract SpendCommitsTest is ZecuredFixture {
 
     // ================================================================== halt (a slash stops minting)
 
+    /// After a slash (the bond halted), a new deposit lands as a refund and nothing is minted (T-02), while the
+    /// existing vaults keep being released and paid out.
     function test_halt_stopsMintingButNotPayouts() public {
-        MockSignerBond bond = new MockSignerBond();
-        ZecuredRegistry r = _deployWithBond(ISignerBond(address(bond)));
-        assertEq(address(r.signerBond()), address(bond));
-
         address a = makeAddr("zecured.commits.haltA");
-        DepositAttestation memory att = _attestation(a, VAULT_001);
-        r.attestDeposit(att, _threeSigs(r.hashDepositAttestation(att)));
+        bytes32 vaultA = _attest(a, VAULT_001);
 
-        bond.setHalted(true);
+        mockBond.setHalted(true);
         address b = makeAddr("zecured.commits.haltB");
-        DepositAttestation memory attB = _attestation(b, VAULT_001);
-        bytes[] memory sigsB = _threeSigs(r.hashDepositAttestation(attB));
-        vm.expectRevert(IZecuredSpendCommits.MintingHalted.selector);
-        r.attestDeposit(attB, sigsB);
+        uint256 supply = zzec.totalSupply();
+        _mockProof(_vaultIdFor(b), b, VAULT_001, _depositTagFor(b), keccak256("zecured.commits.haltAnchor"));
+        assertEq(zzec.totalSupply(), supply, "nothing minted after the halt");
+        assertEq(uint8(_status(_vaultIdFor(b))), uint8(VaultStatus.Cancelled), "the deposit landed as a refund");
 
         // The existing vault can still be released and paid out.
         vm.startPrank(a);
-        MORPHO.setAuthorization(address(r), true);
-        bytes32 claimId = r.requestRelease(att.vaultId, RELEASE_COMMITMENT);
+        MORPHO.setAuthorization(address(registry), true);
+        bytes32 releaseId = registry.requestRelease(vaultA, RELEASE_COMMITMENT);
         vm.stopPrank();
-        bytes32[] memory refs = _one(keccak256("zecured.test.haltRef"));
         SpendCommit memory c = SpendCommit({
-            vaultId: att.vaultId,
-            inputTag: att.depositTag,
-            claimIds: _one(claimId),
-            claimRefs: refs,
+            vaultId: vaultA,
+            inputTag: _depositTagFor(a),
+            claimIds: _one(releaseId),
+            claimRefs: _one(keccak256("zecured.test.haltRef")),
             claimOutputs: new uint8[](1),
             payoutRef: keccak256("zecured.test.haltPayout"),
             changeTag: bytes32(0),
             changeValue: 0
         });
-        r.commitSpend(c, _threeSigs(r.hashSpendCommit(c)));
-        r.confirmPayout(att.vaultId, _one(claimId), _threeSigs(r.hashPayoutConfirmation(att.vaultId, _one(claimId))));
-        assertEq(r.openVaultCount(), 0);
-    }
-
-    /// A second Registry (with its own zZEC and Adapter) whose bond is `bond`.
-    function _deployWithBond(ISignerBond bond) internal returns (ZecuredRegistry r) {
-        uint64 nonce = vm.getNonce(address(this));
-        address predictedRegistry = vm.computeCreateAddress(address(this), nonce + 1);
-        address predictedAdapter = vm.computeCreateAddress(address(this), nonce + 2);
-        ZZEC z = new ZZEC(predictedRegistry, predictedAdapter, address(MORPHO));
-        r = new ZecuredRegistry(
-            MORPHO,
-            z,
-            predictedAdapter,
-            address(usdc),
-            address(oracle),
-            ADAPTIVE_CURVE_IRM,
-            LLTV,
-            signerSet,
-            _depositProofConfig(),
-            bond
+        registry.commitSpend(c, _threeSigs(registry.hashSpendCommit(c)));
+        registry.confirmPayout(
+            vaultA, _one(releaseId), _threeSigs(registry.hashPayoutConfirmation(vaultA, _one(releaseId)))
         );
-        new SettlementAdapter(r);
+        (,,,, ClaimStatus status) = registry.claim(releaseId);
+        assertEq(uint8(status), uint8(ClaimStatus.Paid));
     }
 }

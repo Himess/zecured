@@ -109,6 +109,10 @@ interface ISettlementAdapter is IMorphoLiquidateCallback, IMorphoRepayCallback {
     /// @notice D11 liquidation floor in zatoshi (100,000 = 0.001 ZEC): a liquidation seizes at least this much, or the
     ///         vault's whole remaining outstanding. The remainder is not constrained.
     function MIN_SEIZE() external view returns (uint256);
+    /// @notice T-08 (decision 2e): the floor's share of the vault's outstanding, in basis points (0 on testnet).
+    function minSeizeBps() external view returns (uint16);
+    /// @notice The D11 floor for a vault with `outstanding` zatoshi: max(MIN_SEIZE, outstanding * minSeizeBps / 10,000).
+    function minSeize(uint64 outstanding) external view returns (uint256);
     /// @notice Maximum market maker margin a CloseRequest may carry (500 bps = 5 %).
     function MAX_MARGIN_BPS() external view returns (uint16);
     /// @notice The EIP-712 digest (Adapter domain) of `req`, i.e. the hash the account must validate via ERC-1271.

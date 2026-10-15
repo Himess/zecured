@@ -32,9 +32,10 @@ jobs:
         with:
           version: v1.8.5
 
-      # Raised to 1,024 bytes once the Registry no longer sits within 1 KB of EIP-170.
+      # Every contract keeps at least 1 KB under EIP-170 (the v3 Registry runs its spend logic by delegatecall to stay
+      # there; via_ir only if a margin ever drops below 1 KB).
       - name: Build and contract sizes
-        run: python3 script/check_sizes.py 0
+        run: python3 script/check_sizes.py 1024
 
       - name: Tests that need no RPC (unit, relay)
         run: forge test --match-path "test/{unit,relay}/**"

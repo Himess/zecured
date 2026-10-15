@@ -2,6 +2,7 @@
 pragma solidity 0.8.28;
 
 import {SpendCommit} from "../../libraries/ZecuredEIP712.sol";
+import {IZecuredSignerErrors} from "./IZecuredSignerErrors.sol";
 
 /// @notice A note of a vault's lineage, as Base knows it: a deposit (its tag, from a pending or activated deposit or a
 ///         refund) or the change of a committed payout (its `changeTag`). Keyed by the note's tag (docs/TIER3.md § 2).
@@ -40,12 +41,16 @@ struct ClaimPayment {
 ///        Reimburse destination: `ClaimDestinationUnset`);
 ///      - the vault is not compromised (`IZecuredRegistry.VaultCompromised`): its claims are settled by the
 ///        compensator;
+///      - the vault is not `Pending` (`VaultPending`): a pending activation's note backs a mint that has not happened,
+///        and its reservation can still be released (K3); a refund opened meanwhile waits for the vault to activate,
+///        convert or drop;
 ///      - the fee: `fee = 5,000 * max(2, claimCount + (changeValue > 0 ? 1 : 0))` zatoshi as in v2. Each Fee claim
 ///        (T-06) at index >= 1 bears exactly 5,000 (its own output), and `claimIds[0]` bears the rest. So a Fee claim
 ///        never makes the first claimant pay for the fee's output. `claimIds[0]` must cover its share
 ///        (`FeeBearerIsDust`), as in v2.
 ///      Effects: those of v2, plus `lastCommitAt[c.inputTag] = block.timestamp` (T-05's in-flight protection).
-interface IZecuredSpendCommits {
+/// @notice The events and errors of `commitSpend`, which `ZecuredSpendLogic` emits on the Registry's behalf.
+interface IZecuredSpendCommitsEvents is IZecuredSignerErrors {
     event SpendCommitted(
         bytes32 indexed vaultId,
         bytes32 indexed payoutRef,
@@ -73,7 +78,10 @@ interface IZecuredSpendCommits {
     error FeeBearerIsDust(bytes32 claimId, uint64 amount, uint64 fee);
     error ClaimNotCommitted(bytes32 claimId);
     error ClaimDestinationUnset(bytes32 claimId);
+    error VaultPending(bytes32 vaultId);
+}
 
+interface IZecuredSpendCommits is IZecuredSpendCommitsEvents {
     /// @notice Most claims one payout may pay (8).
     function MAX_CLAIMS_PER_PAYOUT() external view returns (uint256);
 

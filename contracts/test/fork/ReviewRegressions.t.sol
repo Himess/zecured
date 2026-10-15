@@ -6,7 +6,7 @@ import {IMorpho} from "morpho-blue/src/interfaces/IMorpho.sol";
 import {ORACLE_PRICE_SCALE} from "morpho-blue/src/libraries/ConstantsLib.sol";
 import {MorphoBalancesLib} from "morpho-blue/src/libraries/periphery/MorphoBalancesLib.sol";
 import {ISettlementAdapter} from "../../src/interfaces/ISettlementAdapter.sol";
-import {VaultStatus} from "../../src/interfaces/IZecuredRegistry.sol";
+import {VaultStatus} from "../../src/interfaces/v3/IZecuredRegistry.sol";
 import {CloseRequest} from "../../src/libraries/ZecuredEIP712.sol";
 import {ZecuredFixture} from "../utils/ZecuredFixture.sol";
 

@@ -2,47 +2,113 @@
 pragma solidity 0.8.28;
 
 import {console} from "forge-std/console.sol";
-import {VaultStatus, ClaimStatus} from "../../src/interfaces/IZecuredRegistry.sol";
+import {MockRiscZeroVerifier} from "../../src/mocks/MockRiscZeroVerifier.sol";
+import {VaultStatus, ClaimKind, ClaimStatus} from "../../src/interfaces/v3/IZecuredRegistry.sol";
+import {LineageNote} from "../../src/interfaces/v3/IZecuredSpendCommits.sol";
+import {PendingActivation} from "../../src/interfaces/v3/IZecuredIntake.sol";
 import {ZecuredFixture} from "../utils/ZecuredFixture.sol";
-import {ZecuredHandler} from "./ZecuredHandler.sol";
+import {MockHeaderRelay} from "../mocks/MockHeaderRelay.sol";
+import {MockSignerBond} from "../mocks/MockSignerBond.sol";
+import {MockCapPrice} from "../mocks/MockCapPrice.sol";
+import {ZecuredHandler, HandlerSystem} from "./ZecuredHandler.sol";
 
-/// @notice Handler-based invariant tests of CLAUDE.md I1, I2, I3 (on-chain part), I4 to I9, the review's I11 to I14
-///         (I13 on-chain part) and Tier 3's I15 to I17 against the real Morpho Blue on a Base Sepolia fork. Runs/depth:
-///         [profile.default.invariant] in foundry.toml.
+/// @notice Handler-based invariant tests of v3 against the real Morpho Blue on a Base Sepolia fork: CLAUDE.md I1, I2,
+///         I3 (on-chain part), I4 to I9, the review's I11 to I14, Tier 3's I15 to I17, and the v3 design notes' I18 and
+///         I20 to I24 and I27. Deposits arrive only as deposit proofs through the Intake (MOCK relay and verifier); the
+///         bonds and the slasher are a MOCK the handler drives (halt, bonding, effective bond, cases, freeze), with the
+///         coverage cap (T-01) on and an opening fee (T-06). Runs/depth: [profile.default.invariant] in foundry.toml.
 contract ZecuredInvariantsTest is ZecuredFixture {
     ZecuredHandler internal handler;
+    MockSignerBond internal gates;
+    MockCapPrice internal capPrice;
+
+    bytes32 internal constant TREASURY = keccak256("zecured.inv.treasury");
+    uint16 internal constant FEE_BPS = 50; // 0.5 %: charged on 0.05 ZEC (25,000 zat), waived on 0.01 ZEC (5,000)
+    uint64 internal constant MIN_FEE = 20_000;
+
+    /// The bonds and the slasher: one MOCK the handler drives.
+    function _mockBondAndSlasher() internal override returns (address) {
+        gates = new MockSignerBond();
+        gates.setEffectiveBond(20e6); // 20 USDC covers 0.5 ZEC at $40; the handler moves it
+        return address(gates);
+    }
+
+    /// T-01 on: k = 100 %, at most 0.5 ZEC locked and pending, a cap price fresh for an hour.
+    function _capSetup() internal override returns (CapSetup memory) {
+        capPrice = new MockCapPrice(PRICE_40);
+        return
+            CapSetup({
+                coverageBps: 10_000, maxTotalZat: 50_000_000, capPriceMaxAge: 1 hours, capOracle: address(capPrice)
+            });
+    }
+
+    /// T-06 on.
+    function _feeSetup() internal pure override returns (FeeSetup memory) {
+        return FeeSetup({feeBps: FEE_BPS, minFeeZat: MIN_FEE, feeCommitment: TREASURY});
+    }
 
     function setUp() public override {
         super.setUp();
-        handler = new ZecuredHandler(MORPHO, registry, adapter, usdc, oracle, signerKeys);
+        handler = new ZecuredHandler(
+            HandlerSystem({
+                morpho: MORPHO,
+                registry: registry,
+                adapter: adapter,
+                intake: intake,
+                usdc: usdc,
+                oracle: oracle,
+                relay: MockHeaderRelay(address(headerRelay)),
+                verifier: MockRiscZeroVerifier(address(proofVerifier)),
+                imageId: proofs.imageId,
+                gates: gates,
+                capPrice: capPrice
+            }),
+            signerKeys
+        );
         usdc.transferOwnership(address(handler)); // MOCK mint for the handler's actors
         oracle.transferOwnership(address(handler)); // MOCK price moves
 
-        bytes4[] memory selectors = new bytes4[](24);
-        selectors[0] = ZecuredHandler.attest.selector;
-        selectors[1] = ZecuredHandler.attest.selector; // weighted: vaults first
-        selectors[2] = ZecuredHandler.borrow.selector;
-        selectors[3] = ZecuredHandler.repay.selector;
-        selectors[4] = ZecuredHandler.release.selector;
-        selectors[5] = ZecuredHandler.setPrice.selector;
-        selectors[6] = ZecuredHandler.warp.selector;
-        selectors[7] = ZecuredHandler.liquidate.selector;
-        selectors[8] = ZecuredHandler.close.selector;
-        selectors[9] = ZecuredHandler.confirm.selector;
-        selectors[10] = ZecuredHandler.attackAccountWithdraw.selector;
-        selectors[11] = ZecuredHandler.attackDirectLiquidation.selector;
-        selectors[12] = ZecuredHandler.attackFlashLoan.selector;
-        selectors[13] = ZecuredHandler.attackWeakAttestation.selector;
-        selectors[14] = ZecuredHandler.attackCloseRequest.selector;
-        selectors[15] = ZecuredHandler.partialRelease.selector;
-        selectors[16] = ZecuredHandler.attackPartialRelease.selector;
-        selectors[17] = ZecuredHandler.cancel.selector;
-        selectors[18] = ZecuredHandler.attackCancellation.selector;
-        selectors[19] = ZecuredHandler.commitOnly.selector;
-        selectors[20] = ZecuredHandler.attackClaimReuse.selector;
-        selectors[21] = ZecuredHandler.attackUncommittedConfirm.selector;
+        bytes4[] memory selectors = new bytes4[](40);
+        selectors[0] = ZecuredHandler.prove.selector;
+        selectors[1] = ZecuredHandler.prove.selector; // weighted: deposits first
+        selectors[2] = ZecuredHandler.prove.selector;
+        selectors[3] = ZecuredHandler.finalize.selector;
+        selectors[4] = ZecuredHandler.finalize.selector;
+        selectors[5] = ZecuredHandler.drop.selector;
+        selectors[6] = ZecuredHandler.refundPending.selector;
+        selectors[7] = ZecuredHandler.pause.selector;
+        selectors[8] = ZecuredHandler.unpause.selector;
+        selectors[9] = ZecuredHandler.setGates.selector;
+        selectors[10] = ZecuredHandler.setGates.selector;
+        selectors[11] = ZecuredHandler.giveRefundDestination.selector;
+        selectors[12] = ZecuredHandler.abandon.selector;
+        selectors[13] = ZecuredHandler.writeOffDust.selector;
+        selectors[14] = ZecuredHandler.borrow.selector;
+        selectors[15] = ZecuredHandler.repay.selector;
+        selectors[16] = ZecuredHandler.release.selector;
+        selectors[17] = ZecuredHandler.partialRelease.selector;
+        selectors[18] = ZecuredHandler.setPrice.selector;
+        selectors[19] = ZecuredHandler.warp.selector;
+        selectors[20] = ZecuredHandler.liquidate.selector;
+        selectors[21] = ZecuredHandler.close.selector;
         selectors[22] = ZecuredHandler.deleverage.selector;
-        selectors[23] = ZecuredHandler.attackDeleverage.selector;
+        selectors[23] = ZecuredHandler.confirm.selector;
+        selectors[24] = ZecuredHandler.confirm.selector;
+        selectors[25] = ZecuredHandler.commitOnly.selector;
+        selectors[26] = ZecuredHandler.attackClaimReuse.selector;
+        selectors[27] = ZecuredHandler.attackUncommittedConfirm.selector;
+        selectors[28] = ZecuredHandler.attackUnsetDestination.selector;
+        selectors[29] = ZecuredHandler.attackRefundDestination.selector;
+        selectors[30] = ZecuredHandler.attackDoubleLanding.selector;
+        selectors[31] = ZecuredHandler.attackWeakOpened.selector;
+        selectors[32] = ZecuredHandler.attackActivation.selector;
+        selectors[33] = ZecuredHandler.attackAccountWithdraw.selector;
+        selectors[34] = ZecuredHandler.attackDirectLiquidation.selector;
+        selectors[35] = ZecuredHandler.attackPartialRelease.selector;
+        selectors[36] = ZecuredHandler.attackFlashLoan.selector;
+        selectors[37] = ZecuredHandler.attackDeleverage.selector;
+        selectors[38] = ZecuredHandler.attackCloseRequest.selector;
+        selectors[39] = ZecuredHandler.release.selector;
         targetSelector(FuzzSelector({addr: address(handler), selectors: selectors}));
         targetContract(address(handler));
         // The handler pranks its own actors, so the caller does not matter. A fixed caller matters on a fork: every
@@ -50,54 +116,226 @@ contract ZecuredInvariantsTest is ZecuredFixture {
         targetSender(makeAddr("zecured.inv.caller"));
     }
 
-    /// I1: zZEC total supply == sum of outstanding over active vaults.
+    // ------------------------------------------------------------------ supply and custody
+
+    /// I1: zZEC total supply == sum of outstanding over active vaults; only an active vault has outstanding.
     function invariant_I1_supplyEqualsActiveOutstanding() public view {
         uint256 sum;
         for (uint256 i; i < handler.vaultCount(); ++i) {
             (, uint64 outstanding, VaultStatus status) = registry.vault(handler.vaultIds(i));
             if (status == VaultStatus.Active) sum += outstanding;
-            else assertEq(outstanding, 0, "closed vault with outstanding");
+            else assertEq(outstanding, 0, "a vault that is not active has outstanding");
         }
         assertEq(zzec.totalSupply(), sum, "I1");
     }
 
-    /// I2: at rest all zZEC is in Morpho; Registry, Adapter and every actor hold none; no expectation left armed.
+    /// I2: at rest all zZEC is in Morpho; the Registry, the Adapter, the Intake and every actor hold none; no
+    /// expectation is left armed.
     function invariant_I2_zzecOnlyInMorpho() public view {
         assertEq(zzec.balanceOf(address(MORPHO)), zzec.totalSupply(), "I2: zZEC outside Morpho");
         assertEq(zzec.balanceOf(address(registry)), 0, "I2: registry");
         assertEq(zzec.balanceOf(address(adapter)), 0, "I2: adapter");
+        assertEq(zzec.balanceOf(address(intake)), 0, "I2: intake");
         assertEq(zzec.balanceOf(handler.liquidator()), 0, "I2: liquidator");
         assertEq(zzec.balanceOf(handler.marketMaker()), 0, "I2: market maker");
         assertEq(zzec.balanceOf(handler.stranger()), 0, "I2: stranger");
-        for (uint256 i; i < 6; ++i) {
+        for (uint256 i; i < 8; ++i) {
             assertEq(zzec.balanceOf(handler.accounts(i)), 0, "I2: account");
         }
         (address recipient,) = zzec.pendingExpectation();
         assertEq(recipient, address(0), "expectation left armed");
     }
 
-    /// I3 (Base side), I9, I11 and I12: every vault's attested amount is exactly its outstanding plus its claims
-    /// (I11 conservation: nothing left Morpho without a burn and a claim), outstanding never exceeds the attested amount
-    /// (I9), and Morpho's collateral for the account always equals the outstanding (I12).
-    function invariant_I3_I9_I11_I12_burnsAreClaimedAndCollateralMatches() public view {
+    // ------------------------------------------------------------------ conservation
+
+    /// I3 (Base side), I9, I11 and I12, generalized to refunds: everything that landed on a vault (its activating
+    /// deposit and every refunded deposit) is exactly its outstanding plus its claims, of every kind and status; the
+    /// outstanding never exceeds the activating deposit (I9); Morpho's collateral for an activated vault's account is
+    /// its outstanding (I12).
+    function invariant_I3_I9_I11_I12_everyZatoshiIsAccounted() public view {
         for (uint256 i; i < handler.vaultCount(); ++i) {
             bytes32 vaultId = handler.vaultIds(i);
-            (address account, uint64 outstanding,) = registry.vault(vaultId);
+            (, uint64 outstanding,) = registry.vault(vaultId);
             uint256 claimed;
-            for (uint64 j; j < registry.claimCount(vaultId); ++j) {
+            uint64 count = registry.claimCount(vaultId);
+            for (uint64 j; j < count; ++j) {
                 (bytes32 claimVault,, uint64 amount,,) = registry.claim(registry.claimIdOf(vaultId, j));
-                assertEq(claimVault, vaultId, "claim of another vault");
+                assertEq(claimVault, vaultId, "a claim of another vault");
                 claimed += amount;
             }
-            assertEq(claimed + outstanding, handler.attested(vaultId), "I11: attested == outstanding + claims");
-            assertLe(outstanding, handler.attested(vaultId), "I9");
-            assertEq(_position(account).collateral, outstanding, "I12: Morpho collateral == outstanding");
+            uint64 activated = handler.activated(vaultId);
+            assertEq(claimed + outstanding, uint256(activated) + handler.refunded(vaultId), "I11: landed == owed");
+            assertLe(outstanding, activated, "I9");
+            if (activated != 0) {
+                assertEq(
+                    _position(handler.accountOf(vaultId)).collateral, outstanding, "I12: collateral == outstanding"
+                );
+            }
         }
-        assertFalse(handler.i9Violated(), "I9 / D11 violated by a liquidation");
+        assertFalse(handler.i9Violated(), "I9 / D11 violated by a liquidation or a deleverage");
     }
 
+    /// I27 (T-06): an activated vault owes exactly one Fee claim of `amount * feeBps / 10,000` to the treasury when that
+    /// reaches `minFeeZat`, and none otherwise; a vault that never activated owes no fee.
+    function invariant_I27_openingFee() public view {
+        for (uint256 i; i < handler.vaultCount(); ++i) {
+            bytes32 vaultId = handler.vaultIds(i);
+            uint256 fees;
+            uint256 feeClaims;
+            uint64 count = registry.claimCount(vaultId);
+            for (uint64 j; j < count; ++j) {
+                (, ClaimKind kind, uint64 amount, bytes32 commitment,) = registry.claim(registry.claimIdOf(vaultId, j));
+                if (kind != ClaimKind.Fee) continue;
+                fees += amount;
+                ++feeClaims;
+                assertEq(commitment, TREASURY, "I27: the fee goes to the treasury");
+            }
+            uint256 due = uint256(handler.activated(vaultId)) * FEE_BPS / 10_000;
+            if (due >= MIN_FEE) {
+                assertEq(feeClaims, 1, "I27: one Fee claim");
+                assertEq(fees, due, "I27: the fee");
+            } else {
+                assertEq(feeClaims, 0, "I27: a fee below the floor is waived");
+            }
+        }
+    }
+
+    /// I15 (Tier 3, Base side of I10), generalized: the vault's lineage notes that no committed payout spent hold
+    /// exactly what Base still owes from the vault: its outstanding, its pending activation, and every claim no payout
+    /// was committed for, pending or written off (an abandoned refund's or a dust claim's zatoshi stay in the vault).
+    function invariant_I15_liveNotesHoldWhatBaseOwes() public view {
+        for (uint256 i; i < handler.vaultCount(); ++i) {
+            bytes32 vaultId = handler.vaultIds(i);
+            (, uint64 outstanding, VaultStatus status) = registry.vault(vaultId);
+            uint256 owed = outstanding;
+            if (status == VaultStatus.Pending) owed += intake.pendingActivation(vaultId).amount;
+            uint64 count = registry.claimCount(vaultId);
+            for (uint64 j; j < count; ++j) {
+                bytes32 claimId = registry.claimIdOf(vaultId, j);
+                (,, uint64 amount,, ClaimStatus s) = registry.claim(claimId);
+                bool uncommitted = registry.claimInput(claimId) == bytes32(0);
+                if (uncommitted && (s == ClaimStatus.Pending || s == ClaimStatus.WrittenOff)) owed += amount;
+            }
+            uint256 held;
+            bytes32[] memory notes = handler.liveNotesOf(vaultId);
+            for (uint256 n; n < notes.length; ++n) {
+                LineageNote memory note = registry.lineageOf(notes[n]);
+                assertEq(note.vaultId, vaultId, "I15: a note of another vault");
+                held += note.value;
+            }
+            assertEq(held, owed, "I15: live notes == outstanding + pending activation + uncommitted claims");
+        }
+    }
+
+    /// I16 (Tier 3): every claim confirmed paid was committed, against a lineage note of its own vault.
+    /// I21 (T-02, T-05): a claim without a destination is never committed or paid.
+    function invariant_I16_I21_paidClaimsWereCommittedWithADestination() public view {
+        for (uint256 i; i < handler.vaultCount(); ++i) {
+            bytes32 vaultId = handler.vaultIds(i);
+            uint64 count = registry.claimCount(vaultId);
+            for (uint64 j; j < count; ++j) {
+                bytes32 claimId = registry.claimIdOf(vaultId, j);
+                (,,, bytes32 commitment, ClaimStatus status) = registry.claim(claimId);
+                bytes32 input = registry.claimInput(claimId);
+                if (status == ClaimStatus.Paid) assertTrue(input != bytes32(0), "I16: paid without a commitment");
+                if (input != bytes32(0)) {
+                    assertEq(registry.lineageOf(input).vaultId, vaultId, "I16: a foreign input");
+                    assertTrue(commitment != bytes32(0), "I21: committed without a destination");
+                }
+            }
+        }
+    }
+
+    // ------------------------------------------------------------------ bookkeeping
+
+    /// I4 / I5: one account <-> one vault. A pending or activated vault is its account's vault; any vault an account is
+    /// bound to has that account; a refund never binds one.
+    function invariant_I4_I5_bookkeeping() public view {
+        for (uint256 i; i < handler.vaultCount(); ++i) {
+            bytes32 vaultId = handler.vaultIds(i);
+            (address account,, VaultStatus status) = registry.vault(vaultId);
+            if (status == VaultStatus.None) continue; // a dropped reservation
+            assertEq(account, handler.accountOf(vaultId), "the vault's account");
+            if (handler.activated(vaultId) != 0 || status == VaultStatus.Pending) {
+                assertEq(registry.vaultOf(account), vaultId, "I4");
+            }
+        }
+        for (uint256 i; i < 8; ++i) {
+            address account = handler.accounts(i);
+            bytes32 bound = registry.vaultOf(account);
+            if (bound == bytes32(0)) continue;
+            (address boundAccount,,) = registry.vault(bound);
+            assertEq(boundAccount, account, "I4: bound to a vault of another account");
+        }
+    }
+
+    /// I13 and I20 (T-01, T-02): every note the Intake accepted lands exactly once: as a pending reservation, an
+    /// activation or a refund, its tag used and a lineage note of its vault for good; a reservation a reorganisation
+    /// dropped frees its tag. `pendingTotal` is the sum of the pending activations.
+    function invariant_I13_I20_eachNoteLandsOnce() public view {
+        uint256 pendingSum;
+        for (uint256 i; i < handler.tagCount(); ++i) {
+            bytes32 tag = handler.tags(i);
+            uint8 state = handler.tagState(tag);
+            bytes32 vaultId = handler.tagVault(tag);
+            if (state == handler.TAG_DROPPED()) {
+                assertFalse(registry.depositTagUsed(tag), "a dropped reservation keeps its tag");
+                assertEq(registry.lineageOf(tag).vaultId, bytes32(0), "a dropped reservation keeps its lineage");
+                continue;
+            }
+            assertTrue(registry.depositTagUsed(tag), "I13: a landed tag is used");
+            assertEq(registry.lineageOf(tag).vaultId, vaultId, "I20: a landed note is a lineage note of its vault");
+            if (state == handler.TAG_PENDING()) {
+                PendingActivation memory p = intake.pendingActivation(vaultId);
+                assertEq(p.depositTag, tag, "I20: the vault's reservation");
+                pendingSum += p.amount;
+            }
+        }
+        assertEq(intake.pendingTotal(), pendingSum, "I20: pendingTotal == sum of the pending activations");
+    }
+
+    /// I14 (v3): Cancelled <=> never activated. A cancelled vault has no outstanding and only Refund claims; an
+    /// activated vault is active or closed for good.
+    function invariant_I14_cancelledIffNeverActivated() public view {
+        for (uint256 i; i < handler.vaultCount(); ++i) {
+            bytes32 vaultId = handler.vaultIds(i);
+            (, uint64 outstanding, VaultStatus status) = registry.vault(vaultId);
+            if (handler.activated(vaultId) != 0) {
+                assertTrue(status == VaultStatus.Active || status == VaultStatus.Closed, "I14: activated vault");
+            }
+            if (status != VaultStatus.Cancelled) continue;
+            assertEq(handler.activated(vaultId), 0, "I14: a cancelled vault was activated");
+            assertEq(outstanding, 0, "I14: a cancelled vault with outstanding");
+            uint64 count = registry.claimCount(vaultId);
+            for (uint64 j; j < count; ++j) {
+                (, ClaimKind kind,,,) = registry.claim(registry.claimIdOf(vaultId, j));
+                assertEq(uint8(kind), uint8(ClaimKind.Refund), "I14: a cancelled vault owes only refunds");
+            }
+        }
+    }
+
+    /// I17 (Tier 3, S5): the open-vault count the bonds wait on is the number of vaults that are pending or active, or
+    /// closed or cancelled with a claim still pending.
+    function invariant_I17_openVaultCount() public view {
+        uint256 open;
+        for (uint256 i; i < handler.vaultCount(); ++i) {
+            bytes32 vaultId = handler.vaultIds(i);
+            (,, VaultStatus status) = registry.vault(vaultId);
+            bool unpaid;
+            uint64 count = registry.claimCount(vaultId);
+            for (uint64 j; j < count; ++j) {
+                (,,,, ClaimStatus s) = registry.claim(registry.claimIdOf(vaultId, j));
+                if (s == ClaimStatus.Pending) unpaid = true;
+            }
+            if (status == VaultStatus.Active || status == VaultStatus.Pending || unpaid) ++open;
+        }
+        assertEq(registry.openVaultCount(), open, "I17");
+    }
+
+    // ------------------------------------------------------------------ violations caught while acting
+
     /// D14: every partial release left the position at <= 50 % LTV and at least MIN_RELEASE in the vault, kept the
-    ///      vault Active and created a Release claim of exactly the released amount.
+    /// vault Active and created a Release claim of exactly the released amount.
     function invariant_D14_partialReleaseKeepsLtvAtMostFiftyPercent() public view {
         assertFalse(handler.d14Violated(), "D14");
     }
@@ -107,104 +345,46 @@ contract ZecuredInvariantsTest is ZecuredFixture {
         assertFalse(handler.i7Violated(), "I7");
     }
 
-    /// I4 / I5: one account <-> one vault; vault ids and deposit tags single-use (vaultOf is consistent).
-    function invariant_I4_I5_bookkeeping() public view {
-        for (uint256 i; i < handler.vaultCount(); ++i) {
-            bytes32 vaultId = handler.vaultIds(i);
-            (address account,,) = registry.vault(vaultId);
-            assertEq(registry.vaultOf(account), vaultId, "I4");
-        }
+    /// I18 (a reservation only within the coverage cap), I22 (no gate stops an exit or a payout), I23 (no mint while
+    /// halted, paused, underbonded, or with a case open on the vault; a deposit proof never mints), I24 (no exit from a
+    /// frozen vault), and no unexpected revert of an honest action.
+    function invariant_I18_I22_I23_I24_gatesHoldWhileActing() public view {
+        assertFalse(handler.violated(), handler.violation());
     }
 
-    /// I13 (Base side): the note that backs an activated vault keeps its deposit tag marked used for good; this is
-    /// what every signer checks, on two providers, before refunding a note of the vault's amount (K2).
-    function invariant_I13_activatedTagsStayUsed() public view {
-        for (uint256 i; i < handler.vaultCount(); ++i) {
-            assertTrue(registry.depositTagUsed(handler.tagOf(handler.vaultIds(i))), "I13");
-        }
-    }
-
-    /// I14: Cancelled <=> never activated. A cancelled vault has no account, outstanding or claim; an activated vault
-    /// is never cancelled.
-    function invariant_I14_cancelledIffNeverActivated() public view {
-        for (uint256 i; i < handler.cancelledCount(); ++i) {
-            bytes32 vaultId = handler.cancelledIds(i);
-            (address account, uint64 outstanding, VaultStatus status) = registry.vault(vaultId);
-            assertEq(uint8(status), uint8(VaultStatus.Cancelled), "I14: cancelled");
-            assertEq(account, address(0), "I14: cancelled vault with an account");
-            assertEq(outstanding, 0, "I14: cancelled vault with outstanding");
-            assertEq(registry.claimCount(vaultId), 0, "I14: cancelled vault with claims");
-        }
-        for (uint256 i; i < handler.vaultCount(); ++i) {
-            (,, VaultStatus status) = registry.vault(handler.vaultIds(i));
-            assertTrue(status != VaultStatus.Cancelled, "I14: activated vault cancelled");
-        }
-    }
-
-    /// I15 (Tier 3, Base side of I10): a vault's current lineage note holds what Base still owes from the vault: its
-    /// outstanding plus the claims no payout was committed for. A claim committed against an earlier note is paid by
-    /// that payout, not by the current note.
-    function invariant_I15_lineageHoldsWhatBaseOwes() public view {
-        for (uint256 i; i < handler.vaultCount(); ++i) {
-            bytes32 vaultId = handler.vaultIds(i);
-            (, uint64 outstanding,) = registry.vault(vaultId);
-            uint256 owed = outstanding;
-            for (uint64 j; j < registry.claimCount(vaultId); ++j) {
-                bytes32 claimId = registry.claimIdOf(vaultId, j);
-                (,, uint64 amount,, ClaimStatus status) = registry.claim(claimId);
-                if (status == ClaimStatus.Pending && registry.claimInput(claimId) == bytes32(0)) owed += amount;
-            }
-            bytes32 head = handler.headOf(vaultId);
-            uint64 lineage = head == bytes32(0) ? 0 : registry.lineageOf(head).value;
-            assertEq(lineage, owed, "I15: lineage == outstanding + uncommitted claims");
-            if (head != bytes32(0)) assertEq(registry.lineageOf(head).vaultId, vaultId, "I15: lineage of the vault");
-        }
-    }
-
-    /// I16 (Tier 3): every claim confirmed paid was committed, against a lineage note of its own vault.
-    function invariant_I16_paidClaimsWereCommitted() public view {
-        for (uint256 i; i < handler.vaultCount(); ++i) {
-            bytes32 vaultId = handler.vaultIds(i);
-            for (uint64 j; j < registry.claimCount(vaultId); ++j) {
-                bytes32 claimId = registry.claimIdOf(vaultId, j);
-                (,,,, ClaimStatus status) = registry.claim(claimId);
-                bytes32 input = registry.claimInput(claimId);
-                if (status == ClaimStatus.Paid) assertTrue(input != bytes32(0), "I16: paid without a commitment");
-                if (input != bytes32(0)) assertEq(registry.lineageOf(input).vaultId, vaultId, "I16: foreign input");
-            }
-        }
-    }
-
-    /// I17 (Tier 3, S5): the open-vault count the bonds wait on is the number of vaults that are active, or closed with
-    /// a claim not yet confirmed paid.
-    function invariant_I17_openVaultCount() public view {
-        uint256 open;
-        for (uint256 i; i < handler.vaultCount(); ++i) {
-            bytes32 vaultId = handler.vaultIds(i);
-            (,, VaultStatus status) = registry.vault(vaultId);
-            bool unpaid;
-            for (uint64 j; j < registry.claimCount(vaultId); ++j) {
-                (,,,, ClaimStatus s) = registry.claim(registry.claimIdOf(vaultId, j));
-                if (s == ClaimStatus.Pending) unpaid = true;
-            }
-            if (status == VaultStatus.Active || unpaid) ++open;
-        }
-        assertEq(registry.openVaultCount(), open, "I17");
-    }
-
-    /// I2 / I6 / I8 / I14: no attack ever succeeded (account self-withdrawal, direct Morpho liquidation, zZEC flash loan,
-    /// attestation with < 3 distinct signers, close request executed by a stranger or after its deadline, partial
-    /// release by anyone but the account, activation of a cancelled vault, cancellation of an activated one).
+    /// No attack ever succeeded: a claim paid twice or confirmed without a commitment, a refund committed without its
+    /// destination or redirected by a stranger, one note landing twice, a deposit without all five VaultOpened
+    /// signatures, an early or direct activation, an account withdrawing its own collateral, a direct Morpho
+    /// liquidation, a zZEC flash loan, a partial release by anyone but the account, a close or deleverage request
+    /// executed by a stranger or after its deadline.
     function invariant_attacksAlwaysFail() public view {
         assertFalse(handler.attackSucceeded(), "an attack succeeded");
     }
 
     function afterInvariant() external view {
-        string[28] memory names = [
-            "attest",
+        string[48] memory names = [
+            "prove: pending",
+            "prove: refund (known vault)",
+            "prove: refund (account bound)",
+            "prove: refund (halted)",
+            "prove: refund (cap)",
+            "prove (stale cap price)",
+            "prove (compromised vault)",
+            "finalize",
+            "finalize (gated)",
+            "drop",
+            "refundPending",
+            "refundPending (refused)",
+            "pause",
+            "unpause",
+            "gates",
+            "refund destination",
+            "abandon",
+            "write off dust",
             "borrow",
             "repay",
             "release",
+            "release (frozen)",
             "partialRelease",
             "partialRelease (reverted)",
             "setPrice",
@@ -213,22 +393,24 @@ contract ZecuredInvariantsTest is ZecuredFixture {
             "liquidate (reverted)",
             "close",
             "close (reverted)",
-            "confirm",
-            "attack: account withdraw",
-            "attack: direct liquidation",
-            "attack: flash loan",
-            "attack: weak attestation",
-            "attack: close request",
-            "attack: partial release",
-            "cancel",
-            "attack: cancellation",
-            "commit",
-            "commit only",
-            "attack: claim reuse",
-            "attack: uncommitted confirm",
             "deleverage",
             "deleverage (reverted)",
-            "attack: deleverage"
+            "commit",
+            "commit only",
+            "confirm",
+            "attack: claim reuse",
+            "attack: uncommitted confirm",
+            "attack: unset destination",
+            "attack: refund destination",
+            "attack: double landing",
+            "attack: weak VaultOpened",
+            "attack: activation",
+            "attack: account withdraw",
+            "attack: direct liquidation",
+            "attack: partial release",
+            "attack: flash loan",
+            "attack: deleverage",
+            "attack: close request"
         ];
         for (uint256 i; i < names.length; ++i) {
             console.log(names[i], handler.calls(names[i]));

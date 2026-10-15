@@ -2,11 +2,11 @@
 pragma solidity 0.8.28;
 
 import {Tier3Base} from "../utils/Tier3Base.sol";
-import {ViolationKind, ViolationJournal, IZecuredSlasher} from "../../src/interfaces/IZecuredSlasher.sol";
-import {IZecuredSpendCommits} from "../../src/interfaces/IZecuredSpendCommits.sol";
-import {ISignerBond} from "../../src/interfaces/ISignerBond.sol";
-import {IZecuredRegistry, VaultStatus, ClaimStatus} from "../../src/interfaces/IZecuredRegistry.sol";
-import {SpendCommit, CloseRequest, DepositAttestation} from "../../src/libraries/ZecuredEIP712.sol";
+import {ViolationKind, ViolationJournal, IZecuredSlasher} from "../../src/interfaces/v3/IZecuredSlasher.sol";
+import {IZecuredSpendCommitsEvents} from "../../src/interfaces/v3/IZecuredSpendCommits.sol";
+import {IZecuredRegistry, VaultStatus, ClaimStatus} from "../../src/interfaces/v3/IZecuredRegistry.sol";
+import {IZecuredIntake} from "../../src/interfaces/v3/IZecuredIntake.sol";
+import {SpendCommit, CloseRequest} from "../../src/libraries/ZecuredEIP712.sol";
 import {MorphoBalancesLib} from "morpho-blue/src/libraries/periphery/MorphoBalancesLib.sol";
 import {ORACLE_PRICE_SCALE} from "morpho-blue/src/libraries/ConstantsLib.sol";
 import {IMorpho} from "morpho-blue/src/interfaces/IMorpho.sol";
@@ -118,7 +118,7 @@ contract RedTeamRegressionsTest is Tier3Base {
         vm.stopPrank();
         SpendCommit memory c = _spendCommit(vaultId, _depositTagFor(rt1Account), _two(a, b), "rt1.twice");
         bytes[] memory sigs = _threeSigs(registry.hashSpendCommit(c));
-        vm.expectRevert(abi.encodeWithSelector(IZecuredSpendCommits.DuplicateClaimCommitment.selector, _dest()));
+        vm.expectRevert(abi.encodeWithSelector(IZecuredSpendCommitsEvents.DuplicateClaimCommitment.selector, _dest()));
         registry.commitSpend(c, sigs);
     }
 
@@ -226,7 +226,7 @@ contract RedTeamRegressionsTest is Tier3Base {
         _send(_spendCommit(vaultId, t0, _two(u, m), "rt4.S2"));
         SpendCommit memory alone = _spendCommit(vaultId, t0, _one(u), "rt4.S1");
         bytes[] memory sigs = _threeSigs(registry.hashSpendCommit(alone));
-        vm.expectRevert(abi.encodeWithSelector(IZecuredSpendCommits.ClaimSetMismatch.selector, t0));
+        vm.expectRevert(abi.encodeWithSelector(IZecuredSpendCommitsEvents.ClaimSetMismatch.selector, t0));
         registry.commitSpend(alone, sigs);
         // ... while a rebuild of the same payout (same claims, in the same order) is accepted.
         _send(_spendCommit(vaultId, t0, _two(u, m), "rt4.S2.rebuild"));
@@ -238,7 +238,7 @@ contract RedTeamRegressionsTest is Tier3Base {
         _send(first);
         SpendCommit memory pair = _spendCommit(vaultId, t0, _two(u, m), "rt4.S2");
         sigs = _threeSigs(registry.hashSpendCommit(pair));
-        vm.expectRevert(abi.encodeWithSelector(IZecuredSpendCommits.ClaimSetMismatch.selector, t0));
+        vm.expectRevert(abi.encodeWithSelector(IZecuredSpendCommitsEvents.ClaimSetMismatch.selector, t0));
         registry.commitSpend(pair, sigs);
         _confirm(vaultId, _one(u));
         SpendCommit memory next = _spendCommit(vaultId, first.changeTag, _one(m), "rt4.next");
@@ -249,7 +249,7 @@ contract RedTeamRegressionsTest is Tier3Base {
 
     // ================================================================== RT-6: a halt and a pending deposit
 
-    function test_RT6_afterAHaltAPendingDepositIsDroppedCancelledAndTheBondsFreed() public {
+    function test_RT6_afterAHaltAPendingDepositIsRefundedAndTheBondsFreed() public {
         // A vault whose payout withheld its change (F2, signed by signers 1, 3 and 4), slashed and halted.
         address thief = makeAddr("rt6.vault");
         bytes32 badVault = _attest(thief, VAULT_005);
@@ -271,21 +271,30 @@ contract RedTeamRegressionsTest is Tier3Base {
         slasher.executeSlash(caseId);
         assertTrue(bond.halted());
 
-        // The bad vault winds down.
-        _confirm(badVault, _one(claimId));
+        // T-04: the slash compromised the bad vault. Its signers can no longer confirm or pay its claims, nor can its
+        // account leave; the compensator (a MOCK here) retires it and takes its pending claim over.
+        bytes[] memory confirmSigs = _threeSigs(registry.hashPayoutConfirmation(badVault, _one(claimId)));
+        vm.expectRevert(abi.encodeWithSelector(IZecuredRegistry.VaultCompromised.selector, badVault));
+        registry.confirmPayout(badVault, _one(claimId), confirmSigs);
         vm.prank(thief);
-        bytes32 rest = registry.requestRelease(badVault, keccak256("rt6.dest2"));
-        SpendCommit memory last = _spendCommit(badVault, c.changeTag, _one(rest), "rt6.last");
-        _send(last);
-        _confirm(badVault, _one(rest));
+        vm.expectRevert(abi.encodeWithSelector(IZecuredRegistry.VaultFrozen.selector, badVault));
+        registry.requestRelease(badVault, keccak256("rt6.dest2"));
+        assertEq(compensator.caseCount(), 1, "the slasher handed the case to the compensator");
+        assertEq(compensator.retire(registry, badVault), VAULT_005 - 1_000_000);
+        compensator.settle(registry, claimId);
+        (,,,, ClaimStatus settled) = registry.claim(claimId);
+        assertEq(uint8(settled), uint8(ClaimStatus.Compensated));
 
-        // The innocent pending deposit can never finalize, so it can be dropped although its anchor stands ...
+        // The innocent pending deposit can never finalize: anyone turns it into a refund (T-02), whose destination its
+        // account gives, and the signers pay it with a committed payout like any claim.
         assertTrue(relay.isInBestChain(keccak256("rt6.anchor")));
-        registry.dropPendingActivation(innocentVault);
-        // ... then cancelled, which lets the signers refund it (D23).
-        registry.cancelVault(innocentVault, _threeSigs(registry.hashVaultCancellation(innocentVault)));
+        bytes32 refund = intake.refundPending(innocentVault);
         (,, VaultStatus status) = registry.vault(innocentVault);
         assertEq(uint8(status), uint8(VaultStatus.Cancelled));
+        vm.prank(makeAddr("rt6.innocent"));
+        registry.setRefundDestination(refund, keccak256("rt6.innocent.dest"));
+        _send(_spendCommit(innocentVault, keccak256("rt6.tag"), _one(refund), "rt6.refund"));
+        _confirm(innocentVault, _one(refund));
 
         // Every vault has settled: once the window has passed, the signers the slash did not name take their bonds.
         assertEq(registry.openVaultCount(), 0);
@@ -299,8 +308,8 @@ contract RedTeamRegressionsTest is Tier3Base {
         bytes32 vaultId = keccak256("rt6.pending");
         relay.setTipHeight(4_500_000);
         _proveDeposit(vaultId, makeAddr("rt6.pending.account"), VAULT_001, keccak256("rt6.tag2"), keccak256("rt6.a2"));
-        vm.expectRevert(abi.encodeWithSelector(IZecuredRegistry.AnchorStillOnBestChain.selector, vaultId));
-        registry.dropPendingActivation(vaultId);
+        vm.expectRevert(abi.encodeWithSelector(IZecuredIntake.AnchorStillOnBestChain.selector, vaultId));
+        intake.dropPendingActivation(vaultId);
     }
 
     // ================================================================== RT-8: dust
@@ -394,9 +403,11 @@ contract RedTeamRegressionsTest is Tier3Base {
         address other = makeAddr("rt16.other");
         c.changeTag = _depositTagFor(other);
         _send(c);
-        DepositAttestation memory att = _attestation(other, VAULT_001);
-        bytes[] memory sigs = _threeSigs(registry.hashDepositAttestation(att));
-        vm.expectRevert(abi.encodeWithSelector(IZecuredRegistry.DepositTagUsed.selector, att.depositTag));
-        registry.attestDeposit(att, sigs);
+        // Neither as an activation nor as a refund: the Registry refuses a tag that is already a lineage note.
+        bytes32 tag = _depositTagFor(other);
+        vm.expectRevert(abi.encodeWithSelector(IZecuredRegistry.DepositTagUsed.selector, tag));
+        intake.harnessActivate(_vaultIdFor(other), other, VAULT_001, tag);
+        vm.expectRevert(abi.encodeWithSelector(IZecuredRegistry.DepositTagUsed.selector, tag));
+        intake.harnessRefund(_vaultIdFor(other), other, VAULT_001, tag);
     }
 }

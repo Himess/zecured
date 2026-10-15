@@ -1,7 +1,6 @@
 // SPDX-License-Identifier: MIT
 pragma solidity 0.8.28;
 
-import {SignerBond} from "../../src/SignerBond.sol";
 import {ZecuredSlasher} from "../../src/ZecuredSlasher.sol";
 import {ISignerBond} from "../../src/interfaces/ISignerBond.sol";
 import {
@@ -9,12 +8,10 @@ import {
     ViolationKind,
     ViolationJournal,
     ViolationCase
-} from "../../src/interfaces/IZecuredSlasher.sol";
-import {IZecuredSpendCommits} from "../../src/interfaces/IZecuredSpendCommits.sol";
-import {DepositProofConfig, MintMode, ClaimStatus} from "../../src/interfaces/IZecuredRegistry.sol";
-import {IRiscZeroVerifier} from "../../src/interfaces/IRiscZeroVerifier.sol";
-import {IZcashHeaderRelay} from "../../src/relay/IZcashHeaderRelay.sol";
-import {SpendCommit, DepositAttestation} from "../../src/libraries/ZecuredEIP712.sol";
+} from "../../src/interfaces/v3/IZecuredSlasher.sol";
+import {ClaimStatus, VaultStatus} from "../../src/interfaces/v3/IZecuredRegistry.sol";
+import {IZecuredIntake} from "../../src/interfaces/v3/IZecuredIntake.sol";
+import {SpendCommit} from "../../src/libraries/ZecuredEIP712.sol";
 import {MockRiscZeroVerifier} from "../../src/mocks/MockRiscZeroVerifier.sol";
 import {MockHeaderRelay} from "../mocks/MockHeaderRelay.sol";
 import {ZecuredFixture} from "../utils/ZecuredFixture.sol";
@@ -25,65 +22,42 @@ import {MessageHashUtils} from "@openzeppelin/contracts/utils/cryptography/Messa
 ///         the slash, the bounty, the halt and the bond withdrawal rules.
 contract Tier3SlashingTest is ZecuredFixture {
     bytes32 internal constant DEPOSIT_IMAGE = keccak256("zecured.test.tier3.depositImage");
-    bytes32 internal constant VIOLATION_IMAGE = keccak256("zecured.test.tier3.violationImage");
-    uint256 internal constant SLASH_WORK = 38_000_000; // ~100 normal Testnet blocks (S4)
-    uint64 internal constant WINDOW = 1 days;
+    bytes32 internal constant SUITE_VIOLATION_IMAGE = keccak256("zecured.test.tier3.violationImage");
     bytes32 internal constant ANCHOR = keccak256("zecured.test.tier3.anchor");
     bytes32 internal constant THEFT_REF = keccak256("zecured.test.tier3.theftPayoutRef");
 
     MockHeaderRelay internal relay;
     MockRiscZeroVerifier internal verifier;
-    SignerBond internal bond;
-    /// The nonce the bond predicted for the slasher.
-    uint64 internal slasherNonce;
-    ZecuredSlasher internal slasher;
 
     address internal account = makeAddr("zecured.tier3.account");
     address internal watcher = makeAddr("zecured.tier3.watcher");
     bytes32 internal vaultId;
     bytes32 internal depositTag;
 
-    function _depositProofConfig() internal override returns (DepositProofConfig memory) {
+    function _proofSetup() internal override returns (ProofSetup memory) {
         relay = new MockHeaderRelay();
         verifier = new MockRiscZeroVerifier();
-        return DepositProofConfig({
-            verifier: IRiscZeroVerifier(address(verifier)),
+        return ProofSetup({
+            relay: address(relay),
+            verifier: address(verifier),
             imageId: DEPOSIT_IMAGE,
-            relay: IZcashHeaderRelay(address(relay)),
-            minConfirmationWork: 3_500_000,
-            mintMode: MintMode.SignerAttested, // both paths: the tests open vaults by attestation
             sealSelector: verifier.SELECTOR(),
-            finalizeDepth: 6,
-            finalizeDelay: 150
+            minWork: MIN_WORK,
+            finalizeDepth: FINALIZE_DEPTH,
+            finalizeDelay: FINALIZE_DELAY
         });
     }
 
-    /// The bond at the next nonce, then ZZEC, Registry and Adapter (the fixture), then the slasher (setUp).
-    function _signerBond() internal override returns (ISignerBond) {
-        uint64 n = vm.getNonce(address(this));
-        slasherNonce = n + 4;
-        bond = new SignerBond(
-            vm.computeCreateAddress(address(this), n + 2), vm.computeCreateAddress(address(this), n + 4), WINDOW
-        );
-        return ISignerBond(address(bond));
+    function _bonded() internal pure override returns (bool) {
+        return true;
+    }
+
+    function _violationImageId() internal pure override returns (bytes32) {
+        return SUITE_VIOLATION_IMAGE;
     }
 
     function setUp() public override {
         super.setUp();
-        // `forge test --isolate` runs each call as a transaction, which also advances this contract's nonce: put it
-        // back where the bond expects the slasher (a no-op without --isolate).
-        vm.setNonceUnsafe(address(this), slasherNonce);
-        slasher = new ZecuredSlasher(
-            address(registry),
-            address(bond),
-            address(relay),
-            address(verifier),
-            VIOLATION_IMAGE,
-            verifier.SELECTOR(),
-            SLASH_WORK,
-            WINDOW
-        );
-        assertEq(bond.slasher(), address(slasher), "slasher address prediction");
         _bondAll();
         vaultId = _attest(account, VAULT_005);
         depositTag = _depositTagFor(account);
@@ -129,12 +103,12 @@ contract Tier3SlashingTest is ZecuredFixture {
 
     function _prove(bytes memory journal) internal returns (bytes32 caseId) {
         ViolationKind kind = abi.decode(journal, (ViolationJournal)).kind;
-        return slasher.proveViolation(kind, journal, verifier.mockSeal(VIOLATION_IMAGE, sha256(journal)));
+        return slasher.proveViolation(kind, journal, verifier.mockSeal(SUITE_VIOLATION_IMAGE, sha256(journal)));
     }
 
     function _expectProveRevert(bytes memory journal, bytes memory err) internal {
         ViolationKind kind = abi.decode(journal, (ViolationJournal)).kind;
-        bytes memory seal = verifier.mockSeal(VIOLATION_IMAGE, sha256(journal));
+        bytes memory seal = verifier.mockSeal(SUITE_VIOLATION_IMAGE, sha256(journal));
         vm.expectRevert(err);
         slasher.proveViolation(kind, journal, seal);
     }
@@ -218,11 +192,12 @@ contract Tier3SlashingTest is ZecuredFixture {
         vm.expectRevert(abi.encodeWithSelector(IZecuredSlasher.CaseAlreadyExecuted.selector, caseId));
         slasher.executeSlash(caseId);
 
-        // Minting stopped; the bounty is the watcher's to pull.
-        DepositAttestation memory att = _attestation(makeAddr("zecured.tier3.late"), VAULT_001);
-        bytes[] memory sigs = _threeSigs(registry.hashDepositAttestation(att));
-        vm.expectRevert(IZecuredSpendCommits.MintingHalted.selector);
-        registry.attestDeposit(att, sigs);
+        // Minting stopped: a new deposit lands as a refund (T-02); the bounty is the watcher's to pull.
+        address late = makeAddr("zecured.tier3.late");
+        uint256 supply = zzec.totalSupply();
+        _mockProof(_vaultIdFor(late), late, VAULT_001, _depositTagFor(late), keccak256("zecured.tier3.lateAnchor"));
+        assertEq(zzec.totalSupply(), supply, "nothing minted after the slash");
+        assertEq(uint8(_status(_vaultIdFor(late))), uint8(VaultStatus.Cancelled));
         vm.prank(watcher);
         bond.claimBounty();
         assertEq(watcher.balance, 0.005 ether);
@@ -290,18 +265,15 @@ contract Tier3SlashingTest is ZecuredFixture {
             hex"0000000000000000000000000000000000000000000000000000000000000000",
             hex"0000000000000000000000000000000000000000000000000000000000000000"
         );
-        address vault9Account = makeAddr("zecured.tier3.vault9");
-        DepositAttestation memory att = DepositAttestation({
-            vaultId: keccak256("zecured.tier3.vault9"), account: vault9Account, amount: VAULT_001, depositTag: tag
-        });
-        registry.attestDeposit(att, _threeSigs(registry.hashDepositAttestation(att)));
+        bytes32 vault9 = keccak256("zecured.tier3.vault9");
+        intake.harnessActivate(vault9, makeAddr("zecured.tier3.vault9"), VAULT_001, tag);
         relay.setBlock(anchor, true, SLASH_WORK);
 
         ViolationJournal memory j = abi.decode(journal, (ViolationJournal));
         assertEq(uint8(j.kind), uint8(ViolationKind.Uncommitted));
         assertEq(j.beneficiary, address(0xBEbeBeBEbeBebeBeBEBEbebEBeBeBebeBeBebebe));
         bytes32 caseId = _prove(journal);
-        assertEq(slasher.caseOf(caseId).vaultId, att.vaultId);
+        assertEq(slasher.caseOf(caseId).vaultId, vault9);
         vm.warp(block.timestamp + WINDOW);
         slasher.executeSlash(caseId);
         assertEq(_totalBonds(), 0);
@@ -323,20 +295,20 @@ contract Tier3SlashingTest is ZecuredFixture {
         (all5[0], all5[1], all5[2], all5[3], all5[4]) = (0, 1, 2, 3, 4);
         bytes[] memory openedSigs =
             _signerSigs(MessageHashUtils.toTypedDataHash(registry.domainSeparator(), opened), all5);
-        registry.attestDepositWithProof(journal, verifier.mockSeal(DEPOSIT_IMAGE, sha256(journal)), openedSigs);
+        intake.attestDepositWithProof(journal, verifier.mockSeal(DEPOSIT_IMAGE, sha256(journal)), openedSigs);
 
         bytes32 caseId = _prove(_journal(ViolationKind.Uncommitted, THEFT_REF, pTag, 0, bytes32(0)));
         assertEq(slasher.openCasesOf(pVault), 1);
         relay.setTipHeight(1_006);
         vm.warp(block.timestamp + 150);
-        vm.expectRevert(abi.encodeWithSelector(IZecuredSpendCommits.ViolationCaseOpen.selector, pVault));
-        registry.finalizeActivation(pVault);
+        vm.expectRevert(abi.encodeWithSelector(IZecuredIntake.ViolationCaseOpen.selector, pVault));
+        intake.finalizeActivation(pVault);
 
         relay.setBlock(ANCHOR, false, 0);
         vm.warp(block.timestamp + WINDOW);
         slasher.executeSlash(caseId); // dismissed
         assertEq(slasher.openCasesOf(pVault), 0);
-        registry.finalizeActivation(pVault);
+        intake.finalizeActivation(pVault);
         (address activated,,) = registry.vault(pVault);
         assertEq(activated, pAccount);
     }
@@ -427,7 +399,7 @@ contract Tier3SlashingTest is ZecuredFixture {
 
     function test_prove_revertsOnABadJournalOrSeal() public {
         bytes memory journal = _journal(ViolationKind.Uncommitted, THEFT_REF, depositTag, 0, bytes32(0));
-        bytes memory seal = verifier.mockSeal(VIOLATION_IMAGE, sha256(journal));
+        bytes memory seal = verifier.mockSeal(SUITE_VIOLATION_IMAGE, sha256(journal));
 
         vm.expectRevert(abi.encodeWithSelector(IZecuredSlasher.InvalidJournalLength.selector, 6 * 32));
         slasher.proveViolation(
@@ -516,11 +488,14 @@ contract Tier3SlashingTest is ZecuredFixture {
         vm.prank(signerSet[2]);
         bond.withdraw(payable(signerSet[2]));
         assertEq(signerSet[2].balance, before + 0.01 ether);
-        assertFalse(bond.fullyBonded(), "no new vault opens now");
-        DepositAttestation memory att = _attestation(makeAddr("zecured.tier3.next"), VAULT_001);
-        bytes[] memory sigs = _threeSigs(registry.hashDepositAttestation(att));
-        vm.expectRevert(IZecuredSpendCommits.SignersNotBonded.selector);
-        registry.attestDeposit(att, sigs);
+        assertFalse(bond.fullyBonded(), "no new vault activates now");
+        address next = makeAddr("zecured.tier3.next");
+        relay.setTipHeight(1_000);
+        _mockProof(_vaultIdFor(next), next, VAULT_001, _depositTagFor(next), keccak256("zecured.tier3.nextAnchor"));
+        relay.setTipHeight(1_000 + FINALIZE_DEPTH);
+        vm.warp(block.timestamp + FINALIZE_DELAY);
+        vm.expectRevert(IZecuredIntake.SignersNotBonded.selector);
+        intake.finalizeActivation(_vaultIdFor(next));
         vm.prank(signerSet[2]);
         vm.expectRevert(abi.encodeWithSelector(ISignerBond.NoBond.selector, 2));
         bond.withdraw(payable(signerSet[2]));
@@ -553,14 +528,14 @@ contract Tier3SlashingTest is ZecuredFixture {
         address b = address(bond);
         address rl = address(relay);
         address v = address(verifier);
-        // The bond names another slasher (the one deployed in setUp).
+        // The bond and the Registry name another slasher (the one the fixture deployed).
         vm.expectRevert(IZecuredSlasher.InvalidConfig.selector);
-        new ZecuredSlasher(r, b, rl, v, VIOLATION_IMAGE, selector, SLASH_WORK, WINDOW);
+        new ZecuredSlasher(r, b, address(0), rl, v, SUITE_VIOLATION_IMAGE, selector, SLASH_WORK, WINDOW);
         vm.expectRevert(IZecuredSlasher.ZeroWindow.selector);
-        new ZecuredSlasher(r, b, rl, v, VIOLATION_IMAGE, selector, SLASH_WORK, 0);
+        new ZecuredSlasher(r, b, address(0), rl, v, SUITE_VIOLATION_IMAGE, selector, SLASH_WORK, 0);
         vm.expectRevert(IZecuredSlasher.ZeroAddress.selector);
-        new ZecuredSlasher(address(0), b, rl, v, VIOLATION_IMAGE, selector, SLASH_WORK, WINDOW);
+        new ZecuredSlasher(address(0), b, address(0), rl, v, SUITE_VIOLATION_IMAGE, selector, SLASH_WORK, WINDOW);
         vm.expectRevert(IZecuredSlasher.InvalidConfig.selector);
-        new ZecuredSlasher(r, b, rl, v, bytes32(0), selector, SLASH_WORK, WINDOW);
+        new ZecuredSlasher(r, b, address(0), rl, v, bytes32(0), selector, SLASH_WORK, WINDOW);
     }
 }
