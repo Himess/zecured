@@ -1,7 +1,9 @@
-# Reproducible build of the two RISC Zero guests (review E4, docs/TIER2.md § 8.1). The Registry
-# and the slasher pin the image ids this job prints, and every prover runs the ELFs it exports
-# (ZECURED_DEPOSIT_ELF, ZECURED_VIOLATION_ELF). Anyone with Docker gets the same ids with the
-# commands in README.md ("Reproducing the guest image ids").
+# Reproducible build of the RISC Zero guests (review E4, docs/TIER2.md § 8.1), one pair per Zcash network: the
+# network is a build parameter of the statement (design notes T-09), so Testnet and Mainnet each have a deposit and a
+# violation guest with their own image ids (deposit-test, violation-test, deposit-main, violation-main). The Intake and
+# the slasher of a deployment pin its network's ids, and every prover runs the ELFs this job exports
+# (ZECURED_DEPOSIT_ELF, ZECURED_VIOLATION_ELF). Anyone with Docker gets the same ids with the commands in README.md
+# ("Reproducing the guest image ids").
 name: guests
 
 on:
@@ -10,6 +12,8 @@ on:
     branches: [main]
     paths:
       - "tier2/statement/**"
+      - "tier2/k4/**"
+      - "tier2/host/**"
       - "tier2/methods/**"
       - "tier2/vendor/**"
       - ".github/workflows/guests.yml"
@@ -21,6 +25,10 @@ jobs:
   guests:
     runs-on: ubuntu-24.04
     timeout-minutes: 150
+    strategy:
+      fail-fast: false
+      matrix:
+        network: [test, main]
     steps:
       - uses: actions/checkout@v4
 
@@ -39,33 +47,41 @@ jobs:
           "$HOME/.risc0/bin/rzup" install r0vm 3.0.6
           echo "$HOME/.risc0/bin" >> "$GITHUB_PATH"
 
-      - name: Host with both guests built in RISC Zero's guest-builder image
+      # The host's `mainnet` feature sets both the native statement and the embedded guests (their
+      # own `mainnet` feature): one switch, so the parity runs compare like with like.
+      - name: Host with both ${{ matrix.network }} guests built in RISC Zero's guest-builder image
         working-directory: tier2
         env:
           ZECURED_DOCKER_GUESTS: "1"
-        run: cargo build --release --locked -p zecured-tier2-host
+        run: cargo build --release --locked -p zecured-tier2-host ${{ matrix.network == 'main' && '--features mainnet' || '' }}
 
       - name: Image ids and the ELFs to pin
         working-directory: tier2
+        env:
+          NET: ${{ matrix.network }}
         run: |
           host=target/release/zecured-tier2-host
+          test "$($host network)" = "$NET"
           mkdir -p ../guests
-          $host export-elf ../guests/deposit.bin
-          $host violation export-elf ../guests/violation.bin
+          $host export-elf "../guests/deposit-$NET.bin"
+          $host violation export-elf "../guests/violation-$NET.bin"
           {
-            echo "deposit   $($host image-id)"
-            echo "violation $($host violation image-id)"
-            (cd ../guests && sha256sum deposit.bin violation.bin)
-          } | tee ../guests/image-ids.txt
+            echo "deposit-$NET   $($host image-id)"
+            echo "violation-$NET $($host violation image-id)"
+            (cd ../guests && sha256sum "deposit-$NET.bin" "violation-$NET.bin")
+          } | tee "../guests/image-ids-$NET.txt"
           {
-            echo '### Guest image ids (reproducible build)'
+            echo "### Guest image ids, $NET network (reproducible build)"
             echo '```'
-            cat ../guests/image-ids.txt
+            cat "../guests/image-ids-$NET.txt"
             echo '```'
           } >> "$GITHUB_STEP_SUMMARY"
 
       # The Docker-built guests must behave exactly as the native statement: every single change of
-      # the TEST-ONLY deposit witness (K4) and of the F1 witness gives the same outcome in both.
+      # the TEST-ONLY deposit witness (K4, for this network) and of the F1 witness gives the same
+      # outcome in both. The fixtures are Testnet transactions; the Mainnet run proves the deposit
+      # under the Mainnet encoding of the vault's address and checks that the Testnet viewing key
+      # is refused alike.
       - name: Parity of the pinned guests with the native statement
         working-directory: tier2
         run: |
@@ -75,6 +91,6 @@ jobs:
 
       - uses: actions/upload-artifact@v4
         with:
-          name: guests-${{ github.sha }}
+          name: guests-${{ matrix.network }}-${{ github.sha }}
           path: guests/
           if-no-files-found: error

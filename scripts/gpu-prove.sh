@@ -13,8 +13,10 @@
 # built here: ZECURED_DEPOSIT_ELF / ZECURED_VIOLATION_ELF name the pinned ELFs (the `guests`
 # workflow's artifact), so every receipt is for the deployed image id.
 #
-# A witness holds its vault's viewing key: only the team's own disposable vaults are proven on
-# rented hardware, and the machine is destroyed afterwards (docs/TIER2.md § 8).
+# A deposit witness holds its vault's tag key K (statement v2), which links the vault's notes and payouts
+# on Zcash; an F1, F2 or F3 witness holds a viewing key. Only the team's own disposable vaults are proven
+# on rented hardware, and the machine is destroyed afterwards (docs/TIER2.md § 8). The host is built for
+# Testnet; a Mainnet prover builds it with `--features cuda,mainnet`.
 set -euo pipefail
 
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"

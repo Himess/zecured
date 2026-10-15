@@ -143,20 +143,27 @@ router on Base Sepolia; `RealGroth16Seal.t.sol` runs a real deposit's seal throu
 
 ### Reproducing the guest image ids
 
-The Registry pins the deposit guest's image id and the slasher the violation guest's. Both come
-from a reproducible build: the guests are compiled in RISC Zero's pinned guest-builder image
+The Registry (the Intake, from Registry v3) pins the deposit guest's image id and the slasher the
+violation guest's. The network is a build parameter of the guests (design notes T-09), so each
+network has its own pair: deposit-test and violation-test (Testnet, the NU7 epoch), deposit-main
+and violation-main (Mainnet, the NU6.3 and NU7 epochs). All four come from a reproducible build:
+the guests are compiled in RISC Zero's pinned guest-builder image
 (`risczero/risc0-guest-builder:r0.1.97.0`) with `tier2/` as the build context, as the `guests`
 workflow does on every change. With Docker and rzup's Rust toolchain (`rzup install rust`; risc0-build
 asks it for its version even when Docker compiles the guests):
 
 ```bash
 cd tier2
-ZECURED_DOCKER_GUESTS=1 cargo build --release -p zecured-tier2-host
-./target/release/zecured-tier2-host image-id              # deposit guest
-./target/release/zecured-tier2-host violation image-id    # violation guest
+ZECURED_DOCKER_GUESTS=1 cargo build --release -p zecured-tier2-host                     # Testnet
+./target/release/zecured-tier2-host image-id              # deposit-test
+./target/release/zecured-tier2-host violation image-id    # violation-test
+ZECURED_DOCKER_GUESTS=1 cargo build --release -p zecured-tier2-host --features mainnet  # Mainnet
+./target/release/zecured-tier2-host image-id              # deposit-main
+./target/release/zecured-tier2-host violation image-id    # violation-main
 ```
 
-Both ids must equal the deployed ones (`deployments/base-sepolia.json`). A build without
+The ids of a deployment's network must equal the deployed ones (`deployments/base-sepolia.json` for
+Testnet). A build without
 `ZECURED_DOCKER_GUESTS` uses the local risc0 toolchain and gives machine-dependent ids; provers
 then run the pinned ELFs (`ZECURED_DEPOSIT_ELF`, `ZECURED_VIOLATION_ELF`, docs/TIER2.md § 8.1).
 
