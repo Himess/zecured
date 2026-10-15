@@ -230,7 +230,7 @@ contract SignerBondV2Test is Test {
         _expectInvalid(cfg);
 
         cfg = _config();
-        cfg.unbondingPeriod = WINDOW + LIVENESS - 1;
+        cfg.unbondingPeriod = WINDOW + LIVENESS + GRACE - 1; // a claim due at its latest would outlive the unbonding
         _expectInvalid(cfg);
 
         cfg = _config();
@@ -263,6 +263,9 @@ contract SignerBondV2Test is Test {
         assertEq(b.bountyCap(), 0);
         assertEq(b.commitGrace(), 0);
         assertEq(b.livenessPremiumBps(), 0);
+        cfg = _config();
+        cfg.unbondingPeriod = WINDOW + LIVENESS + GRACE;
+        assertEq(new SignerBondV2(cfg).unbondingPeriod(), WINDOW + LIVENESS + GRACE);
     }
 
     // ================================================================== deposit

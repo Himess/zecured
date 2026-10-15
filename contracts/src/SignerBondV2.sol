@@ -90,7 +90,8 @@ contract SignerBondV2 is ISignerBond, ReentrancyGuardTransient {
         ) revert ZeroAddress();
         if (
             cfg.minBond == 0 || cfg.challengeWindow == 0 || cfg.livenessPeriod == 0
-                || cfg.unbondingPeriod < uint256(cfg.challengeWindow) + cfg.livenessPeriod || cfg.bountyBps > BPS
+                || cfg.unbondingPeriod < uint256(cfg.challengeWindow) + cfg.livenessPeriod + cfg.commitGrace
+                || cfg.bountyBps > BPS
         ) revert InvalidConfig();
         registry = cfg.registry;
         slasher = cfg.slasher;

@@ -9,7 +9,8 @@ import {IOracle} from "morpho-blue/src/interfaces/IOracle.sol";
 /// @param oracle The market's oracle (Morpho scale): prices a claim's zatoshi for a liveness payment.
 /// @param minBond A signer counts as bonded with at least this much (`fullyBonded`).
 /// @param unbondingPeriod Between `requestUnbond` and `withdrawUnbonded`; at least `challengeWindow +
-///        livenessPeriod`, so that every claim created before a withdrawal starts can still be paid from it.
+///        livenessPeriod + commitGrace`, so that every claim created before a withdrawal starts is due (at the latest
+///        `livenessPeriod + commitGrace` after it) while the withdrawn amount is still slashable.
 /// @param challengeWindow The slasher's; also the wait after the last vault settled before a full exit.
 /// @param bountyBps, bountyCap A slash credits its prover `min(slashed * bountyBps / 10,000, bountyCap)`.
 /// @param livenessPeriod T-05: a claim unpaid this long after it became payable can be paid from the bonds.
