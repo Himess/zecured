@@ -323,26 +323,35 @@ contract RegistryV3HooksTest is ZecuredFixture {
         bytes32 feeId = registry.claimIdOf(vaultId, 0);
         _authorizeBoth(account);
         _borrow(account, 500_000);
+        uint64 outstanding = _outstanding(vaultId);
         vm.prank(compensator);
         vm.expectRevert(abi.encodeWithSelector(IZecuredRegistry.NotRetirable.selector, vaultId));
-        registry.retireVault(vaultId); // not compromised
+        registry.retireVault(vaultId, outstanding); // not compromised
 
         gates.setCompromised(vaultId, true);
         gates.setFrozen(vaultId, true);
         vm.prank(stranger);
         vm.expectRevert(abi.encodeWithSelector(IZecuredRegistry.OnlyCompensator.selector, stranger));
-        registry.retireVault(vaultId);
-        vm.prank(compensator);
+        registry.retireVault(vaultId, outstanding);
+        vm.startPrank(compensator);
         vm.expectRevert(abi.encodeWithSelector(IZecuredRegistry.DebtOutstanding.selector, vaultId));
-        registry.retireVault(vaultId);
+        registry.retireVault(vaultId, outstanding);
+        vm.expectRevert(IZecuredRegistry.ZeroAmount.selector);
+        registry.retireVault(vaultId, 0);
+        vm.expectRevert(
+            abi.encodeWithSelector(
+                IZecuredRegistry.SeizeExceedsOutstanding.selector, vaultId, outstanding + 1, outstanding
+            )
+        );
+        registry.retireVault(vaultId, outstanding + 1);
+        vm.stopPrank();
 
         _repayAll(account); // what the compensator does with the slashed bonds (layer 3)
-        uint64 outstanding = _outstanding(vaultId);
         bytes32 retiredId = registry.claimIdOf(vaultId, registry.claimCount(vaultId));
         vm.expectEmit(address(registry));
         emit IZecuredRegistry.VaultRetired(vaultId, retiredId, outstanding);
         vm.prank(compensator);
-        assertEq(registry.retireVault(vaultId), outstanding);
+        assertEq(registry.retireVault(vaultId, outstanding), outstanding);
 
         assertEq(uint8(_status(vaultId)), uint8(VaultStatus.Closed));
         assertEq(_outstanding(vaultId), 0);
@@ -358,7 +367,40 @@ contract RegistryV3HooksTest is ZecuredFixture {
         assertEq(registry.lockedZatoshi(), 0);
         vm.prank(compensator);
         vm.expectRevert(abi.encodeWithSelector(IZecuredRegistry.NotRetirable.selector, vaultId));
-        registry.retireVault(vaultId);
+        registry.retireVault(vaultId, 1);
+    }
+
+    /// The bonds repaid part of a compromised vault's debt: the compensator burns its collateral down to what the rest
+    /// of the debt needs (Morpho refuses one zatoshi more), so that nothing can be borrowed against it again. The vault
+    /// stays active, frozen, with its residual debt and collateral.
+    function test_retireVault_partly_downToTheLltv() public {
+        bytes32 vaultId = _attest(account, VAULT_005); // 4,975,000 zat after the fee: 1.99 USDC at $40
+        _authorizeBoth(account);
+        _borrow(account, 600_000); // 30 %
+        gates.setCompromised(vaultId, true);
+        gates.setFrozen(vaultId, true);
+        uint64 outstanding = _outstanding(vaultId);
+
+        // 600,000 of debt needs 600,000 / 0.625 = 960,000 USDC units of collateral: 2,400,000 zat at $40.
+        uint64 burnable = outstanding - 2_400_000;
+        vm.prank(compensator);
+        vm.expectRevert(bytes("insufficient collateral"));
+        registry.retireVault(vaultId, burnable + 1);
+
+        bytes32 retiredId = registry.claimIdOf(vaultId, registry.claimCount(vaultId));
+        vm.prank(compensator);
+        assertEq(registry.retireVault(vaultId, burnable), burnable);
+        assertEq(uint8(_status(vaultId)), uint8(VaultStatus.Active), "still active, with its residual debt");
+        assertEq(_outstanding(vaultId), 2_400_000);
+        assertEq(_position(account).collateral, 2_400_000);
+        assertEq(zzec.totalSupply(), 2_400_000, "I1");
+        _assertClaim(retiredId, vaultId, ClaimKind.Retired, burnable, bytes32(0), ClaimStatus.Compensated);
+
+        // Nothing more can be borrowed against what is left.
+        vm.prank(account);
+        vm.expectRevert(bytes("insufficient collateral"));
+        MORPHO.borrow(params, 1, 0, account, borrowReceiver);
+        assertEq(registry.openVaultCount(), 1, "open until its debt is gone");
     }
 
     /// The Registry withdraws a retired vault's collateral with the account's own Morpho authorization; without it,
@@ -368,7 +410,7 @@ contract RegistryV3HooksTest is ZecuredFixture {
         gates.setCompromised(vaultId, true);
         vm.prank(compensator);
         vm.expectRevert(bytes("unauthorized"));
-        registry.retireVault(vaultId);
+        registry.retireVault(vaultId, VAULT_001);
     }
 
     function test_settleCompensatedClaim() public {

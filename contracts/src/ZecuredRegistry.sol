@@ -38,7 +38,8 @@ import {ZecuredSpendLogic} from "./registry/ZecuredSpendLogic.sol";
 /// @dev Morpho authorization is all-or-nothing: an account that authorizes the Registry lets it do anything on its
 ///      behalf. This contract therefore calls exactly two Morpho functions: `supplyCollateral` (needs no authorization)
 ///      and `withdrawCollateral` (only inside the account's own `requestRelease` / `requestPartialRelease`, and in
-///      `retireVault` for a vault an executed theft case compromised, once its debt is repaid). It has no code path
+///      `retireVault` for a vault an executed theft case compromised, down to what its remaining debt needs). It has
+///      no code path
 ///      that borrows or withdraws loan assets, and it is not upgradeable and has no admin. Its storage layout is
 ///      `ZecuredRegistryStorage`'s; `commitSpend` runs `ZecuredSpendLogic`'s code on it by delegatecall (T-11).
 contract ZecuredRegistry is IZecuredRegistry, IZecuredSpendCommits, ZecuredRegistryStorage {
@@ -247,21 +248,26 @@ contract ZecuredRegistry is IZecuredRegistry, IZecuredSpendCommits, ZecuredRegis
     // ------------------------------------------------------------------ hooks: compensator (T-04), bond (T-05)
 
     /// @inheritdoc IZecuredRegistry
-    function retireVault(bytes32 vaultId) external returns (uint64 retired) {
+    function retireVault(bytes32 vaultId, uint64 amount) external returns (uint64 retired) {
         _only(compensator, OnlyCompensator.selector);
         Vault storage v = _vaults[vaultId];
         if (v.status != VaultStatus.Active || !IZecuredSlasher(slasher).isCompromised(vaultId)) {
             revert NotRetirable(vaultId);
         }
         address account = v.account;
-        retired = v.outstanding;
+        uint64 outstanding = v.outstanding;
+        if (amount == 0) revert ZeroAmount();
+        if (amount > outstanding) revert SeizeExceedsOutstanding(vaultId, amount, outstanding);
         Position memory p = morpho.position(marketId, account);
-        if (p.borrowShares != 0) revert DebtOutstanding(vaultId);
-        if (p.collateral != retired) revert CollateralMismatch(vaultId, p.collateral, retired);
-
-        v.outstanding = 0;
-        v.status = VaultStatus.Closed;
-        // Bookkeeping only (I11): the retired outstanding, compensated in USDC, never paid on Zcash.
+        if (p.collateral != outstanding) revert CollateralMismatch(vaultId, p.collateral, outstanding);
+        retired = amount;
+        uint64 remaining = outstanding - amount;
+        v.outstanding = remaining;
+        if (remaining == 0) {
+            if (p.borrowShares != 0) revert DebtOutstanding(vaultId);
+            v.status = VaultStatus.Closed;
+        }
+        // Bookkeeping only (I11): the retired zatoshi, compensated in USDC, never paid on Zcash.
         uint64 sequence = v.claimCount;
         bytes32 claimId = claimIdOf(vaultId, sequence);
         v.claimCount = sequence + 1;
@@ -275,12 +281,12 @@ contract ZecuredRegistry is IZecuredRegistry, IZecuredSpendCommits, ZecuredRegis
             bondPaid: false
         });
         emit VaultRetired(vaultId, claimId, retired);
-        if (v.unpaidClaims == 0) _settle();
+        if (remaining == 0 && v.unpaidClaims == 0) _settle();
 
-        if (retired != 0) {
-            _withdrawToRegistry(account, retired);
-            zzec.burn(address(this), retired);
-        }
+        // Morpho refuses a withdrawal that would leave the position unhealthy: with debt left, the compensator burns
+        // the collateral down to the LLTV at most.
+        _withdrawToRegistry(account, retired);
+        zzec.burn(address(this), retired);
     }
 
     /// @inheritdoc IZecuredRegistry

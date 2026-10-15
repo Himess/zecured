@@ -9,6 +9,7 @@ import {IMorpho, MarketParams, Id, Market} from "morpho-blue/src/interfaces/IMor
 import {IOracle} from "morpho-blue/src/interfaces/IOracle.sol";
 import {MarketParamsLib} from "morpho-blue/src/libraries/MarketParamsLib.sol";
 import {SharesMathLib} from "morpho-blue/src/libraries/SharesMathLib.sol";
+import {ORACLE_PRICE_SCALE} from "morpho-blue/src/libraries/ConstantsLib.sol";
 import {IZecuredCompensator, Incident, Victim, Entitlement} from "./interfaces/v3/IZecuredCompensator.sol";
 import {
     IZecuredRegistry,
@@ -481,11 +482,34 @@ contract ZecuredCompensator is IZecuredCompensator, ReentrancyGuardTransient {
         }
         uint256 debtNow;
         (repaid, debtNow) = _repayIfCovered(account, share);
-        if (debtNow > share) return (repaid, 0, 0);
+        if (debtNow > share) {
+            // Partly covered: the share is repaid, and the collateral the rest of the debt does not need is burned down
+            // to the LLTV, so that the repayment cannot be borrowed again against the vault's unbacked zZEC.
+            if (active) retired = _burnToLltv(vaultId, account);
+            return (repaid, retired, 0);
+        }
 
         equity = _keepEquity(vaultId, share - repaid, Math.saturatingSub(cap, debtNow));
         // Debt is zero now: the Registry withdraws the collateral with the account's authorization and burns it.
-        if (active) retired = IZecuredRegistry(registry).retireVault(vaultId);
+        if (active) retired = IZecuredRegistry(registry).retireVault(vaultId, v.outstanding);
+    }
+
+    /// @dev Retires the collateral beyond the least that keeps `account`'s position healthy at the market price (Morpho:
+    ///      collateral * price / 1e36 * lltv / 1e18 >= debt, here rounded up, plus one zatoshi). Nothing when the price
+    ///      is zero or the position needs all of it.
+    function _burnToLltv(bytes32 vaultId, address account) private returns (uint64 retired) {
+        uint256 price = IOracle(_oracle).price();
+        if (price == 0) return 0;
+        (, uint256 debt) = _debtOf(account);
+        uint256 collateral = _morpho.position(_marketId, account).collateral;
+        uint256 needed = Math.mulDiv(
+            Math.mulDiv(debt, CompensationMath.WAD, _lltv, Math.Rounding.Ceil),
+            ORACLE_PRICE_SCALE,
+            price,
+            Math.Rounding.Ceil
+        ) + 1;
+        if (needed >= collateral) return 0;
+        retired = IZecuredRegistry(registry).retireVault(vaultId, uint64(collateral - needed));
     }
 
     /// @dev Records `min(left, cap)` as the vault's equity and gives the rest of `left` back to the pool.

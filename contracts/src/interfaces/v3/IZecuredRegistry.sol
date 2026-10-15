@@ -166,7 +166,7 @@ interface IZecuredRegistry is IZecuredSignerErrors {
     /// @notice T-05: the bonds paid the claimant; the claim's ZEC is now owed to a Reimburse destination.
     event ClaimBondPaid(bytes32 indexed vaultId, bytes32 indexed claimId);
     event ReimburseDestinationSet(bytes32 indexed vaultId, bytes32 indexed claimId, bytes32 commitment);
-    /// @notice T-04: the compensator repaid a compromised vault's debt; its unbacked zZEC was burned.
+    /// @notice T-04: the compensator retired `retired` zatoshi of a compromised vault: its unbacked zZEC was burned.
     event VaultRetired(bytes32 indexed vaultId, bytes32 indexed claimId, uint64 retired);
     /// @notice T-04: a pending claim of a compromised vault is paid by the compensator instead.
     event ClaimCompensated(bytes32 indexed vaultId, bytes32 indexed claimId);
@@ -312,9 +312,12 @@ interface IZecuredRegistry is IZecuredSignerErrors {
 
     // ------------------------------------------------------------------ hooks: compensator only (T-04)
 
-    /// @notice A compromised vault whose Morpho debt is zero: withdraws its whole collateral to the Registry with the
-    ///         account's authorization, burns it, records a Retired claim (status Compensated) and closes the vault.
-    function retireVault(bytes32 vaultId) external returns (uint64 retired);
+    /// @notice An active compromised vault: withdraws `amount` of its collateral (1 to its outstanding) to the Registry
+    ///         with the account's Morpho authorization, burns it and records a Retired claim of `amount` (status
+    ///         Compensated). All of it needs the debt repaid and closes the vault; a part is what the compensator burns
+    ///         when the slashed bonds repaid only some of the debt, down to the LLTV at most (Morpho refuses an
+    ///         unhealthy withdrawal), so that nothing more can be borrowed against the unbacked zZEC.
+    function retireVault(bytes32 vaultId, uint64 amount) external returns (uint64 retired);
 
     /// @notice A pending claim of a compromised vault: marks it Compensated (settling the vault once none is left).
     function settleCompensatedClaim(bytes32 claimId) external;

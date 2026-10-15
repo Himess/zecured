@@ -8,9 +8,10 @@ import {ViolationKind} from "./IZecuredSlasher.sol";
 ///         set of ratios (design notes T-04).
 /// @param price P*, the market oracle's price (Morpho scale) at finalization.
 /// @param layer2 USDC owed to third-party claimants (Liquidation, CloseMarketMaker): their pending zatoshi times P*.
-/// @param layer3 USDC owed to lenders: the victim vaults' Morpho debt at tally time.
+/// @param layer3 USDC owed to lenders: the authorized victim vaults' Morpho debt at tally time plus a 1 % interest
+///        allowance (`CompensationMath.INTEREST_ALLOWANCE_BPS`: the debt keeps accruing until the vault is settled).
 /// @param layer4 USDC owed to the owners: their own pending claims (Release, CloseUser, Refund) times P*, plus each
-///        victim vault's equity, max(0, outstanding * P* - debt).
+///        authorized victim vault's equity, max(0, outstanding * P* - debt with the allowance).
 /// @param r2, r3, r4 Payout ratios (1e18 = in full), filled in layer order from the funds: a layer is paid only once
 ///        every earlier layer is paid in full.
 struct Incident {
@@ -29,7 +30,9 @@ struct Incident {
 }
 
 /// @notice A compromised vault (F1 or F2) in an incident.
-/// @param pendingClaims Its pending claims to tally (the Registry's `unpaidClaims` less Fee claims and bond-paid ones).
+/// @param pendingClaims Its claims tallied with an entitlement. `tallyClaim` settles every pending claim of the vault
+///        with the Registry (Fee and bond-paid ones too, without an entitlement); `talliedClaims` counts them all, and
+///        `tallyVault` needs the Registry's `unpaidClaims` at zero.
 /// @param authorized The account still lets the Registry withdraw its collateral on Morpho (else its debt cannot be
 ///        repaid safely: layers 3 and 4 skip it).
 struct Victim {

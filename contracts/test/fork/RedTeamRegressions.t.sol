@@ -280,7 +280,7 @@ contract RedTeamRegressionsTest is Tier3Base {
         vm.expectRevert(abi.encodeWithSelector(IZecuredRegistry.VaultFrozen.selector, badVault));
         registry.requestRelease(badVault, keccak256("rt6.dest2"));
         assertEq(compensator.caseCount(), 1, "the slasher handed the case to the compensator");
-        assertEq(compensator.retire(registry, badVault), VAULT_005 - 1_000_000);
+        assertEq(compensator.retire(registry, badVault, VAULT_005 - 1_000_000), VAULT_005 - 1_000_000);
         compensator.settle(registry, claimId);
         (,,,, ClaimStatus settled) = registry.claim(claimId);
         assertEq(uint8(settled), uint8(ClaimStatus.Compensated));

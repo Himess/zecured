@@ -37,8 +37,8 @@ contract MockCompensator {
         return _cases[i];
     }
 
-    function retire(IZecuredRegistry registry, bytes32 vaultId) external returns (uint64) {
-        return registry.retireVault(vaultId);
+    function retire(IZecuredRegistry registry, bytes32 vaultId, uint64 amount) external returns (uint64) {
+        return registry.retireVault(vaultId, amount);
     }
 
     function settle(IZecuredRegistry registry, bytes32 claimId) external {

@@ -525,7 +525,7 @@ contract ZecuredRegistryTest is ZecuredFixture {
             registry.convertToRefund(vaultId, account, VAULT_001, tag);
             // Roles this deployment does not have (zero) admit nobody.
             vm.expectRevert(abi.encodeWithSelector(IZecuredRegistry.OnlyCompensator.selector, callers[i]));
-            registry.retireVault(vaultId);
+            registry.retireVault(vaultId, VAULT_001);
             vm.expectRevert(abi.encodeWithSelector(IZecuredRegistry.OnlyCompensator.selector, callers[i]));
             registry.settleCompensatedClaim(tag);
             vm.expectRevert(abi.encodeWithSelector(IZecuredRegistry.OnlyBond.selector, callers[i]));
@@ -535,7 +535,7 @@ contract ZecuredRegistryTest is ZecuredFixture {
         // Not even the zero address stands in for a missing role.
         vm.startPrank(address(0));
         vm.expectRevert(abi.encodeWithSelector(IZecuredRegistry.OnlyCompensator.selector, address(0)));
-        registry.retireVault(vaultId);
+        registry.retireVault(vaultId, VAULT_001);
         vm.expectRevert(abi.encodeWithSelector(IZecuredRegistry.OnlyBond.selector, address(0)));
         registry.markBondPaid(tag);
         vm.stopPrank();

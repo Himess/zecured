@@ -2,6 +2,7 @@
 pragma solidity 0.8.28;
 
 import {Test, Vm} from "forge-std/Test.sol";
+import {Math} from "@openzeppelin/contracts/utils/math/Math.sol";
 import {MarketParams} from "morpho-blue/src/interfaces/IMorpho.sol";
 import {IOracle} from "morpho-blue/src/interfaces/IOracle.sol";
 import {ZecuredCompensator} from "../../src/ZecuredCompensator.sol";
@@ -423,7 +424,7 @@ contract ZecuredCompensatorTest is Test {
 
         uint256 shares = morpho.borrowSharesOf(alice);
         vm.expectCall(address(morpho), abi.encodeCall(MockMorphoForCompensator.repay, (params, 0, shares, alice, "")));
-        vm.expectCall(address(registry), abi.encodeCall(MockCompensatorRegistry.retireVault, (VAULT_A)));
+        vm.expectCall(address(registry), abi.encodeCall(MockCompensatorRegistry.retireVault, (VAULT_A, 10 * ZEC)));
         vm.recordLogs();
         comp.settleVault(VAULT_A);
         Vm.Log[] memory logs = vm.getRecordedLogs();
@@ -456,14 +457,16 @@ contract ZecuredCompensatorTest is Test {
         assertEq(comp.funds(), 0);
         assertEq(comp.reserved(), 141 * USD);
 
-        // Partial settlement: the vault's share ($202 / 2) is repaid; the rest of the debt and the collateral stay.
+        // Partial settlement: the vault's share ($202 / 2) is repaid; the collateral the rest of the debt does not need
+        // is burned down to the LLTV; the rest of the debt and that collateral stay.
+        uint256 left = _collateralNeededFor(99 * USD);
         vm.expectEmit(address(comp));
-        emit IZecuredCompensator.VaultSettled(VAULT_A, 101 * USD, 0, 0);
+        emit IZecuredCompensator.VaultSettled(VAULT_A, 101 * USD, uint64(10 * ZEC - left), 0);
         comp.settleVault(VAULT_A);
         assertEq(morpho.debtOf(alice), 99 * USD);
-        assertEq(morpho.collateralOf(alice), 10 * ZEC);
+        assertEq(morpho.collateralOf(alice), left);
         (,, VaultStatus status) = registry.vault(VAULT_A);
-        assertEq(uint8(status), uint8(VaultStatus.Active), "not retired: the Registry has no partial hook yet");
+        assertEq(uint8(status), uint8(VaultStatus.Active), "not retired in full: its residual debt stays");
         assertEq(comp.equityOf(VAULT_A), 0);
         assertEq(comp.withdrawEntitlement(liq), 40 * USD);
         vm.expectRevert(abi.encodeWithSelector(IZecuredCompensator.NothingOwed.selector, rel));
@@ -472,9 +475,9 @@ contract ZecuredCompensatorTest is Test {
         _assertBooks();
     }
 
-    /// Documents the gap the design's withdraw-to-LLTV hook would close: after a partial repayment the collateral is
-    /// still on Morpho, and the account can borrow the repaid amount again.
-    function test_partialSettlement_leavesCollateralTheAccountCanBorrowAgainst() public {
+    /// A partial repayment burns the collateral the rest of the debt does not need, down to the LLTV: the account
+    /// cannot borrow the repaid amount again, and the vault stays active (frozen) with its residual debt.
+    function test_partialSettlement_burnsTheCollateralDownToTheLltv() public {
         _openVault(VAULT_A, alice, 10 * ZEC, 200 * USD);
         _fund(101 * USD);
         _steal(VAULT_A);
@@ -482,15 +485,21 @@ contract ZecuredCompensatorTest is Test {
         _finalize(1);
         comp.settleVault(VAULT_A);
         assertEq(morpho.debtOf(alice), 99 * USD);
+        // What $99 needs at the LLTV (2.8779 ZEC at $40), plus one zatoshi; the rest was burned.
+        (, uint64 outstanding, VaultStatus status) = registry.vault(VAULT_A);
+        assertEq(outstanding, _collateralNeededFor(99 * USD));
+        assertEq(uint8(status), uint8(VaultStatus.Active));
+        assertEq(morpho.collateralOf(alice), outstanding);
+        assertEq(comp.victim(VAULT_A).settled, true);
         vm.prank(alice);
-        morpho.borrow(params, 101 * USD, 0, alice, alice);
-        assertEq(morpho.debtOf(alice), 200 * USD);
+        vm.expectRevert(bytes("MockMorpho: insufficient collateral"));
+        morpho.borrow(params, 1 * USD, 0, alice, alice);
+        _assertBooks();
     }
 
-    /// The same gap, reached on purpose: while layer 4 is not paid in full, an account with room below the LLTV can
-    /// borrow past its share before `settleVault`, so that the share is repaid without retiring the vault, then borrow
-    /// the repayment back.
-    function test_partialSettlement_canBeReachedByBorrowingPastTheShare() public {
+    /// Borrowing past the share before `settleVault` (while layer 4 is not paid in full) only lands in the partial case:
+    /// the share is repaid and the collateral burned down to the LLTV, so the repayment cannot be borrowed back.
+    function test_partialSettlement_reachedByBorrowingPastTheShare_cannotBeBorrowedBack() public {
         _openVault(VAULT_A, alice, 10 * ZEC, 100 * USD);
         _openVault(VAULT_B, bob, 10 * ZEC, 100 * USD);
         _fund(501 * USD); // layer 3 = $202, layer 4 = $598: r4 = 1/2, so A's share is $101 + $149.50
@@ -503,13 +512,20 @@ contract ZecuredCompensatorTest is Test {
 
         vm.prank(alice);
         morpho.borrow(params, 240 * USD, 0, alice, alice); // $340 of debt: past the share, below the LLTV ($344)
-        vm.expectEmit(address(comp));
-        emit IZecuredCompensator.VaultSettled(VAULT_A, 250_500_000, 0, 0);
         comp.settleVault(VAULT_A);
+        uint256 debt = morpho.debtOf(alice);
+        assertApproxEqAbs(debt, 89_500_000, 1, "the share ($250.50) repaid");
+        assertEq(morpho.collateralOf(alice), _collateralNeededFor(debt), "burned down to what the rest needs");
         vm.prank(alice);
-        morpho.borrow(params, 250 * USD, 0, alice, alice);
-        assertEq(usdc.balanceOf(alice), 490 * USD, "on top of the $100 borrowed before the theft");
+        vm.expectRevert(bytes("MockMorpho: insufficient collateral"));
+        morpho.borrow(params, 1 * USD, 0, alice, alice);
+        assertEq(usdc.balanceOf(alice), 240 * USD, "what it borrowed before the settlement, nothing more");
         _assertBooks();
+    }
+
+    /// The least collateral that keeps `debt` healthy at the LLTV and $40 (Morpho's rule, rounded up), plus one zatoshi.
+    function _collateralNeededFor(uint256 debt) internal pure returns (uint256) {
+        return Math.mulDiv(Math.mulDiv(debt, WAD, LLTV, Math.Rounding.Ceil), 1e36, PRICE, Math.Rounding.Ceil) + 1;
     }
 
     function test_layers_zeroFundsPayNobody() public {

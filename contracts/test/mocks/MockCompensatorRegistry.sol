@@ -19,9 +19,10 @@ interface ICompromised {
 /// @notice MOCK, tests only. The part of ZecuredRegistry v3 the compensator reads and calls (design notes T-04), with
 ///         the rules Registry v3 applies: `settleCompensatedClaim` marks a pending claim of a compromised vault
 ///         Compensated (the vault no longer counts as open once it is closed or cancelled and none is left);
-///         `retireVault` needs a compromised active vault without Morpho debt whose Morpho collateral equals its
-///         outstanding, withdraws that collateral with the account's authorization (Morpho reverts without it), records
-///         a Retired claim (status Compensated, never pending) and closes the vault. Vaults and claims are set by the
+///         `retireVault(vaultId, amount)` needs a compromised active vault whose Morpho collateral equals its
+///         outstanding, withdraws `amount` of it with the account's authorization (Morpho reverts without it, and on an
+///         unhealthy position), records a Retired claim (status Compensated, never pending), and closes the vault when
+///         nothing is left (which needs the debt repaid). Vaults and claims are set by the
 ///         test (`setClaimStatus` also allows what the Registry refuses on a compromised vault, such as reviving a
 ///         refund); no zZEC, no signatures.
 contract MockCompensatorRegistry {
@@ -125,16 +126,19 @@ contract MockCompensatorRegistry {
         emit ClaimCompensated(c.vaultId, claimId);
     }
 
-    function retireVault(bytes32 vaultId) external returns (uint64 retired) {
+    function retireVault(bytes32 vaultId, uint64 amount) external returns (uint64 retired) {
         require(msg.sender == compensator, "MockRegistry: only compensator");
         VaultDetails storage v = _vaults[vaultId];
         require(v.status == VaultStatus.Active, "MockRegistry: not active");
         require(ICompromised(slasher).isCompromised(vaultId), "MockRegistry: not compromised");
-        require(morphoMock.borrowSharesOf(v.account) == 0, "MockRegistry: debt outstanding");
+        require(amount != 0 && amount <= v.outstanding, "MockRegistry: amount");
         require(morphoMock.collateralOf(v.account) == v.outstanding, "MockRegistry: collateral mismatch");
-        retired = v.outstanding;
-        v.outstanding = 0;
-        v.status = VaultStatus.Closed;
+        retired = amount;
+        v.outstanding -= amount;
+        if (v.outstanding == 0) {
+            require(morphoMock.borrowSharesOf(v.account) == 0, "MockRegistry: debt outstanding");
+            v.status = VaultStatus.Closed;
+        }
         bytes32 claimId = _newClaim(vaultId, ClaimKind.Retired, ClaimStatus.Compensated, retired, address(0));
         morphoMock.withdrawCollateral(_params, retired, v.account, address(this));
         emit VaultRetired(vaultId, claimId, retired);
