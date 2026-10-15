@@ -25,6 +25,25 @@ Every row is verified from a primary source; date = when verified. Unverified it
 | ZIP 2005 use_qsk test vectors | 8 vectors from ZcashFoundation/frost-tools PR #610 (zafe-core, unofficial); our implementation matches all of them | `signer/crates/zcash-ops/tests/fixtures/zip2005_use_qsk.json` | 2026-10-11 |
 | v6 version group ID | `0xD884B698` | ZIP 229 | 2026-10-10 |
 
+## Zcash header rules by network (header relay parameters)
+
+Z = Zebra `v7.0.0-rc.0` (commit `6d1e414d6f55e4180d0e47baaa934bf97d5b4fec`), paths under
+https://github.com/ZcashFoundation/zebra/blob/v7.0.0-rc.0/. ZIPs and the protocol specification: https://github.com/zcash/zips
+at commit `929a92f7383e036b6f6a48f43ec88c5bdd130003` (2026-10-14, the tip of `main` on 2026-10-15). `contracts/config/relay-<network>.json` holds these values; `ZcashHeaderRelay.RelayParams` repeats the sources.
+
+| Fact | Value | Source | Verified |
+|---|---|---|---|
+| PoWLimit, Mainnet | 2^243 − 1, used rounded through its compact form: nBits `0x1f07ffff`, target `0x07ffff` × 2^224 | Z `zebra-chain/src/work/difficulty.rs` (`ParameterDifficulty for Network::target_difficulty_limit`); specification § 5.3 `PoWLimit` (`protocol/protocol.tex`) | 2026-10-15 |
+| PoWLimit, Testnet | 2^251 − 1, rounded: nBits `0x2007ffff`, target `0x07ffff` × 2^232 | Z `zebra-chain/src/parameters/network/testnet.rs` (`ParametersBuilder::default`); specification § 5.3 | 2026-10-15 |
+| Max time rule (time ≤ median-time-past + 90 min) | Mainnet: every height in Zebra (the specification: height ≥ 2); Testnet: height ≥ 653,606 | Z `zebra-chain/src/parameters/network.rs` (`is_max_block_time_enforced`: `Network::Mainnet => true`), `network_upgrade.rs` (`TESTNET_MAX_TIME_START_HEIGHT`), `zebra-state/src/service/check.rs` (`difficulty_threshold_and_time_are_valid`); specification § 7.6 | 2026-10-15 |
+| Minimum-difficulty blocks | Testnet only, from height 299,188: a block more than 6 × PoWTargetSpacing (18 × from NU7; 450 s either way after Blossom) after its parent carries ToCompact(PoWLimit). Never on Mainnet | Z `network_upgrade.rs` (`minimum_difficulty_spacing_for_height` returns None for Mainnet; `TESTNET_MINIMUM_DIFFICULTY_START_HEIGHT`), `zebra-state/src/service/check/difficulty.rs` (`expected_difficulty_threshold` asserts a test network); specification § 7.7.3 ("not apply to Mainnet"); ZIP 218 § "Minimum difficulty blocks on Testnet" | 2026-10-15 |
+| Blossom activation (75 s spacing from here) | Mainnet 653,600; Testnet 584,000 | Z `zebra-chain/src/parameters/constants.rs` (`activation_heights`); specification § 5.3 | 2026-10-15 |
+| Spacing and averaging window before NU7 | 75 s, 17 blocks (both networks; 150 s before Blossom) | Z `network_upgrade.rs` (`POST_BLOSSOM_POW_TARGET_SPACING`, `POW_AVERAGING_WINDOW`); specification § 5.3 | 2026-10-15 |
+| Spacing and averaging window from NU7 | 25 s, 102 blocks (`PostNU7PoWTargetSpacing`, `PostNU7PoWAveragingWindow`); chosen by the candidate block's height | ZIP 218 § "Block target spacing", § "Averaging window"; Z `network_upgrade.rs` (`POST_NU7_POW_TARGET_SPACING`, `POST_NU7_POW_AVERAGING_WINDOW`, `averaging_window_for_height`) | 2026-10-15 |
+| NU7 Mainnet activation height | **Not assigned yet**: absent from Zebra v7.0.0-rc.0 and from Zebra `main` at `6cc6d360e51fe07e661c26f02230e06d81b468c7` (committed 2026-10-14, checked 2026-10-15; every file above is identical there to v7.0.0-rc.0, and rc.0 is the latest v7 tag); ZIP 259 says "TBD (To be set on OCT 20)" and requires a multiple of 3. The Mainnet relay configuration uses `type(uint32).max` until then | Z `zebra-chain/src/parameters/constants.rs`; ZIP 259 (`zips/zip-0259.md`, § "NU7 network constants") | 2026-10-15 |
+| Rules that do not depend on the network | median of 11 times, damping 4, bounds +16 % / −32 %, 90 min, the 2-hour clock rule, Equihash (200, 9), version ≥ 4 | Z `zebra-state/src/service/check/difficulty.rs` (constants), `zebra-chain/src/block/header.rs` (`time_is_valid_at`), `zebra-consensus/src/block/check.rs`; specification § 7.6, § 7.7 | 2026-10-15 |
+| Real Mainnet data | 1,600 headers 3,497,446 .. 3,499,045 (P2P; SHA256d and `hashPrevBlock` link them to the hashes Zebra v7.0.0-rc.0's `zebra-chain/src/parameters/checkpoint/main-checkpoints.txt` lists at 3,497,445, 3,497,845, 3,498,245, 3,498,645, 3,499,045). With the Mainnet parameters the Python model passes every time, nBits, Equihash and PoW check of the 1,572 headers with their 28-block context. Of the 1,487 with a full 113-block context: a 16-block window reproduces 2 nBits, an 18- or 102-block window or a 25 s spacing none; the Testnet minimum-difficulty rule would refuse exactly the 7 blocks that came 451 s to 762 s after their parents. PoWLimit is not exercised (targets ~1.8 × 10^8 below it) | `contracts/test/relay/tools/zcash_header_check.py chain --network mainnet --equihash`; the variants with the same model's functions | 2026-10-15 |
+
 ## Zcash infrastructure (testnet)
 
 | Fact | Value | Source | Verified |
@@ -36,6 +55,14 @@ Every row is verified from a primary source; date = when verified. Unverified it
 | Wallet tooling | zcash-devtool, frost-tools (ex frost-zcash-demo) and zingo-cli are **not** NU7-ready on testnet; Zkool merged NU7 deps 2026-10-07 (untested) | research | 2026-10-10 |
 | Zebra regtest | `network = "Regtest"`; heights under `[network.testnet_parameters.activation_heights]` with keys `Canopy`, `NU5`, `NU6`, `"NU6.1"`, `"NU6.2"`, `"NU6.3"`, `NU7`; mining via `generate`/`generatetoaddress` RPCs or `internal-miner`; Zebra ≥6.4 has `[rpc] lightwalletd_listen_addr` (built-in lightwalletd-compatible gRPC) | Zebra book, research (not yet run) | 2026-10-10 |
 | Fees | ZIP-317 marginal fee 5,000 zat/action, 2 grace actions (librustzcash); Zebra ≥6.4 also accepts 1,000 | research | 2026-10-10 |
+
+## Zcash infrastructure (mainnet, header relay fixtures only)
+
+| Fact | Value | Source | Verified |
+|---|---|---|---|
+| P2P network | magic `24e92764`, port 8233; DNS seeders `dnsseed.str4d.xyz`, `dnsseed.z.cash`, `mainnet.seeder.shieldedinfra.net`, `mainnet.seeder.zfnd.org`, `seeder.zec.rocks` | Zebra v7.0.0-rc.0 `zebra-chain/src/parameters/constants.rs` (`magics`), `zebra-network/src/config.rs` (`DEFAULT_MAINNET_PEERS`) | 2026-10-15 |
+| P2P protocol versions | Mainnet peers require ≥ 170,160 (NU6.3); NU7 uses 170,190 on Mainnet and 170,180 on Testnet; Zebra 7.0.0-rc.0 advertises 170,180. Mainnet `getheaders` was answered only by `/Zakura:1.5.0/` and `/Zakura:1.6.0/` peers (protocol 170,190); the Zebra peers tried (4.3.0, 5.0.0, 5.1.0, 6.2.3, 6.4.2) closed the connection on it and a `/MagicBean:6.20.0/` (zcashd) peer timed out | `zebra-network/src/protocol/external/types.rs`, `zebra-network/src/constants.rs`; ZIP 259; `tools/zcash_p2p_headers.py --network mainnet` | 2026-10-15 |
+| Mainnet block API | CipherScan `https://api.mainnet.cipherscan.app/api/block/<height>` (same fields as the Testnet API) | probe; `tools/build_fixture.py --network mainnet --cipherscan` | 2026-10-15 |
 
 ## Base Sepolia (84532)
 

@@ -1,7 +1,7 @@
 // SPDX-License-Identifier: MIT
 pragma solidity 0.8.28;
 
-import {IZcashHeaderRelay} from "../../src/relay/IZcashHeaderRelay.sol";
+import {IZcashHeaderRelay, ZCASH_TESTNET} from "../../src/relay/IZcashHeaderRelay.sol";
 
 /// @title MockHeaderRelay
 /// @notice MOCK, tests only. A header relay whose best chain the test sets directly, so that the Registry's pending
@@ -11,6 +11,12 @@ contract MockHeaderRelay is IZcashHeaderRelay {
     mapping(bytes32 blockHash => bool) public onBestChain;
     mapping(bytes32 blockHash => uint256) public work;
     uint256 public tipHeight;
+    /// @notice A Testnet relay unless the test says otherwise.
+    bytes32 public networkId = ZCASH_TESTNET;
+
+    function setNetworkId(bytes32 id) external {
+        networkId = id;
+    }
 
     function setBlock(bytes32 blockHash, bool best, uint256 confirmationWork_) external {
         onBestChain[blockHash] = best;
