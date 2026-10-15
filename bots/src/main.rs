@@ -35,7 +35,7 @@ use zecured_base::events::{self, RegistryEvent};
 use zecured_zcash_ops::spend::zip317_fee;
 
 use crate::chain::{
-    CloseRequest, DeleverageRequest, Deployment, IRegistryView, ISettlementAdapter, ORACLE_PRICE_SCALE,
+    CloseRequest, DeleverageRequest, Deployment, IRegistryView, ISettlementAdapter, Liquidation, ORACLE_PRICE_SCALE,
 };
 
 #[derive(Parser)]
@@ -197,6 +197,9 @@ async fn liquidator(
 /// Base blocks of Registry events the liquidator reads per pass at most.
 const EVENT_STEP: u64 = 20_000;
 
+/// A liquidation's receipt is waited for at most this long (alloy's default is forever).
+const RECEIPT_TIMEOUT: Duration = Duration::from_secs(120);
+
 async fn liquidation_pass<P: Provider>(
     p: &P,
     backend: &str,
@@ -218,30 +221,90 @@ async fn liquidation_pass<P: Provider>(
         }
         *cursor = to;
     }
+    if accounts.is_empty() {
+        return Ok(());
+    }
+    let market = chain::market_state(p, d).await?;
     for (vault_id, account) in accounts.clone() {
-        let pos = chain::position(p, d, account).await?;
-        if pos.borrow_shares == 0 || pos.healthy() {
-            continue;
-        }
-        info!(vault = %hex::encode(&vault_id[..4]), "unhealthy position: liquidating");
-        let commitment = chain::fresh_commitment(backend, zaddr, receiver).await?;
-        let adapter = ISettlementAdapter::new(d.adapter, p);
-        let call = adapter.liquidate(account, U256::ZERO, U256::from(pos.borrow_shares), commitment);
-        // Simulate first: the adapter enforces the dust floor and may revert.
-        if let Err(e) = call.call().await {
-            warn!("liquidation would revert: {e}");
-            continue;
-        }
-        let gas = zecured_base::gas_with_headroom(call.estimate_gas().await?);
-        let receipt = call.gas(gas).send().await?.get_receipt().await?;
-        ensure!(receipt.status(), "liquidation reverted");
-        info!(tx = %receipt.transaction_hash, "liquidated");
-        if pos.collateral > 0 {
-            accounts.remove(&vault_id);
+        // One vault's failure (a flaky RPC answer, a refused commitment) must not starve the
+        // vaults after it.
+        match watch_vault(p, backend, d, zaddr, receiver, &market, vault_id, account).await {
+            Ok(Watch::Keep) => {}
+            Ok(Watch::Closed) => {
+                accounts.remove(&vault_id);
+            }
+            Err(e) => warn!(vault = %hex::encode(&vault_id[..4]), "liquidation check failed: {e:#}"),
         }
     }
     Ok(())
 }
+
+/// Whether a vault stays on the watch list.
+enum Watch {
+    Keep,
+    /// The Registry closed the vault: nothing is left to liquidate.
+    Closed,
+}
+
+/// H-04: checks one vault and liquidates its position if it is unhealthy. A vault leaves the watch
+/// list only once the Registry reports it closed, never because it was liquidated: a partial
+/// liquidation leaves collateral, and the borrower may borrow against it again.
+#[allow(clippy::too_many_arguments)]
+async fn watch_vault<P: Provider>(
+    p: &P,
+    backend: &str,
+    d: &Deployment,
+    zaddr: &str,
+    receiver: &[u8; 43],
+    market: &chain::MarketState,
+    vault_id: B256,
+    account: Address,
+) -> Result<Watch> {
+    let v = IRegistryView::new(d.registry, p).vault(vault_id).call().await?;
+    match v.status {
+        chain::VAULT_CLOSED => return Ok(Watch::Closed),
+        chain::VAULT_ACTIVE => {}
+        _ => return Ok(Watch::Keep),
+    }
+    let pos = chain::position_in(p, d, market, account).await?;
+    let Some(plan) = chain::plan_liquidation(&pos, v.outstanding) else {
+        return Ok(Watch::Keep);
+    };
+    let short = hex::encode(&vault_id[..4]);
+    info!(vault = %short, underwater = matches!(plan, Liquidation::SeizeAll(_)), "unhealthy position: liquidating");
+    let adapter = ISettlementAdapter::new(d.adapter, p);
+    // Simulated first, with a placeholder commitment (the Adapter only refuses zero): the Adapter
+    // enforces the dust floor, and Morpho's accrued debt may differ from the stored one the plan was
+    // made from. A recipient is revealed to the signers (a rate-limited backend call) only for a
+    // liquidation that goes through.
+    let mut passing = None;
+    for attempt in chain::liquidation_attempts(plan, &pos, v.outstanding) {
+        let (seized_assets, repaid_shares) = attempt.arguments();
+        match adapter.liquidate(account, seized_assets, repaid_shares, PROBE_COMMITMENT).call().await {
+            Ok(_) => {
+                passing = Some(attempt);
+                break;
+            }
+            Err(e) => debug!(vault = %short, "liquidation {attempt:?} would revert: {e}"),
+        }
+    }
+    let Some(attempt) = passing else {
+        warn!(vault = %short, "every liquidation of this position would revert");
+        return Ok(Watch::Keep);
+    };
+    let commitment = chain::fresh_commitment(backend, zaddr, receiver).await?;
+    let (seized_assets, repaid_shares) = attempt.arguments();
+    let call = adapter.liquidate(account, seized_assets, repaid_shares, commitment);
+    let gas = zecured_base::gas_with_headroom(call.estimate_gas().await?);
+    let receipt = call.gas(gas).send().await?.with_timeout(Some(RECEIPT_TIMEOUT)).get_receipt().await?;
+    ensure!(receipt.status(), "liquidation reverted");
+    info!(vault = %short, tx = %receipt.transaction_hash, "liquidated");
+    // Kept: the next pass reads the vault again and drops it only once it is closed.
+    Ok(Watch::Keep)
+}
+
+/// A non-zero commitment for simulations only; never sent.
+const PROBE_COMMITMENT: B256 = B256::repeat_byte(0x01);
 
 // ------------------------------------------------------------------------- market maker
 
