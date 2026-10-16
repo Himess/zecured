@@ -2376,11 +2376,20 @@ mod tests {
         let e = c.add_destination(id, "not an address", salt, 1, msg.deadline, Bytes::new()).await.unwrap_err();
         assert_eq!(public_error(&e), Some(PublicError::InvalidReceiver));
 
-        // Correctly signed: it does reach the (unreachable) nodes.
+        // Correctly signed: it does reach the (unreachable) nodes, whatever the vault's status: a
+        // Refund claim of a cancelled vault, or of one whose activation is pending, needs its
+        // destination too (T-02).
         let sig = sign_typed(&owner, &c.domain(), &msg).unwrap();
-        let e = c.add_destination(id, &ua, salt, 1, msg.deadline, sig).await.unwrap_err();
-        assert_eq!(public_error(&e), Some(PublicError::SignersUnavailable));
-        assert!(!format!("{e:#}").contains("127.0.0.1"), "no node URL in errors: {e:#}");
+        for status in [
+            VaultStatus::AwaitingDeposit,
+            VaultStatus::DepositSeen,
+            VaultStatus::Cancelled,
+        ] {
+            c.store.lock().await.update(&id, |v| v.status = status).unwrap();
+            let e = c.add_destination(id, &ua, salt, 1, msg.deadline, sig.clone()).await.unwrap_err();
+            assert_eq!(public_error(&e), Some(PublicError::SignersUnavailable), "{status:?}");
+            assert!(!format!("{e:#}").contains("127.0.0.1"), "no node URL in errors: {e:#}");
+        }
 
         // P5: an off-chain refund needs the owner's signature, then a deposit no guest can land.
         let (landable, unlandable) = (B256::repeat_byte(8), B256::repeat_byte(9));
