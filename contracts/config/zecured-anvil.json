@@ -49,5 +49,6 @@
   "unbondingPeriod": 1800,
   "versionDepositDelay": 600,
   "versionEstopDelay": 600,
-  "versionViolationDelay": 600
+  "versionViolationDelay": 600,
+  "zcashNetwork": "zcash-testnet"
 }
