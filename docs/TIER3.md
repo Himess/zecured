@@ -17,9 +17,9 @@ the contracts, the signers and the violation guest agree on:
 
 It follows the review's decisions T3-1 to T3-7 and S4 to S6 (D31). The interfaces are:
 - `contracts/src/libraries/ZecuredEIP712.sol` (`SpendCommit`);
-- `contracts/src/interfaces/IZecuredSpendCommits.sol`;
-- `ISignerBond.sol`;
-- `IZecuredSlasher.sol`.
+- `contracts/src/interfaces/v3/IZecuredSpendCommits.sol`;
+- `contracts/src/interfaces/v3/ISignerBond.sol`, `IZecuredSlasher.sol`, `IZecuredCompensator.sol` and
+  `IZecuredDisputes.sol` (v3).
 
 The derivations are `zecured_policy::derive::payout_ref` and `zecured_policy::ledger::claim_ref`, and
 the same functions in `tier2/statement` (`violation.rs`).
@@ -54,9 +54,9 @@ note or address. It slashes the signers' bonds and halts minting.
 > **Accountable out:** Signers must commit every payout on Base before they can sign it. Taking ZEC
 > that backs loans — without a commitment or under a false one — or paying any claim to anyone but
 > its owner is provable on Base with a zero-knowledge proof that reveals no Zcash transaction, note or
-> address, and it slashes the signers' bonds. Two things remain outside these proofs: refunds of
-> non-conforming deposits, and liveness — signers refusing to pay, in which case the funds stay in
-> the vault.
+> address, and it slashes the signers' bonds; the bonds compensate the victims: liquidators and
+> lenders before the borrower's own equity. If the signers stop paying a claim, its claimant is
+> paid from the bonds; a payout they confirm but never send can be disputed.
 
 ## 2. References: what Base sees is keyed or salted
 
@@ -133,9 +133,9 @@ against Foundry's EIP-712 implementation) and `zecured-base` `spend_commit_golde
 (`openCasesOf(vaultId)`, E2). A deposit note stolen while its activation is pending (it is a lineage
 note from the proof on, so the theft is F1) therefore never backs zZEC. The hold is per vault, so a
 false case cannot stop the system; if the case is dismissed the activation goes on, and the global
-halt still needs an executed case. A pending deposit is also neither refundable (its tag counts as
-used for the nodes' P5 guard) nor cancellable (`cancelVault` refuses a vault with a pending proof);
-once a pending activation is dropped, cancelling is possible again (E3).
+halt still needs an executed case. A pending deposit is also not refundable off-chain (its tag counts
+as used for the nodes' P5 guard); on Base it becomes a refund only through `refundPending` (after a halt,
+or a long pause), and once a pending activation is dropped its note can be proven again (E3).
 
 Each of the following is prevented, and each has a test:
 
@@ -268,14 +268,14 @@ redirect the reward (`test_prove_revertsOnABadJournalOrSeal`: a seal for another
 - Private input: the vault's tag key K.
 - The guest shows: `ref = payoutRef(txid_X)` for an X in a block under the anchor. Journal
   `{5, anchor, 0, ref, 0, 0, 0, 0}` (no beneficiary).
-- For a later contract that confirms payouts by proof, or upholds a disputed confirmation (design
-  notes T-05, "a payout confirmed but never mined", § 10). `ZecuredSlasher` v2 refuses it: its
-  `ViolationKind` stops at `WrongClaimRef`, so decoding kind 5 reverts. It is in the guest now so that
-  this later contract needs no new guest.
+- It upholds a disputed payout confirmation (D53): `ZecuredSlasher.proveInclusion(journal, seal,
+  imageId, claimId)` checks it like a violation's seal and anchor, then the Registry checks that `ref`
+  is a committed payout of the claim's input. `proveViolation` refuses it (`ViolationKind` stops at
+  `WrongClaimRef`).
 
-**Cases.** `proveViolation(kind, journal, seal)`:
-- checks the seal (pinned selector, violation image id) and the anchor (best chain, at least
-  `slashConfirmationWork`);
+**Cases.** `proveViolation(kind, journal, seal, imageId)`:
+- checks the seal (an active Violation version of `ZecuredVersions`: its router selector and image id,
+  D54) and the anchor (best chain, at least `slashConfirmationWork`);
 - checks the kind's condition and a beneficiary that is not a vault's smart account (smart accounts
   never receive ETH);
 - then opens case `keccak256(kind, ref, noteTag)`: one case per violation, whoever proves it first.
@@ -320,24 +320,26 @@ F1, F2 and F3 proofs are made on the prover's own machine, because their witness
 F4 and `Included` witnesses hold only K, which links the vault's notes and payouts but shows no amount
 or recipient.
 
-## 7. Bonds: `ISignerBond` (S5, S6)
+## 7. Bonds: `SignerBondV2` (S5, S6; D43 to D47)
 
-- **Deposit.** Each of the five signers deposits its bond. On testnet this is 0.01 Base Sepolia ETH,
-  which shows the mechanism, not economic security.
-- **Slash.** A slash takes the whole bond of every signer the case names. It credits the prover with
-  a bounty of 10 %, capped at half a bond (pulled, so a reverting beneficiary cannot block the slash).
-  The rest goes to a compensation pool: nothing is burned, and paying victims from the pool is
-  roadmap.
+- **Deposit.** Each of the five signers bonds USDC (100 USDC each on the judge deployment, which
+  shows the mechanism, not economic security; docs/ECONOMICS.md sizes them for mainnet). What the
+  bonds stand for is the effective bond, `min(sum, 5/3 x the three smallest)`, and new collateral is
+  accepted only while it covers the collateral's value (the coverage cap, D44).
+- **Slash.** A slash takes the whole bond and unbonding of every signer the case names. It credits
+  the prover with a bounty of 10 %, capped (50 USDC on the judge deployment; pulled, so a reverting
+  beneficiary cannot block the slash). The rest goes to `ZecuredCompensator`, which pays the victims
+  in layers: third parties, then the lenders, then the owners (D46).
 - **Halt.** The first slash **halts** minting for good.
-- **Withdrawal.** A signer can withdraw only when all of these hold (after a halt too, so that the
-  signers a slash did not name get their bonds back):
-  - no case is open;
-  - no vault is open;
-  - the challenge window has passed since the last vault settled. The same five signers hold every
-    vault, so "its vaults" are all vaults.
+- **Leaving.** A signer leaves in two steps: an unbonding, slashable until it is withdrawn
+  `unbondingPeriod` later, with no case open. A full exit needs no open vault, no open case, and the
+  challenge window since the last vault settled (the same five signers hold every vault, so "its
+  vaults" are all vaults); a partial exit keeps `minBond` and the coverage cap.
+- **Liveness** (T-05). A claim left unpaid `livenessPeriod` after it became payable (deferred by a
+  payout committed in flight for `commitGrace` at most) can be paid to its claimant from the bonds;
+  its ZEC then reimburses the bonds (D47).
 - **Consortium bond.** FROST hides who signed, so an uncommitted spend slashes all five, while a false
-  record slashes exactly its signers. Deterrence would need each bond to exceed a third of the value
-  at stake; the demo amounts do not.
+  record slashes exactly its signers. Any three colluders lose at least 3/5 of the effective bond.
 
 **Watcher assumption.** For each vault, at least one holder of its UFVK is online within the window
 (the borrower, or an honest signer running the audit), and so is each claimant for its own claims.
@@ -348,7 +350,9 @@ or recipient.
 |---|---|---|
 | `slashConfirmationWork` | ≥ 100 normal Testnet blocks of work (~3.8 × 10^7), the anchor rechecked at the end of the window | same |
 | Challenge window | 24 hours | 2 minutes (labelled DEMO) |
-| Bond per signer | 0.01 ETH | 0.01 ETH |
+| Bond per signer (`minBond`) | 100 USDC | 10 USDC |
+| Liveness period / commit grace | 24 hours / 2 hours | 10 minutes / 2 minutes |
+| Dispute window / inclusion window | 24 hours / 6 hours | 10 minutes / 20 minutes |
 | Build | the judge build: no compromise mode beyond D18 | `demo-tier3` feature, its own Registry, bond and slasher, five demo keys, same relay |
 
 **The theft demo (T3-6)** never runs on the judge deployment. It has its own deployment
@@ -375,23 +379,27 @@ misconfiguration end in an error message, never in a theft on the judge network:
 | A real vault spend | the first payout of the disposable vault 9 (local-fork runs of 2026-10-11, Testnet height 4,488,561) spends the vault's deposit note: `build-violation uncommitted` builds the F1 witness (anchor 4,488,600), the statement proves it with the deposit tag the Registry activated the vault with (`TEST-ONLY_vault9_f1_witness.json`), and `ZecuredSlasher` slashes with exactly that journal (`test_F1_theRustStatementsJournalOfARealSpend`) |
 | Statement tests | 24 (`tier2/statement/tests/violations.rs`): each kind on real transactions (F2 against the real payout's internal-scope change, F3 with the vault as claimant), every field of the F1 opening and the viewing key bound, the inclusion checks, the journal ABI; for F3 (E1) only the claim's own output counts, another address of the same wallet is not the receiver, and a note that does not match its `cmx` pays nothing; F4 gives the reference an honest commitment names a claim by, with K only; F2 does not count change sent to the external scope; `Included` names the payout by its reference only; the epoch is one the build allows and X's own; a Mainnet build refuses a Testnet viewing key. The F3 and F4 journals are byte for byte those before the guest round |
 | F3 through the tools | `build-violation misdirected` on an evidence file for the TEST-ONLY vault as claimant of its own deposit (a stand-in payout): the right output index gives the note's 1,000,000 zat, another index 0; the witness runs in the zkVM in **18.9 M cycles** (20 segments), journal identical |
-| zkVM | violation guest image id, reproducible build (E4, 2026-10-14, after the red-team fixes): `0x7d8c9dd23e813e0e44ffea2b18ec9ec451b52a8a7b634ae998583d49b73cc526`; F1 on the real spend: **26.2 M cycles** (26,225,609, 28 segments), journal identical to the native computation; 11 changes (opening, action, kind, inclusion, an F2 and an F4 on the same payout) give the same outcome natively and in the executor, locally and in CI on the Docker-built guest (`zecured-tier2-host violation parity`). The v2 suite (15 changes: also two epochs, F4 with K and `Included`) runs in the `guests` workflow on each network's guest |
+| zkVM | violation guest image id, reproducible build (E4): statement v1 (2026-10-14, after the red-team fixes; the guest measured in this row) `0x7d8c9dd23e813e0e44ffea2b18ec9ec451b52a8a7b634ae998583d49b73cc526`, statement v2 (2026-10-16) violation-test `0x65705f75c5482b2b0cf6fee12760b2364d48213bb2933f3882dc2d92f824866e` and violation-main `0x24edd49e52447665146009687b6b85e3f0b6184883cbf635a762048cd1a5ce33` (docs/TIER2.md § 8.1); F1 on the real spend: **26.2 M cycles** (26,225,609, 28 segments), journal identical to the native computation; 11 changes (opening, action, kind, inclusion, an F2 and an F4 on the same payout) give the same outcome natively and in the executor, locally and in CI on the Docker-built guest (`zecured-tier2-host violation parity`). The v2 suite (15 changes: also two epochs, F4 with K and `Included`) runs in the `guests` workflow on each network's guest |
 
 ## 10. Out of scope, said plainly (T3-7)
 
 - **Non-conforming notes** (over- or late payments) are the depositor's refund, not zZEC backing.
-  Their theft is not provable yet (roadmap).
+  With refund proofs (journal v2's Refund mode, which the judge deployment takes) they land on Base
+  as Refund claims and are lineage notes like any other, so their theft is F1; on a deployment
+  without refund proofs they are refunded off-chain (P5) and their theft is not provable.
 - **All five signers colluding** against a third party's claim. A liquidator's or market maker's
   claim committed under a wrong reference is provable (F4) only with the vault's K and the claim's
   salt, which only the signers hold together. With three colluders two honest signers remain; with
   five, nobody can prove that one. The borrower's own claims stay provable either way.
 - **Liveness.** Signers can refuse to pay. The ZEC stays in the vault, visible with the UFVK, so
-  refusal is not theft. A liveness penalty is roadmap. Three related cases:
+  refusal is not theft; it is answered by the bonds (T-05, § 7), up to their size. Three related
+  cases:
   - **A payout confirmed but never mined.** Three colluders can have `confirmPayout` accept a
-    committed payout that never landed. That is no profit: the claimant loses its claim, and its value
-    stays frozen in the vault. The unspent input remains a lineage note: spending it without a
-    commitment is F1, and any later commitment from it must carry its full value (conservation), so
-    the unpaid amount stays in the committed change, which F2 protects.
+    committed payout that never landed. Its claimant disputes the confirmation (D53): unless the
+    signers prove the payout's inclusion in time (`proveInclusion`, the `Included` kind), the claim
+    is payable again, and from the bonds on its original liveness schedule. The unspent input
+    remains a lineage note: spending it without a commitment is F1, and any later commitment from it
+    must carry its full value (conservation).
   - **One signer can stop new mints.** Minting needs all five bonds (`fullyBonded()`). A signer may
     withdraw its bond only when no vault is open, and then no new vault can be activated until it
     bonds again. Open vaults are unaffected.

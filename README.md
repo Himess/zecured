@@ -64,11 +64,11 @@ txids) and how to reproduce every run: [docs/TESTING.md](docs/TESTING.md).
 
 | Real | Mock |
 |---|---|
-| Shielded Ironwood transactions on Zcash testnet (NU7) | ZEC/USD price on Base Sepolia: `MockZecOracle` (owner-set) behind `DemoShockOracle` (DEMO: an owner-set shock, in public steps, to show a liquidation); the coverage cap reads it through `DemoCapPrice` (MOCK / DEMO: always fresh). Mainnet uses a `ZecuredPriceFeed` over Chainlink and a second source instead, and the deploy script refuses the demo oracle there ([docs/MAINNET.md](docs/MAINNET.md)) |
+| Shielded Ironwood transactions on Zcash testnet (NU7) | ZEC/USD price on Base Sepolia: `MockZecOracle` (owner-set) behind `DemoShockOracle` (DEMO: an owner-set shock, in public steps, to show a liquidation); the coverage cap reads it through `DemoCapPrice` (MOCK / DEMO: always fresh). Mainnet uses a `ZecuredPriceFeed` over Chainlink's ZEC/USD (Standard proxy) and API3's ZEC/USD instead, and the deploy script refuses the demo oracle there ([docs/MAINNET.md](docs/MAINNET.md)) |
 | 3-of-5 FROST threshold vaults (re-randomized FROST, RedPallas), keys per ZIP 2005 | `MockUSDC` on the local fork only; Base Sepolia uses Circle's testnet USDC |
 | Per-payout policy checks by every signer (P0–P6) | Signer independence (all 5 nodes run by us); the Tier 3 bonds show the mechanism, not economic security |
-| Morpho Blue market on Base Sepolia (the real Morpho deployment); the whole contract suite also runs on a Base mainnet fork, against mainnet's Morpho Blue and RISC Zero router | Morpho in the symbolic checks and the compensator's unit tests only (`MockMorphoForHalmos`, `MockMorphoForCompensator`, test only: Halmos has no fork mode; the fork tests use the real Morpho deployment). Unit tests use MOCK peers, test only: `MockCompensatorRegistry`, `MockCompensatorSlasher`, `MockCompensatorBond`, `BondV2Mocks`, `MockSignerBond` (the bond and slasher views set by hand), `MockCapPrice`, `MockHeaderRelay`; `IntakeHarness` (TEST ONLY) activates a vault without a proof |
-| ZZEC, ZecuredRegistry and ZecuredSpendLogic, ZecuredIntake, SettlementAdapter, SignerBondV2 (USDC bonds), ZecuredSlasher, ZecuredCompensator, ZecuredVersions | |
+| Morpho Blue market on Base Sepolia (the real Morpho deployment); the whole contract suite also runs on a Base mainnet fork, against mainnet's Morpho Blue and RISC Zero router | Morpho in the symbolic checks and the compensator's unit tests only (`MockMorphoForHalmos`, `MockMorphoForCompensator`, test only: Halmos has no fork mode; the fork tests use the real Morpho deployment). Unit tests use MOCK peers, test only: `MockCompensatorRegistry`, `MockCompensatorSlasher`, `MockCompensatorBond`, `BondV2Mocks`, `MockSignerBond` (the bond and slasher views set by hand), `MockCapPrice`, `MockHeaderRelay`, `MockAggregator` (a Chainlink-style source for the price feed's tests); `IntakeHarness` (TEST ONLY) activates a vault without a proof |
+| ZZEC, ZecuredRegistry and ZecuredSpendLogic, ZecuredIntake, SettlementAdapter, SignerBondV2 (USDC bonds), ZecuredSlasher, ZecuredCompensator, ZecuredVersions; ZecuredPriceFeed for mainnet (tested against the live Chainlink and API3 feeds on a Base mainnet fork) | |
 | Liquidation, close from collateral, refunds of non-conforming deposits | |
 | Own RPC / bundler / paymaster proxy with a sponsorship allowlist | |
 | Tier 2 deposit statement on real Testnet data, run in the RISC Zero zkVM; Zcash header relay with on-chain Equihash | RISC Zero verifier on the local fork (`MockRiscZeroVerifier`, accepts unproven journals; it also plays the router and its emergency stop for the version registry) for the demo's own proofs; real Groth16 seals of a real deposit and a real F1 spend pass RISC Zero's verifier router on Base Sepolia and on a Base mainnet fork (`RealGroth16Seal.t.sol`) |
@@ -78,7 +78,7 @@ txids) and how to reproduce every run: [docs/TESTING.md](docs/TESTING.md).
 
 | Path | What |
 |---|---|
-| `contracts/` | Solidity + Foundry: `ZZEC`, `ZecuredRegistry` (vaults, claims, exits, Tier 3 lineage) with `ZecuredSpendLogic` (spend commitments, disputes), `ZecuredIntake` (deposit proofs and the gates of minting), `SettlementAdapter`, `SignerBondV2`, `ZecuredSlasher`, `ZecuredCompensator`, `ZecuredVersions`, mocks, and the Zcash header relay (`src/relay/`); 536 tests, an invariant campaign of 16 invariants and 16 symbolic checks (Halmos) ([docs/INVARIANTS.md](docs/INVARIANTS.md)) |
+| `contracts/` | Solidity + Foundry: `ZZEC`, `ZecuredRegistry` (vaults, claims, exits, Tier 3 lineage) with `ZecuredSpendLogic` (spend commitments, disputes), `ZecuredIntake` (deposit proofs and the gates of minting), `SettlementAdapter`, `SignerBondV2`, `ZecuredSlasher`, `ZecuredCompensator`, `ZecuredVersions`, `ZecuredPriceFeed` (mainnet), mocks, and the Zcash header relay (`src/relay/`); 584 tests (5 of them need a Base mainnet RPC), an invariant campaign of 16 invariants and 16 symbolic checks (Halmos) ([docs/INVARIANTS.md](docs/INVARIANTS.md)) |
 | `signer/crates/zcash-ops` | Ironwood scanning, PCZT build/prove/sign/extract, ZIP 2005 vault keys |
 | `signer/crates/threshold` | FROST DKG and re-randomized signing |
 | `signer/crates/policy` | P1 classification, payout ledger (I10), PCZT verification against the plan |
@@ -149,8 +149,8 @@ router on Base Sepolia; `RealGroth16Seal.t.sol` runs a real deposit's seal throu
 
 ### Reproducing the guest image ids
 
-The Registry (the Intake, from Registry v3) pins the deposit guest's image id and the slasher the
-violation guest's. The network is a build parameter of the guests (design notes T-09), so each
+The Intake accepts the deposit guest's image id and the slasher the violation guest's, as active
+versions of `ZecuredVersions` (adding one takes all five signers and a public delay). The network is a build parameter of the guests (design notes T-09), so each
 network has its own pair: deposit-test and violation-test (Testnet, the NU7 epoch), deposit-main
 and violation-main (Mainnet, the NU6.3 and NU7 epochs). All four come from a reproducible build:
 the guests are compiled in RISC Zero's pinned guest-builder image
@@ -167,6 +167,16 @@ ZECURED_DOCKER_GUESTS=1 cargo build --release -p zecured-tier2-host --features m
 ./target/release/zecured-tier2-host image-id              # deposit-main
 ./target/release/zecured-tier2-host violation image-id    # violation-main
 ```
+
+The `guests` workflow's runs on statement v2 (2026-10-16) gave these, with every parity suite
+passing ([docs/TIER2.md](docs/TIER2.md) § 8.1 lists the ELFs' hashes):
+
+| Guest | Image id |
+|---|---|
+| deposit-test | `0x406c6d268f29270226c775db1fe4bec04acf51ba919e250078125d71c10bff41` |
+| violation-test | `0x65705f75c5482b2b0cf6fee12760b2364d48213bb2933f3882dc2d92f824866e` |
+| deposit-main | `0x53f8f8e3664ce908c4ea072f239e18b6fa8b01d68c01fc162b4ae2e31b2cd5c5` |
+| violation-main | `0x24edd49e52447665146009687b6b85e3f0b6184883cbf635a762048cd1a5ce33` |
 
 The ids of a deployment's network must equal the deployed ones (`deployments/base-sepolia.json` for
 Testnet). A build without

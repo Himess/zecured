@@ -33,8 +33,8 @@ Base never has to trust the signers on either side:
   can pause new minting for up to 30 days at a time; withdrawals, repayments, liquidations and
   payouts never stop.
 
-What remains outside: deposits of another amount than the vault's, refunded off-chain on the
-owner's request until the deployment takes refund proofs, and all five signers together
+A deposit of another amount than the vault's, or paid after its expiry, is proven too, as a refund,
+and paid back like any claim. What remains outside: all five signers together
 ([docs/ECONOMICS.md](ECONOMICS.md)).
 
 ## Why it does not leak

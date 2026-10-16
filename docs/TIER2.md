@@ -39,9 +39,8 @@ releasing ZEC) is unchanged; see § 7.
 | Signers online to mint | yes (3 of 5) | no |
 | Visible on Base | vault id, account, amount, tag | the same, plus the anchor header hash, the `VaultOpened` struct hash and (journal v2) the proof's mode and epoch |
 
-The Registry's `MintMode` is fixed at deployment (D25). The Base Sepolia deployment is `ProofOnly`: `attestDeposit`
-reverts, so no set of signers and no lying data source can mint unbacked zZEC. The local fork keeps both paths
-(`SignerAttested`), which is what lets the tests exercise the rules between them.
+In v3 Tier 1 is gone (D41): no contract takes a signer attestation, so no set of signers and no lying data source can
+mint unbacked zZEC. Only the tests' `IntakeHarness` (TEST ONLY) activates a vault without a proof.
 
 ## 2. The statement (`tier2/statement`)
 
@@ -145,46 +144,53 @@ depends on the tag key, which only the owner, the signers and whoever proves the
 
 ## 3. On Base
 
-`ZecuredRegistry.attestDepositWithProof(journal, seal, openedSigs)` (D22) checks, in this order:
+`ZecuredIntake.attestDepositWithProof(journal, seal, imageId, openedSigs)` (D22, D40) checks, in this order:
 
-1. the journal is 192 bytes and the seal starts with the pinned verifier selector (Y1);
-2. the vault id, tag and account are unused, and no proof for the vault is pending (I4, I5), nothing is zero;
-3. `relay.isInBestChain(tipHash)` and `relay.confirmationWork(tipHash) >= minConfirmationWork`; the deposit's block
-   precedes T, so it is at least as deeply buried;
+1. the journal has the deployment's length (192 bytes for v1, 256 for v2) and, in v2, a valid mode;
+2. the seal's router selector and `imageId` are an active Deposit version of `ZecuredVersions` (Y1, D54) and, in v2,
+   the journal's branch id is one that version allows;
+3. `relay.isInBestChain(tipHash)` and `relay.confirmationWork(tipHash) >= minConfirmationWorkFor(amount)` (the work
+   tiers, T-08); the deposit's block precedes T, so it is at least as deeply buried;
 4. all five signers' signatures (sorted) over the Registry-domain digest of `vaultOpenedHash`;
-5. `verifier.verify(seal, depositImageId, sha256(journal))`;
+5. `verifier.verify(seal, imageId, sha256(journal))`, and the tag is unused (I5);
 
-then **reserves** the vault id, the tag and the account and records a pending activation (D26, review K3): nothing is
-minted yet. `finalizeActivation(vaultId)` (anyone) mints and supplies exactly as `attestDeposit` once the relay's best
-chain has gained `finalizeDepth` (6) headers since the proof and `finalizeDelay` (150 s) has passed, with the anchor
-still on the best chain under `minConfirmationWork`. `dropPendingActivation(vaultId)` (anyone) frees the vault, the
-tag and the account once the anchor has left the best chain; the deposit can then be proven against the chain that
-won. `cancelVault` waits while a proof is pending. The point is a lagging feeder: an attacker could feed a branch of
-their own and prove a fake deposit in it; the depth and the delay give the honest feeders time to replace that branch
-before anything is minted. The coordinator and `zecured-wallet loan prove` both finalize or drop on their own.
+then the deposit **lands**, once: if it can activate the vault, the Registry **reserves** the vault id, the tag and the
+account and the Intake records a pending activation (D26, review K3): nothing is minted yet. Otherwise (Refund mode, a
+vault that is not new, an account bound elsewhere, a halt, a full coverage cap) it lands as a Refund claim (§ 5).
+`finalizeActivation(vaultId)` (anyone) mints and supplies once the relay's best chain has gained `finalizeDepth` (6)
+headers since the proof and `finalizeDelay` (150 s) has passed, with the anchor still on the best chain under the
+same work, no violation case open on the vault, and minting neither halted, paused nor short of bonds.
+`dropPendingActivation(vaultId)` (anyone) frees the vault, the tag and the account once the anchor has left the best
+chain; the deposit can then be proven against the chain that won. The point is a lagging feeder: an attacker could
+feed a branch of their own and prove a fake deposit in it; the depth and the delay give the honest feeders time to
+replace that branch before anything is minted. The coordinator and `zecured-wallet loan prove` both finalize or drop
+on their own.
 
-The verifier is RISC Zero's router on Base Sepolia (`0x0b144e07a0826182b6b59788c34b32bfa86fb711`:
-`verify(bytes,bytes32,bytes32)` present, Groth16 v3.0.0 selector `0x73c457ba` active, checked on-chain). The Registry
-pins that selector, so the router's owner can add verifiers under new selectors but cannot change the one behind
-`0x73c457ba`; the router's emergency stop still works. `MockRiscZeroVerifier` (MOCK, selector `0xffffffff`) stands in
-on the local fork, and the deploy script refuses it anywhere else.
+The verifier is RISC Zero's router (`0x0b144e07a0826182b6b59788c34b32bfa86fb711` on Base Sepolia and Base mainnet:
+`verify(bytes,bytes32,bytes32)` present, Groth16 v3.0.0 selector `0x73c457ba` active, checked on-chain). Which
+selector and which guest image ids the Intake accepts is the version registry's: a new version takes all five signers
+and a public delay, so the router's owner can add verifiers under new selectors but cannot change what an active
+version verifies; the router's emergency stop still works, and when it has stopped every active violation verifier the
+delay for a new violation version shortens (D54). `MockRiscZeroVerifier` (MOCK, selector `0xffffffff`) stands in on
+the local fork, and the deploy script refuses it anywhere else.
 
 **Confirmations are measured in work.** Testnet minimum-difficulty blocks add 32 units of work, against 364,000 to
 402,000 for each of the 113 normal blocks before 4,488,559, so a block count would be cheap to inflate. The default
 `minConfirmationWork` is 3,500,000: about ten normal blocks (the deploy script refuses less than 1,000,000 outside the
 local fork).
 
-**Tests.** `contracts/test/fork/DepositProofs.t.sol` (30 tests): the journal of the real deposit below, anchored to
+**Tests.** `contracts/test/fork/DepositProofs.t.sol` (20 tests): the journal of the real deposit below, anchored to
 header 4,488,560, which the real relay verifies on-chain (Equihash, difficulty, time, linkage; fixture cross-checked
 with CipherScan), proven with three headers on top and finalized after six more; refusals for an unknown anchor, too
-little work, four signatures, a duplicate or foreign signature, a seal for another journal or image or with another
-selector, journals of the wrong length or with a dirty address word, a reused or pending vault, tag or account;
-cancellation, also while a proof is pending; the `VaultOpened` golden vector. `PendingActivation.t.sol` (7 tests) drives
-a MOCK relay through what real headers cannot do in a test: `ProofOnly` refusing even five signatures, not ready by
-height or by time, the anchor leaving the best chain before finalization, dropping and proving again.
-Gas: **289,256** for the proof with the MOCK verifier, **163,423** for the finalization (mint and Morpho supply). With
-the real seal and RISC Zero's router (`RealGroth16Seal.t.sol`): **520,722** for the proof; the router's Groth16 check
-costs about 2.4 × 10^5.
+little work, four signatures, a duplicate or foreign signature, a seal for another journal, a selector or image id that
+is not an active version, journals of the wrong length or with a dirty address word, a reused or pending vault, tag or
+account; the `VaultOpened` golden vector. `PendingActivation.t.sol` (16 tests) drives a MOCK relay through what real
+headers cannot do in a test: not ready by height or by time, the anchor leaving the best chain before finalization,
+dropping and proving again, pauses and refunds of pending activations. `IntakeGates.t.sol` (13) covers the halt, the
+bonds, the coverage cap and the pause; `IntakeJournalV2.t.sol` (9) the v2 journal and its branch ids; `Versions.t.sol`
+(7) the version registry. Gas: **422,568** for the proof with the MOCK verifier, **231,423** for the finalization
+(mint and Morpho supply). With the real seal and RISC Zero's router (`RealGroth16Seal.t.sol`): **652,878** for the
+proof; the router's Groth16 check costs about 2.4 × 10^5.
 
 ## 4. The deposit tag (D24)
 
@@ -194,14 +200,20 @@ both paths and can never mint twice. The depositor can compute it (it has the vi
 to the note without K (L9). The cmx is unique per note; K is fixed by the signed `VaultOpened` (`tagKeyHash =
 keccak256(K)`, § 2.3).
 
-## 5. Unminted deposits: cancellation (D23, L-8)
+## 5. Deposits that do not activate: refunds by proof (D41, T-02)
 
-A proof needs no signer, so the signers may refund the conforming deposit of a vault that was never activated only
-after `cancelVault` (3 of 5 signers over `VaultCancellation(vaultId)`) has made the vault `Cancelled`: from then on
-neither an attestation nor a proof can activate it. The owner asks with an ordinary `RefundRequest` for that deposit
-once its deposit window is over; each node checks that the Registry has not activated the vault, records the refund
-and signs the cancellation; the coordinator submits it; the deposit becomes refundable only when the nodes apply the
-checked `VaultCancelled` event. This also closes security review finding L-8 for Tier 1.
+A proof needs no signer, so a deposit that cannot activate its vault is brought onto Base like any other: it lands as
+a Refund claim of the vault's account (`DepositRefunded`, with the reason), and its note is a lineage note from then
+on. The account gives the refund's destination (`setRefundDestination`, a salted commitment, by UserOp); the signers
+then pay it with a committed payout like any claim, and its theft is F1. A refund nobody claims is written off after
+`refundAbandonPeriod` and can be revived by its account. A pending activation becomes a refund after a halt, or after a
+pause by signatures has lasted `pendingRefundDelay` (`refundPending`). With journal v2, a note of any other amount, or
+paid after the vault's expiry, is proven in Refund mode and lands the same way. There is no `cancelVault` any more:
+it could not authenticate the vault's owner on Base without publishing `VaultOpened`'s hashes, and an off-chain refund
+of a note a later proof could make a lineage note would look exactly like an F1 theft (I30, D42). Notes no deployed
+guest can prove (before journal v2: another amount, a late payment, or a transaction that is not Ironwood-only) are
+still refunded off-chain on the owner's signed request (P5). The judge deployment takes journal v2, so there these
+notes are proven in Refund mode instead.
 
 **Why refunds stay safe while anyone can prove** (review K2, D27). A proof can be made for any note that meets the
 statement, spent or not, while P1 rests on the light wallet server's answers. Four rules keep a refund from ever
@@ -245,7 +257,8 @@ leaving zZEC unbacked:
   must submit headers (anyone can: `scripts/relay-feed.sh`); ~6.3 × 10^5 gas per header on Testnet after NU7,
   ~5.8 × 10^5 on Mainnet before NU7.
 - **RISC Zero**: the soundness of its proof system and the router's governance (its owner can add or remove verifier
-  versions; an e-stop wrapper can disable one). The Registry pins the guest image id and the verifier selector.
+  versions; an e-stop wrapper can disable one). `ZecuredVersions` names the guest image ids and verifier selectors the
+  Intake and the slasher accept; changing them takes all five signers and a public delay (D54).
 - **Testnet** proof of work is weak: a single Equihash ASIC out-mines the whole Testnet about 40 times over, so the
   pending activation and `minConfirmationWork` are demonstrative on Testnet; on mainnet they inherit Zcash's proof of
   work, with the depth chosen by the value at risk. The relay is the same code on both networks: deployed with the
@@ -264,15 +277,15 @@ leaving zZEC unbacked:
    the vault's tag key K, not its viewing key (statement v2): the GPU server learns which notes and payouts are the
    vault's, not their amounts or recipients. The private alternative keeps the STARK on the depositor's machine.
 2. **Base Sepolia**: deploy a relay from a recent checkpoint (`script/DeployRelay.s.sol`, Testnet parameters by
-   default; the relay deployed on 2026-10-12 predates them and has no `networkId()`), keep it fed, deploy the
-   Registry `ProofOnly` with the router, the image id below and the relay.
+   default; the relay deployed on 2026-10-12 predates them and has no `networkId()`), keep it fed, deploy the v3
+   contracts with the router, the image ids below as the initial versions and the relay.
 3. **Fewer cycles** (optional once proving runs on a GPU): one note commitment instead of three (own ZIP 212
    recovery), Pallas point operations through RISC Zero's elliptic-curve accelerator.
 
 ### 8.1 Pinning the guest (D28)
 
 The image id depends on the machine that built the guest: its panic messages carry the source paths of its
-dependencies. The Registry pins one image id for good, so the guest is built once and every prover runs that file:
+dependencies. A version pins one image id, so the guest is built once and every prover runs that file:
 
 ```bash
 tier2/target/release/zecured-tier2-host export-elf deposit.bin       # the embedded guest
@@ -293,12 +306,23 @@ embedded guests disagree. A deployment pins its own network's pair.
 workflow (`.github/workflows/guests.yml`) runs that build on every change to the statement, the guests or the vendored
 crate and publishes the ids and the two ELFs; the commands to reproduce them are in the README. The statement crate and
 both guests are frozen once the deployed ids are taken from that build. Two runs on fresh runners (2026-10-14, the
-same source) gave the same ids. After the red-team fixes the reproducible ids are deposit
+same source) gave the same ids. Statement v1's, after the red-team fixes, were deposit
 `0x62feed13b2948aa427275fb6003e717ccc88945d033b99b196936ca99a80cdf5` and violation
-`0x7d8c9dd23e813e0e44ffea2b18ec9ec451b52a8a7b634ae998583d49b73cc526`, with both parity suites passing on those guests
-in CI. They change with the statement crate until it is frozen. Statement v2 changes both and adds the Mainnet pair:
-the workflow now builds both networks (deposit-test, violation-test, deposit-main, violation-main), prints the four
-ids and runs both parity suites on each pair; its next run gives the ids to pin.
+`0x7d8c9dd23e813e0e44ffea2b18ec9ec451b52a8a7b634ae998583d49b73cc526`; the real seals of `RealGroth16Seal.t.sol` are of
+those guests. Statement v2 changes both and adds the Mainnet pair: the workflow builds both networks, prints the four
+ids and runs both parity suites on each pair. Its runs of 2026-10-16 on statement v2 (two, the same ids, every parity
+suite passing) give the ids to deploy, a network's pair as `DEPOSIT_IMAGE_ID` and `VIOLATION_IMAGE_ID`, and the ELFs
+provers run:
+
+| Guest | Image id | ELF (SHA-256 of the `.bin`) |
+|---|---|---|
+| deposit-test | `0x406c6d268f29270226c775db1fe4bec04acf51ba919e250078125d71c10bff41` | `1a0a418af08e5ae63b2444a16d9902ed8106effa44829a6793c9a0a1dee0f430` |
+| violation-test | `0x65705f75c5482b2b0cf6fee12760b2364d48213bb2933f3882dc2d92f824866e` | `45205f4e390e5d017213ffd399c9231d0300a227d46db7e2f711f0abdc33dd38` |
+| deposit-main | `0x53f8f8e3664ce908c4ea072f239e18b6fa8b01d68c01fc162b4ae2e31b2cd5c5` | `b85d9d21f4bad6d7998506cb09431d5057a334a06732ebdfa3a4472fe811c461` |
+| violation-main | `0x24edd49e52447665146009687b6b85e3f0b6184883cbf635a762048cd1a5ce33` | `dfc746ce0e6c6c2c1f6f5323ebe3c7ef371ab6bd4c3c8f6d08c656adbef3c789` |
+
+The judge deployment and the theft demo take journal v2 with the Testnet pair and the NU7 epoch (branch id
+`0x77190AD9`, D56); the local fork takes journal v2 too, with its own build's ids and the MOCK verifier.
 
 ## 9. Tier 3 directions
 
