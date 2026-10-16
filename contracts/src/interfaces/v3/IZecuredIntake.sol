@@ -74,8 +74,11 @@ struct WorkTier {
 /// @notice Constructor arguments of ZecuredIntake.
 /// @param signerBond Its `halted`, `fullyBonded` and `effectiveBond` gate minting (zero: no bond, tests only).
 /// @param slasher E2 and the automatic pause read its open cases (zero: none, tests only).
-/// @param journalV2 False: the v1 journal of today's guest; true: the T-09 guest's v2 journal.
-/// @param allowedBranchIds Journal v2 only: the branch ids a deposit's epoch may have (zero entries are unused).
+/// @param verifier RISC Zero's verifier router (the one the version registry checks).
+/// @param versions ZecuredVersions (T-07a, its predicted address): a seal is accepted only from an active Deposit
+///        version (router selector and guest image id), and a v2 journal only with a branch id that version allows.
+/// @param journalV2 False: the v1 journal of today's guest; true: the T-09 guest's v2 journal. Every deposit version
+///        of the deployment must commit this journal.
 /// @param coverageBps T-01: k in basis points; zero disables the coverage cap (tests only, with `signerBond` zero).
 /// @param maxTotalZat T-01: absolute cap on locked plus pending zatoshi.
 /// @param capPriceMaxAge T-01: oldest `priceHigh` the cap accepts; an older one makes an activatable proof revert
@@ -90,10 +93,8 @@ struct IntakeConfig {
     address signerBond;
     address slasher;
     IRiscZeroVerifier verifier;
-    bytes32 imageId;
-    bytes4 sealSelector;
+    address versions;
     bool journalV2;
-    uint32[4] allowedBranchIds;
     IZcashHeaderRelay relay;
     WorkTier[] workTiers;
     uint64 finalizeDepth;
@@ -112,9 +113,10 @@ struct IntakeConfig {
 /// @notice Everything before a vault is active (design notes T-01, T-02, T-03, T-08, T-09): deposit proofs, pending
 ///         activations (K3), and the gates of minting: the halt, the bonds, the coverage cap and the pause. Minting
 ///         needs no signer: a proof lands without one. Exits never pass through this contract.
-/// @dev `attestDepositWithProof(journal, seal, openedSigs)`, anyone:
-///      1. the seal starts with `sealSelector` (Y1) and verifies under `imageId`; the journal has the configured length,
-///         a valid mode and (v2) an allowed branch id;
+/// @dev `attestDepositWithProof(journal, seal, imageId, openedSigs)`, anyone:
+///      1. the seal's selector and `imageId` are an active Deposit version of `versions` (Y1, T-07a) and the seal
+///         verifies under `imageId`; the journal has the configured length, a valid mode and (v2) a branch id that
+///         version allows;
 ///      2. the anchor (`tipHash`) is on the relay's best chain with `minConfirmationWorkFor(amount)` on top;
 ///      3. all five signers signed the journal's `vaultOpenedHash` (Registry domain): the note belongs to this vault,
 ///         owner and account, and (VaultOpened v2) its tag was derived with the vault's own tag key;
@@ -146,7 +148,6 @@ interface IZecuredIntake {
     error InvalidJournalLength(uint256 length);
     error InvalidMode(uint8 mode);
     error BranchNotAllowed(uint32 branchId);
-    error UnexpectedSealSelector(bytes4 selector);
     error AnchorNotConfirmed(bytes32 tipHash, uint256 confirmationWork);
     error AmountAboveLargestTier(uint64 amount);
     error DepositTagUsed(bytes32 depositTag);
@@ -168,7 +169,12 @@ interface IZecuredIntake {
     error UnknownSigner(address recovered);
     error SignaturesNotSorted(uint256 index);
 
-    function attestDepositWithProof(bytes calldata journal, bytes calldata seal, bytes[] calldata openedSigs) external;
+    function attestDepositWithProof(
+        bytes calldata journal,
+        bytes calldata seal,
+        bytes32 imageId,
+        bytes[] calldata openedSigs
+    ) external;
     function finalizeActivation(bytes32 vaultId) external;
     function dropPendingActivation(bytes32 vaultId) external;
     function refundPending(bytes32 vaultId) external returns (bytes32 claimId);
@@ -204,8 +210,8 @@ interface IZecuredIntake {
     function signerBond() external view returns (address);
     function slasher() external view returns (address);
     function verifier() external view returns (IRiscZeroVerifier);
-    function imageId() external view returns (bytes32);
-    function sealSelector() external view returns (bytes4);
+    /// @notice The version registry (T-07a).
+    function versions() external view returns (address);
     function journalV2() external view returns (bool);
     function relay() external view returns (IZcashHeaderRelay);
     function finalizeDepth() external view returns (uint64);

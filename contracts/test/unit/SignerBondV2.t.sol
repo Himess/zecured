@@ -30,7 +30,7 @@ contract SignerBondV2Harness is SignerBondV2 {
     }
 }
 
-/// @notice Unit tests of SignerBondV2 (design notes T-01 and T-05, Claude Web's approval § 3; rules in the v3
+/// @notice Unit tests of SignerBondV2 (design notes T-01 and T-05, with a bound on deferrals; rules in the v3
 ///         `ISignerBond`). No fork: the Registry, the slasher, the Intake, the compensator and the oracle are MOCKs
 ///         (test/mocks/BondV2Mocks.sol) and the token is MockUSDC. The parameters are the judge deployment's (design
 ///         notes § 2.8 and § 8.8): five bonds of 400 USDC (2,000 in all), a 100 USDC minimum, ZEC at $1,200.
@@ -931,7 +931,7 @@ contract SignerBondV2Test is Test {
         assertEq(bond.slashLiveness(CLAIM), 126e6);
     }
 
-    /// Claude Web's approval § 3: three colluders re-commit the claim's input every `commitGrace - 1` seconds, forever.
+    /// The design review's case: three colluders re-commit the claim's input every `commitGrace - 1` seconds, forever.
     /// Each commitment protects an in-flight payout for `commitGrace`, but none made after the deadline extends that:
     /// the claim is due `livenessPeriod + commitGrace` after it became payable, at the latest.
     function test_slashLiveness_reCommittingForeverDefersItByCommitGraceAtMost() public {

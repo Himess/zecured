@@ -9,9 +9,11 @@ Ironwood pool. This document describes the system as built; interfaces are in
 | Component | Where | Role |
 |---|---|---|
 | Vault | Zcash (Ironwood) | One per loan. Its spend authority is a 3-of-5 FROST key; its address has a single Orchard-protocol receiver, so it is paid in the Ironwood pool. |
-| Signer nodes (×5) | `signer/` | Each holds one FROST share per vault and an ECDSA key for Base attestations, and reads Zcash and Base through sources it configures itself (optionally checked against witness sources). Each node enforces the policy below independently. |
+| Signer nodes (×5) | `signer/` | Each holds one FROST share per vault and an ECDSA key for its Base messages (`VaultOpened`, payout commitments and confirmations, a pause, a Reimburse destination, a verifier version), and reads Zcash and Base through sources it configures itself (optionally checked against witness sources). Each node enforces the policy below independently. |
 | Coordinator | `signer/`, `backend/` | Relays messages, builds PCZTs, aggregates signatures, submits Base transactions. It holds **no** key share: it cannot move funds or mint on its own, and the deposit address it relays is signed by all five signers. It can delay or withhold work (liveness only). |
-| `ZecuredRegistry`, `ZZEC`, `SettlementAdapter` | `contracts/` (Base) | Receipt token and accounting on top of a Morpho Blue market. |
+| `ZecuredRegistry` (with `ZecuredSpendLogic`), `ZZEC`, `SettlementAdapter` | `contracts/` (Base) | Receipt token and accounting on top of a Morpho Blue market: vaults, claims, exits, payout commitments (Tier 3) and disputes of a confirmation. |
+| `ZecuredIntake`, `ZcashHeaderRelay`, `ZecuredVersions` | `contracts/` (Base) | Deposit proofs (Tier 2) against relay-verified Zcash headers, through an active verifier version; the gates of minting: the halt, the bonds, the coverage cap, the pause. |
+| `SignerBondV2`, `ZecuredSlasher`, `ZecuredCompensator` | `contracts/` (Base) | The signers' USDC bonds and the liveness penalty; violation proofs (Tier 3) and slashing; compensation of a theft's victims ([ECONOMICS.md](ECONOMICS.md)). |
 | App + proxy | `app/`, `backend/` | Browser UI; every RPC / bundler / paymaster call goes through our proxy, which logs nothing. |
 | Bots | `bots/` | Liquidator and market maker (permissionless roles; ours in the demo). |
 
@@ -19,14 +21,19 @@ Ironwood pool. This document describes the system as built; interfaces are in
 
 - A payout needs 3 of 5 signers. Each signer checks the Base event (at the `safe` block), the
   exact transaction outputs and the vault's books before signing. One or two compromised
-  signers cannot move funds; three colluding signers can (hackathon trust assumption, all
-  five run by us).
+  signers cannot move funds. Three colluding signers can, but every payout must be committed on
+  Base first, so taking a vault's ZEC is provable and slashes their bonds, which compensate the
+  victims (Tier 3, [TIER3.md](TIER3.md)). All five are run by us in this deployment.
 - Each signer is as honest as the chain data it reads: independent operators run their own
   Zcash and Base sources ([OPERATORS.md](OPERATORS.md)).
-- Minting does not have to trust the signers (Tier 2, [TIER2.md](TIER2.md)): a deposit can be
-  activated on a RISC Zero proof that its note is in a Zcash block committed by a header the
+- Minting does not have to trust the signers (Tier 2, [TIER2.md](TIER2.md)): a deposit is
+  activated only on a RISC Zero proof that its note is in a Zcash block committed by a header the
   on-chain relay verified, for the vault all five signers described when it opened. The
-  coordinator or the borrower proves; the Registry trusts only the proof.
+  coordinator or the borrower proves; the Intake trusts only the proof, from an active verifier
+  version (all five signers can add one, after a public delay). New collateral is accepted only
+  while the bonds cover its value.
+- If the signers stop paying a claim, its claimant is paid from their bonds after
+  `livenessPeriod`; a payout they confirm but never send can be disputed (D47, D53).
 - The vault address and its viewing key are signed by all five signers when the vault opens;
   the app checks the signatures before showing the address.
 - The borrower gets the vault's viewing key and can check the vault independently.
@@ -39,10 +46,12 @@ Ironwood pool. This document describes the system as built; interfaces are in
    account, signs `OpenVault`. The signers run a DKG and agree on the ZIP 2005 `sk`, giving
    the vault its viewing keys and address. The vault has a deposit expiry *height*. Nothing
    touches Base.
-2. **Deposit (P1).** The borrower pays the denomination from Ironwood notes. After N
-   confirmations the signers classify the vault's notes and attest the conforming one;
-   `attestDeposit` mints zZEC straight into the account's Morpho position. Or (Tier 2) a
-   deposit proof is submitted with `attestDepositWithProof`, with the same effect.
+2. **Deposit.** The borrower pays the denomination from Ironwood notes. The coordinator (or the
+   borrower) proves the deposit and submits it with `attestDepositWithProof`: the vault is
+   reserved, and `finalizeActivation` mints zZEC straight into the account's Morpho position once
+   the relay has moved on (`finalizeDepth` headers, `finalizeDelay` seconds) and every gate is open.
+   A proven deposit that cannot activate the vault (the vault already active, the account bound to
+   another vault, a halt, a full cap) lands as a Refund claim instead.
 3. **Borrow.** The account's first UserOp (sponsored) deploys it, authorizes the Registry and
    the Adapter on Morpho, and borrows.
 4. **Exit.** One of:
@@ -52,9 +61,10 @@ Ironwood pool. This document describes the system as built; interfaces are in
      transaction. No outside funds touch the account.
    - **Liquidation (P3):** a liquidator repays through the Adapter and receives the seized
      ZEC; the vault stays open for the borrower's remainder.
-5. **Refunds (P5).** Any non-conforming deposit can be refunded on the owner's signed request;
-   the conforming deposit of a vault that was never activated, once the signers cancelled the
-   vault on Base (D23).
+5. **Refunds.** A proven deposit that lands as a Refund claim is paid like any claim, once the
+   account gives its destination (D41). A deposit no deployed guest can prove (another amount than
+   the vault's, before refund proofs are deployed) is refunded off-chain on the owner's signed
+   request (P5); a note a deployed guest can prove is never refunded off-chain (I30).
 
 ## Signer policy
 
@@ -74,7 +84,7 @@ Every payout returns the vault's still-unpaid value to the vault's internal addr
 
 - Each Base event creates one claim per recipient (a close creates two). Claims are paid in
   Base order, one transaction at a time; the next starts once the previous change is mined.
-- One transaction settles up to 8 claims of the vault (the Registry's limit; review İ-01): the
+- One transaction settles up to 8 claims of the vault (the Registry's limit; review H-06): the
   first payable claim (or close pair), then the later payable claims in Base order. A claim that
   would pay a receiver of the transaction a second time, or name one of its salts again (E1), is
   skipped for a later transaction, and the claims after it still ride along: a liquidation split
@@ -94,18 +104,13 @@ Every payout returns the vault's still-unpaid value to the vault's internal addr
 
 ## Invariants
 
-| | |
-|---|---|
-| I1 | zZEC total supply = Σ `outstanding` over active vaults |
-| I2 | zZEC moves only between Morpho, Registry and Adapter; no account holds it |
-| I3 | No vault ZEC is released before its zZEC is burned and a claim exists (except P5 refunds) |
-| I4 | One account ↔ one vault |
-| I5 | A `depositTag` and a `vaultId` are each used at most once |
-| I6 | Fewer than 3 distinct signer signatures are always rejected |
-| I7 | `CloseRelease`: `mmAmount + userAmount` = burned zZEC = `outstanding` before the close |
-| I8 | The Adapter never withdraws collateral without a valid, unexpired, non-cancelled signed request whose executor is the caller |
-| I9 | Seized or withdrawn zZEC never exceeds the vault's `outstanding` |
-| I10 | (signers) conforming-lineage notes = `outstanding` + unpaid claims; non-conforming notes are tracked separately until refunded |
+I1 to I31, where each is enforced and which tests check it: [INVARIANTS.md](INVARIANTS.md). The
+original ten: zZEC supply equals the outstanding of active vaults (I1); zZEC moves only between
+Morpho, the Registry and the Adapter (I2); no ZEC leaves a vault before its zZEC is burned and a
+claim exists (I3); one account, one vault (I4); a deposit tag and a vault id are used once (I5);
+fewer than three distinct signer signatures are always rejected (I6); a close splits exactly the
+outstanding (I7); the Adapter acts only on a valid signed request of the account (I8); nothing
+seizes more than the outstanding (I9); the signers' books hold what Base owes (I10).
 
 ## Privacy
 

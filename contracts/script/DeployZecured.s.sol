@@ -20,29 +20,29 @@ import {ZecuredIntake} from "../src/ZecuredIntake.sol";
 import {SignerBondV2} from "../src/SignerBondV2.sol";
 import {ZecuredSlasher} from "../src/ZecuredSlasher.sol";
 import {ZecuredCompensator} from "../src/ZecuredCompensator.sol";
+import {ZecuredVersions} from "../src/ZecuredVersions.sol";
+import {Version, VersionKind} from "../src/interfaces/v3/IZecuredVersions.sol";
+import {IRiscZeroVerifierRouter} from "../src/interfaces/IRiscZeroVerifierRouter.sol";
 import {RegistryConfig} from "../src/interfaces/v3/IZecuredRegistry.sol";
 import {IntakeConfig, WorkTier} from "../src/interfaces/v3/IZecuredIntake.sol";
 import {BondConfig} from "../src/interfaces/v3/ISignerBond.sol";
 import {IRiscZeroVerifier} from "../src/interfaces/IRiscZeroVerifier.sol";
-import {IZcashHeaderRelay} from "../src/relay/IZcashHeaderRelay.sol";
-
-/// @dev The part of RISC Zero's RiscZeroVerifierRouter this script reads.
-interface IRiscZeroVerifierRouter {
-    function getVerifier(bytes4 selector) external view returns (address);
-}
+import {IZcashHeaderRelay, ZCASH_TESTNET} from "../src/relay/IZcashHeaderRelay.sol";
 
 /// @title DeployZecured (v3)
 /// @notice Deploys Zecured v3 on the network a config file describes (`contracts/config/zecured-<name>.json`):
 ///         1. the market's assets: the loan token (the config's, or a fresh MockUSDC on a local fork), the ZEC/USD base
-///            oracle (BASE_ORACLE, or a fresh MockZecOracle, MOCK) and the DemoShockOracle (MOCK / DEMO) around it,
-///            which is the market's oracle; the coverage cap's price (CAP_PRICE, or a DemoCapPrice over the market
+///            oracle (BASE_ORACLE, or a fresh MockZecOracle, MOCK) and, off mainnet, the DemoShockOracle (MOCK /
+///            DEMO) around it, which is then the market's oracle (on Base mainnet BASE_ORACLE itself is, a
+///            ZecuredPriceFeed, T-10); the coverage cap's price (CAP_PRICE, or a DemoCapPrice over the market
 ///            oracle, MOCK / DEMO, testnets only);
 ///         2. the deposit-proof verifier: RISC Zero's router (the selector it must route is checked), or the MOCK
 ///            verifier on a local fork only;
-///         3. at the deployer's next eight CREATE addresses, predicted first because each contract names the others as
-///            immutables and every constructor checks the wiring: ZZEC, ZecuredSpendLogic, ZecuredRegistry (which
+///         3. at the deployer's next nine CREATE addresses, predicted first because each contract names the others as
+///            immutables and the constructors check the wiring: ZZEC, ZecuredSpendLogic, ZecuredRegistry (which
 ///            creates the zZEC / loan token / oracle / AdaptiveCurveIRM / LLTV market on Morpho Blue),
-///            SettlementAdapter, ZecuredIntake, SignerBondV2, ZecuredSlasher, ZecuredCompensator;
+///            SettlementAdapter, ZecuredIntake, SignerBondV2, ZecuredSlasher, ZecuredCompensator, and
+///            ZecuredVersions with the deposit and violation guests as its initial versions (T-07a);
 ///         4. optionally a demo lender supply;
 ///         5. writes deployments/<name>.json (broadcast) or deployments/<name>.dry-run.json (simulation): every address
 ///            and every parameter.
@@ -60,7 +60,8 @@ interface IRiscZeroVerifierRouter {
 ///        RISC0_VERIFIER_MOCK      true: a MockRiscZeroVerifier (MOCK, accepts unproven journals); local fork only
 ///        DEPOSIT_SEAL_SELECTOR    optional: the seal selector both proofs pin (Y1; default Groth16 v3.0 0x73c457ba)
 ///        LOAN_TOKEN               optional: overrides the config's loan token (6 decimals)
-///        BASE_ORACLE              optional: the ZEC/USD oracle the DemoShockOracle wraps (Morpho scale); default a
+///        BASE_ORACLE              the ZEC/USD oracle (Morpho scale): the market's own on Base mainnet (required
+///                                 there), else the one the DemoShockOracle wraps; default off mainnet a
 ///                                 fresh MockZecOracle (MOCK) at ZEC_USD_PRICE_CENTS (default 126500 = $1,265.00)
 ///        CAP_PRICE                optional: the coverage cap's IZecuredCapPrice; required outside testnets
 ///        FEE_COMMITMENT           with a fee in the config: the treasury's salted Ironwood commitment
@@ -72,11 +73,14 @@ contract DeployZecured is Script {
     string internal constant OUT_DIR = "deployments";
     /// RISC Zero Groth16 verifier v3.0 selector (verifier parameters digest prefix) behind the router.
     bytes4 internal constant GROTH16_SELECTOR = 0x73c457ba;
+    uint256 internal constant BASE_MAINNET = 8453;
     uint64 internal constant JUDGE_CHALLENGE_WINDOW = 1 days;
 
     /// One network's parameters: contracts/config/zecured-<name>.json.
     struct NetworkConfig {
         string name;
+        /// The Zcash network the relay follows and the guests prove: "zcash-testnet" or "zcash-mainnet" (T-08).
+        string zcashNetwork;
         uint256 chainId;
         bool localFork;
         bool theftDemo;
@@ -119,6 +123,10 @@ contract DeployZecured is Script {
         uint64 challengeWindow;
         uint256 slashConfirmationWork;
         uint256 slashWorkFloor;
+        // ZecuredVersions (T-07a)
+        uint64 versionDepositDelay;
+        uint64 versionViolationDelay;
+        uint64 versionEstopDelay;
         // ZecuredSpendLogic: disputes (T-05 (a))
         uint64 disputeWindow;
         uint64 inclusionWindow;
@@ -135,7 +143,8 @@ contract DeployZecured is Script {
         bool loanTokenIsMock;
         IOracle baseOracle;
         bool baseOracleIsMock;
-        DemoShockOracle oracle;
+        IOracle oracle;
+        bool oracleIsDemo;
         address capPrice;
         bool capPriceIsDemo;
         address verifier;
@@ -153,11 +162,12 @@ contract DeployZecured is Script {
         SignerBondV2 bond;
         ZecuredSlasher slasher;
         ZecuredCompensator compensator;
+        ZecuredVersions versions;
         Id marketId;
         uint256 lenderSeed; // USDC units (6 decimals)
     }
 
-    /// The eight predicted addresses (deployment order).
+    /// The nine predicted addresses (deployment order).
     struct Predicted {
         address zzec;
         address spendLogic;
@@ -167,6 +177,7 @@ contract DeployZecured is Script {
         address bond;
         address slasher;
         address compensator;
+        address versions;
     }
 
     function run() external returns (Deployment memory d) {
@@ -186,7 +197,7 @@ contract DeployZecured is Script {
         d.violationImageId = vm.envBytes32("VIOLATION_IMAGE_ID");
         require(d.depositImageId != bytes32(0) && d.violationImageId != bytes32(0), "DeployZecured: zero image id");
         d.relay = vm.envAddress("ZCASH_RELAY");
-        _checkRelay(d.relay);
+        _checkRelay(d.relay, cfg);
         d.feeCommitment = cfg.feeBps == 0 ? bytes32(0) : vm.envBytes32("FEE_COMMITMENT");
 
         vm.startBroadcast(deployerKey);
@@ -207,8 +218,12 @@ contract DeployZecured is Script {
         path = vm.envOr("ZECURED_CONFIG", string.concat("config/zecured-", name, ".json"));
     }
 
-    function _readConfig() internal view returns (NetworkConfig memory c) {
+    function _readConfig() internal view returns (NetworkConfig memory) {
         (string memory name, string memory path) = _configPath();
+        return _readConfigAt(name, path);
+    }
+
+    function _readConfigAt(string memory name, string memory path) internal view returns (NetworkConfig memory c) {
         string memory json = vm.readFile(path);
         c.name = name;
         require(
@@ -216,6 +231,7 @@ contract DeployZecured is Script {
             "DeployZecured: the config is for another DEPLOYMENT_NAME"
         );
         c.chainId = vm.parseJsonUint(json, ".chainId");
+        c.zcashNetwork = vm.parseJsonString(json, ".zcashNetwork");
         c.localFork = vm.parseJsonBool(json, ".localFork");
         c.theftDemo = vm.parseJsonBool(json, ".theftDemo");
         c.morpho = IMorpho(vm.parseJsonAddress(json, ".morpho"));
@@ -241,6 +257,9 @@ contract DeployZecured is Script {
         c.slashConfirmationWork = vm.parseJsonUint(json, ".slashConfirmationWork");
         c.slashWorkFloor = vm.parseJsonUint(json, ".slashWorkFloor");
         c.disputeWindow = uint64(vm.parseJsonUint(json, ".disputeWindow"));
+        c.versionDepositDelay = uint64(vm.parseJsonUint(json, ".versionDepositDelay"));
+        c.versionViolationDelay = uint64(vm.parseJsonUint(json, ".versionViolationDelay"));
+        c.versionEstopDelay = uint64(vm.parseJsonUint(json, ".versionEstopDelay"));
         c.inclusionWindow = uint64(vm.parseJsonUint(json, ".inclusionWindow"));
         c.incidentWindow = uint64(vm.parseJsonUint(json, ".incidentWindow"));
         c.leftoverSink = vm.parseJsonAddress(json, ".leftoverSink");
@@ -294,6 +313,10 @@ contract DeployZecured is Script {
             uint256(c.disputeWindow) + c.inclusionWindow <= uint256(c.challengeWindow) + c.unbondingPeriod,
             "DeployZecured: the dispute and inclusion windows outlast the challenge window plus the unbonding"
         );
+        require(
+            c.versionDepositDelay != 0 && c.versionEstopDelay != 0 && c.versionEstopDelay <= c.versionViolationDelay,
+            "DeployZecured: version delays (T-07a)"
+        );
     }
 
     // ------------------------------------------------------------------ steps
@@ -320,11 +343,18 @@ contract DeployZecured is Script {
         }
         d.baseOracle = IOracle(baseOracle);
         require(d.baseOracle.price() != 0, "DeployZecured: the base oracle has no price");
-        d.oracle = new DemoShockOracle(d.deployer, d.baseOracle);
+        if (c.chainId == BASE_MAINNET) {
+            // The market prices with the ZecuredPriceFeed itself (T-10): no demo control on mainnet.
+            require(!d.baseOracleIsMock, "DeployZecured: mainnet needs BASE_ORACLE (a ZecuredPriceFeed, T-10)");
+            d.oracle = d.baseOracle;
+        } else {
+            d.oracle = IOracle(address(new DemoShockOracle(d.deployer, d.baseOracle)));
+            d.oracleIsDemo = true;
+        }
 
         d.capPrice = vm.envOr("CAP_PRICE", address(0));
         if (d.capPrice == address(0)) {
-            require(c.chainId != 8453, "DeployZecured: mainnet needs CAP_PRICE (a ZecuredPriceFeed, T-10)");
+            require(c.chainId != BASE_MAINNET, "DeployZecured: mainnet needs CAP_PRICE (a ZecuredPriceFeed, T-10)");
             d.capPrice = address(new DemoCapPrice(d.oracle));
             d.capPriceIsDemo = true;
         } else {
@@ -357,7 +387,7 @@ contract DeployZecured is Script {
         }
     }
 
-    /// The eight contracts at the deployer's next nonces; every constructor checks that the others name it.
+    /// The nine contracts at the deployer's next nonces; the constructors check that the others name them.
     function _core(NetworkConfig memory c, Deployment memory d, address[5] memory signerSet) internal {
         Predicted memory p = _predict(d.deployer);
         d.zzec = new ZZEC(p.registry, p.adapter, address(c.morpho));
@@ -372,13 +402,20 @@ contract DeployZecured is Script {
             p.compensator,
             d.relay,
             d.verifier,
-            d.violationImageId,
-            d.sealSelector,
+            p.versions,
             c.slashConfirmationWork,
             c.challengeWindow
         );
         d.compensator = new ZecuredCompensator(
             p.registry, p.slasher, p.bond, IERC20(d.loanToken), c.incidentWindow, c.leftoverSink
+        );
+        d.versions = new ZecuredVersions(
+            p.registry,
+            d.verifier,
+            c.versionDepositDelay,
+            c.versionViolationDelay,
+            c.versionEstopDelay,
+            _initialVersions(c, d)
         );
         require(address(d.zzec) == p.zzec, "DeployZecured: zZEC address mismatch");
         require(address(d.spendLogic) == p.spendLogic, "DeployZecured: spend logic address mismatch");
@@ -388,6 +425,7 @@ contract DeployZecured is Script {
         require(address(d.bond) == p.bond, "DeployZecured: bond address mismatch");
         require(address(d.slasher) == p.slasher, "DeployZecured: slasher address mismatch");
         require(address(d.compensator) == p.compensator, "DeployZecured: compensator address mismatch");
+        require(address(d.versions) == p.versions, "DeployZecured: versions address mismatch");
         d.marketId = d.registry.marketId();
         require(c.morpho.market(d.marketId).lastUpdate != 0, "DeployZecured: market not created");
     }
@@ -402,6 +440,34 @@ contract DeployZecured is Script {
         p.bond = vm.computeCreateAddress(deployer, n + 5);
         p.slasher = vm.computeCreateAddress(deployer, n + 6);
         p.compensator = vm.computeCreateAddress(deployer, n + 7);
+        p.versions = vm.computeCreateAddress(deployer, n + 8);
+    }
+
+    /// T-07a: the deposit guest (with the config's branch ids) and the violation guest, both through the pinned seal
+    /// selector, active at once.
+    function _initialVersions(NetworkConfig memory c, Deployment memory d)
+        internal
+        pure
+        returns (Version[] memory initial)
+    {
+        uint32[4] memory none;
+        initial = new Version[](2);
+        initial[0] = Version({
+            kind: VersionKind.Deposit,
+            selector: d.sealSelector,
+            imageId: d.depositImageId,
+            branches: c.branchIds,
+            activeAt: 0,
+            removed: false
+        });
+        initial[1] = Version({
+            kind: VersionKind.Violation,
+            selector: d.sealSelector,
+            imageId: d.violationImageId,
+            branches: none,
+            activeAt: 0,
+            removed: false
+        });
     }
 
     function _registryConfig(
@@ -441,10 +507,8 @@ contract DeployZecured is Script {
             signerBond: p.bond,
             slasher: p.slasher,
             verifier: IRiscZeroVerifier(d.verifier),
-            imageId: d.depositImageId,
-            sealSelector: d.sealSelector,
+            versions: p.versions,
             journalV2: c.journalV2,
-            allowedBranchIds: c.branchIds,
             relay: IZcashHeaderRelay(d.relay),
             workTiers: c.workTiers,
             finalizeDepth: c.finalizeDepth,
@@ -483,10 +547,18 @@ contract DeployZecured is Script {
         });
     }
 
-    function _checkRelay(address relay) internal view {
+    /// T-08: the relay follows the config's Zcash network. The first relay (deployed before the network parameters)
+    /// has no `networkId`; it follows Testnet, so it is accepted for a Testnet deployment only.
+    function _checkRelay(address relay, NetworkConfig memory c) internal view {
         require(relay.code.length > 0, "DeployZecured: ZCASH_RELAY has no code");
         (bytes32 tip,,) = IZcashHeaderRelay(relay).bestChainTip();
         require(tip != bytes32(0), "DeployZecured: ZCASH_RELAY is not a header relay");
+        bytes32 wanted = keccak256(bytes(c.zcashNetwork));
+        try IZcashHeaderRelay(relay).networkId() returns (bytes32 id) {
+            require(id == wanted, "DeployZecured: ZCASH_RELAY follows another Zcash network");
+        } catch {
+            require(wanted == ZCASH_TESTNET, "DeployZecured: a relay without a network id follows Testnet only");
+        }
     }
 
     function _seedLender(NetworkConfig memory c, Deployment memory d) internal {
@@ -537,7 +609,7 @@ contract DeployZecured is Script {
         console.log("deployer:", d.deployer);
         console.log("loan token:", d.loanToken, d.loanTokenIsMock ? "(MockUSDC, MOCK)" : "");
         console.log("base oracle:", address(d.baseOracle), d.baseOracleIsMock ? "(MockZecOracle, MOCK)" : "");
-        console.log("market oracle (DemoShockOracle, MOCK/DEMO):", address(d.oracle));
+        console.log("market oracle:", address(d.oracle), d.oracleIsDemo ? "(DemoShockOracle, MOCK/DEMO)" : "");
         console.log("cap price:", d.capPrice, d.capPriceIsDemo ? "(DemoCapPrice, MOCK/DEMO)" : "");
         console.log("verifier:", d.verifier, d.verifierIsMock ? "(MOCK)" : "");
         console.log("ZZEC:", address(d.zzec));
@@ -548,6 +620,7 @@ contract DeployZecured is Script {
         console.log("SignerBondV2:", address(d.bond));
         console.log("ZecuredSlasher:", address(d.slasher));
         console.log("ZecuredCompensator:", address(d.compensator));
+        console.log("ZecuredVersions:", address(d.versions));
         console.log("Morpho market id:");
         console.logBytes32(Id.unwrap(d.marketId));
         console.log("demo lender supply (USDC units):", d.lenderSeed);
@@ -556,8 +629,10 @@ contract DeployZecured is Script {
 
     /// What is a MOCK or DEMO in this deployment, for README "What is real and what is a mock".
     function _mockNote(NetworkConfig memory c, Deployment memory d) internal pure returns (string memory note) {
-        note =
-            "DemoShockOracle is a MOCK / DEMO control (owner-set shock on top of the base price, public ShockSet events)";
+        if (d.oracleIsDemo) {
+            note =
+                "DemoShockOracle is a MOCK / DEMO control (owner-set shock on top of the base price, public ShockSet events)";
+        }
         if (d.capPriceIsDemo) {
             note =
                 string.concat(note, "; DemoCapPrice is a MOCK / DEMO (the cap reads the market oracle, always fresh)");
@@ -616,12 +691,14 @@ contract DeployZecured is Script {
         vm.serializeAddress(contracts, "SignerBond", address(d.bond));
         vm.serializeAddress(contracts, "ZecuredSlasher", address(d.slasher));
         vm.serializeAddress(contracts, "ZecuredCompensator", address(d.compensator));
+        vm.serializeAddress(contracts, "ZecuredVersions", address(d.versions));
         vm.serializeAddress(contracts, "CapPrice", d.capPrice);
         vm.serializeAddress(contracts, "LoanToken", d.loanToken);
         if (d.loanTokenIsMock) vm.serializeAddress(contracts, "MockUSDC", d.loanToken);
         vm.serializeAddress(contracts, "BaseOracle", address(d.baseOracle));
         if (d.baseOracleIsMock) vm.serializeAddress(contracts, "MockZecOracle", address(d.baseOracle));
-        contracts = vm.serializeAddress(contracts, "DemoShockOracle", address(d.oracle));
+        if (d.oracleIsDemo) vm.serializeAddress(contracts, "DemoShockOracle", address(d.oracle));
+        contracts = vm.serializeAddress(contracts, "MarketOracle", address(d.oracle));
     }
 
     function _marketJson(NetworkConfig memory c, Deployment memory d) internal returns (string memory market) {
@@ -640,6 +717,8 @@ contract DeployZecured is Script {
         vm.serializeString(eip712, "registryDomain", "ZecuredRegistry");
         vm.serializeString(eip712, "adapterDomain", "ZecuredSettlementAdapter");
         vm.serializeString(eip712, "intakeDomain", "ZecuredIntake");
+        vm.serializeString(eip712, "versionsDomain", "ZecuredVersions");
+        vm.serializeBytes32(eip712, "versionsDomainSeparator", d.versions.domainSeparator());
         vm.serializeString(eip712, "version", "1");
         vm.serializeBytes32(eip712, "registryDomainSeparator", d.registry.domainSeparator());
         vm.serializeBytes32(eip712, "intakeDomainSeparator", d.intake.domainSeparator());
@@ -650,6 +729,7 @@ contract DeployZecured is Script {
         proofs = "depositProofs";
         vm.serializeAddress(proofs, "intake", address(d.intake));
         vm.serializeAddress(proofs, "verifier", d.verifier);
+        vm.serializeAddress(proofs, "versions", address(d.versions));
         vm.serializeBool(proofs, "verifierIsMock", d.verifierIsMock);
         vm.serializeBytes32(proofs, "imageId", d.depositImageId);
         vm.serializeAddress(proofs, "relay", d.relay);

@@ -332,7 +332,7 @@ contract SignerBondV2 is ISignerBond, ReentrancyGuardTransient {
         return kindOk && c.status == ClaimStatus.Pending && !c.bondPaid && c.commitment != bytes32(0);
     }
 
-    /// @dev T-05 with Claude Web's bound (approval § 3): `deadline = createdAt + livenessPeriod`; a claim bound to an
+    /// @dev T-05, deferrals bounded (design review): `deadline = createdAt + livenessPeriod`; a claim bound to an
     ///      input waits `commitGrace` after its input's latest commitment, but a commitment made after the deadline
     ///      never extends that: the claim is due at `max(deadline, min(lastCommitAt, deadline) + commitGrace)`, at
     ///      most `livenessPeriod + commitGrace` after it became payable, however often the signers re-commit.

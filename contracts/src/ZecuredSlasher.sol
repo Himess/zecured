@@ -8,6 +8,7 @@ import {IZecuredSpendCommits, SpendRecord, ClaimPayment} from "./interfaces/v3/I
 import {ISignerBond} from "./interfaces/v3/ISignerBond.sol";
 import {IZecuredCompensator} from "./interfaces/v3/IZecuredCompensator.sol";
 import {IZecuredDisputes} from "./interfaces/v3/IZecuredDisputes.sol";
+import {IZecuredVersions, VersionKind} from "./interfaces/v3/IZecuredVersions.sol";
 import {IRiscZeroVerifier} from "./interfaces/IRiscZeroVerifier.sol";
 import {IZcashHeaderRelay} from "./relay/IZcashHeaderRelay.sol";
 
@@ -41,9 +42,7 @@ contract ZecuredSlasher is IZecuredSlasher {
     /// @inheritdoc IZecuredSlasher
     address public immutable verifier;
     /// @inheritdoc IZecuredSlasher
-    bytes32 public immutable violationImageId;
-    /// @inheritdoc IZecuredSlasher
-    bytes4 public immutable sealSelector;
+    address public immutable versions;
     /// @inheritdoc IZecuredSlasher
     uint256 public immutable slashConfirmationWork;
     /// @inheritdoc IZecuredSlasher
@@ -66,8 +65,9 @@ contract ZecuredSlasher is IZecuredSlasher {
     /// @param compensator_ The ZecuredCompensator (its predicted address) that pays the victims; it checks this wiring
     ///        in its own constructor. Zero on deployments without compensation (tests).
     /// @param relay_ The Zcash header relay the Intake uses.
-    /// @param verifier_ The RISC Zero verifier (router) and `sealSelector_` the verifier its seals must be for (Y1).
-    /// @param violationImageId_ The violation guest's image id.
+    /// @param verifier_ The RISC Zero verifier (router).
+    /// @param versions_ ZecuredVersions (T-07a, its predicted address): seals are accepted only from an active
+    ///        Violation version (router selector and guest image id, Y1).
     /// @param slashConfirmationWork_ Work above an anchor a slash needs (S4: at least 100 normal Testnet blocks).
     /// @param challengeWindow_ Time between a proof and its slash (24 hours; 2 minutes on the theft demo, T3-6).
     constructor(
@@ -76,18 +76,16 @@ contract ZecuredSlasher is IZecuredSlasher {
         address compensator_,
         address relay_,
         address verifier_,
-        bytes32 violationImageId_,
-        bytes4 sealSelector_,
+        address versions_,
         uint256 slashConfirmationWork_,
         uint64 challengeWindow_
     ) {
-        if (registry_ == address(0) || signerBond_ == address(0) || relay_ == address(0) || verifier_ == address(0)) {
-            revert ZeroAddress();
-        }
+        if (
+            registry_ == address(0) || signerBond_ == address(0) || relay_ == address(0) || verifier_ == address(0)
+                || versions_ == address(0)
+        ) revert ZeroAddress();
         if (challengeWindow_ == 0) revert ZeroWindow();
-        if (violationImageId_ == bytes32(0) || sealSelector_ == bytes4(0) || slashConfirmationWork_ == 0) {
-            revert InvalidConfig();
-        }
+        if (slashConfirmationWork_ == 0) revert InvalidConfig();
         // The contracts must name each other (the bond and this contract are deployed at predicted addresses).
         if (
             IZecuredSpendCommits(registry_).signerBond() != signerBond_
@@ -103,20 +101,18 @@ contract ZecuredSlasher is IZecuredSlasher {
         compensator = compensator_;
         relay = relay_;
         verifier = verifier_;
-        violationImageId = violationImageId_;
-        sealSelector = sealSelector_;
+        versions = versions_;
         slashConfirmationWork = slashConfirmationWork_;
         challengeWindow = challengeWindow_;
     }
 
     /// @inheritdoc IZecuredSlasher
-    function proveViolation(ViolationKind kind, bytes calldata journal, bytes calldata seal)
+    function proveViolation(ViolationKind kind, bytes calldata journal, bytes calldata seal, bytes32 imageId)
         external
         returns (bytes32 caseId)
     {
         if (journal.length != JOURNAL_LENGTH) revert InvalidJournalLength(journal.length);
-        bytes4 selector = seal.length >= 4 ? bytes4(seal[:4]) : bytes4(0);
-        if (selector != sealSelector) revert InvalidSealSelector(selector);
+        _checkVersion(seal, imageId);
         // abi.decode rejects an out-of-range kind and dirty address / uint64 words.
         ViolationJournal memory j = abi.decode(journal, (ViolationJournal));
         if (j.kind != kind) revert KindMismatch(kind, j.kind);
@@ -127,7 +123,7 @@ contract ZecuredSlasher is IZecuredSlasher {
         (bytes32 vaultId, uint8 signerBitmap) = _violation(j);
         caseId = caseIdOf(kind, j.ref, j.noteTag);
         if (_cases[caseId].kind != ViolationKind.None) revert CaseAlreadyOpen(caseId);
-        IRiscZeroVerifier(verifier).verify(seal, violationImageId, sha256(journal));
+        IRiscZeroVerifier(verifier).verify(seal, imageId, sha256(journal));
 
         uint64 executableAt = uint64(block.timestamp) + challengeWindow;
         _cases[caseId] = ViolationCase({
@@ -197,12 +193,11 @@ contract ZecuredSlasher is IZecuredSlasher {
     }
 
     /// @inheritdoc IZecuredSlasher
-    function proveInclusion(bytes calldata journal, bytes calldata seal, bytes32 claimId) external {
+    function proveInclusion(bytes calldata journal, bytes calldata seal, bytes32 imageId, bytes32 claimId) external {
         (bytes32 anchor, bytes32 payoutRef) = _inclusion(journal);
-        bytes4 selector = seal.length >= 4 ? bytes4(seal[:4]) : bytes4(0);
-        if (selector != sealSelector) revert InvalidSealSelector(selector);
+        _checkVersion(seal, imageId);
         _checkAnchor(anchor);
-        IRiscZeroVerifier(verifier).verify(seal, violationImageId, sha256(journal));
+        IRiscZeroVerifier(verifier).verify(seal, imageId, sha256(journal));
         emit PayoutInclusionProven(claimId, payoutRef, anchor);
         IZecuredDisputes(registry).upholdPayout(claimId, payoutRef);
     }
@@ -229,6 +224,12 @@ contract ZecuredSlasher is IZecuredSlasher {
     /// @dev F1 and F2 take a vault's lineage; F3 and F4 are about one claim.
     function _isTheft(ViolationKind kind) internal pure returns (bool) {
         return kind == ViolationKind.Uncommitted || kind == ViolationKind.WithheldChange;
+    }
+
+    /// @dev Y1, T-07a: the seal's router selector and `imageId` are an active Violation version.
+    function _checkVersion(bytes calldata seal, bytes32 imageId) internal view {
+        bytes4 selector = seal.length >= 4 ? bytes4(seal[:4]) : bytes4(0);
+        IZecuredVersions(versions).activeVersion(VersionKind.Violation, selector, imageId);
     }
 
     function _checkAnchor(bytes32 anchor) internal view {

@@ -13,6 +13,7 @@ import {
     RefundReason
 } from "../../src/interfaces/v3/IZecuredIntake.sol";
 import {IRiscZeroVerifier} from "../../src/interfaces/IRiscZeroVerifier.sol";
+import {IZecuredVersions, VersionKind} from "../../src/interfaces/v3/IZecuredVersions.sol";
 import {ZecuredEIP712} from "../../src/libraries/ZecuredEIP712.sol";
 import {MockRiscZeroVerifier} from "../../src/mocks/MockRiscZeroVerifier.sol";
 import {IZcashHeaderRelay} from "../../src/relay/IZcashHeaderRelay.sol";
@@ -69,7 +70,7 @@ contract DepositProofsTest is ZecuredFixture, RelayFixtures {
     /// Submits the anchor's headers up to 4,488,560 + n - 1 (those not submitted yet).
     function _relayHeaders(uint256 n) internal {
         for (uint256 i = relayed; i < n; ++i) {
-            _warpTo(anchor.headers[i]);
+            _warpForward(anchor.headers[i]);
             relay.submitHeader(anchor.headers[i]);
         }
         if (n > relayed) relayed = n;
@@ -119,7 +120,7 @@ contract DepositProofsTest is ZecuredFixture, RelayFixtures {
     }
 
     function _prove(bytes memory journal) internal {
-        intake.attestDepositWithProof(journal, _seal(journal), _openedSigs(OPENED));
+        intake.attestDepositWithProof(journal, _seal(journal), proofs.imageId, _openedSigs(OPENED));
     }
 
     // ------------------------------------------------------------------ the real deposit
@@ -136,7 +137,7 @@ contract DepositProofsTest is ZecuredFixture, RelayFixtures {
             VAULT_ID, ACCOUNT, AMOUNT, TAG, tipHeight + FINALIZE_DEPTH, block.timestamp + FINALIZE_DELAY
         );
         uint256 gasBefore = gasleft();
-        intake.attestDepositWithProof(journal, _seal(journal), _openedSigs(OPENED));
+        intake.attestDepositWithProof(journal, _seal(journal), proofs.imageId, _openedSigs(OPENED));
         emit log_named_uint(
             "attestDepositWithProof gas (MOCK verifier; the router's Groth16 check adds ~240k)", gasBefore - gasleft()
         );
@@ -197,7 +198,7 @@ contract DepositProofsTest is ZecuredFixture, RelayFixtures {
         bytes[] memory sigs = _openedSigs(OPENED);
         bytes memory seal = _seal(journal);
         vm.expectRevert(abi.encodeWithSelector(IZecuredIntake.AnchorNotConfirmed.selector, TIP, 0));
-        intake.attestDepositWithProof(journal, seal, sigs);
+        intake.attestDepositWithProof(journal, seal, proofs.imageId, sigs);
     }
 
     function test_revert_notEnoughWorkOnTopOfTheAnchor() public {
@@ -209,7 +210,7 @@ contract DepositProofsTest is ZecuredFixture, RelayFixtures {
         bytes[] memory sigs = _openedSigs(OPENED);
         bytes memory seal = _seal(journal);
         vm.expectRevert(abi.encodeWithSelector(IZecuredIntake.AnchorNotConfirmed.selector, TIP, work));
-        intake.attestDepositWithProof(journal, seal, sigs);
+        intake.attestDepositWithProof(journal, seal, proofs.imageId, sigs);
     }
 
     function test_revert_anchorIsTheRelayTip() public {
@@ -218,7 +219,7 @@ contract DepositProofsTest is ZecuredFixture, RelayFixtures {
         bytes[] memory sigs = _openedSigs(OPENED);
         bytes memory seal = _seal(journal);
         vm.expectRevert(abi.encodeWithSelector(IZecuredIntake.AnchorNotConfirmed.selector, TIP, 0));
-        intake.attestDepositWithProof(journal, seal, sigs);
+        intake.attestDepositWithProof(journal, seal, proofs.imageId, sigs);
     }
 
     // ------------------------------------------------------------------ VaultOpened signatures
@@ -229,7 +230,7 @@ contract DepositProofsTest is ZecuredFixture, RelayFixtures {
         bytes[] memory sigs = _signerSigs(_openedDigest(OPENED), _idx4(0, 1, 2, 4));
         bytes memory seal = _seal(journal);
         vm.expectRevert(abi.encodeWithSelector(IZecuredIntake.InsufficientSignatures.selector, 4));
-        intake.attestDepositWithProof(journal, seal, sigs);
+        intake.attestDepositWithProof(journal, seal, proofs.imageId, sigs);
     }
 
     function test_revert_signaturesOverAnotherVaultOpened() public {
@@ -238,7 +239,7 @@ contract DepositProofsTest is ZecuredFixture, RelayFixtures {
         bytes[] memory sigs = _openedSigs(keccak256("another vault"));
         bytes memory seal = _seal(journal);
         vm.expectRevert(); // recovers to an address outside the set
-        intake.attestDepositWithProof(journal, seal, sigs);
+        intake.attestDepositWithProof(journal, seal, proofs.imageId, sigs);
     }
 
     function test_revert_duplicateOpenedSignature() public {
@@ -249,7 +250,7 @@ contract DepositProofsTest is ZecuredFixture, RelayFixtures {
         bytes[] memory sigs = _signerSigs(_openedDigest(OPENED), idx);
         bytes memory seal = _seal(journal);
         vm.expectRevert(abi.encodeWithSelector(IZecuredIntake.SignaturesNotSorted.selector, 4));
-        intake.attestDepositWithProof(journal, seal, sigs);
+        intake.attestDepositWithProof(journal, seal, proofs.imageId, sigs);
     }
 
     // ------------------------------------------------------------------ the proof binds the journal
@@ -262,11 +263,11 @@ contract DepositProofsTest is ZecuredFixture, RelayFixtures {
         bytes[] memory sigs = _openedSigs(OPENED);
         bytes memory seal = _seal(journal);
         vm.expectRevert(MockRiscZeroVerifier.MockSealInvalid.selector);
-        intake.attestDepositWithProof(otherAccount, seal, sigs);
+        intake.attestDepositWithProof(otherAccount, seal, proofs.imageId, sigs);
 
         bytes memory moreZec = _journal(TIP, VAULT_ID, ACCOUNT, 5_000_000, TAG, OPENED);
         vm.expectRevert(MockRiscZeroVerifier.MockSealInvalid.selector);
-        intake.attestDepositWithProof(moreZec, seal, sigs);
+        intake.attestDepositWithProof(moreZec, seal, proofs.imageId, sigs);
     }
 
     function test_revert_sealForAnotherImage() public {
@@ -275,7 +276,7 @@ contract DepositProofsTest is ZecuredFixture, RelayFixtures {
         bytes memory seal = verifier.mockSeal(keccak256("another guest"), sha256(journal));
         bytes[] memory sigs = _openedSigs(OPENED);
         vm.expectRevert(MockRiscZeroVerifier.MockSealInvalid.selector);
-        intake.attestDepositWithProof(journal, seal, sigs);
+        intake.attestDepositWithProof(journal, seal, proofs.imageId, sigs);
     }
 
     function test_revert_sealWithAnotherSelector() public {
@@ -283,11 +284,18 @@ contract DepositProofsTest is ZecuredFixture, RelayFixtures {
         bytes memory journal = _realJournal();
         bytes[] memory sigs = _openedSigs(OPENED);
         bytes memory seal = _seal(journal);
-        seal[0] = 0x73; // a verifier the router might add later under a new selector
-        vm.expectRevert(abi.encodeWithSelector(IZecuredIntake.UnexpectedSealSelector.selector, bytes4(0x73ffffff)));
-        intake.attestDepositWithProof(journal, seal, sigs);
-        vm.expectRevert(abi.encodeWithSelector(IZecuredIntake.UnexpectedSealSelector.selector, bytes4(0)));
-        intake.attestDepositWithProof(journal, hex"ffffff", sigs);
+        seal[0] = 0x73; // a verifier the router might add later under a new selector: no version names it (T-07a)
+        bytes32 other = versions.versionIdOf(VersionKind.Deposit, bytes4(0x73ffffff), proofs.imageId);
+        vm.expectRevert(abi.encodeWithSelector(IZecuredVersions.VersionNotActive.selector, other));
+        intake.attestDepositWithProof(journal, seal, proofs.imageId, sigs);
+        bytes32 none = versions.versionIdOf(VersionKind.Deposit, bytes4(0), proofs.imageId);
+        vm.expectRevert(abi.encodeWithSelector(IZecuredVersions.VersionNotActive.selector, none));
+        intake.attestDepositWithProof(journal, hex"ffffff", proofs.imageId, sigs);
+        // Nor an image id that is not a version, even with the right selector.
+        bytes32 otherImage = versions.versionIdOf(VersionKind.Deposit, bytes4(0xffffffff), keccak256("other image"));
+        bytes memory goodSeal = _seal(journal);
+        vm.expectRevert(abi.encodeWithSelector(IZecuredVersions.VersionNotActive.selector, otherImage));
+        intake.attestDepositWithProof(journal, goodSeal, keccak256("other image"), sigs);
     }
 
     function test_revert_journalLength() public {
@@ -296,11 +304,11 @@ contract DepositProofsTest is ZecuredFixture, RelayFixtures {
         bytes memory longer = abi.encodePacked(journal, uint8(0));
         bytes memory longerSeal = _seal(longer);
         vm.expectRevert(abi.encodeWithSelector(IZecuredIntake.InvalidJournalLength.selector, 193));
-        intake.attestDepositWithProof(longer, longerSeal, sigs);
+        intake.attestDepositWithProof(longer, longerSeal, proofs.imageId, sigs);
         bytes memory shorter = new bytes(191);
         bytes memory shorterSeal = _seal(shorter);
         vm.expectRevert(abi.encodeWithSelector(IZecuredIntake.InvalidJournalLength.selector, 191));
-        intake.attestDepositWithProof(shorter, shorterSeal, sigs);
+        intake.attestDepositWithProof(shorter, shorterSeal, proofs.imageId, sigs);
     }
 
     function test_revert_nonCanonicalAccountWord() public {
@@ -310,7 +318,7 @@ contract DepositProofsTest is ZecuredFixture, RelayFixtures {
         bytes[] memory sigs = _openedSigs(OPENED);
         bytes memory seal = _seal(journal);
         vm.expectRevert(); // abi.decode rejects a dirty address word
-        intake.attestDepositWithProof(journal, seal, sigs);
+        intake.attestDepositWithProof(journal, seal, proofs.imageId, sigs);
     }
 
     // ------------------------------------------------------------------ I4, I5: one note lands once
@@ -322,11 +330,11 @@ contract DepositProofsTest is ZecuredFixture, RelayFixtures {
         bytes[] memory sigs = _openedSigs(OPENED);
         bytes memory seal = _seal(journal);
         vm.expectRevert(abi.encodeWithSelector(IZecuredIntake.DepositTagUsed.selector, TAG));
-        intake.attestDepositWithProof(journal, seal, sigs);
+        intake.attestDepositWithProof(journal, seal, proofs.imageId, sigs);
 
         _finalize(VAULT_ID);
         vm.expectRevert(abi.encodeWithSelector(IZecuredIntake.DepositTagUsed.selector, TAG));
-        intake.attestDepositWithProof(journal, seal, sigs);
+        intake.attestDepositWithProof(journal, seal, proofs.imageId, sigs);
     }
 
     function test_revert_tagAlreadyUsedByAnotherVault() public {
@@ -337,7 +345,7 @@ contract DepositProofsTest is ZecuredFixture, RelayFixtures {
         bytes[] memory sigs = _openedSigs(OPENED);
         bytes memory seal = _seal(journal);
         vm.expectRevert(abi.encodeWithSelector(IZecuredIntake.DepositTagUsed.selector, TAG));
-        intake.attestDepositWithProof(journal, seal, sigs);
+        intake.attestDepositWithProof(journal, seal, proofs.imageId, sigs);
     }
 
     // ------------------------------------------------------------------ T-02: what cannot activate lands as a refund
@@ -365,7 +373,7 @@ contract DepositProofsTest is ZecuredFixture, RelayFixtures {
         _prove(_realJournal());
         bytes32 tag2 = keccak256("2nd note");
         bytes memory journal2 = _journal(TIP, VAULT_ID, ACCOUNT, AMOUNT, tag2, OPENED);
-        intake.attestDepositWithProof(journal2, _seal(journal2), _openedSigs(OPENED));
+        intake.attestDepositWithProof(journal2, _seal(journal2), proofs.imageId, _openedSigs(OPENED));
         (,, VaultStatus status) = registry.vault(VAULT_ID);
         assertEq(uint8(status), uint8(VaultStatus.Pending), "the first deposit still pends");
         _assertClaim(
@@ -412,10 +420,10 @@ contract DepositProofsTest is ZecuredFixture, RelayFixtures {
 
     function test_config() public view {
         assertEq(address(intake.verifier()), address(verifier));
-        assertEq(intake.imageId(), IMAGE_ID);
+        assertEq(intake.versions(), address(versions));
+        assertTrue(versions.isActive(versions.versionIdOf(VersionKind.Deposit, bytes4(0xffffffff), IMAGE_ID)));
         assertEq(address(intake.relay()), address(relay));
         assertEq(intake.minConfirmationWorkFor(AMOUNT), SUITE_MIN_WORK);
-        assertEq(intake.sealSelector(), bytes4(0xffffffff));
         assertEq(intake.finalizeDepth(), FINALIZE_DEPTH);
         assertEq(intake.finalizeDelay(), FINALIZE_DELAY);
         assertFalse(intake.journalV2());
@@ -426,22 +434,21 @@ contract DepositProofsTest is ZecuredFixture, RelayFixtures {
 
     /// An Intake config the Registry under test would accept (it names `address(intake)`: deploy at that address).
     function _goodIntakeConfig() internal view returns (IntakeConfig memory c) {
-        c = _intakeConfig(address(0), address(0), CapSetup(0, 0, 0, address(0)));
+        Predicted memory p;
+        p.versions = address(versions);
+        c = _intakeConfig(p, CapSetup(0, 0, 0, address(0)));
     }
 
     function test_revert_inconsistentIntakeConfig() public {
-        IntakeConfig[8] memory bad;
+        IntakeConfig[5] memory bad;
         for (uint256 i; i < bad.length; ++i) {
             bad[i] = _goodIntakeConfig();
         }
-        bad[0].imageId = bytes32(0);
-        bad[1].sealSelector = bytes4(0);
-        bad[2].finalizeDepth = 0;
-        bad[3].maxPause = 0;
-        bad[4].minRefundZat = registry.DUST_LIMIT();
-        bad[5].workTiers = new WorkTier[](0);
-        bad[6].coverageBps = 10_000; // a cap without bonds or a price
-        bad[7].journalV2 = true; // v2 without any allowed branch id
+        bad[0].finalizeDepth = 0;
+        bad[1].maxPause = 0;
+        bad[2].minRefundZat = registry.DUST_LIMIT();
+        bad[3].workTiers = new WorkTier[](0);
+        bad[4].coverageBps = 10_000; // a cap without bonds or a price
         for (uint256 i; i < bad.length; ++i) {
             vm.expectRevert(IZecuredIntake.InvalidConfig.selector);
             new ZecuredIntake(bad[i]);
@@ -457,6 +464,10 @@ contract DepositProofsTest is ZecuredFixture, RelayFixtures {
         noVerifier.verifier = IRiscZeroVerifier(address(0));
         vm.expectRevert(IZecuredIntake.ZeroAddress.selector);
         new ZecuredIntake(noVerifier);
+        IntakeConfig memory noVersions = _goodIntakeConfig();
+        noVersions.versions = address(0);
+        vm.expectRevert(IZecuredIntake.ZeroAddress.selector);
+        new ZecuredIntake(noVersions);
     }
 
     function _idx4(uint256 a, uint256 b, uint256 c, uint256 d) internal pure returns (uint256[] memory r) {

@@ -46,5 +46,9 @@
   "tierMinWork": [
     "3500000"
   ],
-  "unbondingPeriod": 1800
+  "unbondingPeriod": 1800,
+  "versionDepositDelay": 600,
+  "versionEstopDelay": 600,
+  "versionViolationDelay": 600,
+  "zcashNetwork": "zcash-testnet"
 }

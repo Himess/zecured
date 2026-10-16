@@ -21,12 +21,13 @@ import {IZecuredRegistry, VaultStatus} from "./interfaces/v3/IZecuredRegistry.so
 import {ISignerBond} from "./interfaces/v3/ISignerBond.sol";
 import {IZecuredSlasher} from "./interfaces/v3/IZecuredSlasher.sol";
 import {IZecuredCapPrice} from "./interfaces/v3/IZecuredPriceFeed.sol";
+import {IZecuredVersions, Version, VersionKind} from "./interfaces/v3/IZecuredVersions.sol";
 import {ZecuredEIP712} from "./libraries/ZecuredEIP712.sol";
 
 /// @title ZecuredIntake
-/// @notice Everything before a vault is active (docs/TIER2.md; design notes T-01, T-02, T-03, T-08, T-09): deposit
-///         proofs, pending activations (K3), and the gates of minting (the halt, the bonds, the coverage cap, the
-///         pause). Minting needs no signer: a proof lands without one; the signers' only say is the five `VaultOpened`
+/// @notice Everything before a vault is active (docs/TIER2.md; design notes T-01, T-02, T-03, T-07a, T-08, T-09):
+///         deposit proofs (from an active verifier version), pending activations (K3), and the gates of minting (the
+///         halt, the bonds, the coverage cap, the pause). Minting needs no signer: a proof lands without one; the signers' only say is the five `VaultOpened`
 ///         signatures given when the vault opened. Every proven deposit lands, as a pending activation or as a refund:
 ///         from then on its note is a lineage note, so taking it without a commitment is provable (F1).
 /// @dev The Registry trusts this contract for its deposit hooks and re-checks its own invariants in each (I4, I5,
@@ -53,9 +54,7 @@ contract ZecuredIntake is IZecuredIntake, EIP712 {
     /// @inheritdoc IZecuredIntake
     IRiscZeroVerifier public immutable verifier;
     /// @inheritdoc IZecuredIntake
-    bytes32 public immutable imageId;
-    /// @inheritdoc IZecuredIntake
-    bytes4 public immutable sealSelector;
+    address public immutable versions;
     /// @inheritdoc IZecuredIntake
     bool public immutable journalV2;
     /// @inheritdoc IZecuredIntake
@@ -81,11 +80,6 @@ contract ZecuredIntake is IZecuredIntake, EIP712 {
     /// @inheritdoc IZecuredIntake
     uint64 public immutable minRefundZat;
 
-    uint32 private immutable _branch0;
-    uint32 private immutable _branch1;
-    uint32 private immutable _branch2;
-    uint32 private immutable _branch3;
-
     // The Registry's signer set, strictly increasing (read once at construction).
     address private immutable _signer0;
     address private immutable _signer1;
@@ -106,14 +100,15 @@ contract ZecuredIntake is IZecuredIntake, EIP712 {
 
     /// @param c See `IntakeConfig`. The Registry must already be deployed and name this contract its intake.
     constructor(IntakeConfig memory c) EIP712(ZecuredEIP712.INTAKE_DOMAIN_NAME, ZecuredEIP712.DOMAIN_VERSION) {
-        if (c.registry == address(0) || address(c.verifier) == address(0) || address(c.relay) == address(0)) {
-            revert ZeroAddress();
-        }
+        if (
+            c.registry == address(0) || address(c.verifier) == address(0) || c.versions == address(0)
+                || address(c.relay) == address(0)
+        ) revert ZeroAddress();
         IZecuredRegistry registry_ = IZecuredRegistry(c.registry);
         if (registry_.intake() != address(this)) revert InvalidConfig();
         if (
-            c.imageId == bytes32(0) || c.sealSelector == bytes4(0) || c.finalizeDepth == 0 || c.maxPause == 0
-                || c.minRefundZat <= registry_.DUST_LIMIT() || c.workTiers.length == 0 || c.workTiers.length > MAX_TIERS
+            c.finalizeDepth == 0 || c.maxPause == 0 || c.minRefundZat <= registry_.DUST_LIMIT()
+                || c.workTiers.length == 0 || c.workTiers.length > MAX_TIERS
         ) revert InvalidConfig();
         // The coverage cap needs bonds and a price; without bonds (tests) it is off.
         if (
@@ -130,14 +125,12 @@ contract ZecuredIntake is IZecuredIntake, EIP712 {
             previous = t.maxAmountZat;
             _tiers.push(t);
         }
-        if (c.journalV2 && c.allowedBranchIds[0] == 0) revert InvalidConfig();
 
         _registry = registry_;
         signerBond = c.signerBond;
         slasher = c.slasher;
         verifier = c.verifier;
-        imageId = c.imageId;
-        sealSelector = c.sealSelector;
+        versions = c.versions;
         journalV2 = c.journalV2;
         relay = c.relay;
         finalizeDepth = c.finalizeDepth;
@@ -150,10 +143,6 @@ contract ZecuredIntake is IZecuredIntake, EIP712 {
         pendingRefundDelay = c.pendingRefundDelay;
         autoPauseOnCase = c.autoPauseOnCase;
         minRefundZat = c.minRefundZat;
-        _branch0 = c.allowedBranchIds[0];
-        _branch1 = c.allowedBranchIds[1];
-        _branch2 = c.allowedBranchIds[2];
-        _branch3 = c.allowedBranchIds[3];
         address[5] memory s = registry_.signers();
         _signer0 = s[0];
         _signer1 = s[1];
@@ -165,15 +154,22 @@ contract ZecuredIntake is IZecuredIntake, EIP712 {
     // ------------------------------------------------------------------ deposits
 
     /// @inheritdoc IZecuredIntake
-    /// @dev What the proof itself establishes is in tier2/statement. This contract adds: the seal is for the pinned
-    ///      verifier (Y1); the anchor header is on the relay's best chain with enough work on top for the amount (so is
-    ///      the deposit's block, which precedes it); all five signers described the vault in the `VaultOpened` whose
-    ///      struct hash the proof computed (which binds the note, and with VaultOpened v2 its tag key, to this vault
-    ///      and account without anything about Zcash reaching Base); the tag is unused. Then the deposit lands.
-    function attestDepositWithProof(bytes calldata journal, bytes calldata seal, bytes[] calldata openedSigs) external {
+    /// @dev What the proof itself establishes is in tier2/statement. This contract adds: the seal is from an active
+    ///      Deposit version, its router selector and guest image id (Y1, T-07a), and a v2 journal names a branch id that
+    ///      version allows; the anchor header is on the relay's best chain with enough work on top for the amount (so
+    ///      is the deposit's block, which precedes it); all five signers described the vault in the `VaultOpened`
+    ///      whose struct hash the proof computed (which binds the note, and with VaultOpened v2 its tag key, to this
+    ///      vault and account without anything about Zcash reaching Base); the tag is unused. Then the deposit lands.
+    function attestDepositWithProof(
+        bytes calldata journal,
+        bytes calldata seal,
+        bytes32 imageId,
+        bytes[] calldata openedSigs
+    ) external {
         DepositJournal memory j = _decodeJournal(journal);
         bytes4 selector = seal.length >= 4 ? bytes4(seal[:4]) : bytes4(0);
-        if (selector != sealSelector) revert UnexpectedSealSelector(selector);
+        Version memory version = IZecuredVersions(versions).activeVersion(VersionKind.Deposit, selector, imageId);
+        if (journalV2 && !_branchAllowed(version.branches, j.branchId)) revert BranchNotAllowed(j.branchId);
         _checkAnchor(j.tipHash, minConfirmationWorkFor(j.amount));
         // All five: the DKG needs every signer, so all five always sign, and one honest signer suffices to refuse a
         // vault key it did not help create.
@@ -325,11 +321,6 @@ contract ZecuredIntake is IZecuredIntake, EIP712 {
         return _tiers;
     }
 
-    /// @notice The branch ids a v2 journal may name (zero entries unused).
-    function allowedBranchIds() external view returns (uint32[4] memory) {
-        return [_branch0, _branch1, _branch2, _branch3];
-    }
-
     /// @inheritdoc IZecuredIntake
     function pendingActivation(bytes32 vaultId) external view returns (PendingActivation memory) {
         return _pending[vaultId];
@@ -358,21 +349,23 @@ contract ZecuredIntake is IZecuredIntake, EIP712 {
     // ------------------------------------------------------------------ internal
 
     /// @dev v1: abi.encode(tipHash, vaultId, account, amount, depositTag, vaultOpenedHash), Activate mode. v2: the same
-    ///      words preceded by mode and branch id. abi.decode rejects dirty address and integer words.
+    ///      words preceded by mode and branch id (checked against the seal's version by the caller). abi.decode rejects
+    ///      dirty address and integer words.
     function _decodeJournal(bytes calldata journal) internal view returns (DepositJournal memory j) {
         if (journalV2) {
             if (journal.length != JOURNAL_V2_LENGTH) revert InvalidJournalLength(journal.length);
             j = abi.decode(journal, (DepositJournal));
             if (j.mode > MODE_REFUND) revert InvalidMode(j.mode);
-            uint32 b = j.branchId;
-            if (b == 0 || (b != _branch0 && b != _branch1 && b != _branch2 && b != _branch3)) {
-                revert BranchNotAllowed(b);
-            }
         } else {
             if (journal.length != JOURNAL_V1_LENGTH) revert InvalidJournalLength(journal.length);
             (j.tipHash, j.vaultId, j.account, j.amount, j.depositTag, j.vaultOpenedHash) =
                 abi.decode(journal, (bytes32, bytes32, address, uint64, bytes32, bytes32));
         }
+    }
+
+    /// @dev A non-zero branch id among the version's.
+    function _branchAllowed(uint32[4] memory branches, uint32 b) internal pure returns (bool) {
+        return b != 0 && (b == branches[0] || b == branches[1] || b == branches[2] || b == branches[3]);
     }
 
     /// @dev The header committing to a proof's deposit must be on the relay's best chain with `minWork` on top of it

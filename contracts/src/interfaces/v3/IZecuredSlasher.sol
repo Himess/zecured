@@ -73,7 +73,6 @@ interface IZecuredSlasher {
     error InvalidJournalLength(uint256 length);
     error KindMismatch(ViolationKind argument, ViolationKind journal);
     error UnknownKind();
-    error InvalidSealSelector(bytes4 selector);
     error InvalidBeneficiary(address beneficiary);
     error AnchorNotConfirmed(bytes32 anchor, uint256 work);
     error NoViolation(ViolationKind kind, bytes32 ref);
@@ -84,16 +83,19 @@ interface IZecuredSlasher {
     error NotAnInclusion();
 
     function JOURNAL_LENGTH() external view returns (uint256);
-    function proveViolation(ViolationKind kind, bytes calldata journal, bytes calldata seal)
+    /// @notice Anyone. `imageId` and the seal's router selector must be an active Violation version of `versions`
+    ///         (T-07a).
+    function proveViolation(ViolationKind kind, bytes calldata journal, bytes calldata seal, bytes32 imageId)
         external
         returns (bytes32 caseId);
     function executeSlash(bytes32 caseId) external;
 
     /// @notice Anyone (the signers' coordinator, in practice). Verifies a proof of the violation guest's `Included`
-    ///         kind: the journal is `(5, anchor, 0, payoutRef, 0, 0, 0, 0)`, the seal is for `violationImageId`, and the
-    ///         anchor is on the relay's best chain under `slashConfirmationWork`, as for a slash. Then upholds the
-    ///         disputed `claimId` in the Registry, which checks that `payoutRef` is a committed payout of its input.
-    function proveInclusion(bytes calldata journal, bytes calldata seal, bytes32 claimId) external;
+    ///         kind: the journal is `(5, anchor, 0, payoutRef, 0, 0, 0, 0)`, the seal is from an active Violation version
+    ///         (`imageId`), and the anchor is on the relay's best chain under `slashConfirmationWork`, as for a slash.
+    ///         Then upholds the disputed `claimId` in the Registry, which checks that `payoutRef` is a committed payout
+    ///         of its input.
+    function proveInclusion(bytes calldata journal, bytes calldata seal, bytes32 imageId, bytes32 claimId) external;
 
     function caseOf(bytes32 caseId) external view returns (ViolationCase memory);
     function caseIdOf(ViolationKind kind, bytes32 ref, bytes32 noteTag) external pure returns (bytes32);
@@ -113,8 +115,8 @@ interface IZecuredSlasher {
     function compensator() external view returns (address);
     function relay() external view returns (address);
     function verifier() external view returns (address);
-    function violationImageId() external view returns (bytes32);
-    function sealSelector() external view returns (bytes4);
+    /// @notice The version registry (T-07a).
+    function versions() external view returns (address);
     function slashConfirmationWork() external view returns (uint256);
     function challengeWindow() external view returns (uint64);
 }
