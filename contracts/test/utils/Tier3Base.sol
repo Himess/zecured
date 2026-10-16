@@ -72,14 +72,15 @@ abstract contract Tier3Base is ZecuredFixture {
 
     function _prove(bytes memory journal) internal returns (bytes32) {
         ViolationKind kind = abi.decode(journal, (ViolationJournal)).kind;
-        return slasher.proveViolation(kind, journal, verifier.mockSeal(VIOLATION_IMAGE, sha256(journal)));
+        return
+            slasher.proveViolation(kind, journal, verifier.mockSeal(VIOLATION_IMAGE, sha256(journal)), violationImage);
     }
 
     function _proveExpectRevert(bytes memory journal, bytes memory err) internal {
         ViolationKind kind = abi.decode(journal, (ViolationJournal)).kind;
         bytes memory seal = verifier.mockSeal(VIOLATION_IMAGE, sha256(journal));
         vm.expectRevert(err);
-        slasher.proveViolation(kind, journal, seal);
+        slasher.proveViolation(kind, journal, seal, violationImage);
     }
 
     function _all5() internal pure returns (uint256[] memory r) {
@@ -103,7 +104,7 @@ abstract contract Tier3Base is ZecuredFixture {
     function _proveDeposit(bytes32 vault, address acct, uint64 amount, bytes32 tag, bytes32 anchor) internal {
         relay.setBlock(anchor, true, MIN_WORK);
         (bytes memory journal, bytes memory seal, bytes[] memory sigs) = _depositProof(vault, acct, amount, tag, anchor);
-        intake.attestDepositWithProof(journal, seal, sigs);
+        intake.attestDepositWithProof(journal, seal, proofs.imageId, sigs);
     }
 
     function _one(bytes32 a) internal pure returns (bytes32[] memory r) {

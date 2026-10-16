@@ -90,7 +90,7 @@ contract RealGroth16SealTest is ZecuredFixture, RelayFixtures {
     function test_realSeal_mintsTheRealDepositThroughTheRealRouter() public {
         _relayHeaders(CONFIRMED);
         uint256 gasBefore = gasleft();
-        intake.attestDepositWithProof(_journal(AMOUNT), SEAL, _openedSigs());
+        intake.attestDepositWithProof(_journal(AMOUNT), SEAL, proofs.imageId, _openedSigs());
         emit log_named_uint("attestDepositWithProof gas, real Groth16 verification included", gasBefore - gasleft());
 
         // K3: minted once the relay has moved FINALIZE_DEPTH headers on and the anchor is still on its best chain.
@@ -119,7 +119,7 @@ contract RealGroth16SealTest is ZecuredFixture, RelayFixtures {
         bytes memory journal = _journal(AMOUNT + 1);
         bytes[] memory sigs = _openedSigs();
         vm.expectRevert();
-        intake.attestDepositWithProof(journal, SEAL, sigs);
+        intake.attestDepositWithProof(journal, SEAL, proofs.imageId, sigs);
     }
 }
 
@@ -200,7 +200,7 @@ contract RealViolationSealTest is ZecuredFixture {
         relay.setBlock(THEFT_ANCHOR, true, SLASH_WORK);
 
         uint256 gasBefore = gasleft();
-        bytes32 caseId = slasher.proveViolation(ViolationKind.Uncommitted, JOURNAL, SEAL);
+        bytes32 caseId = slasher.proveViolation(ViolationKind.Uncommitted, JOURNAL, SEAL, violationImage);
         emit log_named_uint("proveViolation gas, real Groth16 verification included", gasBefore - gasleft());
         assertEq(slasher.caseOf(caseId).vaultId, vaultId);
 
@@ -218,6 +218,6 @@ contract RealViolationSealTest is ZecuredFixture {
         bytes memory journal = JOURNAL;
         journal[95] = 0xbf; // the beneficiary's last byte
         vm.expectRevert();
-        slasher.proveViolation(ViolationKind.Uncommitted, journal, SEAL);
+        slasher.proveViolation(ViolationKind.Uncommitted, journal, SEAL, violationImage);
     }
 }

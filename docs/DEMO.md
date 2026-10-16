@@ -47,7 +47,7 @@ Setup, once:
 | Steal | `POST /admin/vaults/<id>/steal` with `{"to":"<an attacker's unified address>"}` | The sweep's txid on a Zcash explorer: no commitment on Base |
 | Detect | `zecured-wallet watch --ufvk-file vault.ufvk --from <birthday> --tier3` | `VIOLATION F1` and the command that builds the witness |
 | Prove | `build-violation uncommitted ... --out f1.json`, then `zecured-tier2-host violation prove f1.json f1.receipt` and `... violation groth16 f1.receipt f1.seal.json` | The journal: an anchor header, a tag, a reference; no Zcash transaction, note or address |
-| Slash | `cast send <ZecuredSlasher> "proveViolation(uint8,bytes,bytes)" 1 <journal> <seal>`; two minutes later `cast send <ZecuredSlasher> "executeSlash(bytes32)" <caseId>` | All five bonds slashed, the bounty owed to the prover, `halted()` true: no new vault can be activated |
+| Slash | `cast send <ZecuredSlasher> "proveViolation(uint8,bytes,bytes,bytes32)" 1 <journal> <seal> <violation image id>`; two minutes later `cast send <ZecuredSlasher> "executeSlash(bytes32)" <caseId>` | All five bonds slashed, the bounty owed to the prover, `halted()` true: no new vault can be activated |
 
 ## Two-minute video
 
