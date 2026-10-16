@@ -278,7 +278,9 @@ contract ZecuredRegistry is IZecuredRegistry, IZecuredSpendCommits, ZecuredRegis
             kind: ClaimKind.Retired,
             status: ClaimStatus.Compensated,
             createdAt: uint40(block.timestamp),
-            bondPaid: false
+            bondPaid: false,
+            paidAt: 0,
+            disputeDueAt: 0
         });
         emit VaultRetired(vaultId, claimId, retired);
         if (remaining == 0 && v.unpaidClaims == 0) _settle();
@@ -432,6 +434,7 @@ contract ZecuredRegistry is IZecuredRegistry, IZecuredSpendCommits, ZecuredRegis
             if (status != ClaimStatus.Pending) revert ClaimNotPayable(claimIds[i]);
             // Tier 3: a claim is paid by a committed payout only, which its claimant can check (F3).
             if (_claimInput[claimIds[i]] == bytes32(0)) revert ClaimNotCommitted(claimIds[i]);
+            c.paidAt = uint40(block.timestamp); // its claimant may dispute this for `disputeWindow`
             _closeClaim(c, ClaimStatus.Paid);
         }
         emit PayoutConfirmed(vaultId, claimIds);
@@ -520,6 +523,20 @@ contract ZecuredRegistry is IZecuredRegistry, IZecuredSpendCommits, ZecuredRegis
             assembly ("memory-safe") {
                 revert(add(ret, 32), mload(ret))
             }
+        }
+    }
+
+    /// @notice Every other call, the dispute path (`IZecuredDisputes`) above all, runs `ZecuredSpendLogic`'s code on this
+    ///         contract's storage (T-11), which refuses what it does not implement. Not payable.
+    fallback() external {
+        address logic = spendLogic;
+        // Never returns to Solidity code, so it may use memory from zero.
+        assembly {
+            calldatacopy(0, 0, calldatasize())
+            let ok := delegatecall(gas(), logic, 0, calldatasize(), 0, 0)
+            returndatacopy(0, 0, returndatasize())
+            if iszero(ok) { revert(0, returndatasize()) }
+            return(0, returndatasize())
         }
     }
 
@@ -772,28 +789,9 @@ contract ZecuredRegistry is IZecuredRegistry, IZecuredSpendCommits, ZecuredRegis
             kind: kind,
             status: ClaimStatus.Pending,
             createdAt: uint40(block.timestamp),
-            bondPaid: false
+            bondPaid: false,
+            paidAt: 0,
+            disputeDueAt: 0
         });
-    }
-
-    /// @dev A pending claim leaves the books (paid, written off or compensated); its vault settles once closed or
-    ///      cancelled with no pending claim left.
-    function _closeClaim(Claim storage c, ClaimStatus status) internal {
-        c.status = status;
-        _pendingClaimZat -= c.amount;
-        Vault storage v = _vaults[c.vaultId];
-        v.unpaidClaims -= 1;
-        if (_settled(v)) _settle();
-    }
-
-    /// @dev Closed or cancelled with no pending claim: no longer counted in `openVaultCount`.
-    function _settled(Vault storage v) internal view returns (bool) {
-        return (v.status == VaultStatus.Closed || v.status == VaultStatus.Cancelled) && v.unpaidClaims == 0;
-    }
-
-    function _settle() internal {
-        uint256 open = _openVaults - 1;
-        _openVaults = open;
-        if (open == 0) _lastVaultSettledAt = uint64(block.timestamp);
     }
 }

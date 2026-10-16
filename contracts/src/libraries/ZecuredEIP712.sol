@@ -1,8 +1,8 @@
 // SPDX-License-Identifier: MIT
 pragma solidity 0.8.28;
 
-/// @notice Deposit attestation signed by at least 3 of the 5 signer nodes (docs/INTERFACES.md § 2.2), verified on-chain
-///         by `ZecuredRegistry.attestDeposit` under the Registry domain.
+/// @notice Deposit attestation of the signer nodes (Tier 1, docs/INTERFACES.md § 2.2) under the Registry domain. No v3
+///         contract verifies it: every deposit is proven (docs/DECISIONS.md D41).
 /// @param vaultId Random 32-byte vault id chosen off-chain when the vault is opened. Never zero.
 /// @param account The vault's smart account (the Morpho position owner). Never zero.
 /// @param amount Collateral in zatoshi (1 zZEC wei = 1 zatoshi). Never zero.

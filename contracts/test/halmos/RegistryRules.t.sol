@@ -167,7 +167,7 @@ contract RegistryRulesCheck is Test {
             })
         );
         vm.etch(token, address(new ZZEC(address(registry), ADAPTER, address(morpho))).code);
-        vm.etch(logic, address(new ZecuredSpendLogic(address(registry), signers)).code);
+        vm.etch(logic, address(new ZecuredSpendLogic(address(registry), signers, 1 days, 6 hours)).code);
         zzec = ZZEC(token);
         // The smart account's setup batch authorizes the Registry and the Adapter on Morpho.
         vm.startPrank(ACCOUNT);

@@ -40,12 +40,15 @@ enum ClaimKind {
 /// - `WrittenOff`: a dust claim of a closed vault (`writeOffDust`, RT-8) or an abandoned refund (`abandonRefund`); its
 ///   value stays in the vault.
 /// - `Compensated`: the claim's vault was compromised (an executed F1 or F2 case); the compensator pays it in USDC.
+/// - `Disputed`: its claimant disputes the signers' confirmation that it was paid (`IZecuredDisputes`); unpaid again
+///   until the signers prove the payout is in a Zcash block, or `Pending` once they failed to in time.
 enum ClaimStatus {
     None,
     Pending,
     Paid,
     WrittenOff,
-    Compensated
+    Compensated,
+    Disputed
 }
 
 /// @notice Everything Base keeps about a claim.
@@ -252,7 +255,8 @@ interface IZecuredRegistry is IZecuredSignerErrors {
     // ------------------------------------------------------------------ payouts
 
     /// @notice As in v2 (3 signatures over PayoutConfirmation, every claim committed), and the vault is not
-    ///         compromised.
+    ///         compromised. Records when each claim was confirmed: its claimant may dispute the confirmation for
+    ///         `disputeWindow` (`IZecuredDisputes`, served by this contract's fallback).
     function confirmPayout(bytes32 vaultId, bytes32[] calldata claimIds, bytes[] calldata sigs) external;
 
     /// @notice RT-8: as in v2; not on a compromised vault (the compensator settles its claims).

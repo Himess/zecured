@@ -6,6 +6,7 @@ import {MockRiscZeroVerifier} from "../../src/mocks/MockRiscZeroVerifier.sol";
 import {VaultStatus, ClaimKind, ClaimStatus} from "../../src/interfaces/v3/IZecuredRegistry.sol";
 import {LineageNote} from "../../src/interfaces/v3/IZecuredSpendCommits.sol";
 import {PendingActivation} from "../../src/interfaces/v3/IZecuredIntake.sol";
+import {IZecuredDisputes} from "../../src/interfaces/v3/IZecuredDisputes.sol";
 import {ZecuredFixture} from "../utils/ZecuredFixture.sol";
 import {MockHeaderRelay} from "../mocks/MockHeaderRelay.sol";
 import {MockSignerBond} from "../mocks/MockSignerBond.sol";
@@ -68,7 +69,7 @@ contract ZecuredInvariantsTest is ZecuredFixture {
         usdc.transferOwnership(address(handler)); // MOCK mint for the handler's actors
         oracle.transferOwnership(address(handler)); // MOCK price moves
 
-        bytes4[] memory selectors = new bytes4[](40);
+        bytes4[] memory selectors = new bytes4[](44);
         selectors[0] = ZecuredHandler.prove.selector;
         selectors[1] = ZecuredHandler.prove.selector; // weighted: deposits first
         selectors[2] = ZecuredHandler.prove.selector;
@@ -109,6 +110,10 @@ contract ZecuredInvariantsTest is ZecuredFixture {
         selectors[37] = ZecuredHandler.attackDeleverage.selector;
         selectors[38] = ZecuredHandler.attackCloseRequest.selector;
         selectors[39] = ZecuredHandler.release.selector;
+        selectors[40] = ZecuredHandler.dispute.selector;
+        selectors[41] = ZecuredHandler.resolveDispute.selector;
+        selectors[42] = ZecuredHandler.dispute.selector; // weighted: a dispute needs a confirmed claim first
+        selectors[43] = ZecuredHandler.resolveDispute.selector;
         targetSelector(FuzzSelector({addr: address(handler), selectors: selectors}));
         targetContract(address(handler));
         // The handler pranks its own actors, so the caller does not matter. A fixed caller matters on a fork: every
@@ -237,7 +242,9 @@ contract ZecuredInvariantsTest is ZecuredFixture {
                 bytes32 claimId = registry.claimIdOf(vaultId, j);
                 (,,, bytes32 commitment, ClaimStatus status) = registry.claim(claimId);
                 bytes32 input = registry.claimInput(claimId);
-                if (status == ClaimStatus.Paid) assertTrue(input != bytes32(0), "I16: paid without a commitment");
+                if (status == ClaimStatus.Paid || status == ClaimStatus.Disputed) {
+                    assertTrue(input != bytes32(0), "I16: paid (or disputed) without a commitment");
+                }
                 if (input != bytes32(0)) {
                     assertEq(registry.lineageOf(input).vaultId, vaultId, "I16: a foreign input");
                     assertTrue(commitment != bytes32(0), "I21: committed without a destination");
@@ -315,7 +322,7 @@ contract ZecuredInvariantsTest is ZecuredFixture {
     }
 
     /// I17 (Tier 3, S5): the open-vault count the bonds wait on is the number of vaults that are pending or active, or
-    /// closed or cancelled with a claim still pending.
+    /// closed or cancelled with a claim still pending or disputed.
     function invariant_I17_openVaultCount() public view {
         uint256 open;
         for (uint256 i; i < handler.vaultCount(); ++i) {
@@ -325,11 +332,36 @@ contract ZecuredInvariantsTest is ZecuredFixture {
             uint64 count = registry.claimCount(vaultId);
             for (uint64 j; j < count; ++j) {
                 (,,,, ClaimStatus s) = registry.claim(registry.claimIdOf(vaultId, j));
-                if (s == ClaimStatus.Pending) unpaid = true;
+                if (s == ClaimStatus.Pending || s == ClaimStatus.Disputed) unpaid = true;
             }
             if (status == VaultStatus.Active || status == VaultStatus.Pending || unpaid) ++open;
         }
         assertEq(registry.openVaultCount(), open, "I17");
+    }
+
+    /// T-05 (a) and the cap's basis (T-01): a disputed claim has an inclusion deadline and no confirmation time; only
+    /// a confirmed claim has a confirmation time; `lockedZatoshi` is the zZEC supply plus every pending or disputed
+    /// claim.
+    function invariant_disputes_andLockedZatoshi() public view {
+        IZecuredDisputes disputes = IZecuredDisputes(address(registry));
+        uint256 unpaid;
+        for (uint256 i; i < handler.vaultCount(); ++i) {
+            bytes32 vaultId = handler.vaultIds(i);
+            uint64 count = registry.claimCount(vaultId);
+            for (uint64 j; j < count; ++j) {
+                bytes32 claimId = registry.claimIdOf(vaultId, j);
+                (,, uint64 amount,, ClaimStatus s) = registry.claim(claimId);
+                (uint64 paidAt, uint64 dueAt) = disputes.payoutDispute(claimId);
+                if (s == ClaimStatus.Disputed) {
+                    assertTrue(dueAt != 0 && paidAt == 0, "a disputed claim's times");
+                } else {
+                    assertEq(dueAt, 0, "an inclusion deadline outside a dispute");
+                }
+                if (paidAt != 0) assertEq(uint8(s), uint8(ClaimStatus.Paid), "a confirmation time on an unpaid claim");
+                if (s == ClaimStatus.Pending || s == ClaimStatus.Disputed) unpaid += amount;
+            }
+        }
+        assertEq(registry.lockedZatoshi(), zzec.totalSupply() + unpaid, "lockedZatoshi");
     }
 
     // ------------------------------------------------------------------ violations caught while acting
@@ -362,7 +394,7 @@ contract ZecuredInvariantsTest is ZecuredFixture {
     }
 
     function afterInvariant() external view {
-        string[48] memory names = [
+        string[51] memory names = [
             "prove: pending",
             "prove: refund (known vault)",
             "prove: refund (account bound)",
@@ -398,6 +430,9 @@ contract ZecuredInvariantsTest is ZecuredFixture {
             "commit",
             "commit only",
             "confirm",
+            "dispute",
+            "uphold",
+            "reopen",
             "attack: claim reuse",
             "attack: uncommitted confirm",
             "attack: unset destination",

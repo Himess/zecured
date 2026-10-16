@@ -7,6 +7,7 @@ import {IZecuredIntake} from "./interfaces/v3/IZecuredIntake.sol";
 import {IZecuredSpendCommits, SpendRecord, ClaimPayment} from "./interfaces/v3/IZecuredSpendCommits.sol";
 import {ISignerBond} from "./interfaces/v3/ISignerBond.sol";
 import {IZecuredCompensator} from "./interfaces/v3/IZecuredCompensator.sol";
+import {IZecuredDisputes} from "./interfaces/v3/IZecuredDisputes.sol";
 import {IRiscZeroVerifier} from "./interfaces/IRiscZeroVerifier.sol";
 import {IZcashHeaderRelay} from "./relay/IZcashHeaderRelay.sol";
 
@@ -16,7 +17,8 @@ import {IZcashHeaderRelay} from "./relay/IZcashHeaderRelay.sol";
 ///         pay a claim; F4: a commitment that hides a payout from its claimant) opens a case; after the challenge window
 ///         the case is checked again and the signers it names are slashed through the SignerBond, which halts minting.
 ///         v2 (design notes T-04): an open F1/F2 case freezes its vault's exits, an executed one marks the vault
-///         compromised, and the loss is handed to the compensator. No owner, no upgrade path.
+///         compromised, and the loss is handed to the compensator. The same guest's `Included` kind upholds a disputed
+///         payout confirmation (T-05 (a)). No owner, no upgrade path.
 /// @dev The guest proves facts about one Zcash transaction X in a relay-anchored block; this contract compares them with
 ///      the Registry's records. Every journal field a kind does not use must be zero, so a violation has exactly one
 ///      journal shape and one case id.
@@ -25,6 +27,8 @@ contract ZecuredSlasher is IZecuredSlasher {
     uint256 public constant JOURNAL_LENGTH = 8 * 32;
     /// @dev An uncommitted spend was signed by three signers, and FROST does not tell which: all five answer for it.
     uint8 private constant ALL_SIGNERS = 0x1f;
+    /// @dev The violation guest's `Included` kind (tier2/statement, `violation::Kind`).
+    uint256 private constant INCLUDED = 5;
 
     /// @inheritdoc IZecuredSlasher
     address public immutable registry;
@@ -192,6 +196,17 @@ contract ZecuredSlasher is IZecuredSlasher {
         IZecuredCompensator(compensator).onCase(caseId, c.kind, c.vaultId, claimId, shortfall);
     }
 
+    /// @inheritdoc IZecuredSlasher
+    function proveInclusion(bytes calldata journal, bytes calldata seal, bytes32 claimId) external {
+        (bytes32 anchor, bytes32 payoutRef) = _inclusion(journal);
+        bytes4 selector = seal.length >= 4 ? bytes4(seal[:4]) : bytes4(0);
+        if (selector != sealSelector) revert InvalidSealSelector(selector);
+        _checkAnchor(anchor);
+        IRiscZeroVerifier(verifier).verify(seal, violationImageId, sha256(journal));
+        emit PayoutInclusionProven(claimId, payoutRef, anchor);
+        IZecuredDisputes(registry).upholdPayout(claimId, payoutRef);
+    }
+
     // ------------------------------------------------------------------ views
 
     /// @inheritdoc IZecuredSlasher
@@ -220,6 +235,21 @@ contract ZecuredSlasher is IZecuredSlasher {
         uint256 work = IZcashHeaderRelay(relay).confirmationWork(anchor);
         if (!IZcashHeaderRelay(relay).isInBestChain(anchor) || work < slashConfirmationWork) {
             revert AnchorNotConfirmed(anchor, work);
+        }
+    }
+
+    /// @dev The anchor and X's reference of an `Included` journal, read word by word (kind 5 is not a `ViolationKind`):
+    ///      kind 5, the anchor, a zero beneficiary, X's payoutRef, and four zero words (note tag, value, destination
+    ///      commitment, output index).
+    function _inclusion(bytes calldata journal) internal pure returns (bytes32 anchor, bytes32 payoutRef) {
+        if (journal.length != JOURNAL_LENGTH) revert InvalidJournalLength(journal.length);
+        anchor = bytes32(journal[32:64]);
+        payoutRef = bytes32(journal[96:128]);
+        if (uint256(bytes32(journal[:32])) != INCLUDED || bytes32(journal[64:96]) != bytes32(0) || payoutRef == 0) {
+            revert NotAnInclusion();
+        }
+        for (uint256 offset = 128; offset < JOURNAL_LENGTH; offset += 32) {
+            if (bytes32(journal[offset:offset + 32]) != bytes32(0)) revert NotAnInclusion();
         }
     }
 

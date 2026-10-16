@@ -50,6 +50,8 @@ struct ViolationCase {
 ///        compromised, and `compensator.onCase(caseId, kind, vaultId, claimId, shortfallZat)` registers the loss:
 ///        F1, F2: the vault (claimId and shortfall zero); F3: the claim of `claimPayment(ref)` and `expected - value`;
 ///        F4: nothing to compensate (the call is still made, for the record).
+///      - Disputes (design notes T-05 (a)): `proveInclusion` takes the same guest's `Included` journal (kind 5, which
+///        is not a `ViolationKind`) and upholds a disputed payout confirmation in the Registry (`IZecuredDisputes`).
 interface IZecuredSlasher {
     event ViolationProven(
         bytes32 indexed caseId,
@@ -62,6 +64,8 @@ interface IZecuredSlasher {
     event ViolationDismissed(bytes32 indexed caseId);
     event ViolationExecuted(bytes32 indexed caseId, uint256 slashed);
     event VaultCompromised(bytes32 indexed vaultId, bytes32 indexed caseId);
+    /// @notice A disputed claim's payout `payoutRef` was proven to be in the block committed by `anchor`.
+    event PayoutInclusionProven(bytes32 indexed claimId, bytes32 indexed payoutRef, bytes32 anchor);
 
     error ZeroAddress();
     error ZeroWindow();
@@ -77,12 +81,19 @@ interface IZecuredSlasher {
     error UnknownCase(bytes32 caseId);
     error ChallengeWindowOpen(bytes32 caseId, uint64 executableAt);
     error CaseAlreadyExecuted(bytes32 caseId);
+    error NotAnInclusion();
 
     function JOURNAL_LENGTH() external view returns (uint256);
     function proveViolation(ViolationKind kind, bytes calldata journal, bytes calldata seal)
         external
         returns (bytes32 caseId);
     function executeSlash(bytes32 caseId) external;
+
+    /// @notice Anyone (the signers' coordinator, in practice). Verifies a proof of the violation guest's `Included`
+    ///         kind: the journal is `(5, anchor, 0, payoutRef, 0, 0, 0, 0)`, the seal is for `violationImageId`, and the
+    ///         anchor is on the relay's best chain under `slashConfirmationWork`, as for a slash. Then upholds the
+    ///         disputed `claimId` in the Registry, which checks that `payoutRef` is a committed payout of its input.
+    function proveInclusion(bytes calldata journal, bytes calldata seal, bytes32 claimId) external;
 
     function caseOf(bytes32 caseId) external view returns (ViolationCase memory);
     function caseIdOf(ViolationKind kind, bytes32 ref, bytes32 noteTag) external pure returns (bytes32);

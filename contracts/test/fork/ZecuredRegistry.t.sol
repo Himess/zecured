@@ -205,7 +205,8 @@ contract ZecuredRegistryTest is ZecuredFixture {
         address predictedRegistry = vm.computeCreateAddress(address(this), nonce + 2);
         address predictedAdapter = vm.computeCreateAddress(address(this), nonce + 3);
         ZZEC z = new ZZEC(predictedRegistry, predictedAdapter, address(MORPHO));
-        ZecuredSpendLogic logic = new ZecuredSpendLogic(predictedRegistry, logicSigners);
+        ZecuredSpendLogic logic =
+            new ZecuredSpendLogic(predictedRegistry, logicSigners, DISPUTE_WINDOW, INCLUSION_WINDOW);
         return _config(z, predictedAdapter, address(logic));
     }
 
@@ -373,7 +374,7 @@ contract ZecuredRegistryTest is ZecuredFixture {
             new ZecuredRegistry(c);
             // The spend logic checks its set the same way.
             vm.expectRevert(IZecuredSignerErrors.InvalidSignerSet.selector);
-            new ZecuredSpendLogic(address(registry), bad[i]);
+            new ZecuredSpendLogic(address(registry), bad[i], DISPUTE_WINDOW, INCLUSION_WINDOW);
         }
     }
 
