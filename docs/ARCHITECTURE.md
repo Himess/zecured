@@ -73,11 +73,11 @@ Ironwood pool. This document describes the system as built; interfaces are in
 | Rule | Condition | Signs |
 |---|---|---|
 | **P0** (every request) | right vault, right signer key, unused nonce, deadline not passed **when accepted**; an accepted request is completed even if signing is slow | — |
-| **P1** deposit attestation | the vault's notes in chain order (height, tx index, action index); the **first** note with: a deposit transaction that only touches Ironwood (no transparent, Sapling or Orchard-pool parts), value = denomination, height ≤ expiry height, ≥ N confirmations. Classification happens once and never changes. | `DepositAttestation` for that note only |
+| **P1** deposit attestation | the vault's notes in chain order (height, tx index, action index); the **first** note with: a deposit transaction that only touches Ironwood (no transparent, Sapling or Orchard-pool parts), value = denomination, height ≤ expiry height, ≥ N confirmations. Classification happens once and never changes. | nothing: the coordinator proves that note in Activate mode, and Base activates the vault on the proof alone (D41) |
 | **P2** release | `ReleaseRequested`; commitment matches the pre-validated destination | borrower: amount − fee |
 | **P3** liquidation | `LiquidationRelease`; commitment matches the liquidator's revealed recipient | liquidator: seized − fee (`ovk = None`) |
 | **P4** anything else | — | never |
-| **P5** refund | a non-conforming note, owner-signed request, Ironwood destination | depositor: note − fee |
+| **P5** refund | a non-conforming note that no guest of the deployment can land on Base (I30; any other lands as a Refund claim), owner-signed request, Ironwood destination | depositor: note − fee |
 | **P6** close | `CloseRelease`; both commitments match revealed recipients | market maker (`ovk = None`) + borrower (remainder − fee) in one transaction |
 
 Every payout returns the vault's still-unpaid value to the vault's internal address.

@@ -64,15 +64,7 @@ pub fn write_atomic(path: &Path, bytes: &[u8]) -> Result<()> {
     Ok(())
 }
 
-/// A deposit attestation this node signed.
-#[derive(Clone, Debug, Serialize, Deserialize)]
-pub struct AttestationRecord {
-    pub position: NotePosition,
-    pub nullifier: [u8; 32],
-    pub deposit_tag: [u8; 32],
-}
-
-/// An accepted P5 refund request.
+/// An accepted P5 refund request: for a deposit no guest of the deployment can land on Base (I30).
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct RefundRecord {
     pub note_id: [u8; 32],
@@ -108,16 +100,16 @@ pub struct VaultRecord {
     /// P1 decisions, once made (never changed).
     #[serde(default)]
     pub decisions: Vec<(NotePosition, Classification)>,
-    #[serde(default)]
-    pub attestation: Option<AttestationRecord>,
     /// `VaultActivated` seen on Base.
     #[serde(default)]
     pub activated: bool,
     /// Mirror of the Registry's `outstanding`.
     #[serde(default)]
     pub outstanding: u64,
+    /// Every claim of the vault on Base, refunds (T-02) and the opening fee (T-06) included.
     #[serde(default)]
     pub claims: Vec<Claim>,
+    /// P5: accepted refund requests of deposits no guest can land on Base (I30).
     #[serde(default)]
     pub refunds: Vec<RefundRecord>,
     /// Owner request nonces already used (P0).
@@ -133,12 +125,8 @@ pub struct VaultRecord {
     /// event is applied at most once, whatever happens to the global cursor (M-9).
     #[serde(default)]
     pub last_event: Option<(u64, u64)>,
-    /// `VaultCancelled` seen on Base (D23): the vault was never activated and never will be,
-    /// so its conforming deposit is refundable.
-    #[serde(default)]
-    pub cancelled: bool,
     /// K2-a: the deposit tag of the `VaultActivated` event: the note that backs the vault and
-    /// heads its lineage.
+    /// heads its main lineage.
     #[serde(default)]
     pub activated_tag: Option<[u8; 32]>,
 }

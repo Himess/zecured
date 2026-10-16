@@ -24,26 +24,27 @@ the signers. Salts are never logged.
 
 | Domain | name | version | chainId | verifyingContract | Used for |
 |---|---|---|---|---|---|
-| Registry | `ZecuredRegistry` | `1` | 84532 | ZecuredRegistry | `DepositAttestation`, `PayoutConfirmation`, `VaultCancellation`, `VaultOpened` (checked off-chain by the owner and on-chain by `attestDepositWithProof`), `SpendCommit` (Tier 3, Registry v2), and all off-chain owner requests (`OpenVault`, `Destination`, `RefundRequest`, `ViewKeyRequest`) |
+| Registry | `ZecuredRegistry` | `1` | 84532 | ZecuredRegistry | `PayoutConfirmation`, `VaultOpened` (checked off-chain by the owner and on-chain by the Intake's `attestDepositWithProof`, under this domain), `SpendCommit` (Tier 3), `ReimburseDestination` (T-05, D47), and all off-chain owner requests (`OpenVault`, `Destination`, `RefundRequest`, `ViewKeyRequest`) |
 | Adapter | `ZecuredSettlementAdapter` | `1` | 84532 | SettlementAdapter | `CloseRequest` |
 
 Every request kind has its own type, so a signature for one kind never verifies as another.
 
+Registry v3 dropped `DepositAttestation` and `VaultCancellation` (D41): a deposit reaches Base only
+by proof, and one that cannot back its vault lands there as a Refund claim, paid from its own note
+like any claim (docs/TIER2.md § 5). No node signs either any more.
+
 ### 2.2 Signed by signer nodes (ECDSA, verified on-chain by the Registry)
 
 ```
-DepositAttestation(bytes32 vaultId,address account,uint64 amount,bytes32 depositTag)
 PayoutConfirmation(bytes32 vaultId,bytes32 claimIdsHash)
-VaultCancellation(bytes32 vaultId)
 ```
 
-- `depositTag` (D24): keyed tag of the conforming note, `BLAKE2b-256(key = BLAKE2b-256(personal
-  = "Zecured_TagKey__", UFVK string), personal = "Zecured_DepTag__", cmx)`, the same value a
-  Tier 2 deposit proof computes; unlinkable to any Zcash data without the vault's viewing key.
-  No expiry; the Registry rejects a reused `vaultId` or `depositTag` (I5).
-- `VaultCancellation` (D23, L-8): signed before the signers refund the conforming deposit of a
-  vault that was never activated; `cancelVault` makes the vault `Cancelled` for good.
-- `claimIdsHash = keccak256(abi.encodePacked(claimIds))`.
+- `claimIdsHash = keccak256(abi.encodePacked(claimIds))`. A confirmation is three signers' word:
+  each claimant may dispute it for `disputeWindow` (D53, docs/TIER3.md § 10).
+- `depositTag` (D24), the tag every Base record names a vault note by: `BLAKE2b-256(key =
+  BLAKE2b-256(personal = "Zecured_TagKey__", UFVK string), personal = "Zecured_DepTag__", cmx)`,
+  what a deposit proof computes; unlinkable to any Zcash data without the vault's tag key. The
+  Registry rejects a reused `vaultId` or `depositTag` (I5).
 - Signatures are passed as `bytes[]`, ordered by **strictly increasing signer address**; at
   least 3 distinct signers of the 5-member set (I6).
 
@@ -61,7 +62,16 @@ ViewKeyRequest(bytes32 vaultId,uint64 nonce,uint64 deadline)
 
 - `deadline` is a Unix timestamp, checked **only when the request is accepted** (P0).
 - `nonce`: per-vault, each value usable once.
-- `noteId`: opaque id of a non-conforming note as returned by `GET /vaults/:id`.
+- `Destination` pre-validates every destination the vault's account later puts on Base: a release's
+  (`requestRelease`), a close's, and a Refund claim's (`setRefundDestination(claimId, commitment)`,
+  T-02). The signers pay a claim only to a commitment whose salt and receiver they hold.
+- `RefundRequest` (P5) asks for the off-chain refund of a deposit that **no guest of the deployment
+  can land on Base** (I30, D42): under journal v1, a note of another amount, a late payment or one
+  from a transaction with other pools; under v2, a note below the Intake's `minRefundZat`; under
+  either, a note to another address of the vault. Every node checks that on its own scan, with the
+  Intake's journal version read on each of its Base providers, and refuses any other deposit: one a
+  guest can land is a lineage note the day someone proves it, so it is refunded only as a Refund
+  claim. `noteId`: the opaque id `GET /vaults/:id` lists it under (`offChain: true`).
 
 ### 2.4 Signed by the vault owner, verified on-chain through the smart account (ERC-1271)
 
@@ -446,11 +456,11 @@ addresses, salts, viewing keys or IPs.
 | Method & path | Body | Response |
 |---|---|---|
 | `POST /vaults` | `{ owner, account, amount, requestId, deadline, signature, stamp }` (`OpenVault`; `stamp`: the nonce of the request's hashcash stamp, below) | `{ vaultId, address (Ironwood-only UA), zip321, amount, expiryHeight, tagKeyHash, signatures: [{ index, signature }] }`; `signatures`: every signer's `VaultOpened` (§ 2.5), ordered by node index; the client checks all five before showing `address` and builds the payment URI itself |
-| `GET /vaults/:id` | — | `{ vaultId, status, amount, address, expiryHeight, birthdayHeight, tipHeight, outstanding, payoutInFlight, nonConforming: [{ noteId, amount }], claims: [{ claimId, kind, amount, paid }] }`; `kind` ∈ `Release`, `Liquidation`, `CloseUser`, `CloseMarketMaker` |
+| `GET /vaults/:id` | — | `{ vaultId, status, amount, address, expiryHeight, birthdayHeight, tipHeight, outstanding, payoutInFlight, nonConforming: [{ noteId, amount, offChain }], claims: [{ claimId, kind, amount, paid, status, destinationSet }] }`; `kind` ∈ `Release`, `Liquidation`, `CloseUser`, `CloseMarketMaker`, `Refund` (T-02), `Fee` (T-06), `Retired` (T-04); `status` ∈ `pending`, `paid`, `written_off`, `compensated`, `disputed` (D53), `paid` being `status == "paid"`; `destinationSet`: the claim has a destination on Base (a Refund claim waits for its account's, `setRefundDestination`). `nonConforming`: the deposits the coordinator's scan found that have not landed on Base, each refunded once a proof lands it as a Refund claim (the coordinator proves those a guest of the deployment can land, when it proves deposits), or, with `offChain: true` (no guest can land it, I30), off-chain at its owner's request (`POST /vaults/:id/refund`) |
 | `POST /vaults/:id/destination` | `{ receiver (UA), salt, nonce, deadline, signature }` (`Destination`) | `{ commitment }` — validated **before** any Base tx that burns zZEC |
-| `POST /vaults/:id/refund` | `{ noteId, receiver, salt, nonce, deadline, signature }` (`RefundRequest`) | `{ accepted: true }` |
+| `POST /vaults/:id/refund` | `{ noteId, receiver, salt, nonce, deadline, signature }` (`RefundRequest`, § 2.3) | `{ accepted: true }`; only for a deposit listed with `offChain: true`, else `409 refund_on_base` (I30); the signers then refund it, net of the fee, to `receiver` |
 | `POST /vaults/:id/viewing-key` | `{ nonce, deadline, signature }` (`ViewKeyRequest`) | `{ ufvk }` |
-| `POST /vaults/:id/deposit-proof` | `{ imageId, journal, seal }` (a deposit proof made elsewhere, e.g. `zecured-wallet loan prove`; journal v2 in Activate mode, § 3) | `{ accepted: true }` once `attestDepositWithProof` is mined with the vault's `VaultOpened` signatures and the coordinator's gas (Y10: proving one's own deposit needs no ETH); the coordinator then finalizes the activation (K3). Only while the vault waits for its deposit |
+| `POST /vaults/:id/deposit-proof` | `{ imageId, journal, seal }` (a deposit proof made elsewhere, e.g. `zecured-wallet loan prove`; a journal of the Intake's version, in Activate mode for v2, § 3) | `{ accepted: true }` once the Intake's `attestDepositWithProof(journal, seal, imageId, openedSigs)` is mined with the vault's `VaultOpened` signatures and the coordinator's gas (Y10: proving one's own deposit needs no ETH); the coordinator then finalizes the activation (K3). Only while the vault waits for its deposit, and only for a guest image id and router selector that are an active deposit version (T-07a, D54) |
 | `POST /recipients` | `{ receiver (UA), salt }` (liquidator / market maker) | `{ commitment }` |
 | `GET /quotes/close/:vaultId` | — | `{ executor, marginBps (number), repayAssets, mmAmount, userAmount, expiresAt (number, Unix s) }` (relayed to the market maker) |
 | `POST /closes` | `{ request: CloseRequest (camelCase), signature }` | `{ txHash }` once `closeWithCollateral` is mined (relayed; executed by the market maker) |
@@ -462,7 +472,9 @@ addresses, salts, viewing keys or IPs.
 | `POST /proxy/bundler` | JSON-RPC | ERC-4337 bundler passthrough |
 | `POST /proxy/paymaster` | JSON-RPC | Sponsors only the allowlist below; rejects anything else |
 
-Vault status values: `awaiting_deposit`, `deposit_seen`, `active`, `closed`, `expired`.
+Vault status values: `awaiting_deposit`, `deposit_seen` (a proof is on Base, its activation pending,
+K3), `active`, `closed`, `expired`, `cancelled` (never activated and never will be: a deposit landed
+as a refund while the vault was new, or its pending activation was converted into one, T-02).
 Amounts are decimal strings in zatoshis (ZEC) or 6-decimal units (USDC).
 
 **Opening a vault has a cost (review H-01).** Each opening costs the five signers a DKG, so

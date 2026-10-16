@@ -24,6 +24,8 @@ pub enum PublicError {
     NotOwner,
     Expired,
     NonceUsed,
+    /// I30: an off-chain refund of a deposit that a guest of the deployment can land on Base.
+    RefundOnBase,
     /// Fewer than three signers accepted, and at least one refused under its policy.
     SignersRefused,
     /// Fewer than three signers answered (unreachable, offline or broken).
@@ -47,6 +49,7 @@ impl PublicError {
             Self::NotOwner => "not_owner",
             Self::Expired => "expired",
             Self::NonceUsed => "nonce_used",
+            Self::RefundOnBase => "refund_on_base",
             Self::SignersRefused => "signers_refused",
             Self::SignersUnavailable => "signers_unavailable",
             Self::ChainUnavailable => "chain_unavailable",
@@ -67,6 +70,9 @@ impl PublicError {
             Self::NotOwner => "Not signed by the vault owner.",
             Self::Expired => "The request has expired.",
             Self::NonceUsed => "This request nonce was already used.",
+            Self::RefundOnBase => {
+                "This deposit can land on Base: it is refunded there, as a Refund claim, once a proof lands it."
+            }
             Self::SignersRefused => "The signers refused the request.",
             Self::SignersUnavailable => "Not enough signers are available. Try again later.",
             Self::ChainUnavailable => "A blockchain service is unavailable. Try again later.",
@@ -80,7 +86,7 @@ impl PublicError {
             Self::BadRequest => 400,
             Self::NotOwner => 403,
             Self::UnknownVault => 404,
-            Self::AlreadyBound | Self::NonceUsed => 409,
+            Self::AlreadyBound | Self::NonceUsed | Self::RefundOnBase => 409,
             Self::NotDenomination | Self::InvalidReceiver | Self::Expired | Self::SignersRefused => 422,
             Self::BadStamp => 422,
             Self::Busy => 429,

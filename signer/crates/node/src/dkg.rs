@@ -346,7 +346,6 @@ pub fn round3(
         ufvk: out.ufvk.clone(),
         address: out.address.clone(),
         decisions: vec![],
-        attestation: None,
         activated: false,
         outstanding: 0,
         claims: vec![],
@@ -355,7 +354,6 @@ pub fn round3(
         inflight: None,
         confirmed: vec![],
         last_event: None,
-        cancelled: false,
         activated_tag: None,
     })?;
     Ok(out)

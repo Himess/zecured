@@ -303,10 +303,11 @@ async fn get_vault(State(c): App, Param(id): Param<B256>) -> ApiResult {
         "payoutInFlight": v.inflight,
         "birthdayHeight": v.birthday_height,
         "tipHeight": v.tip_height,
-        "nonConforming": v.non_conforming.iter().map(|n| json!({ "noteId": n.note_id, "amount": n.amount.to_string() })).collect::<Vec<_>>(),
-        // D23: a deposit never minted against; refunding it cancels the vault on Base first.
-        "cancellable": v.cancellable.as_ref().map(|n| json!({ "noteId": n.note_id, "amount": n.amount.to_string() })),
-        "claims": v.claims.iter().map(|c| json!({ "claimId": c.claim_id, "kind": c.kind, "amount": c.amount.to_string(), "paid": c.paid })).collect::<Vec<_>>(),
+        // Deposits that have not landed on Base: each is refunded once a proof lands it (T-02), or,
+        // when no guest of the deployment can land it (`offChain`), off-chain on request (P5, I30).
+        "nonConforming": v.non_conforming.iter().map(|n| json!({ "noteId": n.note_id, "amount": n.amount.to_string(), "offChain": n.offchain })).collect::<Vec<_>>(),
+        // A Refund claim waits for its account's destination (`destinationSet`, T-02).
+        "claims": v.claims.iter().map(|c| json!({ "claimId": c.claim_id, "kind": c.kind, "amount": c.amount.to_string(), "paid": c.paid, "status": zecured_coordinator::claim_status(c.state), "destinationSet": c.destination_set })).collect::<Vec<_>>(),
     })))
 }
 
@@ -338,6 +339,8 @@ struct RefundBody {
     signature: Bytes,
 }
 
+/// P5: the off-chain refund of a deposit that no guest of the deployment can land on Base (I30);
+/// any other deposit is refunded on Base, as a Refund claim.
 async fn refund(State(c): App, Param(id): Param<B256>, Body(b): Body<RefundBody>) -> ApiResult {
     c.request_refund(id, b.note_id, &b.receiver, salt(&b.salt)?, num(&b.nonce)?, num(&b.deadline)?, b.signature)
         .await?;

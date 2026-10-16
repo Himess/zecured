@@ -1,21 +1,27 @@
-//! Vault accounting and payout planning (policies P2, P3, P5, P6).
+//! Vault accounting and payout planning (policies P2, P3, P6; refunds by proof, T-02).
 //!
-//! A vault's ZEC is split into two lineages:
-//! - the **conforming lineage**: the conforming deposit note and the change notes of the
-//!   vault's own payouts. Its value always equals `outstanding + unpaid claims` (I10).
-//! - **non-conforming notes**: everything else received at the external address; each can
-//!   only leave through a P5 refund to its depositor.
+//! A vault's ZEC sits in the notes Base knows by their tags (docs/TIER3.md § 2), its lineage
+//! notes:
+//! - its **main lineage**: the deposit Base activated the vault with and the change notes of the
+//!   vault's own payouts. Its value always equals `outstanding` plus every claim it backs that is
+//!   not paid yet (I10).
+//! - one **refund note** per deposit that landed on Base as a refund (Registry v3, T-02): the
+//!   deposit's own note, which pays its Refund claim alone and without change. A refund is never
+//!   mixed into the main lineage (I30).
 //!
-//! Anything else sent to the vault's internal address (by the borrower, who holds the vault's
-//! viewing key, or by anyone else who learns it) is **foreign**: it is ignored for I10 and
-//! fees, see [`lineage_members`].
+//! Anything else the vault receives is outside the books: a deposit that has not landed on Base
+//! (it leaves the vault only once a proof lands it, as collateral or as a refund: an off-chain
+//! refund of a note a deployed guest can make a lineage note would later look like a theft, I30),
+//! and **foreign** notes sent to the vault's internal address by anyone else (ignored for I10 and
+//! fees, see [`lineage_members`]).
 //!
-//! Every Base event that burns zZEC creates claims (one per recipient). Claims are paid in
-//! Base order, one payout transaction at a time; a payout settles up to
-//! [`MAX_CLAIMS_PER_PAYOUT`] of them (review H-06), its first claim bearing the whole ZIP-317
-//! fee out of its recipient's output. A payout spends the whole conforming lineage and returns
-//! the rest (the still-unpaid claims plus `outstanding`) to the vault's internal address, so the
-//! zZEC on Base and the ZEC in the vault never diverge.
+//! Every Base event that burns zZEC creates claims (one per recipient); so do a refund (T-02) and
+//! the opening fee (T-06). Claims are paid in Base order, one payout transaction at a time. A
+//! payout of the main lineage settles up to [`MAX_CLAIMS_PER_PAYOUT`] of them (review H-06), its
+//! first claim bearing the ZIP-317 fee out of its recipient's output, except that a Fee claim
+//! riding along bears exactly its own output's share ([`ZIP317_MARGINAL_FEE`]). It spends the
+//! whole main lineage and returns the rest (the still-unpaid claims plus `outstanding`) to the
+//! vault's internal address, so the zZEC on Base and the ZEC in the vault never diverge.
 
 use serde::{Deserialize, Serialize};
 use sha3::{Digest, Keccak256};
@@ -36,7 +42,11 @@ pub const MARKET_MAKER_GRACE_SECS: u64 = 120;
 /// small ones could hold every later claim of the vault back for hours.
 pub const MAX_CLAIMS_PER_PAYOUT: usize = 8;
 
-/// What created a claim.
+/// ZIP 317's marginal fee per logical action: what a Fee claim riding in a payout bears of the
+/// payout's fee, its own output's share (the Registry's `ZIP317_MARGINAL_FEE`, T-06).
+pub const ZIP317_MARGINAL_FEE: u64 = 5_000;
+
+/// What created a claim (the Registry's `ClaimKind`, in its order).
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, Serialize, Deserialize)]
 pub enum ClaimKind {
     /// `ReleaseRequested`: the borrower takes the remaining collateral (P2).
@@ -47,6 +57,14 @@ pub enum ClaimKind {
     CloseUser,
     /// `CloseRelease`, market maker's part (P6).
     CloseMarketMaker,
+    /// `RefundOpened` (T-02): a deposit that landed on Base as a refund, paid back from its own
+    /// note to the destination the vault's account gives (`RefundDestinationSet`).
+    Refund,
+    /// `FeeCharged` (T-06): the opening fee, owed to the signers' treasury; it rides with the
+    /// vault's first exit.
+    Fee,
+    /// `VaultRetired` (T-04): bookkeeping only, settled in USDC, never paid on Zcash.
+    Retired,
 }
 
 impl ClaimKind {
@@ -54,19 +72,41 @@ impl ClaimKind {
     /// UFVK given to the borrower reveals nothing about them.
     pub fn privacy(self) -> OutputPrivacy {
         match self {
-            ClaimKind::Release | ClaimKind::CloseUser => OutputPrivacy::VaultOvk,
-            ClaimKind::Liquidation | ClaimKind::CloseMarketMaker => OutputPrivacy::NoOvk,
+            ClaimKind::Release | ClaimKind::CloseUser | ClaimKind::Refund => OutputPrivacy::VaultOvk,
+            ClaimKind::Liquidation | ClaimKind::CloseMarketMaker | ClaimKind::Fee | ClaimKind::Retired => {
+                OutputPrivacy::NoOvk
+            }
         }
+    }
+
+    /// Backed by, and paid from, the vault's main lineage (a Refund claim has its own note; a
+    /// Retired one is never paid on Zcash).
+    pub fn main_lineage(self) -> bool {
+        !matches!(self, ClaimKind::Refund | ClaimKind::Retired)
+    }
+
+    /// T-05: the signers' bonds pay the claimant of such a claim that stays unpaid too long.
+    pub fn liveness_covered(self) -> bool {
+        !matches!(self, ClaimKind::Fee | ClaimKind::Retired)
     }
 }
 
 /// Payment state of a claim, as seen by a signer node.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub enum ClaimState {
-    /// Not paid on Zcash yet.
+    /// Not paid on Zcash yet (`Pending` on Base).
     Unpaid,
     /// Paid by a mined Zcash transaction (it may still await `confirmPayout` on Base).
     Paid,
+    /// Written off on Base: a dust claim of a closed vault (RT-8) or an abandoned refund (T-02).
+    /// Its value stays in the vault; an abandoned refund is pending again once its account gives
+    /// a destination.
+    WrittenOff,
+    /// T-04: its vault was compromised; the compensator pays it in USDC.
+    Compensated,
+    /// T-05 (a): its claimant disputes a confirmation that this node did not see mined itself.
+    /// Unpaid until the payout is proven (then paid) or the claim is reopened (then pending).
+    Disputed,
 }
 
 /// One claim, in the order its Base event was emitted.
@@ -75,15 +115,48 @@ pub struct Claim {
     pub id: ClaimId,
     pub kind: ClaimKind,
     pub amount: u64,
+    /// Zero while the claim has no destination: a refund before its account gives one, a
+    /// bond-paid claim before three signers give its Reimburse destination (T-02, T-05).
     pub commitment: Commitment,
     /// Base `(block number, log index)` of the emitting event; the two claims of one
     /// `CloseRelease` share it.
     pub order: (u64, u64),
-    /// Base block timestamp of the emitting event.
+    /// When the claim became payable (Base's `createdAt`): the creating block's timestamp, or for
+    /// a Refund claim the time its destination was given. The bonds' liveness clock (T-05).
     pub created_at: u64,
     /// For close claims: the other claim of the same `CloseRelease`.
     pub partner: Option<ClaimId>,
     pub state: ClaimState,
+    /// Refund claims: the tag of the refunded deposit's note, which pays the claim (I30).
+    #[serde(default)]
+    pub refund_tag: Option<[u8; 32]>,
+    /// T-05: the bonds paid the claimant; the claim's ZEC now reimburses them, at the destination
+    /// three signers give (`ReimburseDestinationSet`).
+    #[serde(default)]
+    pub bond_paid: bool,
+}
+
+impl Claim {
+    /// Counted in the vault's books (I10): not paid on Zcash and not settled in USDC. A
+    /// written-off claim's value stays in the vault, and a disputed one is unpaid again.
+    pub fn in_books(&self) -> bool {
+        matches!(self.state, ClaimState::Unpaid | ClaimState::WrittenOff | ClaimState::Disputed)
+    }
+
+    /// Whether Base lets a payout pay it: pending, with a destination.
+    pub fn payable(&self) -> bool {
+        self.state == ClaimState::Unpaid && self.commitment != [0; 32]
+    }
+
+    /// The outgoing-viewing-key policy of its output: a bond-paid claim now reimburses the bonds,
+    /// a third party for the vault's viewing key.
+    pub fn privacy(&self) -> OutputPrivacy {
+        if self.bond_paid {
+            OutputPrivacy::NoOvk
+        } else {
+            self.kind.privacy()
+        }
+    }
 }
 
 /// An off-chain recipient revealed to the signers: raw Orchard-protocol receiver + salt.
@@ -119,6 +192,16 @@ pub fn claim_ref(salt: &[u8; 32], txid: &[u8; 32]) -> [u8; 32] {
     h.finalize().into()
 }
 
+/// RT-4: `keccak256(abi.encodePacked(claimIds))`, the Registry's `inputClaimSet` of a note once a
+/// payout of these claims (in this order) is committed from it.
+pub fn claim_set_hash(claims: &[ClaimId]) -> [u8; 32] {
+    let mut h = Keccak256::new();
+    for id in claims {
+        h.update(id);
+    }
+    h.finalize().into()
+}
+
 /// One output of a planned payout.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct PlannedPayment {
@@ -129,17 +212,30 @@ pub struct PlannedPayment {
     pub privacy: OutputPrivacy,
 }
 
+/// What a payout spends.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum PayoutInput {
+    /// The vault's main lineage (its deposit, or the change of its last payout).
+    Main,
+    /// The note of a deposit Base refunds, by its tag: it pays its own Refund claim (I30).
+    Refund([u8; 32]),
+    /// P5: a deposit no guest of the deployment can land on Base, by its note id, refunded
+    /// off-chain to the destination its owner asked for ([`refund_plan`], I30).
+    Unlanded([u8; 32]),
+}
+
 /// A payout transaction every signer can reproduce and check a PCZT against.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct PayoutPlan {
-    /// Claims this transaction settles.
+    /// Claims this transaction settles, in the order its commitment lists them.
     pub claims: Vec<ClaimId>,
     pub payments: Vec<PlannedPayment>,
-    /// Number of conforming-lineage notes spent (all of them).
+    /// Number of notes spent (all of the input's).
     pub inputs: usize,
     /// Value returned to the vault's internal address.
     pub change: u64,
     pub fee: u64,
+    pub input: PayoutInput,
 }
 
 /// What to do next for a vault.
@@ -154,9 +250,9 @@ pub enum NextPayout {
 /// Errors that mean the vault's books do not add up; signers refuse to sign.
 #[derive(Debug, thiserror::Error, PartialEq, Eq)]
 pub enum LedgerError {
-    #[error("claims to pay ({claims}) exceed the conforming lineage ({lineage})")]
+    #[error("claims to pay ({claims}) exceed the main lineage ({lineage})")]
     Overdrawn { claims: u64, lineage: u64 },
-    #[error("no conforming-lineage notes to spend")]
+    #[error("no main-lineage notes to spend")]
     NoInputs,
     #[error("I10 violated: lineage {lineage} != outstanding {outstanding} + unpaid claims {unpaid}")]
     InvariantI10 {
@@ -168,10 +264,17 @@ pub enum LedgerError {
     RefundIsDust { value: u64, fee: u64 },
 }
 
-/// I10: the conforming lineage equals `outstanding` plus every claim not yet paid on
-/// Zcash (dust and set-aside claims included).
+/// Counted against the main lineage: a main-lineage claim not yet paid on Zcash nor settled in
+/// USDC (dust and set-aside claims included).
+fn backed_by_main_lineage(c: &Claim) -> bool {
+    c.kind.main_lineage() && c.in_books()
+}
+
+/// I10 for the main lineage: its value equals `outstanding` plus every main-lineage claim not yet
+/// paid on Zcash (dust and set-aside claims included). Refund claims are backed by their own
+/// notes, never by the main lineage.
 pub fn check_i10(lineage_value: u64, outstanding: u64, claims: &[Claim]) -> Result<(), LedgerError> {
-    let unpaid: u64 = claims.iter().filter(|c| c.state == ClaimState::Unpaid).map(|c| c.amount).sum();
+    let unpaid: u64 = claims.iter().filter(|c| backed_by_main_lineage(c)).map(|c| c.amount).sum();
     if lineage_value == outstanding + unpaid {
         Ok(())
     } else {
@@ -196,19 +299,19 @@ pub struct VaultNote {
     pub spent_in: Option<[u8; 32]>,
 }
 
-/// Which of a vault's notes belong to the conforming lineage, spent or not (H-2).
+/// Which of a vault's notes belong to its main lineage, spent or not (H-2).
 ///
-/// The lineage starts at the conforming deposit (`conforming`, by nullifier). An internal note
-/// joins it only if it carries value and the transaction that created it spends a lineage note:
-/// only the vault (three signers) can spend a vault note, and every signer checked that such
-/// a transaction pays the plan exactly, change included. Every other internal note is foreign
-/// (sent by whoever knows the internal address) and is ignored for I10 and for fees, so it can
-/// neither break the books nor inflate the fee of later payouts. The value check against the
+/// The lineage starts at the deposit Base activated the vault with (`root`, by nullifier). An
+/// internal note joins it only if it carries value and the transaction that created it spends a
+/// lineage note: only the vault (three signers) can spend a vault note, and every signer checked
+/// that such a transaction pays the plan exactly, change included. Every other internal note is
+/// foreign (sent by whoever knows the internal address) and is ignored for I10 and for fees, so it
+/// can neither break the books nor inflate the fee of later payouts. The value check against the
 /// payout's planned change is [`retain_planned_change`].
 ///
 /// `notes` must be in chain order. Returns one flag per note.
-pub fn lineage_members(conforming: Option<&[u8; 32]>, notes: &[VaultNote]) -> Vec<bool> {
-    let mut member: Vec<bool> = notes.iter().map(|n| Some(&n.nullifier) == conforming).collect();
+pub fn lineage_members(root: Option<&[u8; 32]>, notes: &[VaultNote]) -> Vec<bool> {
+    let mut member: Vec<bool> = notes.iter().map(|n| Some(&n.nullifier) == root).collect();
     for (i, n) in notes.iter().enumerate() {
         if member[i] || !n.internal || n.value == 0 {
             continue;
@@ -221,8 +324,8 @@ pub fn lineage_members(conforming: Option<&[u8; 32]>, notes: &[VaultNote]) -> Ve
     member
 }
 
-/// Keeps, among the unspent lineage notes, the conforming deposit and the change notes worth
-/// exactly `book_value` (H-2).
+/// Keeps, among the unspent main-lineage notes, the deposit and the change notes worth exactly
+/// `book_value` (H-2).
 ///
 /// Every payout spends the whole lineage and returns its planned change to the internal
 /// address; once its claims are marked paid, I10 makes that change equal to the vault's book
@@ -241,21 +344,46 @@ pub fn retain_planned_change<N>(
     drop
 }
 
-/// The vault's book value: `outstanding` plus every claim not yet paid on Zcash. I10 requires
-/// the conforming lineage to hold exactly this much.
+/// The main lineage's book value: `outstanding` plus every main-lineage claim not yet paid on
+/// Zcash. I10 requires the main lineage to hold exactly this much.
 pub fn book_value(outstanding: u64, claims: &[Claim]) -> u64 {
     claims
         .iter()
-        .filter(|c| c.state == ClaimState::Unpaid)
+        .filter(|c| backed_by_main_lineage(c))
         .fold(outstanding, |sum, c| sum.saturating_add(c.amount))
 }
 
-/// Decides the next payout for a vault.
+/// The order claims are paid in: Base order, a close pair's borrower before its market maker.
+fn queue_key(c: &Claim) -> ((u64, u64), bool) {
+    (c.order, c.kind == ClaimKind::CloseMarketMaker)
+}
+
+/// The order a payout lists its claims in (and its commitment on Base, RT-4): the queue's order,
+/// Fee claims last (T-06: a Fee claim never bears the payout's fee for the others). A payout
+/// rebuilt from the claims a commitment binds (RT-3) lists them the same way.
+fn payout_order(group: &mut [(&Claim, Recipient)]) {
+    group.sort_by_key(|(c, _)| (c.kind == ClaimKind::Fee, queue_key(c)));
+}
+
+/// The recipient a claim pays: none without a destination.
+fn payee(claim: &Claim, recipient: &impl Fn(&Commitment) -> Option<Recipient>) -> Option<Recipient> {
+    if claim.commitment == [0; 32] {
+        return None;
+    }
+    recipient(&claim.commitment)
+}
+
+/// Decides the next payout of a vault's main lineage.
 ///
-/// `lineage_value` / `lineage_notes`: the unspent conforming-lineage notes (all are spent).
+/// `lineage_value` / `lineage_notes`: the unspent main-lineage notes (all are spent).
 /// `recipient(commitment)`: the recipient revealed off-chain for a commitment, if any.
 /// `now`: Unix time, used only for the market maker grace period.
 /// `bound`: the unpaid claims a commitment on Base already binds to the lineage note (Tier 3).
+///
+/// Only pending main-lineage claims with a destination are paid (a refund is paid from its own
+/// note, [`next_vault_payout`]). T-06: a Fee claim rides with the vault's first exit, after its
+/// first claim, bearing only its own output's share of the fee; it heads a payout only once no
+/// other main-lineage claim of the vault is left to pay.
 pub fn next_payout(
     claims: &[Claim],
     recipient: impl Fn(&Commitment) -> Option<Recipient>,
@@ -264,17 +392,19 @@ pub fn next_payout(
     now: u64,
     bound: &[ClaimId],
 ) -> Result<NextPayout, LedgerError> {
-    let mut unpaid: Vec<&Claim> = claims.iter().filter(|c| c.state == ClaimState::Unpaid).collect();
-    unpaid.sort_by_key(|c| (c.order, c.kind == ClaimKind::CloseMarketMaker));
+    let mut unpaid: Vec<&Claim> =
+        claims.iter().filter(|c| c.state == ClaimState::Unpaid && c.kind.main_lineage()).collect();
+    unpaid.sort_by_key(|c| queue_key(c));
     let by_id = |id: &ClaimId| unpaid.iter().copied().find(|c| &c.id == id);
+    let recipient = |c: &Claim| payee(c, &recipient);
 
     // RT-3: claims a commitment on Base already binds to this lineage note are its payout, all of
     // them and nothing else (the Registry accepts no other claim list from this note, RT-4), in
-    // queue order, before any other claim. They were payable when they were committed.
+    // payout order, before any other claim. They were payable when they were committed.
     if !bound.is_empty() {
         let mut group: Vec<(&Claim, Recipient)> = vec![];
         for claim in unpaid.iter().filter(|c| bound.contains(&c.id)) {
-            let Some(rcpt) = recipient(&claim.commitment) else {
+            let Some(rcpt) = recipient(claim) else {
                 return Ok(NextPayout::Nothing);
             };
             group.push((claim, rcpt));
@@ -282,10 +412,15 @@ pub fn next_payout(
         if group.len() != bound.len() {
             return Ok(NextPayout::Nothing); // a bound claim this signer does not know as unpaid
         }
+        payout_order(&mut group);
         return Ok(plan(&group, lineage_value, lineage_notes)?.map_or(NextPayout::Nothing, NextPayout::Pay));
     }
 
+    let others_to_pay = unpaid.iter().any(|c| c.kind != ClaimKind::Fee);
     for (i, &claim) in unpaid.iter().enumerate() {
+        if claim.kind == ClaimKind::Fee && others_to_pay {
+            continue; // T-06: it rides with an exit
+        }
         let group = match unit(claim, &by_id, &recipient, lineage_value, lineage_notes, now)? {
             Unit::Pay(group) => group,
             Unit::WaitUntil(t) => return Ok(NextPayout::WaitUntil(t)),
@@ -295,11 +430,68 @@ pub fn next_payout(
         if plan(&group, lineage_value, lineage_notes)?.is_none() {
             continue;
         }
-        // H-06: the later payable claims of the vault ride along, in queue order.
-        let group = with_followers(group, &unpaid[i + 1..], &by_id, &recipient, lineage_value, lineage_notes, now);
+        // T-06 and H-06: the vault's Fee claim rides first, then the later payable claims, in
+        // queue order.
+        let riders: Vec<&Claim> = unpaid
+            .iter()
+            .copied()
+            .filter(|c| c.kind == ClaimKind::Fee && c.id != claim.id)
+            .chain(unpaid[i + 1..].iter().copied().filter(|c| c.kind != ClaimKind::Fee))
+            .collect();
+        let mut group = with_followers(group, &riders, &by_id, &recipient, lineage_value, lineage_notes, now);
+        payout_order(&mut group);
         return Ok(plan(&group, lineage_value, lineage_notes)?.map_or(NextPayout::Nothing, NextPayout::Pay));
     }
     Ok(NextPayout::Nothing)
+}
+
+/// The vault's main lineage, as [`next_vault_payout`] plans from it.
+#[derive(Clone, Copy, Debug)]
+pub struct MainLineage<'a> {
+    /// Value of the unspent main-lineage notes.
+    pub value: u64,
+    /// Number of unspent main-lineage notes.
+    pub notes: usize,
+    /// The unpaid claims a commitment on Base already binds to the lineage note (RT-3).
+    pub bound: &'a [ClaimId],
+}
+
+/// The vault's next payout: from its main lineage when one is payable there ([`next_payout`]),
+/// else the first payable refund in Base order, from its own note (I30).
+///
+/// `main` is `None` when nothing may be paid from the main lineage (the vault was never activated,
+/// or I10 does not hold for it); `refund_notes` lists the unspent notes of the vault's refunded
+/// deposits, by tag and value. A refund is paid alone and without change, so its note's value must
+/// be its amount (conservation, as the Registry checks it); a note of another value, or none, leaves
+/// the refund unpaid.
+pub fn next_vault_payout(
+    claims: &[Claim],
+    recipient: impl Fn(&Commitment) -> Option<Recipient>,
+    main: Option<MainLineage<'_>>,
+    refund_notes: &[([u8; 32], u64)],
+    now: u64,
+) -> Result<NextPayout, LedgerError> {
+    let from_main = main.map(|m| next_payout(claims, &recipient, m.value, m.notes, now, m.bound));
+    if matches!(from_main, Some(Ok(NextPayout::Pay(_)))) {
+        return from_main.unwrap_or(Ok(NextPayout::Nothing));
+    }
+    let mut refunds: Vec<&Claim> = claims.iter().filter(|c| c.kind == ClaimKind::Refund && c.payable()).collect();
+    refunds.sort_by_key(|c| queue_key(c));
+    for claim in refunds {
+        let Some(tag) = claim.refund_tag else { continue };
+        let Some(&(_, value)) = refund_notes.iter().find(|(t, _)| *t == tag) else {
+            continue;
+        };
+        let Some(rcpt) = payee(claim, &recipient) else { continue };
+        if value != claim.amount {
+            continue;
+        }
+        if let Some(mut plan) = plan(&[(claim, rcpt)], value, 1)? {
+            plan.input = PayoutInput::Refund(tag);
+            return Ok(NextPayout::Pay(plan));
+        }
+    }
+    from_main.unwrap_or(Ok(NextPayout::Nothing))
 }
 
 /// What one claim brings to a payout, by the queue's rules.
@@ -323,7 +515,7 @@ fn distinct(a: &Recipient, b: &Recipient) -> bool {
 fn unit<'a>(
     claim: &'a Claim,
     by_id: &impl Fn(&ClaimId) -> Option<&'a Claim>,
-    recipient: &impl Fn(&Commitment) -> Option<Recipient>,
+    recipient: &impl Fn(&Claim) -> Option<Recipient>,
     lineage_value: u64,
     lineage_notes: usize,
     now: u64,
@@ -343,7 +535,7 @@ fn unit<'a>(
     }
     // Without a recipient, a claim is set aside: its value stays in the vault and the
     // queue moves on (docs/ARCHITECTURE.md, payout queue).
-    let Some(rcpt) = recipient(&claim.commitment) else {
+    let Some(rcpt) = recipient(claim) else {
         return Ok(Unit::Skip);
     };
     let mut group: Vec<(&Claim, Recipient)> = vec![(claim, rcpt)];
@@ -351,7 +543,7 @@ fn unit<'a>(
         && let Some(mm) = claim.partner.as_ref().and_then(by_id)
     {
         let grace_end = claim.created_at.saturating_add(MARKET_MAKER_GRACE_SECS);
-        match recipient(&mm.commitment) {
+        match recipient(mm) {
             // E1: one payout never pays the same receiver twice (nor names one salt twice); the
             // market maker then waits for the next payout.
             Some(mm_rcpt) if !distinct(&mm_rcpt, &rcpt) => {}
@@ -363,23 +555,22 @@ fn unit<'a>(
     Ok(Unit::Pay(group))
 }
 
-/// H-06: `group`, a payable start of a payout, extended with the claims of `later` (the rest of
-/// the queue, in order) that the queue would pay on their own, as long as the payout stays within
-/// [`MAX_CLAIMS_PER_PAYOUT`], pays every receiver and names every salt once (E1), and its first
-/// claim still bears the fee of every output. A claim that does not fit is skipped, not waited
-/// for: later claims can still ride along, so claims to one receiver delay only each other.
-/// Followers keep the queue order, which is also the order a rebuilt payout lists them in
-/// (RT-3), and pay no fee.
+/// H-06: `group`, a payable start of a payout, extended with the claims of `riders` (the vault's
+/// Fee claim, then the rest of the queue, in order) that the queue would pay on their own, as long
+/// as the payout stays within [`MAX_CLAIMS_PER_PAYOUT`], pays every receiver and names every salt
+/// once (E1), and its first claim still bears the fee of every output. A claim that does not fit is
+/// skipped, not waited for: later claims can still ride along, so claims to one receiver delay only
+/// each other. Riders pay no fee, except a Fee claim, which bears its own output's share (T-06).
 fn with_followers<'a>(
     mut group: Vec<(&'a Claim, Recipient)>,
-    later: &[&'a Claim],
+    riders: &[&'a Claim],
     by_id: &impl Fn(&ClaimId) -> Option<&'a Claim>,
-    recipient: &impl Fn(&Commitment) -> Option<Recipient>,
+    recipient: &impl Fn(&Claim) -> Option<Recipient>,
     lineage_value: u64,
     lineage_notes: usize,
     now: u64,
 ) -> Vec<(&'a Claim, Recipient)> {
-    for &claim in later {
+    for &claim in riders {
         if group.len() >= MAX_CLAIMS_PER_PAYOUT {
             break;
         }
@@ -408,22 +599,25 @@ fn with_followers<'a>(
 fn borrower_payable(
     user: &Claim,
     mm: &Claim,
-    recipient: &impl Fn(&Commitment) -> Option<Recipient>,
+    recipient: &impl Fn(&Claim) -> Option<Recipient>,
     lineage_value: u64,
     lineage_notes: usize,
 ) -> Result<bool, LedgerError> {
-    let Some(user_rcpt) = recipient(&user.commitment) else {
+    let Some(user_rcpt) = recipient(user) else {
         return Ok(false);
     };
     let mut group = vec![(user, user_rcpt)];
-    if let Some(mm_rcpt) = recipient(&mm.commitment).filter(|r| distinct(r, &user_rcpt)) {
+    if let Some(mm_rcpt) = recipient(mm).filter(|r| distinct(r, &user_rcpt)) {
         group.push((mm, mm_rcpt));
     }
     Ok(plan(&group, lineage_value, lineage_notes)?.is_some())
 }
 
-/// Builds the plan paying `group` (in queue order; its first claim, the borrower in a close pair,
-/// bears the fee of every output). Returns `None` if the fee-bearing claim is dust.
+/// Builds the plan paying `group` from the main lineage, in this order: its first claim (the
+/// borrower in a close pair) bears the fee of every output, except that each Fee claim after it
+/// bears exactly its own output's share, [`ZIP317_MARGINAL_FEE`] (T-06, as the Registry's
+/// `commitSpend` computes each claim's `expected`). Returns `None` if a claim cannot bear its share
+/// (dust).
 fn plan(
     group: &[(&Claim, Recipient)],
     lineage_value: u64,
@@ -442,23 +636,26 @@ fn plan(
     let change = lineage_value - claimed;
     let outputs = group.len() + usize::from(change > 0);
     let fee = zip317_fee(lineage_notes, outputs);
+    let riding_fees = group.iter().skip(1).filter(|(c, _)| c.kind == ClaimKind::Fee).count();
+    // ZIP 317 counts every output, so the fee always covers the riding Fee claims' shares.
+    let head_share = fee - ZIP317_MARGINAL_FEE * riding_fees as u64;
 
-    // The first claim of the group bears the fee (the borrower in a close pair).
     let mut payments = Vec::with_capacity(group.len());
     for (i, (claim, rcpt)) in group.iter().enumerate() {
-        let value = if i == 0 {
-            match claim.amount.checked_sub(fee) {
-                Some(v) if v > 0 => v,
-                _ => return Ok(None),
-            }
-        } else {
-            claim.amount
+        let share = match (i, claim.kind) {
+            (0, _) => head_share,
+            (_, ClaimKind::Fee) => ZIP317_MARGINAL_FEE,
+            _ => 0,
+        };
+        let value = match claim.amount.checked_sub(share) {
+            Some(v) if v > 0 => v,
+            _ => return Ok(None),
         };
         payments.push(PlannedPayment {
             claim: claim.id,
             receiver: rcpt.receiver,
             value,
-            privacy: claim.kind.privacy(),
+            privacy: claim.privacy(),
         });
     }
     Ok(Some(PayoutPlan {
@@ -467,11 +664,25 @@ fn plan(
         inputs: lineage_notes,
         change,
         fee,
+        input: PayoutInput::Main,
     }))
 }
 
-/// P5: refund one non-conforming note to its depositor, net of the fee; no change.
-pub fn refund_plan(note_value: u64, receiver: [u8; 43]) -> Result<PayoutPlan, LedgerError> {
+/// T-05: the claims whose claimant the bonds will pay if the signers do not pay them within the
+/// bonds' liveness period of their `created_at`: of a kind the bonds cover, pending with a
+/// destination, not already paid by the bonds, and older than `age` at `now` (nodes warn at half
+/// the period, so that the claims are paid long before the bonds have to).
+pub fn overdue(claims: &[Claim], now: u64, age: u64) -> Vec<&Claim> {
+    claims
+        .iter()
+        .filter(|c| c.kind.liveness_covered() && c.payable() && !c.bond_paid && now.saturating_sub(c.created_at) > age)
+        .collect()
+}
+
+/// P5: refunds one deposit that no guest of the deployment can land on Base (note id `note_id`,
+/// value `note_value`) to its depositor, net of the fee; no change. Never for a note a guest can
+/// land: that one leaves the vault only as a Refund claim (I30, [`crate::classify::Landing`]).
+pub fn refund_plan(note_id: [u8; 32], note_value: u64, receiver: [u8; 43]) -> Result<PayoutPlan, LedgerError> {
     let fee = zip317_fee(1, 1);
     let value = note_value
         .checked_sub(fee)
@@ -488,6 +699,7 @@ pub fn refund_plan(note_value: u64, receiver: [u8; 43]) -> Result<PayoutPlan, Le
         inputs: 1,
         change: 0,
         fee,
+        input: PayoutInput::Unlanded(note_id),
     })
 }
 
@@ -534,6 +746,8 @@ mod tests {
             created_at: 1_000,
             partner: partner.map(|p| [p; 32]),
             state: ClaimState::Unpaid,
+            refund_tag: None,
+            bond_paid: false,
         }
     }
 
@@ -753,12 +967,345 @@ mod tests {
         assert!(check_i10(DEPOSIT - 1, DEPOSIT - 1_000_000, &[c]).is_err());
     }
 
+    // ----- Registry v3: refunds by proof (T-02, I30), the opening fee (T-06), bonds (T-05),
+    // disputes (T-05 (a)).
+
+    const REFUND_TAG: [u8; 32] = [0xee; 32];
+
+    /// A Refund claim of `amount` paid from the note `REFUND_TAG`, with a destination.
+    fn refund(id: u8, amount: u64, order: u64) -> Claim {
+        Claim {
+            refund_tag: Some(REFUND_TAG),
+            ..claim(id, ClaimKind::Refund, amount, (order, 0), None)
+        }
+    }
+
+    fn main(value: u64, bound: &[ClaimId]) -> Option<MainLineage<'_>> {
+        Some(MainLineage { value, notes: 1, bound })
+    }
+
+    /// I30: a refund is paid from its own note, alone, without change, bearing the fee of its one
+    /// output; it never rides in a payout of the main lineage, nor does a main claim ride with it.
+    #[test]
+    fn a_refund_is_paid_from_its_own_note_alone() {
+        let r = refund(7, 1_234_567, 20);
+        let liq = claim(1, ClaimKind::Liquidation, 1_000_000, (10, 0), None);
+        // The main lineage pays its own claim and nothing of the refund's.
+        let claims = [liq.clone(), r.clone()];
+        let NextPayout::Pay(p) =
+            next_vault_payout(&claims, known(&[1, 7]), main(DEPOSIT, &[]), &[(REFUND_TAG, 1_234_567)], 2_000).unwrap()
+        else {
+            panic!()
+        };
+        assert_eq!((p.claims.clone(), p.input), (vec![liq.id], PayoutInput::Main));
+        assert_eq!(p.change, DEPOSIT - 1_000_000);
+        // Once the main lineage has nothing to pay, the refund is next, from its own note.
+        let claims = [
+            Claim {
+                state: ClaimState::Paid,
+                ..liq
+            },
+            r.clone(),
+        ];
+        let NextPayout::Pay(p) = next_vault_payout(
+            &claims,
+            known(&[1, 7]),
+            main(DEPOSIT - 1_000_000, &[]),
+            &[(REFUND_TAG, 1_234_567)],
+            2_000,
+        )
+        .unwrap() else {
+            panic!()
+        };
+        assert_eq!((p.claims.clone(), p.input), (vec![r.id], PayoutInput::Refund(REFUND_TAG)));
+        assert_eq!((p.inputs, p.change, p.fee), (1, 0, FEE_1_IN_1_OUT));
+        assert_eq!(p.payments[0].value, 1_234_567 - FEE_1_IN_1_OUT);
+        assert_eq!(p.payments[0].privacy, OutputPrivacy::VaultOvk, "the borrower's own output");
+        // A cancelled vault has no main lineage at all: its refunds are still paid.
+        let NextPayout::Pay(p) =
+            next_vault_payout(&[r.clone()], known(&[7]), None, &[(REFUND_TAG, 1_234_567)], 2_000).unwrap()
+        else {
+            panic!()
+        };
+        assert_eq!(p.input, PayoutInput::Refund(REFUND_TAG));
+        // The main planner never pays a refund, even with the lineage's value to spare.
+        assert_eq!(next_payout(&[r.clone()], known(&[7]), DEPOSIT, 1, 2_000, &[]).unwrap(), NextPayout::Nothing);
+    }
+
+    /// T-02: a refund is not paid without its destination, without its note, from a note of
+    /// another value (conservation), when written off (abandoned) or when it cannot bear its fee.
+    #[test]
+    fn a_refund_waits_for_its_destination_and_its_note() {
+        let r = refund(7, 1_234_567, 20);
+        let pay = |c: &Claim, notes: &[([u8; 32], u64)]| {
+            next_vault_payout(std::slice::from_ref(c), known(&[7]), None, notes, 2_000).unwrap()
+        };
+        let note = [(REFUND_TAG, 1_234_567)];
+        assert!(matches!(pay(&r, &note), NextPayout::Pay(_)));
+        let no_destination = Claim {
+            commitment: [0; 32],
+            ..r.clone()
+        };
+        assert_eq!(pay(&no_destination, &note), NextPayout::Nothing);
+        assert_eq!(pay(&r, &[]), NextPayout::Nothing, "its note is not seen (or spent)");
+        assert_eq!(pay(&r, &[(REFUND_TAG, 1_234_566)]), NextPayout::Nothing, "a note of another value");
+        assert_eq!(pay(&r, &[([0xef; 32], 1_234_567)]), NextPayout::Nothing, "another refund's note");
+        let abandoned = Claim {
+            state: ClaimState::WrittenOff,
+            ..r.clone()
+        };
+        assert_eq!(pay(&abandoned, &note), NextPayout::Nothing);
+        let dust = refund(7, FEE_1_IN_1_OUT, 20);
+        assert_eq!(pay(&dust, &[(REFUND_TAG, FEE_1_IN_1_OUT)]), NextPayout::Nothing);
+        // Two refunds: the first in Base order with a destination goes first.
+        let other_tag = [0xef; 32];
+        let r2 = Claim {
+            refund_tag: Some(other_tag),
+            ..refund(8, 500_000, 10)
+        };
+        let NextPayout::Pay(p) = next_vault_payout(
+            &[r.clone(), r2.clone()],
+            known(&[7, 8]),
+            None,
+            &[(REFUND_TAG, 1_234_567), (other_tag, 500_000)],
+            2_000,
+        )
+        .unwrap() else {
+            panic!()
+        };
+        assert_eq!((p.claims, p.input), (vec![r2.id], PayoutInput::Refund(other_tag)));
+    }
+
+    /// The main lineage goes first; when it can only wait (a close pair within its grace period) or
+    /// cannot be planned from, a payable refund is paid meanwhile.
+    #[test]
+    fn a_refund_does_not_wait_for_the_main_lineage() {
+        let user = claim(3, ClaimKind::CloseUser, 1_200_000, (11, 0), Some(4));
+        let mm = claim(4, ClaimKind::CloseMarketMaker, 3_800_000, (11, 0), Some(3));
+        let r = refund(7, 600_000, 30);
+        let claims = [user, mm, r.clone()];
+        let notes = [(REFUND_TAG, 600_000)];
+        let NextPayout::Pay(p) = next_vault_payout(&claims, known(&[3, 7]), main(DEPOSIT, &[]), &notes, 1_050).unwrap()
+        else {
+            panic!()
+        };
+        assert_eq!(p.claims, vec![r.id]);
+        // Without the refund, the main lineage still waits.
+        assert_eq!(
+            next_vault_payout(&claims[..2], known(&[3]), main(DEPOSIT, &[]), &[], 1_050).unwrap(),
+            NextPayout::WaitUntil(1_000 + MARKET_MAKER_GRACE_SECS)
+        );
+        // A main lineage that overdraws is an error, unless a refund can be paid meanwhile.
+        let big = claim(5, ClaimKind::Release, DEPOSIT + 1, (40, 0), None);
+        assert!(next_vault_payout(std::slice::from_ref(&big), known(&[5]), main(DEPOSIT, &[]), &[], 2_000).is_err());
+        let NextPayout::Pay(p) =
+            next_vault_payout(&[big, r.clone()], known(&[5, 7]), main(DEPOSIT, &[]), &notes, 2_000).unwrap()
+        else {
+            panic!()
+        };
+        assert_eq!(p.claims, vec![r.id]);
+    }
+
+    /// The opening fee's claim, owed to the signers' treasury.
+    fn fee(id: u8, amount: u64) -> Claim {
+        claim(id, ClaimKind::Fee, amount, (5, 1), None)
+    }
+
+    /// T-06: the Fee claim rides with the vault's first exit, after its first claim, and bears
+    /// exactly its own output's share of the ZIP 317 fee; the first claim bears the rest. The plan
+    /// pays exactly what the Registry's `commitSpend` records as each claim's `expected`.
+    #[test]
+    fn the_fee_rides_with_the_first_exit() {
+        let f = fee(9, 25_000);
+        let rel = claim(1, ClaimKind::Release, DEPOSIT - 25_000, (20, 0), None);
+        let NextPayout::Pay(p) =
+            next_payout(&[f.clone(), rel.clone()], known(&[1, 9]), DEPOSIT, 1, 2_000, &[]).unwrap()
+        else {
+            panic!()
+        };
+        assert_eq!(p.claims, vec![rel.id, f.id], "the fee after the exit");
+        assert_eq!((p.change, p.fee), (0, FEE_1_IN_2_OUT));
+        assert_eq!(p.payments[0].value, rel.amount - (FEE_1_IN_2_OUT - ZIP317_MARGINAL_FEE));
+        assert_eq!(p.payments[1].value, 25_000 - ZIP317_MARGINAL_FEE, "the fee claim bears its own output");
+        assert_eq!(p.payments[1].privacy, OutputPrivacy::NoOvk, "the treasury is a third party");
+        assert_eq!(p.payments.iter().map(|x| x.value).sum::<u64>() + p.fee + p.change, DEPOSIT);
+
+        // With change and other riders: three claims and the change are four outputs; the fee claim
+        // still bears 5,000 and is listed last.
+        let liq = claim(2, ClaimKind::Liquidation, 1_000_000, (21, 0), None);
+        let part = claim(3, ClaimKind::Release, 500_000, (22, 0), None);
+        let NextPayout::Pay(p) =
+            next_payout(&[f.clone(), liq.clone(), part.clone()], known(&[2, 3, 9]), DEPOSIT, 1, 2_000, &[]).unwrap()
+        else {
+            panic!()
+        };
+        assert_eq!(p.claims, vec![liq.id, part.id, f.id]);
+        assert_eq!(p.fee, zip317_fee(1, 4));
+        assert_eq!(p.payments[0].value, 1_000_000 - (p.fee - ZIP317_MARGINAL_FEE));
+        assert_eq!(p.payments[1].value, 500_000);
+        assert_eq!(p.payments[2].value, 25_000 - ZIP317_MARGINAL_FEE);
+        assert_eq!(p.change, DEPOSIT - 1_525_000);
+
+        // Its recipient unknown (the treasury not registered with this signer): the exit is paid
+        // without it, and the fee stays in the vault as change.
+        let NextPayout::Pay(p) = next_payout(&[f.clone(), liq.clone()], known(&[2]), DEPOSIT, 1, 2_000, &[]).unwrap()
+        else {
+            panic!()
+        };
+        assert_eq!(p.claims, vec![liq.id]);
+        assert_eq!(p.change, DEPOSIT - 1_000_000);
+    }
+
+    /// T-06: the Fee claim never heads a payout while another claim of the vault is left to pay
+    /// (it would bear the whole fee); once it is the last one, it is paid alone so that the vault
+    /// can settle.
+    #[test]
+    fn the_fee_is_paid_alone_only_when_nothing_else_is_left() {
+        let f = fee(9, 25_000);
+        let unknown = claim(1, ClaimKind::Liquidation, 1_000_000, (20, 0), None);
+        // The other claim has no recipient yet: nothing is paid, not the fee alone.
+        assert_eq!(
+            next_payout(&[f.clone(), unknown.clone()], known(&[9]), DEPOSIT, 1, 2_000, &[]).unwrap(),
+            NextPayout::Nothing
+        );
+        // Everything else paid: the fee alone, bearing the whole fee.
+        let paid = Claim {
+            state: ClaimState::Paid,
+            ..unknown
+        };
+        let NextPayout::Pay(p) = next_payout(&[f.clone(), paid], known(&[9]), 25_000, 1, 2_000, &[]).unwrap() else {
+            panic!()
+        };
+        assert_eq!(p.claims, vec![f.id]);
+        assert_eq!(p.payments[0].value, 25_000 - FEE_1_IN_1_OUT);
+        assert_eq!(p.change, 0);
+    }
+
+    /// RT-3 / RT-4: a payout rebuilt from the claims a commitment binds lists them as it was
+    /// committed, the fee claim last, whatever order Base lists the binding in.
+    #[test]
+    fn a_rebuilt_payout_with_the_fee_keeps_its_order() {
+        let f = fee(9, 25_000);
+        let liq = claim(2, ClaimKind::Liquidation, 1_000_000, (21, 0), None);
+        let NextPayout::Pay(first) =
+            next_payout(&[f.clone(), liq.clone()], known(&[2, 9]), DEPOSIT, 1, 2_000, &[]).unwrap()
+        else {
+            panic!()
+        };
+        for bound in [vec![f.id, liq.id], vec![liq.id, f.id]] {
+            let rebuilt = next_payout(&[f.clone(), liq.clone()], known(&[2, 9]), DEPOSIT, 1, 9_000, &bound).unwrap();
+            assert_eq!(rebuilt, NextPayout::Pay(first.clone()));
+        }
+        assert_eq!(claim_set_hash(&first.claims), claim_set_hash(&[liq.id, f.id]));
+    }
+
+    /// T-05: a bond-paid claim has no destination until three signers give its Reimburse
+    /// destination; then it is paid there, without the vault's outgoing viewing key.
+    #[test]
+    fn a_bond_paid_claim_is_paid_to_its_reimburse_destination() {
+        let release = claim(1, ClaimKind::Release, 1_000_000, (20, 0), None);
+        let cleared = Claim {
+            bond_paid: true,
+            commitment: [0; 32],
+            ..release.clone()
+        };
+        assert_eq!(
+            next_payout(std::slice::from_ref(&cleared), known(&[1]), 1_000_000, 1, 2_000, &[]).unwrap(),
+            NextPayout::Nothing
+        );
+        let reimburse = rcpt(42);
+        let pointed = Claim {
+            commitment: reimburse.commitment(),
+            ..cleared
+        };
+        let NextPayout::Pay(p) = next_payout(&[pointed], known(&[42]), 1_000_000, 1, 2_000, &[]).unwrap() else {
+            panic!()
+        };
+        assert_eq!(p.payments[0].receiver, reimburse.receiver);
+        assert_eq!(p.payments[0].privacy, OutputPrivacy::NoOvk, "the bonds' destination, not the borrower's");
+    }
+
+    /// I10 counts what the main lineage still backs: pending, written-off and disputed main claims;
+    /// not refunds (their own notes back them), nor paid, compensated or retired claims.
+    #[test]
+    fn the_main_lineage_backs_only_its_own_unpaid_claims() {
+        let with = |id: u8, kind: ClaimKind, state: ClaimState| Claim {
+            state,
+            ..claim(id, kind, 100_000, (10, u64::from(id)), None)
+        };
+        let claims = [
+            with(1, ClaimKind::Liquidation, ClaimState::Unpaid),
+            with(2, ClaimKind::Liquidation, ClaimState::WrittenOff),
+            with(3, ClaimKind::Release, ClaimState::Disputed),
+            with(4, ClaimKind::Fee, ClaimState::Unpaid),
+            with(5, ClaimKind::Refund, ClaimState::Unpaid),
+            with(6, ClaimKind::Liquidation, ClaimState::Paid),
+            with(7, ClaimKind::Liquidation, ClaimState::Compensated),
+            with(8, ClaimKind::Retired, ClaimState::Compensated),
+        ];
+        assert_eq!(book_value(1_000_000, &claims), 1_400_000);
+        check_i10(1_400_000, 1_000_000, &claims).unwrap();
+        assert!(check_i10(1_500_000, 1_000_000, &claims).is_err());
+    }
+
+    /// T-05 (a): a disputed claim is unpaid again but not payable until it is reopened; reopened,
+    /// it is pending and bound to its input, so it is paid by a payout of that input only.
+    #[test]
+    fn a_disputed_claim_is_not_payable_until_reopened() {
+        let c = claim(1, ClaimKind::Liquidation, 1_000_000, (10, 0), None);
+        let disputed = Claim {
+            state: ClaimState::Disputed,
+            ..c.clone()
+        };
+        assert!(!disputed.payable() && disputed.in_books());
+        assert_eq!(
+            next_payout(std::slice::from_ref(&disputed), known(&[1]), DEPOSIT, 1, 2_000, &[]).unwrap(),
+            NextPayout::Nothing
+        );
+        let NextPayout::Pay(p) = next_payout(&[c.clone()], known(&[1]), DEPOSIT, 1, 2_000, &[c.id]).unwrap() else {
+            panic!()
+        };
+        assert_eq!(p.claims, vec![c.id]);
+    }
+
+    /// T-05: the payable claims a node warns about, before the bonds would pay their claimants.
+    #[test]
+    fn overdue_claims_are_the_payable_ones_the_bonds_cover() {
+        let at = |id: u8, kind: ClaimKind, created_at: u64| Claim {
+            created_at,
+            ..claim(id, kind, 100_000, (10, u64::from(id)), None)
+        };
+        let claims = [
+            at(1, ClaimKind::Liquidation, 1_000),
+            at(2, ClaimKind::Release, 50_000),
+            at(3, ClaimKind::Fee, 1_000),
+            Claim {
+                commitment: [0; 32],
+                ..at(4, ClaimKind::Refund, 1_000)
+            },
+            Claim {
+                bond_paid: true,
+                ..at(5, ClaimKind::CloseUser, 1_000)
+            },
+            Claim {
+                state: ClaimState::Paid,
+                ..at(6, ClaimKind::CloseMarketMaker, 1_000)
+            },
+            at(7, ClaimKind::Refund, 1_000),
+        ];
+        let ids: Vec<u8> = overdue(&claims, 60_000, 43_200).iter().map(|c| c.id[0]).collect();
+        assert_eq!(ids, vec![1, 7]);
+    }
+
+    /// P5: an off-chain refund is the note less the fee of one input and one output, to one
+    /// receiver, without change; a note that cannot pay its own fee stays in the vault.
     #[test]
     fn refund_is_net_of_fee_and_rejects_dust() {
-        let p = refund_plan(1_234_567, [1; 43]).unwrap();
+        let p = refund_plan([7; 32], 1_234_567, [1; 43]).unwrap();
         assert_eq!(p.payments[0].value, 1_234_567 - FEE_1_IN_1_OUT);
-        assert_eq!(p.change, 0);
-        assert!(refund_plan(FEE_1_IN_1_OUT, [1; 43]).is_err());
+        assert_eq!((p.change, p.inputs, p.input), (0, 1, PayoutInput::Unlanded([7; 32])));
+        assert!(p.claims.is_empty());
+        assert!(refund_plan([7; 32], FEE_1_IN_1_OUT, [1; 43]).is_err());
     }
 
     #[test]
@@ -1212,6 +1759,7 @@ mod tests {
         let mut unpaid: Vec<&Claim> = claims.iter().filter(|c| c.state == ClaimState::Unpaid).collect();
         unpaid.sort_by_key(|c| (c.order, c.kind == ClaimKind::CloseMarketMaker));
         let by_id = |id: &ClaimId| unpaid.iter().copied().find(|c| &c.id == id);
+        let recipient = |c: &Claim| payee(c, &recipient);
         for &claim in &unpaid {
             match unit(claim, &by_id, &recipient, lineage_value, 1, now)? {
                 Unit::Pay(group) => {

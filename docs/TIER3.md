@@ -82,7 +82,8 @@ SpendCommit(bytes32 vaultId,bytes32 inputTag,bytes32[] claimIds,bytes32[] claimR
   conforming lineage (`zecured_policy::ledger`), and the lineage is always a single unspent note
   (the activated deposit or the latest change), so one tag; a node refuses a plan with more inputs.
 - `claimIds`: the claims it pays, at least one (T3-1: no "change only" commitment), in plan order;
-  `claimIds[0]` bears the fee. `claimRefs[i]` belongs to `claimIds[i]`.
+  `claimIds[0]` bears the fee, less ZIP 317's marginal 5,000 zatoshi for each Fee claim behind it, which
+  bears exactly that (T-06, D48). `claimRefs[i]` belongs to `claimIds[i]`.
 - `claimOutputs[i]`: the index of the payout's action whose output pays `claimIds[i]` (E1). The
   nodes read it from the PCZT they verified; the indexes are distinct, so no output pays two claims.
 - `payoutRef`: of the payout's txid.
@@ -123,7 +124,8 @@ against Foundry's EIP-712 implementation) and `zecured-base` `spend_commit_golde
 
 `commitSpend` then:
 - records the change as a lineage note;
-- records `expected = amount − fee` for `claimIds[0]` and `amount` for the others;
+- records `expected = amount − fee` for `claimIds[0]` (its share of the fee), `amount − 5,000` for a
+  Fee claim behind it, and `amount` for the others;
 - binds every claim to `inputTag`;
 - emits `SpendCommitted`.
 
@@ -152,8 +154,9 @@ Each of the following is prevented, and each has a test:
 - **Hiding a payout from its claimant** under a wrong reference (RT-1): provable as F4.
 - **Two claim sets from one note** (RT-4), which could bind a claim for ever to a note a payout
   without it spent.
-- **A pending deposit frozen by a halt** (RT-6): once minting has halted, any pending activation can
-  be dropped, then the vault cancelled and its deposit refunded.
+- **A pending deposit frozen by a halt** (RT-6): once minting has halted, `refundPending` (anyone;
+  the coordinator does it as a keeper) turns any pending activation into a Refund claim of its
+  deposit, which the signers pay like any claim.
 - **A dust claim keeping a vault open for ever** (RT-8): a claim of a closed vault, never committed
   and at most 10,000 zat (the smallest payout's fee, so it can never bear one), can be written off
   by anyone (`writeOffDust`); its value stays in the vault.
@@ -200,9 +203,29 @@ a witness RPC (set by default outside the local fork).
 - H-1: a node never signs a second payout while one it signed can still be mined, which it assumes
   for 10 blocks past the payout's expiry height (a reorg margin, RT-4). A claim is therefore never
   committed to two payouts that could both land.
+- v3 (D41 to D53): nothing is paid from a vault whose activation is pending (K3) or that the slasher
+  marked compromised (T-04: the compensator settles its claims). A claim is payable once it is pending
+  on Base with a destination: a Refund claim once its account gave one, from its own note alone (its
+  own lineage; the main lineage backs only the main claims, I10); a Fee claim rides with the vault's
+  first exit, behind it, and heads a payout only when nothing else waits; a claim the bonds paid goes
+  to the destination three signers gave for their reimbursement, without the vault's ovk. A disputed
+  claim counts unpaid but is not payable until it is reopened, and then only by a payout of its input
+  with the same claim list (RT-4); a node that confirmed the payout itself keeps it paid, since it saw
+  its value leave. The coordinator plans with the same functions (`ledger::next_vault_payout`).
+- Liveness (T-05): every node and the coordinator warn when a payable claim is older than half the
+  bonds' `livenessPeriod`, at most every half hour per vault, naming the vault by its id prefix only.
 
-**Refunds of non-conforming notes (P5)** need no commitment. Those notes are never lineage notes, so
-no zZEC rests on them (§ 10).
+**Disputed confirmations (D53).** The coordinator upholds the confirmations of its own payouts: for a
+disputed claim it finds the transaction that spent the claim's input in its scan, checks that Base
+recorded it as that input's payout, proves its inclusion with the violation guest (`Included`, the
+witness holding only K) ahead of every deposit proof in its queue, and calls `proveInclusion` for each
+disputed claim of that payout. Without proofs configured it only warns: someone must prove it before
+the dispute falls due. A claimant disputes with `zecured-wallet loan dispute` (TEST ONLY, the owner
+EOA as the account; the app sends the same call by UserOp).
+
+**Off-chain refunds (P5)** need no commitment, and exist only for deposits that no guest of the
+deployment can land on Base (I30, docs/TIER2.md § 5): those never become lineage notes, so no zZEC
+rests on them (§ 10). Every other non-conforming deposit lands as a Refund claim and is paid as above.
 
 ## 6. The violation statements: one guest, one entry point (T3-3)
 
@@ -385,8 +408,10 @@ misconfiguration end in an error message, never in a theft on the judge network:
 
 - **Non-conforming notes** (over- or late payments) are the depositor's refund, not zZEC backing.
   With refund proofs (journal v2's Refund mode, which the judge deployment takes) they land on Base
-  as Refund claims and are lineage notes like any other, so their theft is F1; on a deployment
-  without refund proofs they are refunded off-chain (P5) and their theft is not provable.
+  as Refund claims and are lineage notes like any other, so their theft is F1. The notes no guest of
+  the deployment can land (without refund proofs: another amount, a late payment, other pools; with
+  them: a note below `minRefundZat`; either way a note to another address of the vault) are refunded
+  off-chain (P5), and their theft is not provable.
 - **All five signers colluding** against a third party's claim. A liquidator's or market maker's
   claim committed under a wrong reference is provable (F4) only with the vault's K and the claim's
   salt, which only the signers hold together. With three colluders two honest signers remain; with

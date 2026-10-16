@@ -98,15 +98,17 @@ nodes' stores freezes the affected vaults; three leaked stores are enough to ste
   (Base Sepolia's public RPC allows 200), so no setting is needed for a stricter provider.
 - **Restarts and upgrades:** stop, replace the binary, start. State is on disk; a payout in flight
   survives a restart (the node still recognizes and confirms the transaction it signed).
-- **Downtime:** any two nodes may be down; payouts and attestations continue with the other three.
-  A node that was down catches up from Base events and its own scan.
-- **Cancellations (D23):** a node signs `VaultCancellation` only for the owner's refund request of
-  a conforming deposit, only past the vault's deposit window, and only while the Registry (on
-  every Base provider it is configured with) has not activated the vault. The deposit becomes
-  refundable when the node applies the checked `VaultCancelled` event.
-- **Deposit proofs (Tier 2):** a node needs nothing for them; it applies the resulting
-  `VaultActivated` like any other. Proving (the coordinator, or the borrower's CLI) and feeding
-  the header relay (`scripts/relay-feed.sh`, anyone) are separate, permissionless jobs.
+- **Downtime:** any two nodes may be down; payouts continue with the other three. A node that was
+  down catches up from Base events and its own scan.
+- **Off-chain refunds (P5, I30):** a node signs one only for a deposit that no guest of the
+  deployment can land on Base (it reads the Intake's journal version and refund floor on every Base
+  provider it is configured with), on the owner's signed request, after checking on each provider
+  that the note is no lineage note and has never landed. Every other non-conforming deposit lands
+  as a Refund claim and is paid like any claim.
+- **Deposit proofs (Tier 2):** every deposit reaches Base by proof (D41); a node needs nothing for
+  them and signs nothing for them, it applies the resulting events like any other. Proving (the
+  coordinator, or the borrower's CLI) and feeding the header relay (`scripts/relay-feed.sh`, anyone)
+  are separate, permissionless jobs.
 
 ## Not yet supported
 

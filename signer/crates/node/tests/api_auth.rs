@@ -225,7 +225,6 @@ async fn a_confirmation_can_be_given_again() {
             ufvk: String::new(),
             address: String::new(),
             decisions: vec![],
-            attestation: None,
             activated: true,
             outstanding: 0,
             claims: vec![],
@@ -237,7 +236,6 @@ async fn a_confirmation_can_be_given_again() {
                 txid,
             }],
             last_event: None,
-            cancelled: false,
             activated_tag: None,
         })
         .unwrap();

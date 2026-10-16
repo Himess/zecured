@@ -1,8 +1,8 @@
 //! H-2 (security review 2026-10-11): a vault never pays one of its own addresses. A borrower
 //! who set the release destination to the vault's internal address had the payout land as
-//! "change" outside the books and brick the vault; destinations, refund recipients and
-//! third-party recipients equal to any vault address (any diversifier, either scope) are now
-//! refused.
+//! "change" outside the books and brick the vault; destinations (a release's or a refund
+//! claim's), off-chain refund recipients (P5) and third-party recipients equal to any vault
+//! address (any diversifier, either scope) are now refused.
 
 use alloy::{
     primitives::{Address, B256},
@@ -75,7 +75,6 @@ fn vault(owner: Address) -> (VaultRecord, FullViewingKey) {
         ufvk: String::new(),
         address: String::new(),
         decisions: vec![],
-        attestation: None,
         activated: true,
         outstanding: 1_000_000,
         claims: vec![],
@@ -84,7 +83,6 @@ fn vault(owner: Address) -> (VaultRecord, FullViewingKey) {
         inflight: None,
         confirmed: vec![],
         last_event: None,
-        cancelled: false,
         activated_tag: None,
     };
     (record, fvk)
@@ -145,7 +143,7 @@ async fn a_vault_never_pays_its_own_addresses() {
         assert!(err.to_string().contains("own addresses"), "{err}");
         // A third party's recipient (liquidator, market maker).
         assert!(node.add_recipient(recipient(addr, [9; 32])).await.is_err());
-        // A refund of a non-conforming deposit.
+        // An off-chain refund (P5), refused before anything is scanned.
         let salt = [8; 32];
         let deadline = now() + 600;
         let msg = RefundRequest {

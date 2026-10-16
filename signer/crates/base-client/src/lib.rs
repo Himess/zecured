@@ -24,25 +24,9 @@ pub const BASE_SEPOLIA_CHAIN_ID: u64 = 84_532;
 sol! {
     /// Signed by signer nodes; verified by the Registry.
     #[derive(Debug, PartialEq, Eq)]
-    struct DepositAttestation {
-        bytes32 vaultId;
-        address account;
-        uint64 amount;
-        bytes32 depositTag;
-    }
-
-    /// Signed by signer nodes; verified by the Registry.
-    #[derive(Debug, PartialEq, Eq)]
     struct PayoutConfirmation {
         bytes32 vaultId;
         bytes32 claimIdsHash;
-    }
-
-    /// Signed by signer nodes before they refund the conforming deposit of a vault that was
-    /// never activated (D23, L-8); verified by the Registry (`cancelVault`).
-    #[derive(Debug, PartialEq, Eq)]
-    struct VaultCancellation {
-        bytes32 vaultId;
     }
 
     /// Off-chain, signed by the vault owner key; verified by every signer node.
@@ -64,7 +48,9 @@ sol! {
         uint64 deadline;
     }
 
-    /// Off-chain, signed by the vault owner key: refund of a non-conforming note (P5).
+    /// Off-chain, signed by the vault owner key: refund of a deposit that no guest of the
+    /// deployment can land on Base (P5 under I30); a deposit a guest can land is refunded only
+    /// as a Refund claim.
     #[derive(Debug, PartialEq, Eq)]
     struct RefundRequest {
         bytes32 vaultId;
@@ -142,7 +128,7 @@ sol! {
     }
 }
 
-/// The Registry's EIP-712 domain (attestations, payout confirmations, owner requests).
+/// The Registry's EIP-712 domain (payout confirmations, spend commitments, `VaultOpened`, owner requests).
 pub fn registry_domain(chain_id: u64, registry: Address) -> Eip712Domain {
     eip712_domain! {
         name: "ZecuredRegistry",
@@ -328,14 +314,9 @@ mod tests {
     #[test]
     fn type_strings_match_interfaces_md() {
         assert_eq!(
-            DepositAttestation::eip712_encode_type(),
-            "DepositAttestation(bytes32 vaultId,address account,uint64 amount,bytes32 depositTag)"
-        );
-        assert_eq!(
             PayoutConfirmation::eip712_encode_type(),
             "PayoutConfirmation(bytes32 vaultId,bytes32 claimIdsHash)"
         );
-        assert_eq!(VaultCancellation::eip712_encode_type(), "VaultCancellation(bytes32 vaultId)");
         assert_eq!(
             OpenVault::eip712_encode_type(),
             "OpenVault(address owner,address account,uint64 amount,bytes32 requestId,uint64 deadline)"
@@ -541,11 +522,9 @@ mod tests {
     #[test]
     fn sign_recover_and_order() {
         let domain = registry_domain(BASE_SEPOLIA_CHAIN_ID, Address::repeat_byte(0x11));
-        let msg = DepositAttestation {
+        let msg = PayoutConfirmation {
             vaultId: B256::repeat_byte(1),
-            account: Address::repeat_byte(2),
-            amount: 1_000_000,
-            depositTag: B256::repeat_byte(3),
+            claimIdsHash: B256::repeat_byte(3),
         };
         let signers: Vec<PrivateKeySigner> = (0..3).map(|_| PrivateKeySigner::random()).collect();
         let sigs: Vec<Bytes> = signers.iter().map(|s| sign_typed(s, &domain, &msg).unwrap()).collect();
@@ -591,17 +570,6 @@ mod tests {
         let b = |h: &str| h.parse::<B256>().unwrap();
         assert_eq!(rd.separator(), b("0x489271068185e1811817d2dfae78e2be898ee5fc9768bf01d870981f667ef9f8"));
         assert_eq!(ad.separator(), b("0xb62551e236af33b3b84da5fe38134bcea7c80b912f8b172bb4020080457a9260"));
-
-        let att = DepositAttestation {
-            vaultId: vault,
-            account: Address::repeat_byte(0x33),
-            amount: 1_000_000,
-            depositTag: B256::repeat_byte(0x66),
-        };
-        assert_eq!(
-            att.eip712_signing_hash(&rd),
-            b("0xbe0251d9c909749194da8ebf137e42a33a60d6fba8672a022c4923558fecb90f")
-        );
 
         let payout = PayoutConfirmation {
             vaultId: vault,

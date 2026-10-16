@@ -28,8 +28,8 @@ use zcash_protocol::{
 };
 use zecured_policy::{
     ledger::{
-        Claim, ClaimKind, ClaimState, MAX_CLAIMS_PER_PAYOUT, NextPayout, PayoutPlan, PlannedPayment, Recipient,
-        next_payout,
+        Claim, ClaimKind, ClaimState, MAX_CLAIMS_PER_PAYOUT, NextPayout, PayoutInput, PayoutPlan, PlannedPayment,
+        Recipient, next_payout,
     },
     verify::{ExpectedInput, TxExpectations, VerifyError, verify_payout},
 };
@@ -138,6 +138,7 @@ fn plan(liquidator: Address, seized: u64) -> PayoutPlan {
         inputs: 1,
         change: NOTE - seized,
         fee,
+        input: PayoutInput::Main,
     }
 }
 
@@ -300,6 +301,7 @@ fn a_close_pairs_payments_map_to_their_own_actions() {
         inputs: 1,
         change: NOTE - 1_200_000 - 2_300_000,
         fee,
+        input: PayoutInput::Main,
     };
     let pczt = build(&fvk, anchor, &[&ns[0]], &honest_payments(&p));
     let v = verify_payout(&pczt, &fvk, &inputs(&[&ns[0]]), &p, &expect()).unwrap();
@@ -336,6 +338,8 @@ fn a_planned_payout_of_eight_claims_builds_and_verifies() {
             created_at: 1_000,
             partner: None,
             state: ClaimState::Unpaid,
+            refund_tag: None,
+            bond_paid: false,
         })
         .collect();
     let recipient = |c: &[u8; 32]| recipients.iter().find(|r| r.commitment() == *c).copied();
