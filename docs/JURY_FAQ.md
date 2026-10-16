@@ -51,10 +51,6 @@ No. The ZEC never leaves Zcash's shielded Ironwood pool, and nothing is sold. Ho
 no longer means giving up liquidity: you can borrow dollars on Base without selling or unshielding
 it, and USDC lenders on Base gain a new market backed by Zcash collateral.
 
-**Why not NEAR Intents?**
-Today's Zcash-origin bridge routes typically require a transparent sender. That's exactly the
-unshielding step we avoid.
-
 **Do you cross pools?**
 No. Deposits must be Ironwood → Ironwood (no transparent, Sapling or Orchard-pool parts — the
 signers check the full transaction); every payout goes to an Orchard-protocol receiver in the

@@ -44,7 +44,7 @@ review and their status are in [SECURITY_REVIEW.md](SECURITY_REVIEW.md).
 | L9 | Linking `depositTag` to the deposit note | Keyed tag: BLAKE2b keyed with a hash of the vault's viewing key, its tag key K, over the note commitment (D24); only holders of K can compute it: the viewing key's holders and whoever proves the vault's deposits | `policy/src/derive.rs`, `tier2/statement` |
 | L10 | Our backend and the app's host see client IPs | Nothing is logged; vault ids stay in the URL fragment, so the app's host never sees them; Tor support is roadmap | `backend/`, app routes |
 | L11 | Liquidator / market maker addresses | Revealed off-chain only; Base sees salted commitments; a fresh salt per operation | `bots/`, coordinator |
-| L12 | Bridges or NEAR Intents in the ZEC flow | None: ZEC never leaves Zcash | design |
+| L12 | Bridges or cross-chain intent routes in the ZEC flow | None: ZEC never leaves Zcash | design |
 | L13 | Paying interest/principal from an outside wallet | Close from collateral (P6) needs no outside USDC; the repay-with-USDC path shows a warning | contracts, app |
 | L14 | Turnstile: depositing from Orchard/Sapling or paying out to Sapling reveals the amount | P1 accepts only Ironwood-only deposits; every payout goes to an Orchard-protocol receiver in the Ironwood pool; Ironwood preparation screen | `tx::TxShape::is_ironwood_only`, `policy/src/verify.rs` |
 | L15 | Providers mapping IP ↔ account | Backend proxy for RPC, bundler and paymaster | `backend/src/proxy.rs` |

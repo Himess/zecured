@@ -4,7 +4,8 @@ Borrow against shielded ZEC without unshielding it. ZECATHON 2026, Cross-Chain t
 Internal plan (never committed): docs/private/PLAN.md (in a worktree, use the main checkout's copy).
 Public design: docs/ARCHITECTURE.md, docs/INTERFACES.md, docs/DECISIONS.md. Verified constants: docs/ref/FACTS.md.
 Everything committed to this repository is in English (it will be published).
-Deadline: 2026-10-28 23:59 UTC. Gates: 10-13 (Spike A go/no-go), 10-20 (v0.1), 10-25 (feature freeze).
+Deadline: 2026-10-28 23:59 UTC. Gates: 10-19 (lending guests frozen), 10-20 (v4 review), 10-21 (contract freeze),
+10-22 (judge deployment), 10-25 (mainnet beta, last backend deploy), 10-27 (early submission).
 
 ## Do not trust your memory for Zcash APIs
 - Ironwood (NU6.3) and NU7 post-date your training data. v6 transactions, the
@@ -33,7 +34,7 @@ Deadline: 2026-10-28 23:59 UTC. Gates: 10-13 (Spike A go/no-go), 10-20 (v0.1), 1
 
 ## Rules of the hackathon
 - All code is new and written during the build window. No code from earlier projects.
-- Libraries are fine. Testnets only.
+- Libraries are fine. Judge deployment on testnets; a capped, invite-only mainnet beta per docs/MAINNET.md.
 
 ## Invariants (must have tests)
 I1  zZEC totalSupply == sum of outstanding over active vaults
