@@ -307,7 +307,7 @@ fn a_close_pairs_payments_map_to_their_own_actions() {
     assert_ne!(v.payment_actions[0], v.payment_actions[1]);
 }
 
-/// Review H-06 / İ-01: the planner's payout of eight claims (the Registry's most per commitment)
+/// Review H-06: the planner's payout of eight claims (the Registry's most per commitment)
 /// builds and verifies like any other: each payment maps to its own action, the first claim bears
 /// the fee of nine outputs, the change returns to the vault; the same transaction without one of
 /// the eight is refused.

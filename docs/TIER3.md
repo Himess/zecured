@@ -194,7 +194,7 @@ a witness RPC (set by default outside the local fork).
   note's committed claim list (`inputClaimSet`).
 - E1: a payout never pays one receiver twice, nor names one salt twice (two claims with one salt
   would share a claim reference, which the Registry refuses). A payout settles up to 8 claims (review
-  İ-01): a claim to a receiver, or with a salt, the payout already has waits for a later payout, and
+  H-06): a claim to a receiver, or with a salt, the payout already has waits for a later payout, and
   if a close's borrower and market maker share one, the borrower is paid first and the market maker
   in a later payout.
 - H-1: a node never signs a second payout while one it signed can still be mined, which it assumes
@@ -220,7 +220,7 @@ redirect the reward (`test_prove_revertsOnABadJournalOrSeal`: a seal for another
 
 **F1 Uncommitted.**
 - Private input: the vault's UFVK, a lineage note's opening, and the index of the action of X that spends it.
-  The full UFVK, not K and a nullifier key (design review, Claude Web § 2): on a forged block nothing
+  The full UFVK, not K and a nullifier key (design review): on a forged block nothing
   ties a nullifier key to the vault, so anyone who knows K, the deposit prover included, could pair it
   with a made-up one; and F1 is proven by the owner or our watcher anyway.
 - The guest shows: the note's nullifier (`Note::nullifier` under the UFVK's full viewing key) is

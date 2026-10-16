@@ -101,8 +101,7 @@ VaultOpened(bytes32 vaultId,address owner,address account,uint64 amount,uint32 e
   exactly as the owner receives it (`POST /vaults/:id/viewing-key`). A deposit proof's witness
   carries K, not the UFVK, and the proof derives its deposit tag with the K whose hash it puts in
   the struct: a proof under any other K names a `VaultOpened` nobody signed, so every tag that
-  lands is the vault's own and one note cannot land twice under two tags (design review,
-  Claude Web § 2).
+  lands is the vault's own and one note cannot land twice under two tags (design review).
 - 65-byte `r || s || v` signatures (v = 27/28, low s), as in § 2.2.
 - The app and the CLI accept a vault only if all five signers of the set pinned in their own
   build signed it (app: `NEXT_PUBLIC_SIGNERS`, compared as a set; CLI: the node `eth` addresses
@@ -125,7 +124,7 @@ SpendCommit(bytes32 vaultId,bytes32 inputTag,bytes32[] claimIds,bytes32[] claimR
   (`salt_i` of its recipient commitment, § 1). Txids in internal byte order.
 - `claimOutputs[i]` is the index of the payout's action whose output pays `claimIds[i]`; the indexes
   are distinct, so two claims never share one output (E1, D34).
-- `claimIds[0]` bears the payout's ZIP 317 fee. A payout settles 1 to 8 claims (review İ-01), in
+- `claimIds[0]` bears the payout's ZIP 317 fee. A payout settles 1 to 8 claims (review H-06), in
   the queue's order, with distinct receivers and salts (E1). Arrays are hashed as EIP-712 requires
   (`keccak256` of the concatenated elements); signatures as in § 2.2.
 
