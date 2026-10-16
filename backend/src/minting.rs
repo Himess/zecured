@@ -3,15 +3,17 @@
 //! room, read from `ZecuredIntake` and `SignerBondV2` and cached for [`TTL`]. Public state only:
 //! flags, times and one total, nothing about any vault or user. None of it ever blocks an exit.
 
-use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
+use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 use alloy::{
-    primitives::{Address, Bytes, U256},
+    primitives::{Address, U256},
     sol,
     sol_types::SolCall,
 };
 use anyhow::Result;
 use serde_json::{Map, Value, json};
+
+use crate::onchain::{Cached, CallError, eth_call, view};
 
 sol! {
     function mintingPaused() external view returns (bool);
@@ -30,22 +32,13 @@ pub const MINT_BLOCK: [&str; 5] = ["None", "Halted", "NotBonded", "Paused", "Cap
 pub const TTL: Duration = Duration::from_secs(15);
 const CALL_TIMEOUT: Duration = Duration::from_secs(5);
 
-/// Why an `eth_call` gave no result.
-#[derive(Debug, PartialEq, Eq)]
-enum CallError {
-    /// The node answered with an error: the call reverted (`mintBlock` reverts `CapPriceStale`).
-    Reverted,
-    /// No usable answer: the node is unreachable or answered something else.
-    Unavailable,
-}
-
 pub struct MintingGates {
     rpc_url: String,
     intake: Address,
     bond: Address,
     denominations: Vec<u64>,
     http: reqwest::Client,
-    cache: tokio::sync::Mutex<Option<(Instant, Value)>>,
+    cache: Cached,
 }
 
 impl MintingGates {
@@ -56,22 +49,14 @@ impl MintingGates {
             bond,
             denominations,
             http: reqwest::Client::builder().timeout(CALL_TIMEOUT).build()?,
-            cache: tokio::sync::Mutex::new(None),
+            cache: Cached::new(TTL),
         })
     }
 
     /// The gates as `GET /status` shows them, read at most once per [`TTL`]; `null` while the
     /// chain cannot be read.
     pub async fn json(&self) -> Value {
-        let mut cache = self.cache.lock().await;
-        if let Some((at, value)) = cache.as_ref()
-            && at.elapsed() < TTL
-        {
-            return value.clone();
-        }
-        let value = self.read().await.unwrap_or(Value::Null);
-        *cache = Some((Instant::now(), value.clone()));
-        value
+        self.cache.get(|| self.read()).await
     }
 
     /// - `paused`: `mintingPaused()`, by signatures until `pausedUntil` (0: not paused by
@@ -83,17 +68,19 @@ impl MintingGates {
     ///   of that amount from being minted now (`None`: nothing), or `null` while the cap's price
     ///   is stale (the Intake then refuses deposit proofs until it is fresh again).
     async fn read(&self) -> Option<Value> {
+        let (http, url) = (&self.http, self.rpc_url.as_str());
         let (paused, until, since, room, halted, bonded) = tokio::join!(
-            self.view::<mintingPausedCall>(self.intake, mintingPausedCall {}),
-            self.view::<pausedUntilCall>(self.intake, pausedUntilCall {}),
-            self.view::<pausedSinceCall>(self.intake, pausedSinceCall {}),
-            self.view::<capRoomCall>(self.intake, capRoomCall {}),
-            self.view::<haltedCall>(self.bond, haltedCall {}),
-            self.view::<fullyBondedCall>(self.bond, fullyBondedCall {}),
+            view(http, url, self.intake, mintingPausedCall {}),
+            view(http, url, self.intake, pausedUntilCall {}),
+            view(http, url, self.intake, pausedSinceCall {}),
+            view(http, url, self.intake, capRoomCall {}),
+            view(http, url, self.bond, haltedCall {}),
+            view(http, url, self.bond, fullyBondedCall {}),
         );
         let mut blocks = Map::new();
         for amount in &self.denominations {
-            let block = match self.eth_call(self.intake, mintBlockCall { amount: *amount }.abi_encode()).await {
+            // Reverts `CapPriceStale` while the cap's price is too old.
+            let block = match eth_call(http, url, self.intake, mintBlockCall { amount: *amount }.abi_encode()).await {
                 Ok(out) => {
                     let value = mintBlockCall::abi_decode_returns(&out).ok()?;
                     Value::from(*MINT_BLOCK.get(usize::from(value))?)
@@ -115,29 +102,6 @@ impl MintingGates {
             "readAt": SystemTime::now().duration_since(UNIX_EPOCH).map(|d| d.as_secs()).unwrap_or(0),
         }))
     }
-
-    /// A view call that must answer.
-    async fn view<C: SolCall>(&self, to: Address, call: C) -> Option<C::Return> {
-        let out = self.eth_call(to, call.abi_encode()).await.ok()?;
-        C::abi_decode_returns(&out).ok()
-    }
-
-    async fn eth_call(&self, to: Address, data: Vec<u8>) -> Result<Vec<u8>, CallError> {
-        let body = json!({
-            "jsonrpc": "2.0", "id": 1, "method": "eth_call",
-            "params": [{ "to": to, "data": Bytes::from(data) }, "latest"],
-        });
-        let resp = self.http.post(&self.rpc_url).json(&body).send().await.map_err(|_| CallError::Unavailable)?;
-        let v: Value = resp.json().await.map_err(|_| CallError::Unavailable)?;
-        if let Some(result) = v.get("result") {
-            let out: Bytes = serde_json::from_value(result.clone()).map_err(|_| CallError::Unavailable)?;
-            return Ok(out.to_vec());
-        }
-        if v.get("error").is_some() {
-            return Err(CallError::Reverted);
-        }
-        Err(CallError::Unavailable)
-    }
 }
 
 #[cfg(test)]
@@ -150,6 +114,7 @@ mod tests {
         },
     };
 
+    use alloy::primitives::Bytes;
     use axum::{Json, Router, extract::State, routing::post};
 
     use super::*;

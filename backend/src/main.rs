@@ -41,8 +41,10 @@ use zecured_node::config::NetworkConfig;
 mod allowlist;
 mod limits;
 mod minting;
+mod onchain;
 mod paymaster;
 mod proxy;
+mod versions;
 
 #[derive(Parser)]
 #[command(about = "Zecured backend: coordinator + public API")]
@@ -767,6 +769,8 @@ struct StatusInfo {
     /// v3's minting gates (T-01, T-03), read from the Intake and the bond and cached; `None`
     /// without a v3 deployment file.
     minting: Option<Arc<minting::MintingGates>>,
+    /// The verifier versions (T-07a), read from ZecuredVersions and cached; `None` without one.
+    versions: Option<Arc<versions::VerifierVersions>>,
 }
 
 /// When the nodes' modes were read, and what they were.
@@ -788,8 +792,10 @@ fn status_info(dep: &serde_json::Value, cfg: &NetworkConfig) -> StatusInfo {
             "slasher": field(&["contracts", "ZecuredSlasher"]),
             "signerBond": field(&["contracts", "SignerBond"]),
             "compensator": field(&["contracts", "ZecuredCompensator"]),
+            "versions": field(&["contracts", "ZecuredVersions"]),
             "mintMode": field(&["depositProofs", "mintMode"]),
             "verifierIsMock": field(&["depositProofs", "verifierIsMock"]),
+            // The guests the deployment started with; `versions` below lists the current ones.
             "depositImageId": field(&["depositProofs", "imageId"]),
             "violationImageId": field(&["tier3", "violationImageId"]),
             "challengeWindow": field(&["tier3", "challengeWindow"]),
@@ -809,10 +815,13 @@ fn status_info(dep: &serde_json::Value, cfg: &NetworkConfig) -> StatusInfo {
             .ok()
             .map(Arc::new)
     });
+    let versions = contract("ZecuredVersions")
+        .and_then(|registry| versions::VerifierVersions::new(cfg.base_rpc_url.clone(), registry).ok().map(Arc::new));
     StatusInfo {
         fixed: Arc::new(fixed),
         nodes: Arc::new(tokio::sync::Mutex::new(None)),
         minting,
+        versions,
     }
 }
 
@@ -844,8 +853,9 @@ fn v3_parameters(dep: &serde_json::Value) -> serde_json::Value {
 }
 
 /// `GET /status`: the running commit and image ids (G5), the Zcash tip of the last coordinator
-/// pass, each signer node's mode, the deposit-proof queue's counts (H-12) and v3's minting gates
-/// (cached 15 s, `null` while unreadable or without v3). Nothing about any vault or user.
+/// pass, each signer node's mode, the deposit-proof queue's counts (H-12), v3's minting gates
+/// (cached 15 s) and the verifier versions (T-07a, cached 60 s), each `null` while unreadable or
+/// without v3. Nothing about any vault or user.
 async fn status(State(c): App, axum::Extension(s): axum::Extension<StatusInfo>) -> Json<serde_json::Value> {
     let nodes = {
         let mut cache = s.nodes.lock().await;
@@ -870,6 +880,10 @@ async fn status(State(c): App, axum::Extension(s): axum::Extension<StatusInfo>) 
     out["depositProofs"] = serde_json::to_value(c.proving_status()).unwrap_or_default();
     out["minting"] = match &s.minting {
         Some(gates) => gates.json().await,
+        None => serde_json::Value::Null,
+    };
+    out["versions"] = match &s.versions {
+        Some(versions) => versions.json().await,
         None => serde_json::Value::Null,
     };
     Json(out)
@@ -1313,33 +1327,36 @@ mod tests {
     fn v3_deployment() -> serde_json::Value {
         json!({
             "chainId": 84_532,
-            "block": 48_149_116,
+            "block": 48_198_682,
             "contracts": {
-                "BaseOracle": "0x741452339FA7c93f3a5Ceb5786bDD08d974C78Cf",
-                "CapPrice": "0xB450Fb876A81250eBf19560b8C07b4e6c756dF85",
-                "DemoShockOracle": "0xd2fa242D0167Df86e99A743546e4dd20eCf841Fe",
+                "BaseOracle": "0xC2f3515C272383D2b5e055D4CF39c9d719D232e1",
+                "CapPrice": "0x2860F0aB28D7ADa29CFB4D74B60bCD29C414BD20",
+                "DemoShockOracle": "0x6065991f617AF84f4BC48B9B42A14c2CEfFfBF58",
                 "LoanToken": "0x036CbD53842c5426634e7929541eC2318f3dCF7e",
-                "MockZecOracle": "0x741452339FA7c93f3a5Ceb5786bDD08d974C78Cf",
-                "SettlementAdapter": "0x967466dA65d97c4Ffa5ce657AB84145Ee1a31F3F",
-                "SignerBond": "0x22fD196DBC6da8206f6f62ef0A615A8B17dD407b",
-                "ZZEC": "0x551D6bf39fFf862bc969a5B26b2ea7B723Ef48E6",
-                "ZecuredCompensator": "0x96160571138e7871675821e7023c345eA6B9dD71",
-                "ZecuredIntake": "0x255d5B41cCEF1Bb499b55249bADff5f932ffe467",
-                "ZecuredRegistry": "0x2819fCb1A4a4c73C7291339B5a030c2601C4b259",
-                "ZecuredSlasher": "0x3f163edCE54059Cb3E6aC6d2045cA913650Ea5C9",
-                "ZecuredSpendLogic": "0x1602c63e23191748Ae9212247D5c8FF2FB5D3213",
+                "MarketOracle": "0x6065991f617AF84f4BC48B9B42A14c2CEfFfBF58",
+                "MockZecOracle": "0xC2f3515C272383D2b5e055D4CF39c9d719D232e1",
+                "SettlementAdapter": "0x3074AcAEa758A41C42f6EbCf5686f4a7f24ac957",
+                "SignerBond": "0xf42821eF06F68a01bba08c91a16368A83C002586",
+                "ZZEC": "0xbB63C296eb88567318C36fa29a26be77D8695b84",
+                "ZecuredCompensator": "0xEe045dF461915D9E4C919DAFbB2Df2af7e62922b",
+                "ZecuredIntake": "0x5197D7051ac19aD80dbD8829E46062B8d6d451aE",
+                "ZecuredRegistry": "0x2849a4FA18C4bD42687bD9B8eBDC2F4D89ECfB2F",
+                "ZecuredSlasher": "0xCcF6091bB163431D3C51C3B48CC853549df003E2",
+                "ZecuredSpendLogic": "0xDB0768AE34e9926ddF58eF1aBC4C82547616a542",
+                "ZecuredVersions": "0x9BfbaDc8108F2e1959A2a58a647a6DAf07C99527",
             },
             "market": {
-                "collateralToken": "0x551D6bf39fFf862bc969a5B26b2ea7B723Ef48E6",
+                "collateralToken": "0xbB63C296eb88567318C36fa29a26be77D8695b84",
                 "irm": "0x46415998764C29aB2a25CbeA6254146D50D22687",
                 "lltv": "625000000000000000",
                 "loanToken": "0x036CbD53842c5426634e7929541eC2318f3dCF7e",
-                "marketId": "0xdec23caf1c50a6c3e327fa03639e56981aa95e58963105f25e3201a60aac6eff",
+                "marketId": "0xabd581e8f7e88ea8e3e7abde60d9aea72986782f9b5d3fb3518b42968a89817e",
                 "morphoBlue": "0xBBBBBbbBBb9cC5e90e3b3Af64bdAF62C37EEFFCb",
-                "oracle": "0xd2fa242D0167Df86e99A743546e4dd20eCf841Fe",
+                "oracle": "0x6065991f617AF84f4BC48B9B42A14c2CEfFfBF58",
             },
             "depositProofs": {
-                "intake": "0x255d5B41cCEF1Bb499b55249bADff5f932ffe467",
+                "intake": "0x5197D7051ac19aD80dbD8829E46062B8d6d451aE",
+                "versions": "0x9BfbaDc8108F2e1959A2a58a647a6DAf07C99527",
                 "imageId": format!("0x{}", "11".repeat(32)),
                 "mintMode": "proof-only",
                 "verifierIsMock": false,
@@ -1524,8 +1541,9 @@ mod tests {
         assert_eq!(body["privacyDelays"], json!({ "attestMaxBlocks": 0, "payoutMaxBlocks": 0, "localFork": false }));
         // H-12: no deposit-proof queue on this backend.
         assert_eq!(body["depositProofs"], serde_json::Value::Null);
-        // No v3 deployment file: no minting gates.
+        // No v3 deployment file: no minting gates, no verifier versions.
         assert_eq!(body["minting"], serde_json::Value::Null);
+        assert_eq!(body["versions"], serde_json::Value::Null);
         let nodes = body["nodes"].as_array().expect("nodes");
         assert_eq!(nodes.len(), 5);
         assert!(nodes.iter().all(|n| n.as_object().is_some_and(|o| o.len() == 2) && n["mode"] == "unreachable"));
@@ -1636,14 +1654,18 @@ mod tests {
 
         let info = status_info(&dep, &cfg);
         assert!(info.minting.is_some(), "a v3 file names the Intake and the bond");
-        assert!(status_info(&serde_json::Value::Null, &cfg).minting.is_none());
+        assert!(info.versions.is_some(), "and ZecuredVersions");
+        let none = status_info(&serde_json::Value::Null, &cfg);
+        assert!(none.minting.is_none() && none.versions.is_none());
         let key = hex::encode(alloy::signers::local::PrivateKeySigner::random().to_bytes());
         let coordinator = Coordinator::new(cfg, &dir, &key).unwrap();
         let Json(body) = status(State(Arc::new(coordinator)), axum::Extension(info)).await;
         assert_eq!(body["deployment"]["intake"], dep["contracts"]["ZecuredIntake"]);
         assert_eq!(body["deployment"]["compensator"], dep["contracts"]["ZecuredCompensator"]);
+        assert_eq!(body["deployment"]["versions"], dep["contracts"]["ZecuredVersions"]);
         assert_eq!(body["deployment"]["v3"], parameters);
         assert_eq!(body["minting"], serde_json::Value::Null);
+        assert_eq!(body["versions"], serde_json::Value::Null);
         let _ = std::fs::remove_dir_all(&dir);
     }
 
