@@ -40,6 +40,7 @@ use zecured_node::config::NetworkConfig;
 
 mod allowlist;
 mod limits;
+mod minting;
 mod paymaster;
 mod proxy;
 
@@ -763,6 +764,9 @@ struct StatusInfo {
     fixed: Arc<serde_json::Value>,
     /// The signer nodes' modes, cached so that `/status` never fans out to the nodes per request.
     nodes: Arc<tokio::sync::Mutex<Option<NodeModes>>>,
+    /// v3's minting gates (T-01, T-03), read from the Intake and the bond and cached; `None`
+    /// without a v3 deployment file.
+    minting: Option<Arc<minting::MintingGates>>,
 }
 
 /// When the nodes' modes were read, and what they were.
@@ -780,14 +784,17 @@ fn status_info(dep: &serde_json::Value, cfg: &NetworkConfig) -> StatusInfo {
             "chainId": field(&["chainId"]),
             "block": field(&["block"]),
             "registry": field(&["contracts", "ZecuredRegistry"]),
+            "intake": field(&["contracts", "ZecuredIntake"]),
             "slasher": field(&["contracts", "ZecuredSlasher"]),
             "signerBond": field(&["contracts", "SignerBond"]),
+            "compensator": field(&["contracts", "ZecuredCompensator"]),
             "mintMode": field(&["depositProofs", "mintMode"]),
             "verifierIsMock": field(&["depositProofs", "verifierIsMock"]),
             "depositImageId": field(&["depositProofs", "imageId"]),
             "violationImageId": field(&["tier3", "violationImageId"]),
             "challengeWindow": field(&["tier3", "challengeWindow"]),
             "theftDemo": field(&["tier3", "theftDemo"]),
+            "v3": v3_parameters(dep),
         },
         // L5 and L23: the random delays that hide when a deposit is minted and when a payout is broadcast.
         "privacyDelays": {
@@ -796,15 +803,49 @@ fn status_info(dep: &serde_json::Value, cfg: &NetworkConfig) -> StatusInfo {
             "localFork": cfg.local_fork,
         },
     });
+    let contract = |name: &str| dep.get("contracts")?.get(name)?.as_str()?.parse::<Address>().ok();
+    let minting = contract("ZecuredIntake").zip(contract("SignerBond")).and_then(|(intake, bond)| {
+        minting::MintingGates::new(cfg.base_rpc_url.clone(), intake, bond, cfg.denominations.clone())
+            .ok()
+            .map(Arc::new)
+    });
     StatusInfo {
         fixed: Arc::new(fixed),
         nodes: Arc::new(tokio::sync::Mutex::new(None)),
+        minting,
     }
 }
 
+/// The deployment file's public v3 parameters that the app and anyone checking the deployment
+/// read (design notes T-01 to T-06: the opening fee, the refund floor and abandon period, the
+/// pause, the liveness penalty, the coverage cap, the incident window); `null` before v3.
+fn v3_parameters(dep: &serde_json::Value) -> serde_json::Value {
+    const KEYS: [&str; 12] = [
+        "feeBps",
+        "minFeeZat",
+        "minRefundZat",
+        "refundAbandonPeriod",
+        "pendingRefundDelay",
+        "maxPause",
+        "livenessPeriod",
+        "commitGrace",
+        "livenessPremiumBps",
+        "coverageBps",
+        "maxTotalZat",
+        "incidentWindow",
+    ];
+    let Some(v3) = dep.get("v3").and_then(serde_json::Value::as_object) else {
+        return serde_json::Value::Null;
+    };
+    KEYS.iter()
+        .filter_map(|k| Some(((*k).to_owned(), v3.get(*k)?.clone())))
+        .collect::<serde_json::Map<_, _>>()
+        .into()
+}
+
 /// `GET /status`: the running commit and image ids (G5), the Zcash tip of the last coordinator
-/// pass, each signer node's mode and the deposit-proof queue's counts (H-12). Nothing about any
-/// vault or user.
+/// pass, each signer node's mode, the deposit-proof queue's counts (H-12) and v3's minting gates
+/// (cached 15 s, `null` while unreadable or without v3). Nothing about any vault or user.
 async fn status(State(c): App, axum::Extension(s): axum::Extension<StatusInfo>) -> Json<serde_json::Value> {
     let nodes = {
         let mut cache = s.nodes.lock().await;
@@ -827,6 +868,10 @@ async fn status(State(c): App, axum::Extension(s): axum::Extension<StatusInfo>) 
     out["nodes"] = nodes.into();
     // Counts only (`null` without deposit proofs): proofs waiting, running, and run at once.
     out["depositProofs"] = serde_json::to_value(c.proving_status()).unwrap_or_default();
+    out["minting"] = match &s.minting {
+        Some(gates) => gates.json().await,
+        None => serde_json::Value::Null,
+    };
     Json(out)
 }
 
@@ -850,12 +895,15 @@ fn deployment_signers(dep: &serde_json::Value) -> Option<Vec<Address>> {
 /// `GET /config`: chain, contract addresses, market, signer set and signer-network parameters.
 /// The app checks the addresses and the signer set against the ones pinned in its build.
 /// `sponsorship`: the bundler, the paymaster and the paymaster allowlist are all configured, so the
-/// app can send sponsored UserOps.
+/// app can send sponsored UserOps. `intake` and `v3`: the deployment's ZecuredIntake and its public
+/// v3 parameters (`null` before v3).
 fn public_config_json(cfg: &NetworkConfig, dep: &serde_json::Value, sponsorship: bool) -> serde_json::Value {
     json!({
         "chainId": cfg.chain_id,
         "registry": cfg.registry,
         "adapter": cfg.adapter,
+        "intake": dep.pointer("/contracts/ZecuredIntake").cloned().unwrap_or(serde_json::Value::Null),
+        "v3": v3_parameters(dep),
         "contracts": dep.get("contracts").cloned().unwrap_or(serde_json::Value::Null),
         "market": dep.get("market").cloned().unwrap_or(serde_json::Value::Null),
         "signers": deployment_signers(dep),
@@ -1476,6 +1524,8 @@ mod tests {
         assert_eq!(body["privacyDelays"], json!({ "attestMaxBlocks": 0, "payoutMaxBlocks": 0, "localFork": false }));
         // H-12: no deposit-proof queue on this backend.
         assert_eq!(body["depositProofs"], serde_json::Value::Null);
+        // No v3 deployment file: no minting gates.
+        assert_eq!(body["minting"], serde_json::Value::Null);
         let nodes = body["nodes"].as_array().expect("nodes");
         assert_eq!(nodes.len(), 5);
         assert!(nodes.iter().all(|n| n.as_object().is_some_and(|o| o.len() == 2) && n["mode"] == "unreachable"));
@@ -1554,6 +1604,46 @@ mod tests {
         let info = status_info(&serde_json::Value::Null, &coordinator.cfg);
         let Json(body) = status(State(Arc::new(coordinator)), axum::Extension(info)).await;
         assert_eq!(body["depositProofs"], json!({ "queued": 0, "running": 0, "concurrency": 2 }));
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// v3: `/config` names the Intake and the deployment's public v3 parameters; `/status` too,
+    /// with the minting gates once the chain answers (`null` here: the node is unreachable).
+    #[tokio::test]
+    async fn status_and_config_report_the_v3_deployment() {
+        let dir = std::env::temp_dir().join(format!("zecured-backend-test-{}", hex::encode(keccak256(b"v3-status"))));
+        let nodes: Vec<serde_json::Value> = (1..=5u8)
+            .map(|i| json!({ "index": i, "url": "http://127.0.0.1:9", "x25519": "00", "eth": Address::repeat_byte(i) }))
+            .collect();
+        let cfg: NetworkConfig = serde_json::from_value(json!({
+            "lightwalletd_url": "http://127.0.0.1:9", "base_rpc_url": "http://127.0.0.1:9", "chain_id": 84_532,
+            "registry": Address::repeat_byte(0x11), "adapter": Address::repeat_byte(0x22), "registry_from_block": 1,
+            "confirmations": 3, "vault_expiry_blocks": 288, "denominations": [1_000_000, 5_000_000], "nodes": nodes,
+        }))
+        .unwrap();
+        let dep = v3_deployment();
+        let parameters = json!({
+            "feeBps": 50, "minFeeZat": 20_000, "minRefundZat": 20_000, "refundAbandonPeriod": 2_592_000,
+            "pendingRefundDelay": 86_400, "maxPause": 2_592_000, "livenessPeriod": 86_400, "commitGrace": 7_200,
+            "livenessPremiumBps": 500, "coverageBps": 10_000, "maxTotalZat": 150_000_000, "incidentWindow": 259_200,
+        });
+        let c = public_config_json(&cfg, &dep, true);
+        assert_eq!(c["intake"], dep["contracts"]["ZecuredIntake"]);
+        assert_eq!(c["v3"], parameters, "only the parameters the app reads");
+        assert_eq!(c["contracts"]["ZecuredCompensator"], dep["contracts"]["ZecuredCompensator"]);
+        let before = public_config_json(&cfg, &serde_json::Value::Null, false);
+        assert_eq!((&before["intake"], &before["v3"]), (&serde_json::Value::Null, &serde_json::Value::Null));
+
+        let info = status_info(&dep, &cfg);
+        assert!(info.minting.is_some(), "a v3 file names the Intake and the bond");
+        assert!(status_info(&serde_json::Value::Null, &cfg).minting.is_none());
+        let key = hex::encode(alloy::signers::local::PrivateKeySigner::random().to_bytes());
+        let coordinator = Coordinator::new(cfg, &dir, &key).unwrap();
+        let Json(body) = status(State(Arc::new(coordinator)), axum::Extension(info)).await;
+        assert_eq!(body["deployment"]["intake"], dep["contracts"]["ZecuredIntake"]);
+        assert_eq!(body["deployment"]["compensator"], dep["contracts"]["ZecuredCompensator"]);
+        assert_eq!(body["deployment"]["v3"], parameters);
+        assert_eq!(body["minting"], serde_json::Value::Null);
         let _ = std::fs::remove_dir_all(&dir);
     }
 
