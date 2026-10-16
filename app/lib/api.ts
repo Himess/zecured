@@ -9,6 +9,7 @@
  * bodies: they contain addresses and salts.
  */
 import { isAddress, isHex, getAddress, type Address, type Hex } from "viem";
+import { CLAIM_KIND, MINT_BLOCK } from "./abi";
 import {
   config,
   parseSigners,
@@ -18,6 +19,7 @@ import {
   type RemoteConfig,
   type RemoteContracts,
   type RemoteMarket,
+  type V3Params,
 } from "./config";
 import type { CloseRequestMessage } from "./eip712";
 import { STAMP_MAX_BITS } from "./stamp";
@@ -27,9 +29,11 @@ import { STAMP_MAX_BITS } from "./stamp";
 export const VAULT_STATUSES = ["awaiting_deposit", "deposit_seen", "active", "closing", "closed", "expired", "cancelled"] as const;
 export type VaultStatus = (typeof VAULT_STATUSES)[number];
 
-export const CLAIM_KINDS = ["Release", "Liquidation", "CloseUser", "CloseMarketMaker"] as const;
+/** The Registry's claim kinds (v3: Refund, Fee and Retired too). */
+export const CLAIM_KINDS = CLAIM_KIND;
 export type ClaimKind = (typeof CLAIM_KINDS)[number];
-export type ClaimStatus = "pending" | "paid";
+/** As the coordinator reports it (a `paid` flag, or a status). */
+export type ClaimStatus = "pending" | "paid" | "writtenOff" | "compensated" | "disputed";
 
 export interface Claim {
   claimId: Hex;
@@ -39,8 +43,9 @@ export interface Claim {
   status: ClaimStatus;
 }
 
+/** A payment to the vault that cannot back the loan, as the signers saw it on Zcash. */
 export interface NonConformingNote {
-  /** Opaque id (RefundRequest.noteId). */
+  /** Opaque id. */
   noteId: Hex;
   /** zatoshi */
   amount: bigint;
@@ -53,10 +58,9 @@ export interface Vault {
   amount: bigint;
   /** Last Zcash height at which a deposit is accepted. */
   expiryHeight: number;
+  /** v3 refunds them only as Refund claims on Base, once proven (empty when not reported). */
   nonConforming: NonConformingNote[];
   claims: Claim[];
-  /** D23: the valid deposit of a vault that was never activated; refunding it cancels the vault. */
-  cancellable?: NonConformingNote;
   // In INTERFACES.md § 4; optional because older backends omit them:
   /** The vault's Ironwood-only unified address. */
   address?: string;
@@ -112,8 +116,29 @@ export interface DestinationBody {
   signature: Hex;
 }
 
-export interface RefundBody extends DestinationBody {
-  noteId: Hex;
+export type MintBlock = (typeof MINT_BLOCK)[number];
+
+/**
+ * `GET /status` `minting` (design notes T-01, T-03): the Intake's and the bond's minting gates, read
+ * by the backend at most every 15 s. None of them ever blocks an exit.
+ */
+export interface MintingStatus {
+  /** `mintingPaused()`: by signatures until `pausedUntil`, or by an open theft case. */
+  paused: boolean;
+  /** Unix seconds; 0: not paused by signatures. */
+  pausedUntil: number;
+  /** When the running pause by signatures started (Unix seconds). */
+  pausedSince: number;
+  /** A slash halted minting for good. */
+  halted: boolean;
+  /** Every signer holds at least the minimum bond. */
+  fullyBonded: boolean;
+  /** Zatoshi the coverage and absolute caps still admit (0 while the cap's price is stale). */
+  capRoom: bigint;
+  /** Per vault denomination (zatoshi): what stops a proven deposit of it now; null while the cap's price is stale. */
+  mintBlock: Map<bigint, MintBlock | null>;
+  /** When the backend read it (Unix seconds); null if it does not say. */
+  readAt: number | null;
 }
 
 export interface ViewKeyBody {
@@ -260,6 +285,19 @@ function claimKind(v: unknown): ClaimKind | "Unknown" {
   return CLAIM_KINDS.find((c) => c.toLowerCase() === k) ?? "Unknown";
 }
 
+/** A claim's status: a `status` string ("paid", "written_off", "compensated", "disputed"), else the `paid` flag. */
+function claimStatus(o: Json): ClaimStatus {
+  if (typeof o.status === "string") {
+    const s = o.status.replace(/[_\s-]/g, "").toLowerCase();
+    if (s === "paid") return "paid";
+    if (s === "writtenoff") return "writtenOff";
+    if (s === "compensated") return "compensated";
+    if (s === "disputed") return "disputed";
+    return "pending";
+  }
+  return o.paid === true ? "paid" : "pending";
+}
+
 export function parseVault(raw: unknown): Vault {
   const r = obj(raw, "vault");
   const status = typeof r.status === "string" && (VAULT_STATUSES as readonly string[]).includes(r.status)
@@ -278,15 +316,12 @@ export function parseVault(raw: unknown): Vault {
     }),
     claims: claimsRaw.map((c) => {
       const o = obj(c, "claim");
-      const status: ClaimStatus =
-        typeof o.status === "string"
-          ? o.status.toLowerCase() === "paid"
-            ? "paid"
-            : "pending"
-          : o.paid === true
-            ? "paid"
-            : "pending";
-      return { claimId: hex32(o.claimId, "claimId"), kind: claimKind(o.kind), amount: big(o.amount, "claim amount"), status };
+      return {
+        claimId: hex32(o.claimId, "claimId"),
+        kind: claimKind(o.kind),
+        amount: big(o.amount, "claim amount"),
+        status: claimStatus(o),
+      };
     }),
   };
   const confirmations = optional(r.confirmations, (x) => int(x, "confirmations"));
@@ -295,10 +330,6 @@ export function parseVault(raw: unknown): Vault {
     const d = r.deposit as Json;
     vault.deposit = { attested: d.attested === true };
     if (typeof d.txHash === "string" && isHex(d.txHash)) vault.deposit.txHash = d.txHash as Hex;
-  }
-  if (r.cancellable && typeof r.cancellable === "object") {
-    const o = obj(r.cancellable, "cancellable");
-    vault.cancellable = { noteId: hex32(o.noteId, "noteId"), amount: big(o.amount, "cancellable amount") };
   }
   if (typeof r.address === "string" && r.address) vault.address = r.address;
   const outstanding = optional(r.outstanding, (x) => big(x, "outstanding"));
@@ -335,13 +366,15 @@ export function parseRemoteConfig(raw: unknown): RemoteConfig {
   let contracts: RemoteContracts | null = null;
   if (r.contracts !== null && r.contracts !== undefined) {
     const c = obj(r.contracts, "config.contracts");
-    // RQ-06: LoanToken and DemoShockOracle; deployments made before them name only the mocks.
+    // RQ-06: LoanToken and the market's oracle (MarketOracle; the DemoShockOracle, MOCK / DEMO, on
+    // testnets); deployments made before them name only the DemoShockOracle, or only the mocks.
     contracts = {
       LoanToken: addr(c.LoanToken ?? c.MockUSDC, "config.contracts.LoanToken"),
-      MarketOracle: addr(c.DemoShockOracle ?? c.MockZecOracle, "config.contracts.DemoShockOracle"),
+      MarketOracle: addr(c.MarketOracle ?? c.DemoShockOracle ?? c.MockZecOracle, "config.contracts.MarketOracle"),
       SettlementAdapter: addr(c.SettlementAdapter, "config.contracts.SettlementAdapter"),
       ZZEC: addr(c.ZZEC, "config.contracts.ZZEC"),
       ZecuredRegistry: addr(c.ZecuredRegistry, "config.contracts.ZecuredRegistry"),
+      ZecuredIntake: optional(c.ZecuredIntake, (x) => addr(x, "config.contracts.ZecuredIntake")) ?? null,
     };
   }
   let market: RemoteMarket | null = null;
@@ -367,6 +400,9 @@ export function parseRemoteConfig(raw: unknown): RemoteConfig {
     chainId,
     registry: addr(r.registry, "config.registry"),
     adapter: addr(r.adapter, "config.adapter"),
+    // v3; absent or null from a backend without a v3 deployment.
+    intake: optional(r.intake, (x) => addr(x, "config.intake")) ?? null,
+    v3: optional(r.v3, parseV3Params) ?? null,
     contracts,
     market,
     signers,
@@ -375,6 +411,59 @@ export function parseRemoteConfig(raw: unknown): RemoteConfig {
     vaultExpiryBlocks,
     openVaultStampBits,
     sponsorship: r.sponsorship,
+  };
+}
+
+/** `GET /config` `v3`: every field, as JSON numbers or decimal strings. */
+function parseV3Params(raw: unknown): V3Params {
+  const v = obj(raw, "config.v3");
+  const n = (k: string) => uint(v[k], `config.v3.${k}`);
+  const z = (k: string) => big(v[k], `config.v3.${k}`);
+  const feeBps = n("feeBps");
+  if (feeBps > 10_000) throw invalid("config.v3.feeBps");
+  return {
+    feeBps,
+    minFeeZat: z("minFeeZat"),
+    minRefundZat: z("minRefundZat"),
+    refundAbandonPeriod: n("refundAbandonPeriod"),
+    pendingRefundDelay: n("pendingRefundDelay"),
+    maxPause: n("maxPause"),
+    livenessPeriod: n("livenessPeriod"),
+    commitGrace: n("commitGrace"),
+    livenessPremiumBps: n("livenessPremiumBps"),
+    coverageBps: n("coverageBps"),
+    maxTotalZat: z("maxTotalZat"),
+    incidentWindow: n("incidentWindow"),
+  };
+}
+
+/**
+ * `GET /status` `minting`, or null when the backend has none (no v3 deployment, the chain
+ * unreadable, or a backend from before v3).
+ */
+export function parseMintingStatus(raw: unknown): MintingStatus | null {
+  const r = obj(raw, "status");
+  if (r.minting === null || r.minting === undefined) return null;
+  const m = obj(r.minting, "status.minting");
+  const flag = (k: string) => {
+    if (typeof m[k] !== "boolean") throw invalid(`status.minting.${k}`);
+    return m[k] as boolean;
+  };
+  const blocks = new Map<bigint, MintBlock | null>();
+  for (const [amount, block] of Object.entries(obj(m.mintBlock, "status.minting.mintBlock"))) {
+    if (!/^\d+$/.test(amount)) throw invalid("status.minting.mintBlock");
+    if (block !== null && !(MINT_BLOCK as readonly unknown[]).includes(block)) throw invalid("status.minting.mintBlock");
+    blocks.set(BigInt(amount), block as MintBlock | null);
+  }
+  return {
+    paused: flag("paused"),
+    pausedUntil: uint(m.pausedUntil, "status.minting.pausedUntil"),
+    pausedSince: uint(m.pausedSince, "status.minting.pausedSince"),
+    halted: flag("halted"),
+    fullyBonded: flag("fullyBonded"),
+    capRoom: big(m.capRoom, "status.minting.capRoom"),
+    mintBlock: blocks,
+    readAt: optional(m.readAt, (x) => uint(x, "status.minting.readAt")) ?? null,
   };
 }
 
@@ -535,6 +624,11 @@ export function createApi(options: ApiOptions = {}) {
       return parseRemoteConfig(await call("GET", "/config", undefined, { timeoutMs: RUNTIME_CONFIG_TIMEOUT_MS }));
     },
 
+    /** GET /status — v3's minting gates (public state, nothing about any vault); null when the backend has none. */
+    async getMintingStatus(): Promise<MintingStatus | null> {
+      return parseMintingStatus(await call("GET", "/status"));
+    },
+
     /** POST /vaults — open a vault off-chain (OpenVault signed by the owner key, with its hashcash stamp). */
     async openVault(b: OpenVaultBody): Promise<OpenVaultResult> {
       const r = await call(
@@ -577,27 +671,6 @@ export function createApi(options: ApiOptions = {}) {
         "destination",
       );
       return hex32(r.commitment, "commitment");
-    },
-
-    /** POST /vaults/:id/refund — P5 refund of a non-conforming note. */
-    async postRefund(vaultId: Hex, b: RefundBody): Promise<boolean> {
-      const r = obj(
-        await call(
-          "POST",
-          `/vaults/${segment(vaultId)}/refund`,
-          {
-            noteId: b.noteId,
-            receiver: b.receiver,
-            salt: b.salt,
-            nonce: b.nonce.toString(),
-            deadline: b.deadline.toString(),
-            signature: b.signature,
-          },
-          { timeoutMs: TIMEOUT.owner },
-        ),
-        "refund",
-      );
-      return r.accepted === true;
     },
 
     /** POST /vaults/:id/viewing-key — the vault's UFVK, for the owner only. */

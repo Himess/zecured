@@ -2,19 +2,22 @@
  * App configuration, with every security-relevant value pinned at build time (security review
  * H-6).
  *
- * The Base addresses the app signs for or sends calls to (Registry, Adapter, zZEC, MockUSDC,
- * oracle, Morpho, IRM, market id) and the five signer addresses come from `NEXT_PUBLIC_*`
- * variables baked into the build; Morpho and the IRM default to Base Sepolia's canonical
- * deployments. Next.js inlines `process.env.NEXT_PUBLIC_*`, which is why each variable is read
- * with its literal name. Every value here is public.
+ * The Base addresses the app signs for or sends calls to (Registry, Adapter, Intake, zZEC, the
+ * loan token, oracle, Morpho, IRM, market id) and the five signer addresses come from
+ * `NEXT_PUBLIC_*` variables baked into the build; Morpho and the IRM default to Base Sepolia's
+ * canonical deployments. Next.js inlines `process.env.NEXT_PUBLIC_*`, which is why each variable
+ * is read with its literal name. Every value here is public. The contracts the app only reads
+ * (the slasher, the compensator, the bond, the relay) are the ones the pinned Registry and Intake
+ * name on-chain (lib/chain.ts `readLinks`).
  *
  * The backend's `GET /config` never overrides a pin. It is a consistency check: any
  * disagreement is a hard stop (owner signatures, Base reads and sponsored transactions are
  * disabled; `problems` says why). It does provide the values that carry no authority: whether
  * sponsored transactions are available, the denominations, the confirmations, the deposit
- * window and the zero bits of the open-vault stamp. Only a development build (`next dev`) may
- * take unpinned addresses from it, and the UI then says so; a production build with a missing
- * pin keeps Base disabled.
+ * window, the zero bits of the open-vault stamp and the deployment's public v3 parameters (the
+ * opening fee the app shows, the refund and liveness periods it explains). Only a development
+ * build (`next dev`) may take unpinned addresses from it, and the UI then says so; a production
+ * build with a missing pin keeps Base disabled.
  *
  * `config` is updated in place once `loadRuntimeConfig()` (lib/api.ts) has fetched `/config`;
  * components/ConfigGate.tsx renders pages only after that, so nothing may read the config at
@@ -46,11 +49,44 @@ export const SIGNER_COUNT = 5;
 /** How long pages wait for `GET /config` before rendering with the build-time configuration. */
 export const RUNTIME_CONFIG_TIMEOUT_MS = 6_000;
 
+/**
+ * The deployment's public v3 parameters (`GET /config` `v3`, from the deployment file the deploy
+ * script writes). Amounts in zatoshi, periods in seconds.
+ */
+export interface V3Params {
+  /** T-06: the opening fee, in basis points of the deposit; 0: no fee. */
+  feeBps: number;
+  /** T-06: a fee below this is waived. */
+  minFeeZat: bigint;
+  /** T-02: the smallest deposit a proof can land as a refund. */
+  minRefundZat: bigint;
+  /** T-02: a Refund claim without a destination for this long can be written off (and revived). */
+  refundAbandonPeriod: number;
+  /** T-03: a pause by signatures this long lets a pending activation's account refund it. */
+  pendingRefundDelay: number;
+  /** T-03: the longest pause one set of signatures sets. */
+  maxPause: number;
+  /** T-05: a claim unpaid this long after it became payable can be paid from the bonds. */
+  livenessPeriod: number;
+  /** T-05: how long a payout in flight defers that. */
+  commitGrace: number;
+  /** T-05: what the bonds pay on top of the claim's value, in basis points. */
+  livenessPremiumBps: number;
+  /** T-01: the coverage factor k, in basis points of the effective bond. */
+  coverageBps: number;
+  /** T-01: the absolute cap on locked plus pending zatoshi. */
+  maxTotalZat: bigint;
+  /** T-04: how long one incident takes in new theft cases. */
+  incidentWindow: number;
+}
+
 export interface AppConfig {
   /** Our backend. Always from the build (`NEXT_PUBLIC_BACKEND_URL`): it serves `/config`. */
   backendUrl: string;
   registry: Address;
   adapter: Address;
+  /** ZecuredIntake (v3): pending activations and their refund (`refundPending`). */
+  intake: Address;
   morpho: Address;
   marketId: Hex;
   usdc: Address;
@@ -83,6 +119,8 @@ export interface AppConfig {
   vaultExpiryBlocks: number | null;
   /** Zero bits `POST /vaults`'s hashcash stamp needs (review H-01; lib/stamp.ts); null until known. */
   openVaultStampBits: number | null;
+  /** The deployment's public v3 parameters; null until the backend reports them. */
+  v3: V3Params | null;
   /** `GET /config`: not fetched yet, checked and applied, or unavailable (`remoteError` says why). */
   remote: "pending" | "loaded" | "unavailable";
   remoteError: string | null;
@@ -96,6 +134,10 @@ export interface RemoteConfig {
   /** The Registry and the Adapter the signer network uses (its EIP-712 domains). */
   registry: Address;
   adapter: Address;
+  /** The deployment's ZecuredIntake; null from a backend without a v3 deployment. */
+  intake: Address | null;
+  /** The deployment's public v3 parameters; null before v3. */
+  v3: V3Params | null;
   /** The deployment file's contracts; null before deployment. */
   contracts: RemoteContracts | null;
   /** The Zecured Morpho market; null before deployment. */
@@ -120,6 +162,8 @@ export interface RemoteContracts {
   SettlementAdapter: Address;
   ZZEC: Address;
   ZecuredRegistry: Address;
+  /** v3; null in a deployment file from before it. */
+  ZecuredIntake: Address | null;
 }
 
 export interface RemoteMarket {
@@ -137,12 +181,13 @@ export type RemoteConfigResult = RemoteConfig | { error: string };
 
 export type ConfigEnv = Record<string, string | undefined>;
 
-type PinField = "registry" | "adapter" | "morpho" | "marketId" | "usdc" | "oracle" | "zzec" | "irm";
+type PinField = "registry" | "adapter" | "intake" | "morpho" | "marketId" | "usdc" | "oracle" | "zzec" | "irm";
 
 /** The build-time pin of each Base value. */
 const ENV_VAR: Record<PinField, string> = {
   registry: "NEXT_PUBLIC_REGISTRY",
   adapter: "NEXT_PUBLIC_ADAPTER",
+  intake: "NEXT_PUBLIC_INTAKE",
   morpho: "NEXT_PUBLIC_MORPHO",
   marketId: "NEXT_PUBLIC_MARKET_ID",
   usdc: "NEXT_PUBLIC_USDC",
@@ -153,7 +198,7 @@ const ENV_VAR: Record<PinField, string> = {
 const FIELDS = Object.keys(ENV_VAR) as PinField[];
 
 /** Pins without a safe default: a production build must set them (and NEXT_PUBLIC_SIGNERS). */
-const REQUIRED: readonly PinField[] = ["registry", "adapter", "marketId", "usdc", "oracle", "zzec"];
+const REQUIRED: readonly PinField[] = ["registry", "adapter", "intake", "marketId", "usdc", "oracle", "zzec"];
 
 /** Built-in pins: Base Sepolia's canonical Morpho Blue and AdaptiveCurveIRM. */
 const BUILT_IN: Partial<Record<PinField, Hex>> = { morpho: MORPHO_BLUE, irm: ADAPTIVE_CURVE_IRM };
@@ -162,6 +207,7 @@ const BUILT_IN: Partial<Record<PinField, Hex>> = { morpho: MORPHO_BLUE, irm: ADA
 const UNSET: Record<PinField, Hex> = {
   registry: PLACEHOLDER_CONTRACT,
   adapter: PLACEHOLDER_CONTRACT,
+  intake: ZERO_ADDRESS,
   morpho: MORPHO_BLUE,
   marketId: ZERO_BYTES32,
   usdc: ZERO_ADDRESS,
@@ -222,6 +268,7 @@ function backendReports(r: RemoteConfig): Record<PinField, { value: Hex; what: s
   const out: Record<PinField, { value: Hex; what: string }[]> = {
     registry: [{ value: r.registry, what: "signer network's Registry" }],
     adapter: [{ value: r.adapter, what: "signer network's Settlement Adapter" }],
+    intake: r.intake ? [{ value: r.intake, what: "deployment's Intake" }] : [],
     morpho: [],
     marketId: [],
     usdc: [],
@@ -241,6 +288,7 @@ function backendReports(r: RemoteConfig): Record<PinField, { value: Hex; what: s
   if (c) {
     out.registry.push({ value: c.ZecuredRegistry, what: "deployed ZecuredRegistry" });
     out.adapter.push({ value: c.SettlementAdapter, what: "deployed SettlementAdapter" });
+    if (c.ZecuredIntake) out.intake.push({ value: c.ZecuredIntake, what: "deployed ZecuredIntake" });
     out.usdc.push({ value: c.LoanToken, what: "deployed loan token" });
     out.oracle.push({ value: c.MarketOracle, what: "deployed market oracle" });
     out.zzec.push({ value: c.ZZEC, what: "ZZEC" });
@@ -277,6 +325,7 @@ export function buildConfig(env: ConfigEnv, remote?: RemoteConfigResult): AppCon
   let confirmations: number | null = null;
   let vaultExpiryBlocks: number | null = null;
   let openVaultStampBits: number | null = null;
+  let v3: V3Params | null = null;
   let status: AppConfig["remote"] = "pending";
   let remoteError: string | null = null;
   if (remote && "error" in remote) {
@@ -284,11 +333,12 @@ export function buildConfig(env: ConfigEnv, remote?: RemoteConfigResult): AppCon
     remoteError = remote.error;
   } else if (remote) {
     status = "loaded";
-    // Values without authority: they only shape the UI (the signers enforce their own).
+    // Values without authority: they only shape the UI (the signers and the contracts enforce their own).
     if (remote.denominations.length > 0) denominations = remote.denominations;
     confirmations = remote.confirmations;
     vaultExpiryBlocks = remote.vaultExpiryBlocks;
     openVaultStampBits = remote.openVaultStampBits;
+    v3 = remote.v3;
     if (remote.chainId !== CHAIN_ID) {
       problems.push(`The backend is configured for chain ${remote.chainId}, this app for Base Sepolia (${CHAIN_ID}).`);
     } else {
@@ -340,7 +390,8 @@ export function buildConfig(env: ConfigEnv, remote?: RemoteConfigResult): AppCon
   const unpinned = REQUIRED.filter((f) => pins[f] === undefined && !malformed.has(f)).map((f) => ENV_VAR[f]);
   if (signersPin === undefined) unpinned.push("NEXT_PUBLIC_SIGNERS");
   const placeholders: Hex[] = [PLACEHOLDER_CONTRACT, ZERO_ADDRESS];
-  const complete = ![v.registry, v.adapter, v.usdc, v.oracle, v.zzec].some((a) => placeholders.includes(a)) && v.marketId !== ZERO_BYTES32;
+  const complete =
+    ![v.registry, v.adapter, v.intake, v.usdc, v.oracle, v.zzec].some((a) => placeholders.includes(a)) && v.marketId !== ZERO_BYTES32;
   if (complete && problems.length === 0) {
     const id = marketIdOf({ loanToken: v.usdc, collateralToken: v.zzec, oracle: v.oracle, irm: v.irm, lltv: MARKET_LLTV });
     if (!same(id, v.marketId)) problems.push(MARKET_MISMATCH);
@@ -349,6 +400,7 @@ export function buildConfig(env: ConfigEnv, remote?: RemoteConfigResult): AppCon
     backendUrl: url(env.NEXT_PUBLIC_BACKEND_URL, "http://127.0.0.1:8080"),
     registry: v.registry,
     adapter: v.adapter,
+    intake: v.intake,
     morpho: v.morpho,
     marketId: v.marketId,
     usdc: v.usdc,
@@ -367,6 +419,7 @@ export function buildConfig(env: ConfigEnv, remote?: RemoteConfigResult): AppCon
     confirmations,
     vaultExpiryBlocks,
     openVaultStampBits,
+    v3,
     remote: status,
     remoteError,
     problems,
@@ -379,6 +432,7 @@ const BUILD_ENV: ConfigEnv = {
   NEXT_PUBLIC_BACKEND_URL: process.env.NEXT_PUBLIC_BACKEND_URL,
   NEXT_PUBLIC_REGISTRY: process.env.NEXT_PUBLIC_REGISTRY,
   NEXT_PUBLIC_ADAPTER: process.env.NEXT_PUBLIC_ADAPTER,
+  NEXT_PUBLIC_INTAKE: process.env.NEXT_PUBLIC_INTAKE,
   NEXT_PUBLIC_MORPHO: process.env.NEXT_PUBLIC_MORPHO,
   NEXT_PUBLIC_MARKET_ID: process.env.NEXT_PUBLIC_MARKET_ID,
   NEXT_PUBLIC_USDC: process.env.NEXT_PUBLIC_USDC,

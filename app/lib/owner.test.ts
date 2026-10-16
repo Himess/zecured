@@ -4,22 +4,10 @@ import { generatePrivateKey, privateKeyToAccount } from "viem/accounts";
 import { DRY_RUN_CONFIG, DRY_RUN_ENV } from "./__fixtures__/deployment";
 import { createApi, parseRemoteConfig } from "./api";
 import { buildConfig } from "./config";
-import {
-  destinationTypedData,
-  openVaultTypedData,
-  refundRequestTypedData,
-  vaultOpenedTypedData,
-  viewKeyRequestTypedData,
-} from "./eip712";
+import { destinationTypedData, openVaultTypedData, vaultOpenedTypedData, viewKeyRequestTypedData } from "./eip712";
 import { createLoan, type StoredLoan } from "./keys";
-import {
-  checkVaultAddress,
-  fetchViewingKey,
-  openVault,
-  OwnerSigningDisabledError,
-  requestRefund,
-  submitDestination,
-} from "./owner";
+import * as owner from "./owner";
+import { checkVaultAddress, fetchViewingKey, openVault, OwnerSigningDisabledError, submitDestination } from "./owner";
 import { tagKeyHash, textHash, vaultOpenedMessage, VaultProofError } from "./signers";
 import { isValidStamp } from "./stamp";
 import { encodeUnifiedAddress, TYPECODE_ORCHARD, TYPECODE_SAPLING } from "./ua";
@@ -223,20 +211,9 @@ describe("submitDestination", () => {
   });
 });
 
-describe("refund and viewing key", () => {
-  it("signs a RefundRequest bound to the note and the salted destination", async () => {
-    const loan = createLoan(1_000_000n);
-    const noteId: Hex = `0x${"cc".repeat(32)}`;
-    const { api, bodies } = backend(() => ({ accepted: true }));
-    expect(await requestRefund(loan, VAULT, noteId, destUa, { api, registry: REGISTRY })).toBe(true);
-    const b = bodies[0]!;
-    expect(b.noteId).toBe(noteId);
-    const commitment = keccak256(concatBytes([Uint8Array.from(Buffer.from(b.salt!.slice(2), "hex")), receiver]));
-    const signer = await recoverTypedDataAddress({
-      ...refundRequestTypedData(REGISTRY, { vaultId: VAULT, noteId, commitment, nonce: BigInt(b.nonce!), deadline: BigInt(b.deadline!) }),
-      signature: b.signature as Hex,
-    });
-    expect(signer).toBe(loan.owner);
+describe("refunds and viewing key", () => {
+  it("v3 has no off-chain refund: a refund's destination is a Destination, then a UserOp (lib/calls.ts)", () => {
+    expect("requestRefund" in owner).toBe(false);
   });
 
   it("signs a ViewKeyRequest and returns the UFVK", async () => {
@@ -311,7 +288,6 @@ describe("owner signatures follow the pinned configuration (H-6)", () => {
     expect(config.ownerSigning).toBe(false);
     await expect(openVault(loan, { api, config })).rejects.toBeInstanceOf(OwnerSigningDisabledError);
     await expect(submitDestination(loan, VAULT, destUa, { api, config })).rejects.toBeInstanceOf(OwnerSigningDisabledError);
-    await expect(requestRefund(loan, VAULT, VAULT, destUa, { api, config })).rejects.toBeInstanceOf(OwnerSigningDisabledError);
     await expect(fetchViewingKey(loan, VAULT, { api, config })).rejects.toThrow(/Owner requests are disabled/);
     expect(bodies).toHaveLength(0);
   });

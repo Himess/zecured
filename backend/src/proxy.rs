@@ -5,8 +5,9 @@
 //! never logged, and only the JSON-RPC methods the app needs are allowed, with bounded batches
 //! and log ranges (L-4). Every request that carries a UserOp must pass the paymaster
 //! allowlist, name EntryPoint v0.7, come from a Zecured account (`Registry.vaultOf(sender)
-//! != 0`; once deployed, still the canonical SafeProxy) and stay within a per-sender rate
-//! (M-3). Refusals are fixed messages with a short code (L-2).
+//! != 0`, or for a call about a claim, the claim's own claimant; once deployed, still the
+//! canonical SafeProxy), refund only its own pending activation, and stay within a per-sender
+//! rate (M-3). Refusals are fixed messages with a short code (L-2).
 
 use std::{
     collections::HashMap,
@@ -31,8 +32,8 @@ use std::sync::Arc;
 
 use crate::{
     allowlist::{
-        Allowlist, ENTRY_POINT_V07, FALLBACK_HANDLER_SLOT, SAFE_4337_MODULE, SAFE_PROXY_RUNTIME_CODE, SAFE_SINGLETON,
-        UserOpView,
+        Allowlist, Bindings, ENTRY_POINT_V07, FALLBACK_HANDLER_SLOT, SAFE_4337_MODULE, SAFE_PROXY_RUNTIME_CODE,
+        SAFE_SINGLETON, UserOpView,
     },
     limits::{KeyedBuckets, Rate},
     paymaster::OwnPaymaster,
@@ -103,7 +104,24 @@ const CHECK_TIMEOUT: Duration = Duration::from_secs(10);
 
 sol! {
     function vaultOf(address account) external view returns (bytes32 vaultId);
+
+    /// IZecuredRegistry v3 `ClaimDetails`; its enums are ABI-encoded as uint8.
+    struct ClaimDetails {
+        bytes32 vaultId;
+        uint8 kind;
+        uint8 status;
+        uint64 amount;
+        bytes32 commitment;
+        uint40 createdAt;
+        bool bondPaid;
+        address claimant;
+    }
+
+    function claimDetails(bytes32 claimId) external view returns (ClaimDetails memory);
 }
+
+/// `ClaimKind.Refund` (IZecuredRegistry v3; the enum is append-only).
+const CLAIM_KIND_REFUND: u8 = 4;
 
 /// A refused JSON-RPC request: a fixed public message and a short code.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -143,6 +161,12 @@ const RATE_LIMITED: Refusal =
     Refusal::new("rate_limited", "Too many UserOperations from this account. Try again later.");
 const UNKNOWN_SENDER: Refusal =
     Refusal::new("unknown_sender", "Not sponsored: the sender is not a Zecured loan account.");
+const NOT_OWN_VAULT: Refusal =
+    Refusal::new("not_own_vault", "Not sponsored: only a vault's own account refunds its pending activation.");
+const NOT_OWN_REFUND: Refusal =
+    Refusal::new("not_own_refund", "Not sponsored: only the refunded vault's account gives the refund's destination.");
+const NOT_OWN_CLAIM: Refusal =
+    Refusal::new("not_own_claim", "Not sponsored: only a claim's own claimant disputes or reopens it.");
 const NOT_A_SAFE: Refusal =
     Refusal::new("not_a_safe", "Not sponsored: the sender is not a standard Zecured Safe account.");
 const CHECK_UNAVAILABLE: Refusal =
@@ -168,8 +192,8 @@ pub struct Proxy {
     pub own_paymaster: Option<OwnPaymaster>,
     pub allowlist: Option<Allowlist>,
     senders: KeyedBuckets<Address>,
-    /// Senders recently found to be Zecured Safes.
-    verified: Mutex<HashMap<Address, Instant>>,
+    /// Senders recently found to be Zecured Safes bound to a vault, and that vault.
+    verified: Mutex<HashMap<Address, (Instant, B256)>>,
 }
 
 pub type ProxyState = State<Arc<Proxy>>;
@@ -262,61 +286,110 @@ impl Proxy {
             let op = params.and_then(|p| p.get(0)).ok_or(MALFORMED_USEROP)?;
             let op: UserOpView = serde_json::from_value(op.clone()).map_err(|_| MALFORMED_USEROP)?;
             check_entry_point(params)?;
-            allowlist.check(&op).map_err(|reason| Refusal::new("not_sponsorable", reason))?;
+            let bindings = allowlist.check(&op).map_err(|reason| Refusal::new("not_sponsorable", reason))?;
             if !self.senders.try_take(op.sender) {
                 return Err(RATE_LIMITED);
             }
-            self.check_sender(allowlist, &op).await?;
+            self.check_sender(allowlist, &op, &bindings).await?;
         }
         Ok(())
     }
 
-    fn recently_verified(&self, sender: Address) -> bool {
+    /// The vault of a sender recently found to be a Zecured Safe bound to it.
+    fn recently_verified(&self, sender: Address) -> Option<B256> {
         let verified = self.verified.lock().unwrap_or_else(PoisonError::into_inner);
-        verified.get(&sender).is_some_and(|t| t.elapsed() < VERIFIED_TTL)
+        verified.get(&sender).filter(|(t, _)| t.elapsed() < VERIFIED_TTL).map(|(_, vault)| *vault)
     }
 
-    fn mark_verified(&self, sender: Address) {
+    fn mark_verified(&self, sender: Address, vault: B256) {
         let mut verified = self.verified.lock().unwrap_or_else(PoisonError::into_inner);
         if verified.len() >= MAX_SENDERS {
-            verified.retain(|_, t| t.elapsed() < VERIFIED_TTL);
+            verified.retain(|_, (t, _)| t.elapsed() < VERIFIED_TTL);
             if verified.len() >= MAX_SENDERS {
                 verified.clear();
             }
         }
-        verified.insert(sender, Instant::now());
+        verified.insert(sender, (Instant::now(), vault));
     }
 
-    /// M-3: the sender is a Zecured account (bound to a vault by `attestDeposit`, which comes
-    /// before its first UserOp) and, once deployed, still the canonical SafeProxy with the
-    /// Safe 1.4.1 singleton and the Safe 4337 module as fallback handler, so its `callData`
-    /// means what the allowlist decoded. Fails closed if the chain cannot be read.
-    async fn check_sender(&self, allowlist: &Allowlist, op: &UserOpView) -> Result<(), Refusal> {
-        if self.recently_verified(op.sender) {
-            return Ok(());
-        }
-        let call = vaultOfCall { account: op.sender }.abi_encode();
-        let call = json!([{ "to": allowlist.registry, "data": format!("0x{}", hex::encode(call)) }, "latest"]);
-        let vault = self.chain_read("eth_call", call).await?;
-        let vault = hex_bytes(&vault).filter(|b| b.len() == 32).ok_or(CHECK_UNAVAILABLE)?;
-        if B256::from_slice(&vault).is_zero() {
+    /// M-3: the sender is a Zecured account and, once deployed, still the canonical SafeProxy with
+    /// the Safe 1.4.1 singleton and the Safe 4337 module as fallback handler, so its `callData`
+    /// means what the allowlist decoded. Bound to a vault (`Registry.vaultOf`, set by the deposit
+    /// proof that reserved the vault, before the account's first UserOp) for every call but those
+    /// about one of its own claims, whose claimant it must be (`Registry.claimDetails`): a
+    /// refund's destination (T-02; a Refund claim, which a deposit that landed only as a refund
+    /// leaves without binding the account), a dispute of a payout confirmation and the reopening
+    /// of a disputed claim (T-05 (a)). `Intake.refundPending` (T-03) only for the sender's own
+    /// vault. Fails closed if the chain cannot be read.
+    async fn check_sender(&self, allowlist: &Allowlist, op: &UserOpView, bindings: &Bindings) -> Result<(), Refusal> {
+        let cached = self.recently_verified(op.sender);
+        let vault = match cached {
+            Some(vault) => vault,
+            None => self.vault_of(allowlist.registry, op.sender).await?,
+        };
+        if bindings.bound_sender && vault.is_zero() {
             return Err(UNKNOWN_SENDER);
         }
-        // An undeployed sender is checked by the allowlist: its factory data CREATE2-derives it.
-        if op.factory.is_none() {
-            let code = self.chain_read("eth_getCode", json!([op.sender, "latest"])).await?;
-            if hex_bytes(&code).as_deref() != Some(SAFE_PROXY_RUNTIME_CODE) {
-                return Err(NOT_A_SAFE);
+        if bindings.own_vaults.iter().any(|v| *v != vault) {
+            return Err(NOT_OWN_VAULT);
+        }
+        let mut claims: Vec<B256> = bindings.refund_claims.iter().chain(&bindings.own_claims).copied().collect();
+        claims.sort_unstable();
+        claims.dedup();
+        for claim_id in claims {
+            let c = self.claim_details(allowlist.registry, claim_id).await?;
+            let refund = bindings.refund_claims.contains(&claim_id);
+            if refund && (c.kind != CLAIM_KIND_REFUND || c.claimant != op.sender) {
+                return Err(NOT_OWN_REFUND);
             }
-            for (slot, expected) in [(B256::ZERO, SAFE_SINGLETON), (FALLBACK_HANDLER_SLOT, SAFE_4337_MODULE)] {
-                let word = self.chain_read("eth_getStorageAt", json!([op.sender, slot, "latest"])).await?;
-                if hex_bytes(&word).as_deref().and_then(word_address) != Some(expected) {
-                    return Err(NOT_A_SAFE);
-                }
+            // Fee and Retired claims have no claimant (zero), which is never the sender.
+            if c.claimant != op.sender {
+                return Err(NOT_OWN_CLAIM);
             }
         }
-        self.mark_verified(op.sender);
+        if cached.is_none() {
+            // An undeployed sender is checked by the allowlist: its factory data CREATE2-derives it.
+            if op.factory.is_none() {
+                self.check_safe(op.sender).await?;
+            }
+            if !vault.is_zero() {
+                self.mark_verified(op.sender, vault);
+            }
+        }
         Ok(())
+    }
+
+    /// `Registry.vaultOf(account)` (zero: not bound to a vault).
+    async fn vault_of(&self, registry: Address, account: Address) -> Result<B256, Refusal> {
+        let vault = self.eth_call(registry, vaultOfCall { account }.abi_encode()).await?;
+        (vault.len() == 32).then(|| B256::from_slice(&vault)).ok_or(CHECK_UNAVAILABLE)
+    }
+
+    async fn claim_details(&self, registry: Address, claim_id: B256) -> Result<ClaimDetails, Refusal> {
+        let out = self.eth_call(registry, claimDetailsCall { claimId: claim_id }.abi_encode()).await?;
+        claimDetailsCall::abi_decode_returns(&out).map_err(|_| CHECK_UNAVAILABLE)
+    }
+
+    /// The deployed sender is the canonical SafeProxy of the Safe 1.4.1 singleton with the Safe
+    /// 4337 module as fallback handler.
+    async fn check_safe(&self, sender: Address) -> Result<(), Refusal> {
+        let code = self.chain_read("eth_getCode", json!([sender, "latest"])).await?;
+        if hex_bytes(&code).as_deref() != Some(SAFE_PROXY_RUNTIME_CODE) {
+            return Err(NOT_A_SAFE);
+        }
+        for (slot, expected) in [(B256::ZERO, SAFE_SINGLETON), (FALLBACK_HANDLER_SLOT, SAFE_4337_MODULE)] {
+            let word = self.chain_read("eth_getStorageAt", json!([sender, slot, "latest"])).await?;
+            if hex_bytes(&word).as_deref().and_then(word_address) != Some(expected) {
+                return Err(NOT_A_SAFE);
+            }
+        }
+        Ok(())
+    }
+
+    async fn eth_call(&self, to: Address, data: Vec<u8>) -> Result<Vec<u8>, Refusal> {
+        let call = json!([{ "to": to, "data": format!("0x{}", hex::encode(data)) }, "latest"]);
+        let out = self.chain_read("eth_call", call).await?;
+        hex_bytes(&out).ok_or(CHECK_UNAVAILABLE)
     }
 
     /// One JSON-RPC read on the backend's own RPC.
@@ -425,13 +498,16 @@ mod tests {
     use axum::{Router, routing::post};
 
     use super::*;
-    use crate::allowlist::tests::{list, op, single};
+    use crate::allowlist::tests::{batch, dispute, list, op, refund_destination, refund_pending, reopen, single};
 
-    /// A Base RPC stub: `bound` senders have a vault; `deployed` senders have the given code
-    /// and storage (singleton slot, fallback handler slot).
+    /// A Base RPC stub: `bound` senders have a vault (0x07…, or the one in `vaults`); `claims`
+    /// are the Registry's claims (kind, claimant); `deployed` senders have the given code and
+    /// storage (singleton slot, fallback handler slot).
     #[derive(Default)]
     struct Chain {
         bound: Vec<Address>,
+        vaults: HashMap<Address, B256>,
+        claims: HashMap<B256, (u8, Address)>,
         deployed: HashMap<Address, (Vec<u8>, Address, Address)>,
         calls: AtomicUsize,
     }
@@ -443,13 +519,30 @@ mod tests {
         let result = match req["method"].as_str().unwrap() {
             "eth_call" => {
                 let data = hex_bytes(&params[0]["data"]).unwrap();
-                let account = vaultOfCall::abi_decode(&data).unwrap().account;
-                let id = if c.bound.contains(&account) {
-                    B256::repeat_byte(7)
+                if let Ok(call) = vaultOfCall::abi_decode(&data) {
+                    let account = call.account;
+                    let id = match c.vaults.get(&account) {
+                        Some(id) => *id,
+                        None if c.bound.contains(&account) => B256::repeat_byte(7),
+                        None => B256::ZERO,
+                    };
+                    json!(id)
                 } else {
-                    B256::ZERO
-                };
-                json!(id)
+                    let id = claimDetailsCall::abi_decode(&data).unwrap().claimId;
+                    // An unknown claim reads as zeros (status None, no claimant).
+                    let (kind, claimant) = c.claims.get(&id).copied().unwrap_or((0, Address::ZERO));
+                    let details = ClaimDetails {
+                        vaultId: B256::repeat_byte(7),
+                        kind,
+                        status: u8::from(!claimant.is_zero()),
+                        amount: 50_000,
+                        commitment: B256::ZERO,
+                        createdAt: Default::default(),
+                        bondPaid: false,
+                        claimant,
+                    };
+                    json!(Bytes::from(claimDetailsCall::abi_encode_returns(&details)))
+                }
             }
             "eth_getCode" => {
                 let a: Address = params[0].as_str().unwrap().parse().unwrap();
@@ -570,6 +663,99 @@ mod tests {
     async fn stub_data(p: &Proxy, sender: Address) -> Result<(), Refusal> {
         let req = request("pm_getPaymasterStubData", release_op(sender), ENTRY_POINT_V07);
         p.check(&req, PAYMASTER_METHODS).await
+    }
+
+    /// `pm_getPaymasterStubData` for a UserOp of `sender` with `call_data`.
+    async fn sponsor(p: &Proxy, sender: Address, call_data: Bytes) -> Result<(), Refusal> {
+        let user_op = serde_json::to_value(UserOpJson::from(&op(sender, call_data))).unwrap();
+        p.check(&request("pm_getPaymasterStubData", user_op, ENTRY_POINT_V07), PAYMASTER_METHODS).await
+    }
+
+    /// T-02: a refund's destination is sponsored only for the refunded vault's own account, which
+    /// need not be bound to a vault (a deposit that landed only as a refund binds none); anything
+    /// else still needs a bound account.
+    #[tokio::test]
+    async fn refund_destinations_only_from_the_refunded_account() {
+        let l = list();
+        let bound = Address::repeat_byte(0x91);
+        let refund_only = Address::repeat_byte(0x92);
+        let stranger = Address::repeat_byte(0x93);
+        let mut chain = Chain::default();
+        chain.vaults.insert(bound, B256::repeat_byte(0x0b));
+        chain.claims.insert(B256::repeat_byte(3), (CLAIM_KIND_REFUND, refund_only));
+        chain.claims.insert(B256::repeat_byte(4), (CLAIM_KIND_REFUND, bound));
+        chain.claims.insert(B256::repeat_byte(5), (0, bound)); // a Release claim of `bound`
+        for a in [bound, refund_only, stranger] {
+            chain.deployed.insert(a, safe(SAFE_SINGLETON, SAFE_4337_MODULE));
+        }
+        let (p, _) = proxy_with(chain).await;
+        let destination = |claim: u8| single(l.registry, refund_destination(claim));
+        assert_eq!(sponsor(&p, refund_only, destination(3)).await, Ok(()), "a refund-only account");
+        assert_eq!(sponsor(&p, bound, destination(4)).await, Ok(()), "a bound account's own refund");
+        assert_eq!(sponsor(&p, stranger, destination(3)).await, Err(NOT_OWN_REFUND), "another account's refund");
+        assert_eq!(sponsor(&p, bound, destination(3)).await, Err(NOT_OWN_REFUND), "a bound account, not its refund");
+        assert_eq!(sponsor(&p, bound, destination(5)).await, Err(NOT_OWN_REFUND), "not a Refund claim");
+        assert_eq!(sponsor(&p, refund_only, destination(9)).await, Err(NOT_OWN_REFUND), "an unknown claim");
+        let both = batch(&[(l.registry, refund_destination(3)), (l.registry, refund_destination(4))]);
+        assert_eq!(sponsor(&p, refund_only, both).await, Err(NOT_OWN_REFUND), "every claim in a batch");
+        // Nothing else without a vault: a transfer next to the destination.
+        let transfer = crate::allowlist::transferCall {
+            to: stranger,
+            amount: U256::from(1u8),
+        }
+        .abi_encode();
+        let mixed = batch(&[(l.registry, refund_destination(3)), (l.usdc, transfer)]);
+        assert_eq!(sponsor(&p, refund_only, mixed).await, Err(UNKNOWN_SENDER));
+    }
+
+    /// T-05 (a): only a claim's own claimant disputes its confirmation or reopens it. The claim
+    /// binds the account, so an account with only a refund disputes its refund's payout too.
+    #[tokio::test]
+    async fn disputes_only_from_the_claims_own_claimant() {
+        let l = list();
+        let bound = Address::repeat_byte(0x91);
+        let refund_only = Address::repeat_byte(0x92);
+        let liquidator = Address::repeat_byte(0x94);
+        let mut chain = Chain::default();
+        chain.vaults.insert(bound, B256::repeat_byte(0x0b));
+        chain.claims.insert(B256::repeat_byte(5), (0, bound)); // Release
+        chain.claims.insert(B256::repeat_byte(3), (CLAIM_KIND_REFUND, refund_only));
+        chain.claims.insert(B256::repeat_byte(6), (1, liquidator)); // Liquidation
+        chain.claims.insert(B256::repeat_byte(7), (5, Address::ZERO)); // Fee: no claimant
+        for a in [bound, refund_only] {
+            chain.deployed.insert(a, safe(SAFE_SINGLETON, SAFE_4337_MODULE));
+        }
+        let (p, _) = proxy_with(chain).await;
+        let registry = |data: Vec<u8>| single(l.registry, data);
+        assert_eq!(sponsor(&p, bound, registry(dispute(5))).await, Ok(()));
+        assert_eq!(sponsor(&p, bound, registry(reopen(5))).await, Ok(()));
+        assert_eq!(sponsor(&p, refund_only, registry(dispute(3))).await, Ok(()), "a refund-only account");
+        assert_eq!(sponsor(&p, bound, registry(dispute(6))).await, Err(NOT_OWN_CLAIM), "the liquidator's claim");
+        assert_eq!(sponsor(&p, bound, registry(reopen(3))).await, Err(NOT_OWN_CLAIM), "another account's claim");
+        assert_eq!(sponsor(&p, bound, registry(dispute(7))).await, Err(NOT_OWN_CLAIM), "a Fee claim has no claimant");
+        let both = batch(&[(l.registry, dispute(3)), (l.registry, refund_destination(3))]);
+        assert_eq!(sponsor(&p, refund_only, both).await, Ok(()), "one claim, read once, both rules");
+    }
+
+    /// T-03: only a vault's own account has its pending activation refunded (the Intake also lets
+    /// anyone do it after a halt; the paymaster sponsors only the account).
+    #[tokio::test]
+    async fn pending_refunds_only_for_the_senders_own_vault() {
+        let l = list();
+        let bound = Address::repeat_byte(0x91);
+        let refund_only = Address::repeat_byte(0x92);
+        let mut chain = Chain::default();
+        chain.vaults.insert(bound, B256::repeat_byte(0x0b));
+        for a in [bound, refund_only] {
+            chain.deployed.insert(a, safe(SAFE_SINGLETON, SAFE_4337_MODULE));
+        }
+        let (p, chain) = proxy_with(chain).await;
+        let pending = |vault: u8| single(l.intake, refund_pending(vault));
+        assert_eq!(sponsor(&p, bound, pending(0x0b)).await, Ok(()));
+        assert_eq!(sponsor(&p, bound, pending(0x0c)).await, Err(NOT_OWN_VAULT));
+        assert_eq!(sponsor(&p, refund_only, pending(0x0b)).await, Err(UNKNOWN_SENDER));
+        // The bound sender's vault is cached with it: one vaultOf and the Safe checks, once.
+        assert_eq!(chain.calls.load(Ordering::SeqCst), 4 + 1);
     }
 
     /// M-3: the EntryPoint parameter is pinned to v0.7 for every UserOp method.
