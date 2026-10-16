@@ -9,7 +9,9 @@ import {ZecuredPriceFeed} from "../src/ZecuredPriceFeed.sol";
 
 /// @title DeployPriceFeed
 /// @notice Deploys ZecuredPriceFeed (design notes T-10) from a config file, by default config/price-feed-base.json
-///         (Base mainnet). Before deploying it checks that the RPC is on the config's chain, that each source has code,
+///         (Base mainnet). Before deploying it checks the config's rules (each max age at least its source's heartbeat
+///         plus an hour; a deviation band at least the sum of the sources' own deviation thresholds, so that their
+///         normal lag never reads as a divergence), that the RPC is on the config's chain, that each source has code,
 ///         the decimals the config states and a positive answer, and that the primary is fresh; it warns when the
 ///         secondary is not. Afterwards it reads the feed back and writes deployments/price-feed-<network>.json, or
 ///         deployments/price-feed-<network>.dry-run.json in a simulation.
@@ -31,14 +33,19 @@ contract DeployPriceFeed is Script {
         address primary;
         uint64 primaryMaxAge;
         uint256 primaryDecimals;
+        uint256 primaryHeartbeat;
+        uint256 primaryDeviationBps;
         address secondary;
         uint64 secondaryMaxAge;
         uint256 secondaryDecimals;
+        uint256 secondaryHeartbeat;
+        uint256 secondaryDeviationBps;
         uint16 maxDeviationBps;
     }
 
     function run() external returns (ZecuredPriceFeed feed) {
         Config memory c = _readConfig();
+        _checkRules(c);
         require(block.chainid == c.chainId, "DeployPriceFeed: the RPC's chain is not the config's");
         require(
             _checkSource(c.primary, c.primaryDecimals, c.primaryMaxAge, "primary"), "DeployPriceFeed: stale primary"
@@ -70,10 +77,32 @@ contract DeployPriceFeed is Script {
         c.primary = vm.parseJsonAddress(json, ".primary.address");
         c.primaryMaxAge = uint64(vm.parseJsonUint(json, ".primary.maxAge"));
         c.primaryDecimals = vm.parseJsonUint(json, ".primary.decimals");
+        c.primaryHeartbeat = vm.parseJsonUint(json, ".primary.heartbeat");
+        c.primaryDeviationBps = vm.parseJsonUint(json, ".primary.deviationThresholdBps");
         c.secondary = vm.parseJsonAddress(json, ".secondary.address");
         c.secondaryMaxAge = uint64(vm.parseJsonUint(json, ".secondary.maxAge"));
         c.secondaryDecimals = vm.parseJsonUint(json, ".secondary.decimals");
+        c.secondaryHeartbeat = vm.parseJsonUint(json, ".secondary.heartbeat");
+        c.secondaryDeviationBps = vm.parseJsonUint(json, ".secondary.deviationThresholdBps");
         c.maxDeviationBps = uint16(vm.parseJsonUint(json, ".maxDeviationBps"));
+    }
+
+    /// @dev T-10: a max age of at least the heartbeat plus an hour, and a band wide enough for both sources' lag.
+    function _checkRules(Config memory c) internal pure {
+        require(
+            c.primaryMaxAge >= c.primaryHeartbeat + 1 hours,
+            "DeployPriceFeed: the primary's max age is under its heartbeat plus an hour"
+        );
+        if (c.secondary != address(0)) {
+            require(
+                c.secondaryMaxAge >= c.secondaryHeartbeat + 1 hours,
+                "DeployPriceFeed: the secondary's max age is under its heartbeat plus an hour"
+            );
+            require(
+                c.maxDeviationBps >= c.primaryDeviationBps + c.secondaryDeviationBps,
+                "DeployPriceFeed: the deviation band is narrower than the sources' own thresholds"
+            );
+        }
     }
 
     /// @dev Code, decimals and a positive answer are required; returns whether the answer is fresh.
