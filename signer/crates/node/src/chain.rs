@@ -868,7 +868,10 @@ mod tests {
     #[test]
     fn under_v2_almost_everything_lands_as_a_refund_claim() {
         let v2 = Some(Landing::WithRefunds { min_refund: 20_000 });
-        for n in [deposit(200, 1_234_567, 1, WRONG_AMOUNT), deposit(300, 1_000_000, 1, LATE)] {
+        for n in [
+            deposit(200, 1_234_567, 1, WRONG_AMOUNT),
+            deposit(300, 1_000_000, 1, LATE),
+        ] {
             assert!(!refundable_offchain(&n, v2, &RULES, 1_000));
         }
         assert!(refundable_offchain(&deposit(200, 19_999, 1, WRONG_AMOUNT), v2, &RULES, 1_000));

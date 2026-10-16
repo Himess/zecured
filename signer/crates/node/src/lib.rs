@@ -506,8 +506,11 @@ impl Node {
             .get_or_try_init(|| async {
                 let mut agreed: Option<Landing> = None;
                 for provider in self.base_providers()? {
-                    let intake =
-                        IZecuredRegistry::new(self.cfg.registry, &provider).intake().call().await.context("Registry.intake")?;
+                    let intake = IZecuredRegistry::new(self.cfg.registry, &provider)
+                        .intake()
+                        .call()
+                        .await
+                        .context("Registry.intake")?;
                     ensure!(intake != Address::ZERO, "the Registry names no Intake");
                     let intake = IZecuredIntake::new(intake, &provider);
                     let landing = if intake.journalV2().call().await.context("Intake.journalV2")? {
