@@ -79,6 +79,25 @@ to sign a new vault, made explicit and bounded.
 verifier version, which takes effect only after a public delay (*judge*: 10 minutes; mainnet 14 days
 for a deposit guest, 7 for a violation guest).
 
+## Mainnet signer economics (design)
+
+With the mainnet template (docs/MAINNET.md § 2): five bonds of 50,000 USDC (250,000 USDC in all),
+coverage k = 50 % and a cap of 100 ZEC. A 0.5 % opening fee on a full cap of new vaults earns
+0.5 ZEC; if the cap turns over four times a year, the signers earn about 2 ZEC a year on 250,000
+USDC of bonded capital, about 1 % a year at a ZEC price near 1,200 USD. The opening fee alone does
+not pay for the capital. Options, all design:
+
+- **Yield-bearing bonds:** bonds held as ERC-4626 shares of a lending vault and counted at a
+  haircut in the effective bond, so that the capital earns while it backs the vaults.
+- **A custody fee by time:** a small fee per day on the outstanding collateral, charged at exit as
+  a Fee claim.
+- **Signer cells:** several independent five-signer cells, each with its own cap and bonds, so
+  that capital grows with demand instead of one cell's bonds bounding the protocol.
+
+Liveness payments shrink the coverage until the bonds are topped up: the USDC paid for an overdue
+claim leaves the bonds, the effective bond falls, and new minting stops earlier until the signers
+add to their bonds.
+
 ## What the bonds do not cover
 
 - A theft larger than the bonds. The coverage cap keeps the locked value within the bonds' reach at
