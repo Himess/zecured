@@ -155,6 +155,8 @@ describe("opening a vault (no deposit that would only come back as a refund)", (
       message: `New minting is paused until ${formatUtc(NOW + 60)}: your deposit would wait as a pending activation until then.`,
     });
     expect(at("Paused").message).toMatch(/theft case is open/);
+    // A pause by signatures that had ended when the backend read the gates: the case is what pauses.
+    expect(at("Paused", { pausedUntil: NOW - 60 }).message).toMatch(/theft case is open/);
     expect(at("NotBonded")).toMatchObject({ allowed: true, message: expect.stringMatching(/full bond/) });
     expect(at(null)).toMatchObject({ allowed: true, message: expect.stringMatching(/stale/) });
     expect(at("None")).toEqual({ allowed: true, message: null });

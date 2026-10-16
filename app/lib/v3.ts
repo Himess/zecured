@@ -157,10 +157,11 @@ export function openGate(s: MintingStatus | null, amount: bigint): OpenGate {
         message: `The coverage cap has room for ${formatTaz(s.capRoom)} only: a deposit of ${formatTaz(amount)} proven now would only come back as a refund. Try a smaller size, or later.`,
       };
     case "Paused":
+      // A pause by signatures runs until `pausedUntil`; past it (as the backend read it), an open theft case pauses.
       return {
         allowed: true,
         message:
-          s.pausedUntil > 0
+          s.pausedUntil > (s.readAt ?? 0)
             ? `New minting is paused until ${formatUtc(s.pausedUntil)}: your deposit would wait as a pending activation until then.`
             : "New minting is paused while a theft case is open: your deposit would wait as a pending activation.",
       };
