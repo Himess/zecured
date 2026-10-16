@@ -23,6 +23,8 @@ import {ZecuredCompensator} from "../src/ZecuredCompensator.sol";
 import {ZecuredVersions} from "../src/ZecuredVersions.sol";
 import {Version, VersionKind} from "../src/interfaces/v3/IZecuredVersions.sol";
 import {IRiscZeroVerifierRouter} from "../src/interfaces/IRiscZeroVerifierRouter.sol";
+import {ZecuredPriceFeed} from "../src/ZecuredPriceFeed.sol";
+import {IZecuredPriceFeed} from "../src/interfaces/v3/IZecuredPriceFeed.sol";
 import {RegistryConfig} from "../src/interfaces/v3/IZecuredRegistry.sol";
 import {IntakeConfig, WorkTier} from "../src/interfaces/v3/IZecuredIntake.sol";
 import {BondConfig} from "../src/interfaces/v3/ISignerBond.sol";
@@ -97,6 +99,8 @@ contract DeployZecured is Script {
         uint16 coverageBps;
         uint64 maxTotalZat;
         uint64 capPriceMaxAge;
+        /// Mainnet: the primary source the market's ZecuredPriceFeed must read (T-10); zero elsewhere.
+        address pricePrimary;
         uint64 maxPause;
         uint64 pendingRefundDelay;
         bool autoPauseOnCase;
@@ -265,7 +269,7 @@ contract DeployZecured is Script {
         c.leftoverSink = vm.parseJsonAddress(json, ".leftoverSink");
     }
 
-    function _readIntakeConfig(string memory json, NetworkConfig memory c) internal pure {
+    function _readIntakeConfig(string memory json, NetworkConfig memory c) internal view {
         uint256[] memory maxAmounts = vm.parseJsonUintArray(json, ".tierMaxAmountZat");
         uint256[] memory minWorks = vm.parseJsonUintArray(json, ".tierMinWork");
         require(maxAmounts.length == minWorks.length, "DeployZecured: work tiers: two arrays of one length");
@@ -279,6 +283,7 @@ contract DeployZecured is Script {
         c.coverageBps = uint16(vm.parseJsonUint(json, ".coverageBps"));
         c.maxTotalZat = uint64(vm.parseJsonUint(json, ".maxTotalZat"));
         c.capPriceMaxAge = uint64(vm.parseJsonUint(json, ".capPriceMaxAge"));
+        if (vm.keyExistsJson(json, ".pricePrimary")) c.pricePrimary = vm.parseJsonAddress(json, ".pricePrimary");
         c.maxPause = uint64(vm.parseJsonUint(json, ".maxPause"));
         c.pendingRefundDelay = uint64(vm.parseJsonUint(json, ".pendingRefundDelay"));
         c.autoPauseOnCase = vm.parseJsonBool(json, ".autoPauseOnCase");
@@ -346,6 +351,7 @@ contract DeployZecured is Script {
         if (c.chainId == BASE_MAINNET) {
             // The market prices with the ZecuredPriceFeed itself (T-10): no demo control on mainnet.
             require(!d.baseOracleIsMock, "DeployZecured: mainnet needs BASE_ORACLE (a ZecuredPriceFeed, T-10)");
+            _checkPriceFeed(c, address(d.baseOracle));
             d.oracle = d.baseOracle;
         } else {
             d.oracle = IOracle(address(new DemoShockOracle(d.deployer, d.baseOracle)));
@@ -353,13 +359,30 @@ contract DeployZecured is Script {
         }
 
         d.capPrice = vm.envOr("CAP_PRICE", address(0));
-        if (d.capPrice == address(0)) {
-            require(c.chainId != BASE_MAINNET, "DeployZecured: mainnet needs CAP_PRICE (a ZecuredPriceFeed, T-10)");
+        if (c.chainId == BASE_MAINNET) {
+            // The same feed: price() for the market, priceHigh() for the cap.
+            if (d.capPrice == address(0)) d.capPrice = address(d.baseOracle);
+            require(
+                d.capPrice == address(d.baseOracle), "DeployZecured: on mainnet CAP_PRICE is the market's feed (T-10)"
+            );
+        } else if (d.capPrice == address(0)) {
             d.capPrice = address(new DemoCapPrice(d.oracle));
             d.capPriceIsDemo = true;
         } else {
             require(d.capPrice.code.length > 0, "DeployZecured: CAP_PRICE has no code");
         }
+    }
+
+    /// T-10 on mainnet: the market's oracle is a working ZecuredPriceFeed over the config's primary source, with a
+    /// secondary one, and the Intake's `capPriceMaxAge` is its `maxSourceAge` (a smaller one would refuse fresh prices,
+    /// a larger one accept a stale price for the difference).
+    function _checkPriceFeed(NetworkConfig memory c, address feed) internal view {
+        require(c.pricePrimary != address(0), "DeployZecured: the mainnet config names the feed's primary source");
+        ZecuredPriceFeed f = ZecuredPriceFeed(feed);
+        require(f.primary() == c.pricePrimary, "DeployZecured: the feed reads another primary source");
+        require(f.secondary() != address(0), "DeployZecured: the feed has no secondary source");
+        require(f.state() != IZecuredPriceFeed.FeedState.Stale, "DeployZecured: the feed is stale");
+        require(f.maxSourceAge() == c.capPriceMaxAge, "DeployZecured: capPriceMaxAge is not the feed's maxSourceAge");
     }
 
     /// The verifier both proof kinds use, and the seal selector they pin (Y1).
@@ -655,7 +678,7 @@ contract DeployZecured is Script {
         vm.serializeUint(root, "block", block.number);
         vm.serializeUint(root, "timestamp", block.timestamp);
         vm.serializeAddress(root, "deployer", d.deployer);
-        vm.serializeString(root, "contracts", _contractsJson(d));
+        vm.serializeString(root, "contracts", _contractsJson(c, d));
         vm.serializeString(root, "market", _marketJson(c, d));
         vm.serializeString(root, "eip712", _eip712Json(d));
         vm.serializeString(root, "depositProofs", _proofsJson(c, d));
@@ -681,8 +704,12 @@ contract DeployZecured is Script {
         console.log("written:", path);
     }
 
-    function _contractsJson(Deployment memory d) internal returns (string memory contracts) {
+    function _contractsJson(NetworkConfig memory c, Deployment memory d) internal returns (string memory contracts) {
         contracts = "contracts";
+        if (c.chainId == BASE_MAINNET) {
+            vm.serializeAddress(contracts, "PriceFeedPrimary", ZecuredPriceFeed(address(d.oracle)).primary());
+            vm.serializeAddress(contracts, "PriceFeedSecondary", ZecuredPriceFeed(address(d.oracle)).secondary());
+        }
         vm.serializeAddress(contracts, "ZZEC", address(d.zzec));
         vm.serializeAddress(contracts, "ZecuredSpendLogic", address(d.spendLogic));
         vm.serializeAddress(contracts, "ZecuredRegistry", address(d.registry));
@@ -788,6 +815,12 @@ contract DeployZecured is Script {
         vm.serializeUint(v3, "commitGrace", c.commitGrace);
         vm.serializeUint(v3, "livenessPremiumBps", c.livenessPremiumBps);
         vm.serializeUint(v3, "incidentWindow", c.incidentWindow);
+        vm.serializeUint(v3, "disputeWindow", c.disputeWindow);
+        vm.serializeUint(v3, "inclusionWindow", c.inclusionWindow);
+        vm.serializeUint(v3, "versionDepositDelay", c.versionDepositDelay);
+        vm.serializeUint(v3, "versionViolationDelay", c.versionViolationDelay);
+        vm.serializeUint(v3, "versionEstopDelay", c.versionEstopDelay);
+        vm.serializeString(v3, "zcashNetwork", c.zcashNetwork);
         v3 = vm.serializeAddress(v3, "leftoverSink", c.leftoverSink);
     }
 }

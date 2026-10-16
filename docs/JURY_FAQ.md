@@ -21,9 +21,9 @@ bonds after 24 hours (72 on mainnet); a payout they confirm but never send can b
 they mint unbacked zZEC: a deposit is activated on a zero-knowledge proof (RISC Zero) that the note
 is in a Zcash block committed by a header our on-chain relay verified with Equihash, without
 revealing which block ([TIER2.md](TIER2.md)), and new collateral is accepted only while the bonds
-cover its value ([ECONOMICS.md](ECONOMICS.md)). What remains outside: deposits of another amount
-than the vault's, refunded off-chain on the owner's request until the deployment takes refund
-proofs, and all five signers together.
+cover its value ([ECONOMICS.md](ECONOMICS.md)). A deposit of another amount than the vault's, or
+paid after its expiry, is proven as a refund and paid back like any claim. What remains outside:
+all five signers together.
 
 On Zcash testnet a single Equihash ASIC out-mines the whole network about 40 times over, so every
 proof-of-work-based guarantee here — Tier 2 minting and Tier 3 slashing — is demonstrative on

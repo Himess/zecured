@@ -55,10 +55,20 @@ contract DeployConfigTest is Test {
         assertEq(c.chainId, 84532);
         assertEq(c.zcashNetwork, "zcash-testnet");
         assertFalse(c.localFork);
+        _assertTestnetJournal(c);
         c = _load("base-sepolia-theft-demo");
         assertTrue(c.theftDemo);
+        _assertTestnetJournal(c);
         c = _load("anvil");
         assertTrue(c.localFork);
+        _assertTestnetJournal(c);
+    }
+
+    /// The guests commit journal v2 only (statement v2), and the Testnet build proves the NU7 epoch only.
+    function _assertTestnetJournal(DeployZecured.NetworkConfig memory c) internal pure {
+        assertTrue(c.journalV2, "journal v2");
+        assertEq(c.branchIds[0], 0x77190AD9, "NU7");
+        assertEq(c.branchIds[1], 0, "the Testnet build proves no other epoch");
     }
 
     /// The mainnet template: docs/MAINNET.md's parameter table.
@@ -69,6 +79,8 @@ contract DeployConfigTest is Test {
         assertFalse(c.localFork);
         assertFalse(c.theftDemo);
         assertEq(c.loanToken, 0x833589fCD6eDb6E08f4c7C32D4f71b54bdA02913, "Circle USDC on Base");
+        assertEq(c.pricePrimary, 0x69e5BC4988a9AF30Ec827C5609c0D41028446ec0, "Chainlink ZEC/USD, Standard proxy");
+        assertEq(c.capPriceMaxAge, 90_000, "the price feed's maxSourceAge");
         assertLe(c.coverageBps, 5_000, "k <= 50 % with independent operators");
         assertTrue(c.autoPauseOnCase, "an open F1/F2 case pauses minting");
         assertTrue(c.journalV2, "journal v2");
