@@ -10,8 +10,8 @@
 //!   nullifier (under the full viewing key of the vault's UFVK) is the nullifier of one of X's
 //!   actions. The journal names the note by its tag and X by its `payoutRef`, both under the
 //!   UFVK's tag key; the slasher checks that the tag is a lineage note on Base and that no
-//!   commitment of X names it as its input. F1 keeps the full UFVK (design review, Claude Web
-//!   § 2): with only K and a nullifier key, anyone holding K could pair it with a made-up `nk`
+//!   commitment of X names it as its input. F1 keeps the full UFVK (design review): with only
+//!   K and a nullifier key, anyone holding K could pair it with a made-up `nk`
 //!   on a forged block.
 //! - **F2, WithheldChange.** No action of X carries the change note the commitment of X
 //!   promised: none whose note commitment has the committed tag and decrypts, with the vault's

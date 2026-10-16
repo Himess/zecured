@@ -38,7 +38,7 @@
 //! note must still pay the vault's published receiver with a matching opening. The tag is the same
 //! in both modes, so a note lands on Base once, as collateral or as a refund, never both.
 //!
-//! **The tag key is bound to the vault** (design review, Claude Web § 2). The witness carries K,
+//! **The tag key is bound to the vault** (design review). The witness carries K,
 //! not the vault's viewing key: the prover never sees the UFVK (review H-10). The signers sign
 //! `tagKeyHash = keccak256(K)` in `VaultOpened`, and the journal's `vaultOpenedHash` is computed
 //! with the witness's K, so the five signatures Base checks vouch for the very K the tag was

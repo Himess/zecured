@@ -253,7 +253,7 @@ fn f4_gives_the_reference_an_honest_commitment_names_the_claim_by() {
     assert_eq!((j.value, j.output_index), (0, 0));
 }
 
-/// F4 needs only K (the guest round, Claude Web § 2): the prover is not given the UFVK. A wrong K
+/// F4 needs only K (the guest round): the prover is not given the UFVK. A wrong K
 /// names another payout, for which Base has no commitment (the slasher refuses the case); the
 /// receiver must still be a receiver.
 #[test]
