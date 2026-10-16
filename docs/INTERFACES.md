@@ -275,7 +275,7 @@ function lastVaultSettledAt() external view returns (uint64);
 // Disputes (IZecuredDisputes, T-05 (a)): served by the Registry's fallback, which runs ZecuredSpendLogic
 function disputePayout(bytes32 claimId) external;                                      // the claim's claimant
 function upholdPayout(bytes32 claimId, bytes32 payoutRef) external;                    // slasher only
-function reopenDisputedClaim(bytes32 claimId) external;                                // anyone, after the inclusion window
+function reopenDisputedClaim(bytes32 claimId) external;                                // anyone, after the inclusion window (still upholdable, D57)
 function payoutDispute(bytes32 claimId) external view returns (uint64 paidAt, uint64 dueAt);
 ```
 
@@ -303,7 +303,8 @@ function payoutDispute(bytes32 claimId) external view returns (uint64 paidAt, ui
   the claim is unpaid again until the slasher upholds it with a proof of its payout's inclusion, or
   anyone reopens it after `inclusionWindow` (then payable again, and from the bonds on its original
   liveness schedule). Once per confirmation; never a bond-paid claim, an upheld one, or one of a
-  compromised vault.
+  compromised vault. A reopened claim is still upheld by a later proof (D57), and a new commitment of
+  its input names the input's whole claim list again, its confirmed claims included.
 - Tier 3 (D31): `commitSpend` records a payout before the signers sign it (3 sorted signer
   signatures, one lineage input of the vault, 1 to 8 distinct pending claims bound to that input on
   first commitment, one unused claim reference, one distinct output index and one distinct

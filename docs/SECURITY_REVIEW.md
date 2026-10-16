@@ -90,6 +90,14 @@ threshold and malleability (I6), close-request binding and ERC-1271 (I8), Morpho
 Morpho authorization surface (no path borrows or withdraws loan assets), D14's LTV rounding, liquidation share caps,
 close arithmetic, event privacy, and the relay's consensus rules.
 
+## v3 integration (2026-10-16)
+
+Found while switching the signers and the coordinator to the v3 contracts.
+
+| ID | Severity | Finding | Status |
+|---|---|---|---|
+| V-1 | Medium | A disputed claim reopened after its inclusion window could never be committed again when its input's claim list also held a claim that stayed confirmed (the opening fee, which nobody can dispute): RT-4 asks for the same list, and every member had to be pending. The bonds then paid it, their reimbursement was blocked the same way, and the vault never settled, so no bond could leave in full; a payout proven after the window kept its vault open the same way | **Fixed** (D57). A new commitment of the input names its whole list again, confirmed claims included, and a later proof still upholds a reopened claim (`DisputedFeePayoutTest`, three more dispute tests) |
+
 ## Remaining risks
 
 - **Data sources (C-1, C-2).** A node is as honest as the chain data it reads. Independent

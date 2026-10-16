@@ -7,7 +7,10 @@
 3. A borrower wallet pre-funded in Ironwood (`zecured-wallet balance`); a second vault already
    active for the liquidation scene (liquidation needs a few minutes of confirmations).
 4. Oracle price at $40 (the deployment default; the demo control panel sets it).
-5. Backup video recorded (see below) in case the testnet or the light wallet server is slow.
+5. The treasury's receiver and salt behind the deployment's `FEE_COMMITMENT` registered with the
+   signers like a market maker's (`POST /recipients`): without it the vaults' opening-fee claims are
+   never paid and their vaults never settle.
+6. Backup video recorded (see below) in case the testnet or the light wallet server is slow.
 
 ## Live flow (≈ 6 minutes)
 
@@ -15,14 +18,14 @@
 |---|---|---|
 | Prepare | Why only Ironwood → Ironwood deposits are accepted (turnstile) | Preparation page |
 | Open | Choose 0.01 TAZ → a fresh owner key and smart account → a fresh 3-of-5 vault | ZIP-321 QR, vault address |
-| Deposit | Pay the QR from the Ironwood wallet | Vault status: deposit seen → active |
+| Deposit | Pay the QR from the Ironwood wallet | Vault status: deposit seen → proven (pending) → active |
 | Borrow | Borrow USDC from a gasless account (first UserOp deploys it) | Position page; the account never held ETH or zZEC |
 | What the world sees | Three columns: everyone / signer network / you | Live data |
 | Close from collateral | Quote → sign → the market maker repays on Morpho | One Zcash transaction pays the market maker and the borrower |
 | Liquidation | Drop the oracle price → the bot liquidates → the rest stays yours | Liquidation claim paid, remaining collateral released |
 | Threshold | Switch two signers to "compromised" → sweep attempt → 2 sign, 3 refuse | Votes on the control panel; nothing moves |
 | Verify | Owner-signed viewing-key request → scan the vault yourself | UFVK and the vault's notes |
-| Tier 2 (optional) | The same deposit activated on a zero-knowledge proof instead of signer signatures: the relay's verified header, the proof's journal, `attestDepositWithProof` | The Base transaction; the journal holds no Zcash data but a later header |
+| Tier 2 (optional) | How that deposit was activated: a zero-knowledge proof, no signer's word: the relay's verified header, the proof's journal, `ZecuredIntake.attestDepositWithProof`, then `finalizeActivation` | The Base transactions; the journal holds no Zcash data but a later header |
 
 ## Theft demo (Tier 3, its own deployment)
 
@@ -34,7 +37,7 @@ Setup, once:
 1. `THEFT_DEMO=1 scripts/signer-network.sh init`: five fresh node identities in
    `signer/data-theft-demo/` (and the `demo-tier3` build in `target/theft-demo/`).
 2. `scripts/deploy-theft-demo.sh` (a simulation), then `scripts/deploy-theft-demo.sh --broadcast`:
-   Registry, zZEC, Adapter, `SignerBond` and `ZecuredSlasher` with a 2-minute window
+   the v3 contracts with a 2-minute challenge window and no opening fee
    (`contracts/deployments/base-sepolia-theft-demo.json`).
 3. `THEFT_DEMO=1 scripts/signer-network.sh init` again (the network config now names the
    deployment), `THEFT_DEMO=1 scripts/bond-signers.sh`, `THEFT_DEMO=1 scripts/signer-network.sh start`.

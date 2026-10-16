@@ -210,8 +210,11 @@ a witness RPC (set by default outside the local fork).
   first exit, behind it, and heads a payout only when nothing else waits; a claim the bonds paid goes
   to the destination three signers gave for their reimbursement, without the vault's ovk. A disputed
   claim counts unpaid but is not payable until it is reopened, and then only by a payout of its input
-  with the same claim list (RT-4); a node that confirmed the payout itself keeps it paid, since it saw
-  its value leave. The coordinator plans with the same functions (`ledger::next_vault_payout`).
+  with the same claim list (RT-4), which may name the list's confirmed claims again (D57): while the
+  input is unspent, no payout of it landed. A node that confirmed the payout itself keeps it paid,
+  since it saw its value leave. The coordinator plans with the same functions
+  (`ledger::next_vault_payout`); it does not yet plan such a payout again with the confirmed claims
+  (a confirmed payout undone by a reorganization), which the contracts allow.
 - Liveness (T-05): every node and the coordinator warn when a payable claim is older than half the
   bonds' `livenessPeriod`, at most every half hour per vault, naming the vault by its id prefix only.
 
@@ -219,8 +222,10 @@ a witness RPC (set by default outside the local fork).
 disputed claim it finds the transaction that spent the claim's input in its scan, checks that Base
 recorded it as that input's payout, proves its inclusion with the violation guest (`Included`, the
 witness holding only K) ahead of every deposit proof in its queue, and calls `proveInclusion` for each
-disputed claim of that payout. Without proofs configured it only warns: someone must prove it before
-the dispute falls due. A claimant disputes with `zecured-wallet loan dispute` (TEST ONLY, the owner
+disputed claim of that payout. It does the same for a claim reopened after its inclusion window whose
+payout it saw mined: a later proof still upholds it (D57), so that a payout which did land never keeps
+its vault open for good. Without proofs configured it only warns: someone must prove it before the
+dispute falls due. A claimant disputes with `zecured-wallet loan dispute` (TEST ONLY, the owner
 EOA as the account; the app sends the same call by UserOp).
 
 **Off-chain refunds (P5)** need no commitment, and exist only for deposits that no guest of the
@@ -291,9 +296,9 @@ redirect the reward (`test_prove_revertsOnABadJournalOrSeal`: a seal for another
 - Private input: the vault's tag key K.
 - The guest shows: `ref = payoutRef(txid_X)` for an X in a block under the anchor. Journal
   `{5, anchor, 0, ref, 0, 0, 0, 0}` (no beneficiary).
-- It upholds a disputed payout confirmation (D53): `ZecuredSlasher.proveInclusion(journal, seal,
-  imageId, claimId)` checks it like a violation's seal and anchor, then the Registry checks that `ref`
-  is a committed payout of the claim's input. `proveViolation` refuses it (`ViolationKind` stops at
+- It upholds a disputed payout confirmation (D53), or a reopened one (D57):
+  `ZecuredSlasher.proveInclusion(journal, seal, imageId, claimId)` checks it like a violation's seal
+  and anchor, then the Registry checks that `ref` is a committed payout of the claim's input. `proveViolation` refuses it (`ViolationKind` stops at
   `WrongClaimRef`).
 
 **Cases.** `proveViolation(kind, journal, seal, imageId)`:
@@ -424,7 +429,9 @@ misconfiguration end in an error message, never in a theft on the judge network:
     signers prove the payout's inclusion in time (`proveInclusion`, the `Included` kind), the claim
     is payable again, and from the bonds on its original liveness schedule. The unspent input
     remains a lineage note: spending it without a commitment is F1, and any later commitment from it
-    must carry its full value (conservation).
+    must carry its full value (conservation) and its whole claim list, the confirmed claims included
+    (RT-4, D57), so the payout can be made again. A proof that comes after the window still upholds
+    the reopened claim (D57).
   - **One signer can stop new mints.** Minting needs all five bonds (`fullyBonded()`). A signer may
     withdraw its bond only when no vault is open, and then no new vault can be activated until it
     bonds again. Open vaults are unaffected.

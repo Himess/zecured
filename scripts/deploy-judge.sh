@@ -4,8 +4,9 @@
 # a challenge window of a day, USDC bonds, the coverage cap, the opening fee), the judge
 # network's five signers (SIGNER_ADDRESSES), and the guests' reproducible image ids (README,
 # "Reproducing the guest image ids"). Writes contracts/deployments/base-sepolia.json; then bond
-# the signers (scripts/bond-signers.sh). After a real deployment, add its Registry to
-# JUDGE_REGISTRIES (signer/crates/base-client/src/theft_demo_guard.rs).
+# the signers (scripts/bond-signers.sh) and register the treasury's receiver and salt behind
+# FEE_COMMITMENT with them (POST /recipients), or the opening-fee claims are never paid. After a
+# real deployment, add its Registry to JUDGE_REGISTRIES (signer/crates/base-client/src/theft_demo_guard.rs).
 #
 #   scripts/deploy-judge.sh                 # simulation only
 #   scripts/deploy-judge.sh --broadcast     # sends the deployment
