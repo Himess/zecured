@@ -306,8 +306,9 @@ function payoutDispute(bytes32 claimId) external view returns (uint64 paidAt, ui
   compromised vault. A reopened claim is still upheld by a later proof (D57), and a new commitment of
   its input names the input's whole claim list again, its confirmed claims included.
 - Tier 3 (D31): `commitSpend` records a payout before the signers sign it (3 sorted signer
-  signatures, one lineage input of the vault, 1 to 8 distinct pending claims bound to that input on
-  first commitment, one unused claim reference, one distinct output index and one distinct
+  signatures, one lineage input of the vault, 1 to 8 distinct claims bound to that input on first
+  commitment, pending (or, in a later commitment of the same input, confirmed or disputed: D57), one
+  unused claim reference, one distinct output index and one distinct
   recipient commitment each, the claim list of the note's first commitment if any (RT-4), exact
   conservation, the ZIP 317 fee fixed by the committed shape, each Fee claim after the first
   bearing only its own output). Not for a Pending or compromised vault.

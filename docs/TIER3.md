@@ -108,7 +108,9 @@ against Foundry's EIP-712 implementation) and `zecured-base` `spend_commit_golde
 - at least 3 sorted signatures of distinct signers (I6);
 - `payoutRef` never committed;
 - `inputTag` a lineage note of the vault;
-- 1 to 8 distinct claims, each of the vault, `Pending` and bound to no other input;
+- 1 to 8 distinct claims, each of the vault, `Pending` and bound to no other input; a new commitment
+  of an input also names its claims once confirmed or disputed (D57): every commitment of an input
+  carries the same claims, so while that input is unspent none of its payouts landed;
 - unused claim refs, one per claim;
 - distinct output indexes, one per claim (E1), and distinct recipient commitments (a payout never
   names two claims of one commitment, so `claimRefOf` is unambiguous);

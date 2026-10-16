@@ -119,7 +119,7 @@ features of their own (§ 8.1).
 
 The witness names the epoch of B and T (`branch_id`): the build must allow it, the transaction must carry it, and it
 personalizes the history tree's hashes, so B and T are of it. A deployment registers only its network's guests; the
-Intake also checks `branchId` against the ids it was deployed with. (NU6.3 is a Testnet epoch too, from 4,134,000 to
+Intake also checks `branchId` against the ids the proof's verifier version allows (`ZecuredVersions`, D54). (NU6.3 is a Testnet epoch too, from 4,134,000 to
 NU7; the Testnet build proves the current NU7 epoch only.)
 
 ### 2.3 Why the tag key is bound to the vault (design review)
