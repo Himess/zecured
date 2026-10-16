@@ -28,14 +28,9 @@
         "internalType": "address"
       },
       {
-        "name": "violationImageId_",
-        "type": "bytes32",
-        "internalType": "bytes32"
-      },
-      {
-        "name": "sealSelector_",
-        "type": "bytes4",
-        "internalType": "bytes4"
+        "name": "versions_",
+        "type": "address",
+        "internalType": "address"
       },
       {
         "name": "slashConfirmationWork_",
@@ -281,6 +276,11 @@
         "internalType": "bytes"
       },
       {
+        "name": "imageId",
+        "type": "bytes32",
+        "internalType": "bytes32"
+      },
+      {
         "name": "claimId",
         "type": "bytes32",
         "internalType": "bytes32"
@@ -307,6 +307,11 @@
         "name": "seal",
         "type": "bytes",
         "internalType": "bytes"
+      },
+      {
+        "name": "imageId",
+        "type": "bytes32",
+        "internalType": "bytes32"
       }
     ],
     "outputs": [
@@ -340,19 +345,6 @@
         "name": "",
         "type": "address",
         "internalType": "address"
-      }
-    ],
-    "stateMutability": "view"
-  },
-  {
-    "type": "function",
-    "name": "sealSelector",
-    "inputs": [],
-    "outputs": [
-      {
-        "name": "",
-        "type": "bytes4",
-        "internalType": "bytes4"
       }
     ],
     "stateMutability": "view"
@@ -436,13 +428,13 @@
   },
   {
     "type": "function",
-    "name": "violationImageId",
+    "name": "versions",
     "inputs": [],
     "outputs": [
       {
         "name": "",
-        "type": "bytes32",
-        "internalType": "bytes32"
+        "type": "address",
+        "internalType": "address"
       }
     ],
     "stateMutability": "view"
@@ -644,17 +636,6 @@
         "name": "length",
         "type": "uint256",
         "internalType": "uint256"
-      }
-    ]
-  },
-  {
-    "type": "error",
-    "name": "InvalidSealSelector",
-    "inputs": [
-      {
-        "name": "selector",
-        "type": "bytes4",
-        "internalType": "bytes4"
       }
     ]
   },

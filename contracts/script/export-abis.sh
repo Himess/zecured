@@ -19,6 +19,7 @@ contracts=(
   "src/SignerBondV2.sol:SignerBondV2"
   "src/ZecuredSlasher.sol:ZecuredSlasher"
   "src/ZecuredCompensator.sol:ZecuredCompensator"
+  "src/ZecuredVersions.sol:ZecuredVersions"
   "src/mocks/MockUSDC.sol:MockUSDC"
   "src/mocks/MockZecOracle.sol:MockZecOracle"
 )
