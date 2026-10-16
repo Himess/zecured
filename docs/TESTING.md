@@ -89,6 +89,9 @@ from symbolic storage, which no change to the token can break.
 
 ## 2. Live end-to-end runs
 
+The runs below used the v2 contracts (signer attestations, 2026-10-11 to 10-14); the v3 runs follow the jury
+deployment.
+
 Setup: Zcash **testnet** after NU7 through `testnet.zec.rocks`, five signer node processes plus
 the coordinator talking over HTTP, and the Base side on a local fork of Base Sepolia (the real
 Morpho Blue deployment, a fresh Zecured deployment) started with `scripts/local-fork.sh`.

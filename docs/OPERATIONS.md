@@ -49,7 +49,7 @@ These are measured costs at Base Sepolia's usual 0.006 gwei. A higher gas price 
 |---|---|---|
 | Relayer 1 | ~590,000 gas per Zcash header, 3,456 headers a day at NU7's 25 s blocks: ~0.012 ETH a day | ~0.45 ETH, plus ~0.03 ETH to catch up from the relay's tip (4,491,413) |
 | Relayer 2 (standby) | only while relayer 1 is down | 0.05 ETH reserve |
-| Signer bonds | 5 × 0.01 ETH per deployment, locked until withdrawal | 0.05 ETH (judge) + 0.05 ETH per theft-demo run (slashed) |
+| Signer bonds | USDC, `minBond` each (judge: 5 × 100 USDC; theft demo: 5 × 10 USDC per run, slashed), locked until withdrawn; the signers pay gas for `deposit` and `requestUnbond` | 500 USDC (judge) + 50 USDC per theft-demo run, plus a little ETH for the signers' own transactions |
 | Coordinator | proofs, activations, commitments, confirmations: a few cents of a cent per vault | 0.02 ETH |
 | Paymaster deposit | sponsored UserOps, including each account's deployment | 0.05 ETH |
 | Bundler executor, market maker, liquidator | their own transactions | 0.02 ETH each |

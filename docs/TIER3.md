@@ -17,9 +17,9 @@ the contracts, the signers and the violation guest agree on:
 
 It follows the review's decisions T3-1 to T3-7 and S4 to S6 (D31). The interfaces are:
 - `contracts/src/libraries/ZecuredEIP712.sol` (`SpendCommit`);
-- `contracts/src/interfaces/IZecuredSpendCommits.sol`;
-- `ISignerBond.sol`;
-- `IZecuredSlasher.sol`.
+- `contracts/src/interfaces/v3/IZecuredSpendCommits.sol`;
+- `contracts/src/interfaces/v3/ISignerBond.sol`, `IZecuredSlasher.sol`, `IZecuredCompensator.sol` and
+  `IZecuredDisputes.sol` (v3).
 
 The derivations are `zecured_policy::derive::payout_ref` and `zecured_policy::ledger::claim_ref`, and
 the same functions in `tier2/statement` (`violation.rs`).
@@ -133,9 +133,9 @@ against Foundry's EIP-712 implementation) and `zecured-base` `spend_commit_golde
 (`openCasesOf(vaultId)`, E2). A deposit note stolen while its activation is pending (it is a lineage
 note from the proof on, so the theft is F1) therefore never backs zZEC. The hold is per vault, so a
 false case cannot stop the system; if the case is dismissed the activation goes on, and the global
-halt still needs an executed case. A pending deposit is also neither refundable (its tag counts as
-used for the nodes' P5 guard) nor cancellable (`cancelVault` refuses a vault with a pending proof);
-once a pending activation is dropped, cancelling is possible again (E3).
+halt still needs an executed case. A pending deposit is also not refundable off-chain (its tag counts
+as used for the nodes' P5 guard); on Base it becomes a refund only through `refundPending` (after a halt,
+or a long pause), and once a pending activation is dropped its note can be proven again (E3).
 
 Each of the following is prevented, and each has a test:
 
