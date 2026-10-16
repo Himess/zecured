@@ -46,6 +46,9 @@ sol! {
     interface IRegistry {
         function requestRelease(bytes32 vaultId, bytes32 destCommitment) external returns (bytes32);
         function requestPartialRelease(bytes32 vaultId, uint64 amount, bytes32 destCommitment) external returns (bytes32);
+        function setRefundDestination(bytes32 claimId, bytes32 destCommitment) external;
+        function disputePayout(bytes32 claimId) external;
+        function reopenDisputedClaim(bytes32 claimId) external;
     }
 }
 
@@ -160,6 +163,49 @@ pub async fn partial_release(wallet: &Path, vault: &B256, amount: u64, commitmen
     let r = call.gas(gas).send().await?.get_receipt().await?;
     ensure!(r.status(), "requestPartialRelease reverted");
     println!("partial release of {amount} zat requested (tx {})", r.transaction_hash);
+    Ok(())
+}
+
+/// T-02: gives a Refund claim of the vault its destination, from the owner EOA as the account (the
+/// app sends the same call from the smart account). The destination was pre-validated with the
+/// signers first, exactly like a release's.
+pub async fn set_refund_destination(
+    wallet: &Path,
+    vault: &B256,
+    claim: B256,
+    commitment: B256,
+    rpc: &str,
+) -> Result<()> {
+    let d = Deployment::load()?;
+    let key = owner(wallet, vault)?;
+    let p = ProviderBuilder::new().wallet(EthereumWallet::from(key)).connect_http(rpc.parse()?);
+    let registry = IRegistry::new(d.registry, &p);
+    let call = registry.setRefundDestination(claim, commitment);
+    let gas = gas_with_headroom(call.estimate_gas().await.map_err(|e| anyhow!("setRefundDestination: {e}"))?);
+    let r = call.gas(gas).send().await?.get_receipt().await?;
+    ensure!(r.status(), "setRefundDestination reverted");
+    println!("refund destination given (tx {})", r.transaction_hash);
+    Ok(())
+}
+
+/// T-05 (a): disputes the confirmation of one of the vault's claims (its claimant: the account),
+/// or, with `reopen`, reopens a disputed claim whose payout nobody proved in time (anyone may).
+pub async fn dispute(wallet: &Path, vault: &B256, claim: B256, reopen: bool, rpc: &str) -> Result<()> {
+    let d = Deployment::load()?;
+    let key = owner(wallet, vault)?;
+    let p = ProviderBuilder::new().wallet(EthereumWallet::from(key)).connect_http(rpc.parse()?);
+    let registry = IRegistry::new(d.registry, &p);
+    let (r, what) = if reopen {
+        let call = registry.reopenDisputedClaim(claim);
+        let gas = gas_with_headroom(call.estimate_gas().await.map_err(|e| anyhow!("reopenDisputedClaim: {e}"))?);
+        (call.gas(gas).send().await?.get_receipt().await?, "reopenDisputedClaim")
+    } else {
+        let call = registry.disputePayout(claim);
+        let gas = gas_with_headroom(call.estimate_gas().await.map_err(|e| anyhow!("disputePayout: {e}"))?);
+        (call.gas(gas).send().await?.get_receipt().await?, "disputePayout")
+    };
+    ensure!(r.status(), "{what} reverted");
+    println!("{what} sent (tx {})", r.transaction_hash);
     Ok(())
 }
 

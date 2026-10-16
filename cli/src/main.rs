@@ -24,8 +24,8 @@ use serde::{Deserialize, Serialize};
 use serde_json::json;
 use zcash_protocol::consensus::{BlockHeight, Network};
 use zecured_base::{
-    Destination, OpenVault, RefundRequest, VaultOpened, ViewKeyRequest, check_signed_by_all, registry_domain,
-    sign_typed, tag_key_hash, text_hash,
+    Destination, OpenVault, VaultOpened, ViewKeyRequest, check_signed_by_all, registry_domain, sign_typed,
+    tag_key_hash, text_hash,
 };
 use zecured_zcash_ops::{
     keys::{encode_ironwood_ua, ironwood_receiver},
@@ -35,6 +35,7 @@ use zecured_zcash_ops::{
 };
 
 mod base_test;
+mod claims;
 mod prove;
 mod watch;
 
@@ -158,13 +159,39 @@ enum LoanCmd {
         #[arg(long)]
         to: Option<String>,
     },
-    /// Ask for a non-conforming deposit back (defaults to this wallet).
-    Refund {
+    /// T-02: the vault's Refund claims on Base. A deposit that cannot back the vault (another
+    /// amount, a late or second payment, a transaction with other pools) lands on Base as a Refund
+    /// claim once proven; it is paid back from its own note to the destination the vault's account
+    /// gives (`refund-destination`). Nothing is refunded off-chain.
+    Refunds {
+        vault: B256,
+        #[arg(long, env = "BASE_SEPOLIA_RPC_URL", default_value = "https://sepolia.base.org")]
+        rpc: String,
+    },
+    /// T-02: give a Refund claim its destination (defaults to this wallet). The destination is
+    /// pre-validated with the signers exactly like a release's, then set on Base from the account
+    /// (TEST ONLY: the owner EOA acts as the account; the app sends it from the smart account).
+    RefundDestination {
         vault: B256,
         #[arg(long)]
-        note: B256,
+        claim: B256,
         #[arg(long)]
         to: Option<String>,
+        #[arg(long, env = "BASE_SEPOLIA_RPC_URL", default_value = "https://sepolia.base.org")]
+        rpc: String,
+    },
+    /// T-05 (a): dispute the confirmation of one of the loan's claims whose payout never reached
+    /// this wallet (its claimant only, within the dispute window): the signers must then prove the
+    /// payout is in a Zcash block. With `--reopen`, reopen a disputed claim whose payout nobody
+    /// proved in time. TEST ONLY: the owner EOA acts as the account.
+    Dispute {
+        vault: B256,
+        #[arg(long)]
+        claim: B256,
+        #[arg(long)]
+        reopen: bool,
+        #[arg(long, env = "BASE_SEPOLIA_RPC_URL", default_value = "https://sepolia.base.org")]
+        rpc: String,
     },
     /// Fetch the vault's viewing key (UFVK) to verify it independently; refused unless it is
     /// the key the signers signed when the vault opened.
@@ -866,30 +893,57 @@ async fn loan(wallet: &Path, lwd_url: &str, backend: &str, cmd: LoanCmd) -> Resu
             let c = destination(wallet, backend, &vault, to).await?;
             println!("{}", json!({ "commitment": c }));
         }
-        LoanCmd::Refund { vault, note, to } => {
-            let (mut l, owner, to) = owner_ctx(wallet, &vault, to)?;
-            let salt = fresh_salt();
-            let receiver = ironwood_receiver(&NETWORK, &to)?.to_raw_address_bytes();
-            let nonce = l.next_nonce;
-            let deadline = now() + REQUEST_TTL_SECS;
-            let msg = RefundRequest {
-                vaultId: vault,
-                noteId: note,
-                commitment: B256::from(commitment(&salt, &receiver)),
-                nonce,
-                deadline,
-            };
-            let sig = sign_typed(&owner, &registry_domain(l.chain_id, l.registry), &msg)?;
-            let r = post(
-                backend,
-                &format!("/vaults/{vault}/refund"),
-                json!({ "noteId": note, "receiver": to, "salt": hex::encode(salt), "nonce": nonce.to_string(),
-                        "deadline": deadline.to_string(), "signature": sig }),
-            )
-            .await?;
-            l.next_nonce += 1;
-            write_json(&loan_path(wallet, &vault), &l)?;
-            println!("{}", serde_json::to_string_pretty(&r)?);
+        LoanCmd::Refunds { vault, rpc } => {
+            let net = network_params()?;
+            let rows = claims::refund_table(&claims::vault_claims(net.registry, vault, &rpc).await?);
+            if rows.is_empty() {
+                println!("no Refund claim for this vault on Base");
+            }
+            for row in rows {
+                println!("{row}");
+            }
+        }
+        LoanCmd::RefundDestination { vault, claim, to, rpc } => {
+            let l: LoanFile = read_secret_json(&loan_path(wallet, &vault))?;
+            // Refunds come from deposit proofs, which prove VaultOpened v2 (the tag key's hash).
+            ensure!(
+                l.tag_key_hash.is_some(),
+                "this loan's vault was opened under VaultOpened v1, whose deposits are never proven as refunds"
+            );
+            let net = network_params()?;
+            let on_base = claims::vault_claims(net.registry, vault, &rpc).await?;
+            let c = on_base.iter().find(|c| c.id == claim).context("no such claim of this vault on Base")?;
+            claims::refund_destination_allowed(c)?;
+            // The signers learn the salt and receiver (owner-signed `Destination`), validated as an
+            // Ironwood receiver, before anything goes to Base.
+            let commitment = destination(wallet, backend, &vault, to).await?;
+            base_test::set_refund_destination(wallet, &vault, claim, commitment, &rpc).await?;
+        }
+        LoanCmd::Dispute {
+            vault,
+            claim,
+            reopen,
+            rpc,
+        } => {
+            let l: LoanFile = read_secret_json(&loan_path(wallet, &vault))?;
+            let net = network_params()?;
+            let on_base = claims::vault_claims(net.registry, vault, &rpc).await?;
+            let c = on_base.iter().find(|c| c.id == claim).context("no such claim of this vault on Base")?;
+            if reopen {
+                ensure!(c.status == zecured_base::verify::CLAIM_DISPUTED, "the claim is not disputed");
+            } else {
+                ensure!(c.status == zecured_base::verify::CLAIM_PAID, "only a claim confirmed paid can be disputed");
+                let owner: PrivateKeySigner = l.owner_key.parse()?;
+                ensure!(
+                    c.claimant == owner.address(),
+                    "only the claim's claimant may dispute it (here: the account, the owner EOA in this test mode)"
+                );
+                eprintln!(
+                    "dispute only a payout that never arrived: `zecured-wallet watch --tier3 --claims-of` checks each \
+                     committed payment of this loan's claims"
+                );
+            }
+            base_test::dispute(wallet, &vault, claim, reopen, &rpc).await?;
         }
         LoanCmd::ViewingKey { vault } => {
             let (ufvk, checked) = viewing_key(wallet, backend, &vault).await?;
