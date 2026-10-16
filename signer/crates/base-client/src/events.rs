@@ -1,4 +1,5 @@
-//! Registry ABI and ingestion of its events up to Base's `safe` head.
+//! The v3 contracts' ABIs (Registry, Intake, slasher, bond, verifier versions) and ingestion of
+//! the Registry's events up to Base's `safe` head.
 //!
 //! Logs only say what an RPC provider claims happened; signer nodes check every event they
 //! apply against the Registry's state (see [`crate::verify`]).
@@ -21,18 +22,14 @@ use anyhow::{Context, Result, anyhow};
 use zecured_policy::ledger::{Claim, ClaimKind, ClaimState};
 
 sol! {
+    /// The Registry v3 (contracts/src/interfaces/v3/IZecuredRegistry.sol, IZecuredSpendCommits.sol
+    /// and IZecuredDisputes.sol, which the Registry serves through its fallback), as far as the
+    /// signer network, the CLI and the bots use it.
     // `SpendCommitted` has eight fields, and so does the constructor sol! generates for it.
     #[sol(rpc)]
     #[allow(clippy::too_many_arguments)]
     interface IZecuredRegistry {
-        struct DepositAttestation {
-            bytes32 vaultId;
-            address account;
-            uint64 amount;
-            bytes32 depositTag;
-        }
-
-        // Tier 3 (docs/TIER3.md; contracts/src/interfaces/IZecuredSpendCommits.sol).
+        // Tier 3 (docs/TIER3.md; contracts/src/interfaces/v3/IZecuredSpendCommits.sol).
         #[derive(Debug, PartialEq, Eq)]
         struct SpendCommit {
             bytes32 vaultId;
@@ -66,36 +63,63 @@ sol! {
             uint64 expected;
             uint8 outputIndex;
         }
+        // `kind` and `status` are the Registry's `ClaimKind` and `ClaimStatus` enums (values in
+        // `crate::verify`).
+        #[derive(Debug, PartialEq, Eq)]
+        struct ClaimDetails {
+            bytes32 vaultId;
+            uint8 kind;
+            uint8 status;
+            uint64 amount;
+            bytes32 commitment;
+            uint40 createdAt;
+            bool bondPaid;
+            address claimant;
+        }
+        #[derive(Debug, PartialEq, Eq)]
+        struct VaultDetails {
+            address account;
+            uint64 outstanding;
+            uint8 status;
+            uint64 claimCount;
+            uint64 unpaidClaims;
+        }
 
         event VaultActivated(bytes32 indexed vaultId, address indexed account, uint64 amount, bytes32 depositTag);
-        event ActivationPending(bytes32 indexed vaultId, address indexed account, uint64 amount, bytes32 depositTag, uint256 readyHeight, uint256 readyTime);
-        event PendingActivationDropped(bytes32 indexed vaultId);
+        event VaultReserved(bytes32 indexed vaultId, address indexed account, uint64 amount, bytes32 depositTag);
+        event VaultReservationReleased(bytes32 indexed vaultId);
+        event RefundOpened(bytes32 indexed vaultId, bytes32 indexed claimId, address account, uint64 amount, bytes32 depositTag);
+        event RefundDestinationSet(bytes32 indexed vaultId, bytes32 indexed claimId, bytes32 commitment);
+        event RefundAbandoned(bytes32 indexed vaultId, bytes32 indexed claimId);
+        event FeeCharged(bytes32 indexed vaultId, bytes32 indexed claimId, uint64 fee);
         event ReleaseRequested(bytes32 indexed vaultId, bytes32 indexed claimId, uint64 amount, bytes32 destCommitment);
         event LiquidationRelease(bytes32 indexed vaultId, bytes32 indexed claimId, uint64 amount, bytes32 recipientCommitment);
         event CloseRelease(bytes32 indexed vaultId, bytes32 userClaimId, bytes32 mmClaimId, uint64 userAmount, uint64 mmAmount, bytes32 userCommitment, bytes32 mmCommitment);
         event PayoutConfirmed(bytes32 indexed vaultId, bytes32[] claimIds);
-        event VaultCancelled(bytes32 indexed vaultId);
+        event DustWrittenOff(bytes32 indexed vaultId, bytes32 indexed claimId, uint64 amount);
+        event ClaimBondPaid(bytes32 indexed vaultId, bytes32 indexed claimId);
+        event ReimburseDestinationSet(bytes32 indexed vaultId, bytes32 indexed claimId, bytes32 commitment);
+        event VaultRetired(bytes32 indexed vaultId, bytes32 indexed claimId, uint64 retired);
+        event ClaimCompensated(bytes32 indexed vaultId, bytes32 indexed claimId);
         event SpendCommitted(bytes32 indexed vaultId, bytes32 indexed payoutRef, bytes32 inputTag, bytes32[] claimIds, bytes32[] claimRefs, bytes32 changeTag, uint64 changeValue, uint8 signerBitmap);
+        event PayoutDisputed(bytes32 indexed vaultId, bytes32 indexed claimId, uint64 dueAt);
+        event PayoutUpheld(bytes32 indexed vaultId, bytes32 indexed claimId, bytes32 payoutRef);
+        event DisputedClaimReopened(bytes32 indexed vaultId, bytes32 indexed claimId);
 
-        function attestDeposit(DepositAttestation att, bytes[] sigs) external;
-        function attestDepositWithProof(bytes journal, bytes seal, bytes[] openedSigs) external;
-        function finalizeActivation(bytes32 vaultId) external;
-        function dropPendingActivation(bytes32 vaultId) external;
-        function pendingActivation(bytes32 vaultId) external view returns (address account, uint64 amount, bytes32 depositTag, bytes32 anchor, uint256 readyHeight, uint256 readyTime);
-        function mintMode() external view returns (uint8);
-        function depositSealSelector() external view returns (bytes4);
-        function finalizeDepth() external view returns (uint64);
-        function finalizeDelay() external view returns (uint64);
-        function cancelVault(bytes32 vaultId, bytes[] sigs) external;
-        function depositTagUsed(bytes32 depositTag) external view returns (bool);
-        function relay() external view returns (address);
-        function minConfirmationWork() external view returns (uint256);
-        function depositImageId() external view returns (bytes32);
+        function requestRelease(bytes32 vaultId, bytes32 destCommitment) external returns (bytes32 claimId);
+        function setRefundDestination(bytes32 claimId, bytes32 destCommitment) external;
         function confirmPayout(bytes32 vaultId, bytes32[] claimIds, bytes[] sigs) external;
+        function commitSpend(SpendCommit c, bytes[] sigs) external;
+        function disputePayout(bytes32 claimId) external;
+        function reopenDisputedClaim(bytes32 claimId) external;
         function vaultOf(address account) external view returns (bytes32 vaultId);
         function vault(bytes32 vaultId) external view returns (address account, uint64 outstanding, uint8 status);
+        function vaultDetails(bytes32 vaultId) external view returns (VaultDetails memory);
         function claim(bytes32 claimId) external view returns (bytes32 vaultId, uint8 kind, uint64 amount, bytes32 commitment, uint8 status);
-        function commitSpend(SpendCommit c, bytes[] sigs) external;
+        function claimDetails(bytes32 claimId) external view returns (ClaimDetails memory);
+        function claimIdOf(bytes32 vaultId, uint64 sequence) external pure returns (bytes32);
+        function depositTagUsed(bytes32 depositTag) external view returns (bool);
+        function feeCommitment() external view returns (bytes32);
         function lineageOf(bytes32 tag) external view returns (LineageNote memory);
         function spendRecord(bytes32 payoutRef) external view returns (SpendRecord memory);
         function claimPayment(bytes32 claimRef) external view returns (ClaimPayment memory);
@@ -103,9 +127,89 @@ sol! {
         function inputClaimSet(bytes32 inputTag) external view returns (bytes32);
         function claimRefOf(bytes32 payoutRef, bytes32 commitment) external view returns (bytes32);
         function hashSpendCommit(SpendCommit c) external view returns (bytes32);
+        function payoutDispute(bytes32 claimId) external view returns (uint64 paidAt, uint64 dueAt);
+        function disputeWindow() external view returns (uint64);
         function openVaultCount() external view returns (uint256);
+        function intake() external view returns (address);
+        function slasher() external view returns (address);
         function signerBond() external view returns (address);
         function signers() external view returns (address[5] memory);
+    }
+}
+
+sol! {
+    /// The Intake (contracts/src/interfaces/v3/IZecuredIntake.sol): deposit proofs and pending
+    /// activations (K3). The image id a seal was made for is an argument, which the Intake checks
+    /// against the verifier version registry (design notes T-07a).
+    #[sol(rpc)]
+    interface IZecuredIntake {
+        #[derive(Debug, PartialEq, Eq)]
+        struct PendingActivation {
+            address account;
+            uint64 amount;
+            bytes32 depositTag;
+            bytes32 anchor;
+            uint256 readyHeight;
+            uint256 readyTime;
+        }
+
+        function attestDepositWithProof(bytes journal, bytes seal, bytes32 imageId, bytes[] openedSigs) external;
+        function finalizeActivation(bytes32 vaultId) external;
+        function dropPendingActivation(bytes32 vaultId) external;
+        function refundPending(bytes32 vaultId) external returns (bytes32 claimId);
+        function pendingActivation(bytes32 vaultId) external view returns (PendingActivation memory);
+        function journalV2() external view returns (bool);
+        function minRefundZat() external view returns (uint64);
+        function minConfirmationWorkFor(uint64 amount) external view returns (uint256);
+        function mintingPaused() external view returns (bool);
+        function relay() external view returns (address);
+        function signerBond() external view returns (address);
+        function versions() external view returns (address);
+    }
+}
+
+sol! {
+    /// The slasher (contracts/src/interfaces/v3/IZecuredSlasher.sol), as far as the signer network
+    /// uses it: the compromised flag (T-04) and inclusion proofs of disputed payouts (T-05 (a)).
+    #[sol(rpc)]
+    interface IZecuredSlasher {
+        function isCompromised(bytes32 vaultId) external view returns (bool);
+        function proveInclusion(bytes journal, bytes seal, bytes32 imageId, bytes32 claimId) external;
+        function slashConfirmationWork() external view returns (uint256);
+        function relay() external view returns (address);
+        function versions() external view returns (address);
+    }
+}
+
+sol! {
+    /// SignerBond v2 (contracts/src/interfaces/v3/ISignerBond.sol): the liveness period (T-05) and
+    /// the halt.
+    #[sol(rpc)]
+    interface ISignerBond {
+        function livenessPeriod() external view returns (uint64);
+        function halted() external view returns (bool);
+    }
+}
+
+sol! {
+    /// The verifier version registry (design notes T-07a): the guest image ids, with their RISC Zero
+    /// router selector and (deposits) consensus branch ids, that Base accepts proofs of.
+    #[sol(rpc)]
+    interface IZecuredVersions {
+        #[derive(Debug, PartialEq, Eq)]
+        struct Version {
+            uint8 kind;
+            bytes4 selector;
+            bytes32 imageId;
+            uint32[4] branches;
+            uint64 activeAt;
+            bool removed;
+        }
+
+        function versionIds(uint8 kind) external view returns (bytes32[] memory);
+        function version(bytes32 versionId) external view returns (Version memory);
+        function isActive(bytes32 versionId) external view returns (bool);
+        function branchAllowed(bytes32 versionId, uint32 branchId) external view returns (bool);
     }
 }
 
@@ -134,24 +238,79 @@ sol! {
     }
 }
 
+/// `VersionKind.Deposit` and `VersionKind.Violation` of the verifier version registry (T-07a).
+pub const VERSION_DEPOSIT: u8 = 0;
+pub const VERSION_VIOLATION: u8 = 1;
+
+/// The verifier version registry's id of `(kind, selector, imageId)`:
+/// `keccak256(abi.encode(kind, selector, imageId))` (`IZecuredVersions.versionIdOf`).
+pub fn version_id(kind: u8, selector: [u8; 4], image_id: B256) -> B256 {
+    let mut encoded = [0u8; 96];
+    encoded[31] = kind;
+    encoded[32..36].copy_from_slice(&selector);
+    encoded[64..].copy_from_slice(image_id.as_slice());
+    alloy::primitives::keccak256(encoded)
+}
+
+/// What changed about an existing claim.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum ClaimChange {
+    /// `RefundDestinationSet` (T-02): the vault's account gave the refund's destination; an
+    /// abandoned refund is pending again, and the claim is payable from now on.
+    RefundDestination(B256),
+    /// `ReimburseDestinationSet` (T-05): three signers pointed a bond-paid claim at the
+    /// destination that reimburses the bonds.
+    ReimburseDestination(B256),
+    /// `ClaimBondPaid` (T-05): the bonds paid the claimant; its destination is cleared.
+    BondPaid,
+    /// `RefundAbandoned` or `DustWrittenOff`: written off, its value stays in the vault.
+    WrittenOff,
+    /// `ClaimCompensated` (T-04): settled in USDC by the compensator.
+    Compensated,
+    /// `PayoutDisputed` (T-05 (a)): its claimant disputes the confirmation; unpaid on Base until a
+    /// committed payout of its input is proven mined, or until the claim is reopened after `due_at`.
+    Disputed { due_at: u64 },
+    /// `PayoutUpheld`: a committed payout of its input (`payout_ref`) was proven mined: paid.
+    Upheld { payout_ref: B256 },
+    /// `DisputedClaimReopened`: nobody proved its payout in time: pending again, still bound to its
+    /// input.
+    Reopened,
+}
+
 /// A Registry event, reduced to what the signer network needs.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum RegistryEvent {
-    /// A deposit attestation or a finalized deposit proof activated the vault: zZEC minted into
-    /// the account's position. `deposit_tag` names the note that backs it, the head of the
-    /// vault's lineage (K2-a): it is never refundable.
+    /// K3: a deposit proof reserved the vault; nothing is minted until `VaultActivated`. Signer
+    /// nodes do not apply it (nothing is paid from a pending vault).
+    Reserved {
+        account: Address,
+        amount: u64,
+        deposit_tag: B256,
+    },
+    /// K3: the reservation was released (its anchor left the relay's best chain).
+    ReservationReleased,
+    /// A finalized deposit proof activated the vault: zZEC minted into the account's position.
+    /// `deposit_tag` names the note that backs it, the head of the vault's main lineage (K2-a).
     VaultActivated {
         account: Address,
         amount: u64,
         deposit_tag: B256,
     },
-    /// zZEC was burned: these claims must be paid on Zcash (one per recipient).
+    /// New claims: zZEC was burned (one claim per recipient), a deposit landed as a refund (T-02),
+    /// the opening fee was charged (T-06), or the compensator retired a compromised vault's
+    /// outstanding (T-04, bookkeeping).
     Claims(Vec<Claim>),
+    /// An existing claim changed.
+    ClaimChanged { claim_id: B256, change: ClaimChange },
     /// Claims were confirmed as paid on Base.
     PayoutConfirmed(Vec<B256>),
-    /// The signers cancelled a vault that was never activated (D23): it can never be activated,
-    /// and its conforming deposit becomes refundable.
-    VaultCancelled,
+}
+
+impl RegistryEvent {
+    /// Whether signer nodes apply it: the reservation events matter to the coordinator only.
+    pub fn for_signers(&self) -> bool {
+        !matches!(self, RegistryEvent::Reserved { .. } | RegistryEvent::ReservationReleased)
+    }
 }
 
 /// A decoded event with its vault and position.
@@ -167,7 +326,19 @@ pub struct VaultEvent {
     pub event: RegistryEvent,
 }
 
-/// The latest block number Base reports as `safe`.
+impl VaultEvent {
+    /// Sets the block's timestamp, which is also when the event's new claims were created.
+    pub fn set_timestamp(&mut self, timestamp: u64) {
+        self.timestamp = timestamp;
+        if let RegistryEvent::Claims(claims) = &mut self.event {
+            for c in claims {
+                c.created_at = timestamp;
+            }
+        }
+    }
+}
+
+// The latest block number Base reports as `safe`.
 pub async fn safe_head<P: Provider>(provider: &P) -> Result<u64> {
     let block = provider
         .get_block_by_number(BlockNumberOrTag::Safe)
@@ -330,7 +501,8 @@ where
     Ok(logs)
 }
 
-/// Registry events in blocks `from..=to`, in chain order.
+//// Registry events in blocks `from..=to`, in chain order. A Fee claim's commitment, which its
+/// event does not carry, is the Registry's `feeCommitment` (the same for every vault, T-06).
 pub async fn fetch<P: Provider>(provider: &P, registry: Address, from: u64, to: u64) -> Result<Vec<VaultEvent>> {
     if from > to {
         return Ok(vec![]);
@@ -342,10 +514,15 @@ pub async fn fetch<P: Provider>(provider: &P, registry: Address, from: u64, to: 
     .await?;
     let logs = registry_logs(logs, registry);
     let mut timestamps: HashMap<u64, u64> = HashMap::new();
+    let mut fee_commitment: Option<B256> = None;
     let mut out = Vec::with_capacity(logs.len());
     for log in logs {
-        let block = log.block_number.context("log without block number")?;
-        let created_at = match log.block_timestamp {
+        // Logs the signer network does not use (Tier 3 commitments) cost no block lookup.
+        let Some(mut ev) = decode(&log, 0)? else {
+            continue;
+        };
+        let block = ev.block;
+        let timestamp = match log.block_timestamp {
             Some(t) => t,
             None => match timestamps.get(&block) {
                 Some(t) => *t,
@@ -361,9 +538,24 @@ pub async fn fetch<P: Provider>(provider: &P, registry: Address, from: u64, to: 
                 }
             },
         };
-        if let Some(ev) = decode(&log, created_at)? {
-            out.push(ev);
+        ev.set_timestamp(timestamp);
+        if let RegistryEvent::Claims(claims) = &mut ev.event {
+            for c in claims.iter_mut().filter(|c| c.kind == ClaimKind::Fee) {
+                let commitment = match fee_commitment {
+                    Some(f) => f,
+                    None => {
+                        let f = IZecuredRegistry::new(registry, provider)
+                            .feeCommitment()
+                            .call()
+                            .await
+                            .context("Registry.feeCommitment")?;
+                        *fee_commitment.insert(f)
+                    }
+                };
+                c.commitment = commitment.0;
+            }
         }
+        out.push(ev);
     }
     out.sort_by_key(|e| (e.block, e.log_index));
     Ok(out)
@@ -375,12 +567,9 @@ pub fn registry_logs(logs: Vec<Log>, registry: Address) -> Vec<Log> {
     logs.into_iter().filter(|l| l.inner.address == registry && !l.removed).collect()
 }
 
-/// `MintMode.ProofOnly` (K1).
-pub const MINT_MODE_PROOF_ONLY: u8 = 1;
-
-/// Decodes one Registry log. Unknown logs, the pending-activation logs (K3: nothing is minted and
-/// nothing changes for the signers until `VaultActivated`) and Tier 3 commitments (each node reads
-/// the record it signed straight from the Registry) are ignored.
+/// Decodes one Registry log; `created_at` is its block's timestamp. Unknown logs and Tier 3
+/// commitments (each node reads the record it signed straight from the Registry) are ignored. A
+/// Fee claim's commitment is left zero ([`fetch`] fills it in).
 pub fn decode(log: &Log, created_at: u64) -> Result<Option<VaultEvent>> {
     use IZecuredRegistry::IZecuredRegistryEvents as E;
     let Ok(decoded) = E::decode_log(&log.inner) else {
@@ -398,7 +587,10 @@ pub fn decode(log: &Log, created_at: u64) -> Result<Option<VaultEvent>> {
         created_at,
         partner: partner.map(|p| p.0),
         state: ClaimState::Unpaid,
+        refund_tag: None,
+        bond_paid: false,
     };
+    let changed = |claim_id: B256, change: ClaimChange| RegistryEvent::ClaimChanged { claim_id, change };
     let (vault_id, event) = match decoded.data {
         E::VaultActivated(e) => (
             e.vaultId,
@@ -408,7 +600,32 @@ pub fn decode(log: &Log, created_at: u64) -> Result<Option<VaultEvent>> {
                 deposit_tag: e.depositTag,
             },
         ),
-        E::ActivationPending(_) | E::PendingActivationDropped(_) | E::SpendCommitted(_) => return Ok(None),
+        E::VaultReserved(e) => (
+            e.vaultId,
+            RegistryEvent::Reserved {
+                account: e.account,
+                amount: e.amount,
+                deposit_tag: e.depositTag,
+            },
+        ),
+        E::VaultReservationReleased(e) => (e.vaultId, RegistryEvent::ReservationReleased),
+        E::RefundOpened(e) => (
+            e.vaultId,
+            RegistryEvent::Claims(vec![Claim {
+                refund_tag: Some(e.depositTag.0),
+                ..claim(e.claimId, ClaimKind::Refund, e.amount, B256::ZERO, None)
+            }]),
+        ),
+        E::FeeCharged(e) => {
+            (e.vaultId, RegistryEvent::Claims(vec![claim(e.claimId, ClaimKind::Fee, e.fee, B256::ZERO, None)]))
+        }
+        E::VaultRetired(e) => (
+            e.vaultId,
+            RegistryEvent::Claims(vec![Claim {
+                state: ClaimState::Compensated,
+                ..claim(e.claimId, ClaimKind::Retired, e.retired, B256::ZERO, None)
+            }]),
+        ),
         E::ReleaseRequested(e) => (
             e.vaultId,
             RegistryEvent::Claims(vec![claim(e.claimId, ClaimKind::Release, e.amount, e.destCommitment, None)]),
@@ -430,8 +647,27 @@ pub fn decode(log: &Log, created_at: u64) -> Result<Option<VaultEvent>> {
                 claim(e.mmClaimId, ClaimKind::CloseMarketMaker, e.mmAmount, e.mmCommitment, Some(e.userClaimId)),
             ]),
         ),
+        E::RefundDestinationSet(e) => (e.vaultId, changed(e.claimId, ClaimChange::RefundDestination(e.commitment))),
+        E::ReimburseDestinationSet(e) => {
+            (e.vaultId, changed(e.claimId, ClaimChange::ReimburseDestination(e.commitment)))
+        }
+        E::ClaimBondPaid(e) => (e.vaultId, changed(e.claimId, ClaimChange::BondPaid)),
+        E::RefundAbandoned(e) => (e.vaultId, changed(e.claimId, ClaimChange::WrittenOff)),
+        E::DustWrittenOff(e) => (e.vaultId, changed(e.claimId, ClaimChange::WrittenOff)),
+        E::ClaimCompensated(e) => (e.vaultId, changed(e.claimId, ClaimChange::Compensated)),
+        E::PayoutDisputed(e) => (e.vaultId, changed(e.claimId, ClaimChange::Disputed { due_at: e.dueAt })),
+        E::PayoutUpheld(e) => (
+            e.vaultId,
+            changed(
+                e.claimId,
+                ClaimChange::Upheld {
+                    payout_ref: e.payoutRef,
+                },
+            ),
+        ),
+        E::DisputedClaimReopened(e) => (e.vaultId, changed(e.claimId, ClaimChange::Reopened)),
         E::PayoutConfirmed(e) => (e.vaultId, RegistryEvent::PayoutConfirmed(e.claimIds)),
-        E::VaultCancelled(e) => (e.vaultId, RegistryEvent::VaultCancelled),
+        E::SpendCommitted(_) => return Ok(None),
     };
     Ok(Some(VaultEvent {
         vault_id,
@@ -585,15 +821,147 @@ mod tests {
         assert_eq!(kept, vec![good]);
     }
 
+    /// The Registry v3's refund, fee and retirement events become claims: a refund knows the note
+    /// that pays it and has no destination yet, a fee's commitment is filled in by `fetch`, a
+    /// retirement is bookkeeping (settled in USDC).
     #[test]
-    fn vault_cancelled_is_decoded() {
-        let ev = IZecuredRegistry::VaultCancelled {
-            vaultId: B256::repeat_byte(6),
+    fn v3_claim_events_are_decoded() {
+        let decode_at = |data: LogData| decode(&rpc_log(data, 12, 3), 100).unwrap().unwrap();
+        let refund = decode_at(
+            IZecuredRegistry::RefundOpened {
+                vaultId: B256::repeat_byte(6),
+                claimId: B256::repeat_byte(7),
+                account: Address::repeat_byte(8),
+                amount: 250_000,
+                depositTag: B256::repeat_byte(9),
+            }
+            .encode_log_data(),
+        );
+        assert_eq!(refund.vault_id, B256::repeat_byte(6));
+        let RegistryEvent::Claims(claims) = refund.event else {
+            panic!()
         };
-        let got = decode(&rpc_log(ev.encode_log_data(), 12, 3), 100).unwrap().unwrap();
-        assert_eq!(got.vault_id, B256::repeat_byte(6));
-        assert_eq!(got.event, RegistryEvent::VaultCancelled);
-        assert_eq!((got.block, got.log_index), (12, 3));
+        assert_eq!((claims[0].kind, claims[0].amount), (ClaimKind::Refund, 250_000));
+        assert_eq!(claims[0].refund_tag, Some([9; 32]));
+        assert_eq!(claims[0].commitment, [0; 32], "no destination yet");
+        assert_eq!((claims[0].order, claims[0].created_at), ((12, 3), 100));
+
+        let fee = decode_at(
+            IZecuredRegistry::FeeCharged {
+                vaultId: B256::repeat_byte(6),
+                claimId: B256::repeat_byte(7),
+                fee: 25_000,
+            }
+            .encode_log_data(),
+        );
+        let RegistryEvent::Claims(claims) = fee.event else {
+            panic!()
+        };
+        assert_eq!((claims[0].kind, claims[0].amount, claims[0].state), (ClaimKind::Fee, 25_000, ClaimState::Unpaid));
+
+        let retired = decode_at(
+            IZecuredRegistry::VaultRetired {
+                vaultId: B256::repeat_byte(6),
+                claimId: B256::repeat_byte(7),
+                retired: 400_000,
+            }
+            .encode_log_data(),
+        );
+        let RegistryEvent::Claims(claims) = retired.event else {
+            panic!()
+        };
+        assert_eq!((claims[0].kind, claims[0].state), (ClaimKind::Retired, ClaimState::Compensated));
+    }
+
+    /// Every change of an existing claim, the dispute path's included, is decoded.
+    #[test]
+    fn claim_changes_are_decoded() {
+        let (vault, id) = (B256::repeat_byte(6), B256::repeat_byte(7));
+        let commitment = B256::repeat_byte(8);
+        let cases: Vec<(LogData, ClaimChange)> = vec![
+            (
+                IZecuredRegistry::RefundDestinationSet {
+                    vaultId: vault,
+                    claimId: id,
+                    commitment,
+                }
+                .encode_log_data(),
+                ClaimChange::RefundDestination(commitment),
+            ),
+            (
+                IZecuredRegistry::ReimburseDestinationSet {
+                    vaultId: vault,
+                    claimId: id,
+                    commitment,
+                }
+                .encode_log_data(),
+                ClaimChange::ReimburseDestination(commitment),
+            ),
+            (
+                IZecuredRegistry::ClaimBondPaid {
+                    vaultId: vault,
+                    claimId: id,
+                }
+                .encode_log_data(),
+                ClaimChange::BondPaid,
+            ),
+            (
+                IZecuredRegistry::RefundAbandoned {
+                    vaultId: vault,
+                    claimId: id,
+                }
+                .encode_log_data(),
+                ClaimChange::WrittenOff,
+            ),
+            (
+                IZecuredRegistry::DustWrittenOff {
+                    vaultId: vault,
+                    claimId: id,
+                    amount: 9_000,
+                }
+                .encode_log_data(),
+                ClaimChange::WrittenOff,
+            ),
+            (
+                IZecuredRegistry::ClaimCompensated {
+                    vaultId: vault,
+                    claimId: id,
+                }
+                .encode_log_data(),
+                ClaimChange::Compensated,
+            ),
+            (
+                IZecuredRegistry::PayoutDisputed {
+                    vaultId: vault,
+                    claimId: id,
+                    dueAt: 5_000,
+                }
+                .encode_log_data(),
+                ClaimChange::Disputed { due_at: 5_000 },
+            ),
+            (
+                IZecuredRegistry::PayoutUpheld {
+                    vaultId: vault,
+                    claimId: id,
+                    payoutRef: commitment,
+                }
+                .encode_log_data(),
+                ClaimChange::Upheld { payout_ref: commitment },
+            ),
+            (
+                IZecuredRegistry::DisputedClaimReopened {
+                    vaultId: vault,
+                    claimId: id,
+                }
+                .encode_log_data(),
+                ClaimChange::Reopened,
+            ),
+        ];
+        for (data, change) in cases {
+            let got = decode(&rpc_log(data, 12, 3), 100).unwrap().unwrap();
+            assert_eq!(got.vault_id, vault);
+            assert_eq!(got.event, RegistryEvent::ClaimChanged { claim_id: id, change });
+        }
     }
 
     #[test]
@@ -615,21 +983,47 @@ mod tests {
         );
     }
 
+    /// K3: the reservation events are decoded for the coordinator; signer nodes do not apply them.
     #[test]
-    fn pending_activation_logs_are_not_vault_events() {
-        let pending = IZecuredRegistry::ActivationPending {
+    fn reservations_are_decoded_but_not_for_signers() {
+        let reserved = IZecuredRegistry::VaultReserved {
             vaultId: B256::repeat_byte(1),
             account: Address::repeat_byte(2),
             amount: 1_000_000,
             depositTag: B256::repeat_byte(3),
-            readyHeight: U256::from(10),
-            readyTime: U256::from(20),
         };
-        assert!(decode(&rpc_log(pending.encode_log_data(), 5, 1), 50).unwrap().is_none());
-        let dropped = IZecuredRegistry::PendingActivationDropped {
+        let got = decode(&rpc_log(reserved.encode_log_data(), 5, 1), 50).unwrap().unwrap();
+        assert_eq!(
+            got.event,
+            RegistryEvent::Reserved {
+                account: Address::repeat_byte(2),
+                amount: 1_000_000,
+                deposit_tag: B256::repeat_byte(3),
+            }
+        );
+        assert!(!got.event.for_signers());
+        let released = IZecuredRegistry::VaultReservationReleased {
             vaultId: B256::repeat_byte(1),
         };
-        assert!(decode(&rpc_log(dropped.encode_log_data(), 5, 2), 50).unwrap().is_none());
+        let got = decode(&rpc_log(released.encode_log_data(), 5, 2), 50).unwrap().unwrap();
+        assert_eq!(got.event, RegistryEvent::ReservationReleased);
+        assert!(!got.event.for_signers());
+    }
+
+    /// The verifier version registry's ids, as `versionIdOf` computes them (`abi.encode` puts a
+    /// `bytes4` at the start of its word).
+    #[test]
+    fn version_ids_are_keccak_of_the_abi_encoded_triple() {
+        use alloy::{
+            primitives::{FixedBytes, U256},
+            sol_types::SolValue,
+        };
+        let image = B256::repeat_byte(0x42);
+        let selector = [0x73, 0xc4, 0x57, 0xba];
+        // A uint8 enum takes a whole word, as a uint256 does.
+        let encoded = (U256::from(VERSION_DEPOSIT), FixedBytes::<4>::from(selector), image).abi_encode();
+        assert_eq!(version_id(VERSION_DEPOSIT, selector, image), alloy::primitives::keccak256(encoded));
+        assert_ne!(version_id(VERSION_VIOLATION, selector, image), version_id(VERSION_DEPOSIT, selector, image));
     }
 
     #[test]

@@ -1,7 +1,7 @@
-//! The journal of a deposit proof (v2, design notes T-09): what the zkVM guest commits
-//! (tier2/statement `Journal::abi_encode`) and the Intake decodes (`DepositJournal` in
-//! contracts/src/interfaces/v3/IZecuredIntake.sol). Off-chain callers read it before they pay gas
-//! to submit a proof.
+//! The journal of a deposit proof: what the zkVM guest commits (tier2/statement
+//! `Journal::abi_encode`, v2 since design notes T-09) and the Intake decodes (`DepositJournal` in
+//! contracts/src/interfaces/v3/IZecuredIntake.sol), v1 or v2 as the deployment says
+//! (`IZecuredIntake.journalV2`). Off-chain callers read it before they pay gas to submit a proof.
 
 use alloy::{sol, sol_types::SolType};
 use anyhow::{Result, anyhow, ensure};
@@ -28,6 +28,21 @@ pub const MODE_ACTIVATE: u8 = 0;
 pub const MODE_REFUND: u8 = 1;
 /// Length of a v2 journal: eight ABI words.
 pub const JOURNAL_LENGTH: usize = 8 * 32;
+/// Length of a v1 journal (the guest before T-09): six ABI words, always Activate mode.
+pub const JOURNAL_V1_LENGTH: usize = 6 * 32;
+
+sol! {
+    /// `abi.encode(bytes32 tipHash, bytes32 vaultId, address account, uint64 amount, bytes32
+    /// depositTag, bytes32 vaultOpenedHash)`: the v1 journal, six words.
+    struct DepositJournalV1 {
+        bytes32 tipHash;
+        bytes32 vaultId;
+        address account;
+        uint64 amount;
+        bytes32 depositTag;
+        bytes32 vaultOpenedHash;
+    }
+}
 
 /// Decodes a v2 deposit journal as strictly as the Intake: exactly eight words, every word in
 /// range for its type (a dirty high byte is refused, as Solidity's `abi.decode` does), a known
@@ -42,6 +57,32 @@ pub fn decode_deposit_journal(journal: &[u8]) -> Result<DepositJournal> {
         <DepositJournal as SolType>::abi_decode_validate(journal).map_err(|e| anyhow!("not a deposit journal: {e}"))?;
     ensure!(j.mode == MODE_ACTIVATE || j.mode == MODE_REFUND, "unknown deposit proof mode {}", j.mode);
     Ok(j)
+}
+
+/// Decodes a deposit journal of the version the Intake reads (`v2`: `IZecuredIntake.journalV2`),
+/// as strictly as the Intake does. A v1 journal is an Activate-mode proof whose branch id is not
+/// recorded (zero here).
+pub fn decode_deposit_journal_for(journal: &[u8], v2: bool) -> Result<DepositJournal> {
+    if v2 {
+        return decode_deposit_journal(journal);
+    }
+    ensure!(
+        journal.len() == JOURNAL_V1_LENGTH,
+        "this Intake reads v1 deposit journals of {JOURNAL_V1_LENGTH} bytes, not {}",
+        journal.len()
+    );
+    let j = <DepositJournalV1 as SolType>::abi_decode_validate(journal)
+        .map_err(|e| anyhow!("not a v1 deposit journal: {e}"))?;
+    Ok(DepositJournal {
+        mode: MODE_ACTIVATE,
+        branchId: 0,
+        tipHash: j.tipHash,
+        vaultId: j.vaultId,
+        account: j.account,
+        amount: j.amount,
+        depositTag: j.depositTag,
+        vaultOpenedHash: j.vaultOpenedHash,
+    })
 }
 
 #[cfg(test)]
@@ -79,6 +120,25 @@ mod tests {
         assert_eq!(j.vaultOpenedHash, b(REAL[7]));
         // The encoding round-trips.
         assert_eq!(<DepositJournal as SolType>::abi_encode(&j), real());
+    }
+
+    /// A v1 journal is the v2 one without its first two words, read only by a v1 Intake.
+    #[test]
+    fn journals_are_read_in_the_intakes_version() {
+        let v2 = decode_deposit_journal_for(&real(), true).unwrap();
+        let mut v1 = real();
+        v1.drain(..64);
+        let read = decode_deposit_journal_for(&v1, false).unwrap();
+        assert_eq!((read.mode, read.branchId), (MODE_ACTIVATE, 0));
+        assert_eq!(
+            (read.tipHash, read.vaultId, read.account, read.amount, read.depositTag, read.vaultOpenedHash),
+            (v2.tipHash, v2.vaultId, v2.account, v2.amount, v2.depositTag, v2.vaultOpenedHash)
+        );
+        assert!(decode_deposit_journal_for(&v1, true).is_err());
+        assert!(decode_deposit_journal_for(&real(), false).is_err());
+        let mut dirty = v1.clone();
+        dirty[2 * 32] = 1; // the account word
+        assert!(decode_deposit_journal_for(&dirty, false).is_err());
     }
 
     #[test]
