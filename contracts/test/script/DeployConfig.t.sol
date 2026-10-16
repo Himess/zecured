@@ -55,10 +55,20 @@ contract DeployConfigTest is Test {
         assertEq(c.chainId, 84532);
         assertEq(c.zcashNetwork, "zcash-testnet");
         assertFalse(c.localFork);
+        _assertTestnetJournal(c);
         c = _load("base-sepolia-theft-demo");
         assertTrue(c.theftDemo);
+        _assertTestnetJournal(c);
         c = _load("anvil");
         assertTrue(c.localFork);
+        _assertTestnetJournal(c);
+    }
+
+    /// The guests commit journal v2 only (statement v2), and the Testnet build proves the NU7 epoch only.
+    function _assertTestnetJournal(DeployZecured.NetworkConfig memory c) internal pure {
+        assertTrue(c.journalV2, "journal v2");
+        assertEq(c.branchIds[0], 0x77190AD9, "NU7");
+        assertEq(c.branchIds[1], 0, "the Testnet build proves no other epoch");
     }
 
     /// The mainnet template: docs/MAINNET.md's parameter table.

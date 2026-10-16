@@ -149,8 +149,8 @@ router on Base Sepolia; `RealGroth16Seal.t.sol` runs a real deposit's seal throu
 
 ### Reproducing the guest image ids
 
-The Registry (the Intake, from Registry v3) pins the deposit guest's image id and the slasher the
-violation guest's. The network is a build parameter of the guests (design notes T-09), so each
+The Intake accepts the deposit guest's image id and the slasher the violation guest's, as active
+versions of `ZecuredVersions` (adding one takes all five signers and a public delay). The network is a build parameter of the guests (design notes T-09), so each
 network has its own pair: deposit-test and violation-test (Testnet, the NU7 epoch), deposit-main
 and violation-main (Mainnet, the NU6.3 and NU7 epochs). All four come from a reproducible build:
 the guests are compiled in RISC Zero's pinned guest-builder image
@@ -167,6 +167,16 @@ ZECURED_DOCKER_GUESTS=1 cargo build --release -p zecured-tier2-host --features m
 ./target/release/zecured-tier2-host image-id              # deposit-main
 ./target/release/zecured-tier2-host violation image-id    # violation-main
 ```
+
+The `guests` workflow's runs on statement v2 (2026-10-16) gave these, with every parity suite
+passing ([docs/TIER2.md](docs/TIER2.md) § 8.1 lists the ELFs' hashes):
+
+| Guest | Image id |
+|---|---|
+| deposit-test | `0x406c6d268f29270226c775db1fe4bec04acf51ba919e250078125d71c10bff41` |
+| violation-test | `0x65705f75c5482b2b0cf6fee12760b2364d48213bb2933f3882dc2d92f824866e` |
+| deposit-main | `0x53f8f8e3664ce908c4ea072f239e18b6fa8b01d68c01fc162b4ae2e31b2cd5c5` |
+| violation-main | `0x24edd49e52447665146009687b6b85e3f0b6184883cbf635a762048cd1a5ce33` |
 
 The ids of a deployment's network must equal the deployed ones (`deployments/base-sepolia.json` for
 Testnet). A build without

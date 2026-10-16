@@ -12,7 +12,9 @@
   "autoPauseOnCase": false,
   "bountyBps": 1000,
   "bountyCap": "5000000",
-  "branchIds": [],
+  "branchIds": [
+    1998129881
+  ],
   "capPriceMaxAge": 3600,
   "challengeWindow": 120,
   "commitGrace": 120,
@@ -23,7 +25,7 @@
   "finalizeDepth": 6,
   "incidentWindow": 600,
   "inclusionWindow": 1200,
-  "journalV2": false,
+  "journalV2": true,
   "leftoverSink": "0x000000000000000000000000000000000000dEaD",
   "livenessPeriod": 600,
   "livenessPremiumBps": 500,

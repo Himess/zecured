@@ -212,7 +212,8 @@ paid after the vault's expiry, is proven in Refund mode and lands the same way. 
 it could not authenticate the vault's owner on Base without publishing `VaultOpened`'s hashes, and an off-chain refund
 of a note a later proof could make a lineage note would look exactly like an F1 theft (I30, D42). Notes no deployed
 guest can prove (before journal v2: another amount, a late payment, or a transaction that is not Ironwood-only) are
-still refunded off-chain on the owner's signed request (P5).
+still refunded off-chain on the owner's signed request (P5). The judge deployment takes journal v2, so there these
+notes are proven in Refund mode instead.
 
 **Why refunds stay safe while anyone can prove** (review K2, D27). A proof can be made for any note that meets the
 statement, spent or not, while P1 rests on the light wallet server's answers. Four rules keep a refund from ever
@@ -305,12 +306,23 @@ embedded guests disagree. A deployment pins its own network's pair.
 workflow (`.github/workflows/guests.yml`) runs that build on every change to the statement, the guests or the vendored
 crate and publishes the ids and the two ELFs; the commands to reproduce them are in the README. The statement crate and
 both guests are frozen once the deployed ids are taken from that build. Two runs on fresh runners (2026-10-14, the
-same source) gave the same ids. After the red-team fixes the reproducible ids are deposit
+same source) gave the same ids. Statement v1's, after the red-team fixes, were deposit
 `0x62feed13b2948aa427275fb6003e717ccc88945d033b99b196936ca99a80cdf5` and violation
-`0x7d8c9dd23e813e0e44ffea2b18ec9ec451b52a8a7b634ae998583d49b73cc526`, with both parity suites passing on those guests
-in CI. They change with the statement crate until it is frozen. Statement v2 changes both and adds the Mainnet pair:
-the workflow now builds both networks (deposit-test, violation-test, deposit-main, violation-main), prints the four
-ids and runs both parity suites on each pair; its next run gives the ids to pin.
+`0x7d8c9dd23e813e0e44ffea2b18ec9ec451b52a8a7b634ae998583d49b73cc526`; the real seals of `RealGroth16Seal.t.sol` are of
+those guests. Statement v2 changes both and adds the Mainnet pair: the workflow builds both networks, prints the four
+ids and runs both parity suites on each pair. Its runs of 2026-10-16 on statement v2 (two, the same ids, every parity
+suite passing) give the ids to deploy, a network's pair as `DEPOSIT_IMAGE_ID` and `VIOLATION_IMAGE_ID`, and the ELFs
+provers run:
+
+| Guest | Image id | ELF (SHA-256 of the `.bin`) |
+|---|---|---|
+| deposit-test | `0x406c6d268f29270226c775db1fe4bec04acf51ba919e250078125d71c10bff41` | `1a0a418af08e5ae63b2444a16d9902ed8106effa44829a6793c9a0a1dee0f430` |
+| violation-test | `0x65705f75c5482b2b0cf6fee12760b2364d48213bb2933f3882dc2d92f824866e` | `45205f4e390e5d017213ffd399c9231d0300a227d46db7e2f711f0abdc33dd38` |
+| deposit-main | `0x53f8f8e3664ce908c4ea072f239e18b6fa8b01d68c01fc162b4ae2e31b2cd5c5` | `b85d9d21f4bad6d7998506cb09431d5057a334a06732ebdfa3a4472fe811c461` |
+| violation-main | `0x24edd49e52447665146009687b6b85e3f0b6184883cbf635a762048cd1a5ce33` | `dfc746ce0e6c6c2c1f6f5323ebe3c7ef371ab6bd4c3c8f6d08c656adbef3c789` |
+
+The judge deployment and the theft demo take journal v2 with the Testnet pair and the NU7 epoch (branch id
+`0x77190AD9`, D56); the local fork takes journal v2 too, with its own build's ids and the MOCK verifier.
 
 ## 9. Tier 3 directions
 

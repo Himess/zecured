@@ -43,7 +43,7 @@ vault (a decision for 2026-10-22).
 | `incidentWindow` | 3 days | 7 days | Cases of one incident share one price |
 | `capPriceMaxAge` | 1 h (demo price) | 25 h | The price feed's `maxSourceAge` (a 24-hour heartbeat plus an hour), which the deploy script requires |
 | `autoPauseOnCase` | off | on | An open F1/F2 case pauses new minting |
-| `journalV2` / `branchIds` | v1 / none | v2 / NU6.3 `0x37A5165B`, NU7 `0x77190AD9` | The epoch of the deposit is part of what is proven |
+| `journalV2` / `branchIds` | v2 / NU7 `0x77190AD9` | v2 / NU6.3 `0x37A5165B`, NU7 `0x77190AD9` | The epoch of the deposit is part of what is proven; the Testnet build proves the NU7 epoch only |
 | `minRefundZat` | 20,000 | 100,000 | A refund must be worth its own payout |
 | `refundAbandonPeriod` | 30 days | 2 years | |
 | `minSeize` / `minSeizeBps` | 100,000 zat / 0 | 0.05 ZEC / 5 % | No liquidation small enough to grief a vault with dust claims |

@@ -62,9 +62,11 @@ Ironwood pool. This document describes the system as built; interfaces are in
    - **Liquidation (P3):** a liquidator repays through the Adapter and receives the seized
      ZEC; the vault stays open for the borrower's remainder.
 5. **Refunds.** A proven deposit that lands as a Refund claim is paid like any claim, once the
-   account gives its destination (D41). A deposit no deployed guest can prove (another amount than
-   the vault's, before refund proofs are deployed) is refunded off-chain on the owner's signed
-   request (P5); a note a deployed guest can prove is never refunded off-chain (I30).
+   account gives its destination (D41). With journal v2, as on the judge deployment, a deposit of
+   another amount or paid late is proven in Refund mode and lands the same way. A deposit no
+   deployed guest can prove (on a deployment without refund proofs, another amount than the
+   vault's) is refunded off-chain on the owner's signed request (P5); a note a deployed guest can
+   prove is never refunded off-chain (I30).
 
 ## Signer policy
 
