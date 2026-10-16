@@ -89,8 +89,8 @@ from symbolic storage, which no change to the token can break.
 
 ## 2. Live end-to-end runs
 
-The runs below used the v2 contracts (signer attestations, 2026-10-11 to 10-14); the v3 runs follow the jury
-deployment.
+The runs in the first table used the v2 contracts (signer attestations, 2026-10-11 to 10-14); the v3 runs on a local
+fork follow it (2026-10-16), and the jury deployment's will follow those.
 
 Setup: Zcash **testnet** after NU7 through `testnet.zec.rocks`, five signer node processes plus
 the coordinator talking over HTTP, and the Base side on a local fork of Base Sepolia (the real
@@ -114,6 +114,27 @@ own fork gas. The app uses a fresh, gasless Safe instead.
 
 In every run the account's zZEC balance stayed 0 (I2): zZEC only ever sat in Morpho, the
 Registry and the SettlementAdapter.
+
+### v3 on a local fork (2026-10-16)
+
+A fresh v3 deployment on an anvil fork of Base Sepolia (block 48,206,967): the nine contracts, the real header relay
+checkpointed at the Testnet tip and fed over P2P, `MockRiscZeroVerifier` with the v2 Testnet guests' image ids as the
+active versions, five signer node processes and the coordinator, all on the Windows development machine. The Zcash side
+is real Testnet: TAZ from the Valar faucet; every deposit and payout below is a Testnet transaction. The seals are MOCK
+(`mock-host`: the native statement on the real witness, since RISC Zero does not run on Windows); everything else is
+the code the jury deployment runs.
+
+| Flow | What happened | Evidence |
+|---|---|---|
+| Deposit proof, pending activation, activation | 0.01 TAZ paid to vault A. The coordinator built the witness from Testnet data (the first one, with the NU7 epoch's summaries, in about 8 minutes), proved it into the Intake (pending until the relay had gained 6 headers and 150 s had passed), then finalized it: 1,000,000 zat of zZEC straight into the account's Morpho collateral | deposit `dd07aa9e68ed547fd092f8449ca2be5204e99e8bb683b2fe1b5f0b3975524388` (block 4,509,466) |
+| Borrow, repay, release | 0.1 USDC borrowed and repaid; `requestRelease`; the payout committed on Base, FROST-signed by nodes 1, 2 and 4, confirmed: vault closed, zZEC supply 0 | payout `d41c2feb4ab540b811d1d3ac38e98b8c29e21b79f8e0bc6694bcd4e2f0718dde` (block 4,509,505, 990,000 zat) |
+| Refund by proof (T-02) | 0.0123 TAZ (another amount), then 0.01 TAZ paid to vault B. Once B was active the coordinator proved the first note in Refund mode: a Refund claim of 1,230,000 zat, its destination given from the account, paid by nodes 1, 2 and 3 | deposits `66fa53d4d191312cd42fe2d83d52977be59137b63e55723e684e97125b821b71`, `95d51562985c38349cfe33ca2b04c8971637368a80e4efc8a6cac7b3df72fde6`; refund `86e1ffedc5877ccf963fe3b6fb54c9a1055b4c0ed6bd2c5a13fec56548b36463` (block 4,509,534, 1,220,000 zat) |
+| Dispute, reopening, the bonds, a late proof (D53, T-05, D57) | Vault A's confirmed release disputed although it had arrived. The slash's confirmation work (38 M) took about 45 minutes to gather, longer than the fork's 20-minute inclusion window, so the claim was reopened on its original liveness schedule and the account had the bonds pay it (13.2825 USDC). Then the coordinator proved the payout's inclusion and the claim was upheld as paid: the vault settled again | the payout above |
+| Release after a refund | Vault B's collateral released and paid by nodes 1, 2 and 3 | payout `97b7c1deb34ebd4569985e1ac5aa1d00097ba3f4873a7d3ee680122573994896` (block 4,509,573, 990,000 zat) |
+
+Not in this run: the opening fee (the fork's config charges none), liquidation and close from collateral, and the
+app's sponsored UserOps. Twice the coordinator asked for signatures right after a new Base event that the nodes had
+not applied yet; they refused, and its next pass, about 80 seconds later, went through.
 
 ## 2b. Tier 2 deposit proofs (docs/TIER2.md)
 
