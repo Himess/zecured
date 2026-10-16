@@ -28,8 +28,9 @@ interface IZecuredDisputesEvents {
 ///         `inclusionWindow` to prove, with the violation guest's `Included` kind (`ZecuredSlasher.proveInclusion`), that
 ///         a committed payout of the claim's input is in a Zcash block; every commitment of an input pays the same
 ///         claims (RT-4), so any of them pays this one. If nobody does, anyone reopens the claim: `Pending`, payable by a
-///         new payout of its input, and from the bonds on its original liveness schedule (T-05), which a false
-///         confirmation never restarts.
+///         new payout of its input, which names the same claims, confirmed ones included (D57), and from the bonds on
+///         its original liveness schedule (T-05), which a false confirmation never restarts. A proof that comes later
+///         still upholds the reopened claim, so that a payout which did land never keeps its vault open for good.
 /// @dev Served by the Registry: its fallback runs `ZecuredSpendLogic`'s code on its storage (T-11), so call these on
 ///      the Registry's address. A dispute keeps its vault open (`openVaultCount`) and counts the claim among the
 ///      vault's unpaid claims and in `lockedZatoshi` until it is resolved. The deployment keeps
@@ -49,10 +50,12 @@ interface IZecuredDisputes is IZecuredDisputesEvents {
     function disputePayout(bytes32 claimId) external;
 
     /// @notice The slasher only, after it verified an `Included` proof of `payoutRef`. Upholds the confirmation of a
-    ///         disputed claim if `payoutRef` is a committed payout of the claim's input; the claim is `Paid` for good.
+    ///         disputed claim, or of one reopened after its inclusion window (D57), if `payoutRef` is a committed payout
+    ///         of the claim's input; the claim is `Paid` for good, also if the bonds paid it meanwhile.
     function upholdPayout(bytes32 claimId, bytes32 payoutRef) external;
 
-    /// @notice Anyone, once `inclusionWindow` has passed without a proof: the disputed claim is `Pending` again.
+    /// @notice Anyone, once `inclusionWindow` has passed without a proof: the disputed claim is `Pending` again (and
+    ///         stays upholdable by a later proof).
     function reopenDisputedClaim(bytes32 claimId) external;
 
     /// @return paidAt When the claim was confirmed paid (zero if it is not, or its confirmation was upheld).

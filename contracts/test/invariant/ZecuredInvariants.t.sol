@@ -394,7 +394,7 @@ contract ZecuredInvariantsTest is ZecuredFixture {
     }
 
     function afterInvariant() external view {
-        string[51] memory names = [
+        string[52] memory names = [
             "prove: pending",
             "prove: refund (known vault)",
             "prove: refund (account bound)",
@@ -432,6 +432,7 @@ contract ZecuredInvariantsTest is ZecuredFixture {
             "confirm",
             "dispute",
             "uphold",
+            "uphold late",
             "reopen",
             "attack: claim reuse",
             "attack: uncommitted confirm",

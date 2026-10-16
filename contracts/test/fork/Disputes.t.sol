@@ -1,7 +1,7 @@
 // SPDX-License-Identifier: MIT
 pragma solidity 0.8.28;
 
-import {ClaimStatus} from "../../src/interfaces/v3/IZecuredRegistry.sol";
+import {IZecuredRegistry, ClaimStatus} from "../../src/interfaces/v3/IZecuredRegistry.sol";
 import {IZecuredDisputes, IZecuredDisputesEvents} from "../../src/interfaces/v3/IZecuredDisputes.sol";
 import {IZecuredSlasher, ViolationKind} from "../../src/interfaces/v3/IZecuredSlasher.sol";
 import {IZecuredVersions, VersionKind} from "../../src/interfaces/v3/IZecuredVersions.sol";
@@ -12,12 +12,30 @@ import {SpendCommit} from "../../src/libraries/ZecuredEIP712.sol";
 import {ZecuredSpendLogic} from "../../src/registry/ZecuredSpendLogic.sol";
 import {Tier3Base} from "../utils/Tier3Base.sol";
 
+/// The journal of the violation guest's `Included` kind and its MOCK seal.
+abstract contract DisputesBase is Tier3Base {
+    uint256 internal constant INCLUDED = 5;
+
+    /// The journal of the violation guest's `Included` kind: kind 5, the anchor, X's payoutRef, every other word zero.
+    function _included(bytes32 anchor, bytes32 ref) internal pure returns (bytes memory) {
+        return abi.encode(INCLUDED, anchor, uint256(0), ref, bytes32(0), uint256(0), bytes32(0), uint256(0));
+    }
+
+    function _seal(bytes memory journal) internal view returns (bytes memory) {
+        return verifier.mockSeal(VIOLATION_IMAGE, sha256(journal));
+    }
+
+    /// Proves the inclusion of `ref` (anchored at ANCHOR) for `claimId`.
+    function _upholdWith(bytes32 ref, bytes32 claimId) internal {
+        bytes memory journal = _included(ANCHOR, ref);
+        slasher.proveInclusion(journal, _seal(journal), violationImage, claimId);
+    }
+}
+
 /// The dispute path (design notes T-05 (a)) on the real Registry, spend logic, slasher, bond and compensator, with the
 /// MOCK verifier and the MOCK relay: a claimant disputes the signers' confirmation that its claim was paid; the signers
 /// prove that the payout is in a Zcash block (the violation guest's `Included` kind), or the claim is payable again.
-contract DisputesTest is Tier3Base {
-    uint256 internal constant INCLUDED = 5;
-
+contract DisputesTest is DisputesBase {
     address internal account = makeAddr("zecured.disputes.account");
     IZecuredDisputes internal disputes;
     bytes32 internal vaultId;
@@ -40,15 +58,6 @@ contract DisputesTest is Tier3Base {
     }
 
     // ------------------------------------------------------------------ helpers
-
-    /// The journal of the violation guest's `Included` kind: kind 5, the anchor, X's payoutRef, every other word zero.
-    function _included(bytes32 anchor, bytes32 ref) internal pure returns (bytes memory) {
-        return abi.encode(INCLUDED, anchor, uint256(0), ref, bytes32(0), uint256(0), bytes32(0), uint256(0));
-    }
-
-    function _seal(bytes memory journal) internal view returns (bytes memory) {
-        return verifier.mockSeal(VIOLATION_IMAGE, sha256(journal));
-    }
 
     function _proveIncludedExpectRevert(bytes memory journal, bytes32 id, bytes memory err) internal {
         bytes memory seal = _seal(journal);
@@ -108,15 +117,11 @@ contract DisputesTest is Tier3Base {
         assertEq(confirmedAt, 0);
         assertEq(dueAt, due);
 
-        // Nothing confirms or commits it meanwhile, and no bond leaves in full.
+        // No signature confirms it meanwhile (a new payout of its input may be committed, D57, but only a proof
+        // upholds it), and no bond leaves in full.
         bytes[] memory sigs = _threeSigs(registry.hashPayoutConfirmation(vaultId, _one(claimId)));
         vm.expectRevert(abi.encodeWithSelector(IZecuredSpendCommitsEvents.ClaimNotPayable.selector, claimId));
         registry.confirmPayout(vaultId, _one(claimId), sigs);
-        SpendCommit memory c =
-            _spendCommit(vaultId, _depositTagFor(account), _one(claimId), keccak256("zecured.disputes.meanwhile"));
-        sigs = _threeSigs(registry.hashSpendCommit(c));
-        vm.expectRevert(abi.encodeWithSelector(IZecuredSpendCommitsEvents.ClaimNotPayable.selector, claimId));
-        registry.commitSpend(c, sigs);
         vm.prank(signerSet[0]);
         vm.expectRevert(abi.encodeWithSelector(ISignerBond.FullExitLocked.selector, 1, 0, uint64(paidAt) + WINDOW));
         bond.requestUnbond(MIN_BOND);
@@ -346,12 +351,6 @@ contract DisputesTest is Tier3Base {
         assertEq(due, 0);
         vm.expectRevert(abi.encodeWithSelector(IZecuredDisputesEvents.NotDisputed.selector, claimId));
         disputes.reopenDisputedClaim(claimId);
-        // A late proof upholds nothing any more.
-        _proveIncludedExpectRevert(
-            _included(ANCHOR, payoutRef),
-            claimId,
-            abi.encodeWithSelector(IZecuredDisputesEvents.NotDisputed.selector, claimId)
-        );
 
         // Payable again: a new payout of the same input and claims, confirmed, which its claimant may dispute again.
         SpendCommit memory again =
@@ -398,6 +397,87 @@ contract DisputesTest is Tier3Base {
         disputes.disputePayout(claimId);
     }
 
+    /// D57: a proof that comes after the inclusion window still upholds the reopened claim (the payout did land), and
+    /// the vault settles again; only a disputed or reopened claim is upheld this way.
+    function test_lateProof_upholdsAReopenedClaim() public {
+        _dispute();
+        vm.warp(block.timestamp + INCLUSION_WINDOW + 1);
+        disputes.reopenDisputedClaim(claimId);
+        assertEq(registry.openVaultCount(), 1);
+
+        bytes memory journal = _included(ANCHOR, payoutRef);
+        bytes memory seal = _seal(journal);
+        vm.expectEmit(address(registry));
+        emit IZecuredDisputesEvents.PayoutUpheld(vaultId, claimId, payoutRef);
+        slasher.proveInclusion(journal, seal, violationImage, claimId);
+        assertEq(uint8(_claimStatus(claimId)), uint8(ClaimStatus.Paid));
+        assertEq(registry.vaultDetails(vaultId).unpaidClaims, 0);
+        assertEq(registry.openVaultCount(), 0, "settled again");
+        assertEq(registry.lastVaultSettledAt(), block.timestamp);
+
+        // Upheld for good: no dispute, no second proof.
+        vm.prank(account);
+        vm.expectRevert(abi.encodeWithSelector(IZecuredDisputesEvents.NotDisputable.selector, claimId));
+        disputes.disputePayout(claimId);
+        _proveIncludedExpectRevert(
+            journal, claimId, abi.encodeWithSelector(IZecuredDisputesEvents.NotDisputed.selector, claimId)
+        );
+        // A committed claim that was never disputed is confirmed by the signers, not by a proof.
+        (bytes32 otherClaim, bytes32 otherRef) = _otherCommitted();
+        _proveIncludedExpectRevert(
+            _included(ANCHOR, otherRef),
+            otherClaim,
+            abi.encodeWithSelector(IZecuredDisputesEvents.NotDisputed.selector, otherClaim)
+        );
+    }
+
+    /// D57: the bonds paid the reopened claim, then a proof shows that its payout had landed: the claim is paid, the
+    /// bonds' reimbursement is forgone (its ZEC reached the claimant), and the vault no longer keeps every bond in.
+    function test_lateProof_afterTheBondsPaid_settlesTheVault() public {
+        _dispute();
+        vm.warp(block.timestamp + INCLUSION_WINDOW + 1);
+        disputes.reopenDisputedClaim(claimId);
+        (uint64 dueAt,) = bond.livenessDue(claimId);
+        if (dueAt > block.timestamp) vm.warp(dueAt);
+        vm.prank(account);
+        bond.slashLiveness(claimId);
+        assertTrue(registry.claimDetails(claimId).bondPaid);
+        assertEq(registry.openVaultCount(), 1, "its ZEC is owed to the bonds");
+
+        _upholdWith(payoutRef, claimId);
+        assertEq(uint8(_claimStatus(claimId)), uint8(ClaimStatus.Paid));
+        assertTrue(registry.claimDetails(claimId).bondPaid, "the bonds paid it as well");
+        assertEq(registry.openVaultCount(), 0, "settled: the bonds can leave in full again");
+        assertEq(registry.lockedZatoshi(), 0);
+        // Its reimbursement destination can no longer be given: the claim is paid.
+        bytes32 dest = keccak256("zecured.disputes.reimburse");
+        uint64 deadline = uint64(block.timestamp + 1 hours);
+        bytes[] memory sigs = _threeSigs(registry.hashReimburseDestination(claimId, dest, deadline));
+        vm.expectRevert(abi.encodeWithSelector(IZecuredRegistry.NotBondPaid.selector, claimId));
+        registry.setReimburseDestination(claimId, dest, deadline, sigs);
+    }
+
+    /// D57: a commitment may name a confirmed claim again only from the claim's own input; from another note of the
+    /// vault it never can.
+    function test_confirmedClaim_isNamedAgainOnlyFromItsOwnInput() public {
+        address holder = makeAddr("zecured.disputes.partial");
+        bytes32 v = _attest(holder, VAULT_005);
+        _authorizeBoth(holder);
+        vm.prank(holder);
+        bytes32 part = registry.requestPartialRelease(v, 1_000_000, RELEASE_COMMITMENT);
+        SpendCommit memory first = _commitNext(v, _one(part)); // from the deposit, with change
+        _confirm(v, _one(part));
+        assertTrue(first.changeTag != bytes32(0));
+
+        SpendCommit memory fromChange =
+            _spendCommit(v, first.changeTag, _one(part), keccak256("zecured.disputes.fromChange"));
+        bytes[] memory sigs = _threeSigs(registry.hashSpendCommit(fromChange));
+        vm.expectRevert(abi.encodeWithSelector(IZecuredSpendCommitsEvents.ClaimNotPayable.selector, part));
+        registry.commitSpend(fromChange, sigs);
+        // From its own input it can: the confirmed payout would have been a false one.
+        _send(_spendCommit(v, _depositTagFor(holder), _one(part), keccak256("zecured.disputes.fromInput")));
+    }
+
     /// A dispute open when the vault is compromised: the compensator waits for it, then tallies the reopened claim.
     function test_disputeOpenAtCompromise_isTalliedOnceReopened() public {
         _dispute();
@@ -426,5 +506,83 @@ contract DisputesTest is Tier3Base {
         compensator.tallyVault(vaultId);
         assertTrue(compensator.victim(vaultId).tallied);
         assertEq(registry.openVaultCount(), 0);
+    }
+}
+
+/// D57 on a payout that also paid the vault's opening fee, a Fee claim nobody can dispute: once the release's
+/// confirmation is disputed and not upheld, a new payout of the same input names both claims again, the confirmed Fee
+/// claim included (RT-4 keeps the claim set), so the vault never stays open for good.
+contract DisputedFeePayoutTest is DisputesBase {
+    bytes32 internal constant TREASURY = keccak256("zecured.disputes.treasury");
+
+    address internal account = makeAddr("zecured.disputes.fee.account");
+    IZecuredDisputes internal disputes;
+    bytes32 internal vaultId;
+    bytes32 internal releaseId;
+    bytes32 internal feeId;
+    bytes32 internal input;
+
+    function _feeSetup() internal pure override returns (FeeSetup memory) {
+        return FeeSetup({feeBps: 50, minFeeZat: 20_000, feeCommitment: TREASURY});
+    }
+
+    /// The vault's first exit pays the release and the opening fee from its deposit, confirmed an hour later.
+    function setUp() public override {
+        super.setUp();
+        disputes = IZecuredDisputes(address(registry));
+        vaultId = _attest(account, VAULT_005);
+        feeId = registry.claimIdOf(vaultId, 0);
+        _authorizeBoth(account);
+        vm.prank(account);
+        releaseId = registry.requestRelease(vaultId, RELEASE_COMMITMENT);
+        input = _depositTagFor(account);
+        _commitNext(vaultId, _two(releaseId, feeId));
+        vm.warp(block.timestamp + 1 hours);
+        _confirm(vaultId, _two(releaseId, feeId));
+        assertEq(registry.openVaultCount(), 0);
+        assertEq(registry.claimDetails(feeId).claimant, address(0), "nobody disputes the fee");
+    }
+
+    function _feeCaseStatus(bytes32 id) internal view returns (ClaimStatus) {
+        return registry.claimDetails(id).status;
+    }
+
+    function test_recommit_afterAReopen_namesTheConfirmedFeeAgain() public {
+        vm.prank(account);
+        disputes.disputePayout(releaseId);
+        vm.warp(block.timestamp + INCLUSION_WINDOW + 1);
+        disputes.reopenDisputedClaim(releaseId);
+        assertEq(uint8(_feeCaseStatus(feeId)), uint8(ClaimStatus.Paid));
+
+        // RT-4 still holds: the input's whole claim set, never a part of it.
+        SpendCommit memory part = _spendCommit(vaultId, input, _one(releaseId), keccak256("zecured.disputes.fee.part"));
+        bytes[] memory sigs = _threeSigs(registry.hashSpendCommit(part));
+        vm.expectRevert(abi.encodeWithSelector(IZecuredSpendCommitsEvents.ClaimSetMismatch.selector, input));
+        registry.commitSpend(part, sigs);
+
+        // The same claims, the confirmed fee included: the payout that never landed is made again.
+        SpendCommit memory again =
+            _spendCommit(vaultId, input, _two(releaseId, feeId), keccak256("zecured.disputes.fee.again"));
+        _send(again);
+        assertEq(registry.claimPayment(again.claimRefs[1]).expected, registry.claimDetails(feeId).amount - 5_000);
+        _confirm(vaultId, _one(releaseId));
+        assertEq(uint8(_feeCaseStatus(releaseId)), uint8(ClaimStatus.Paid));
+        assertEq(registry.openVaultCount(), 0, "the vault settles again");
+        assertEq(registry.lockedZatoshi(), 0);
+    }
+
+    /// Within the inclusion window: the signers find the input unspent, pay the claims now, and prove that payout.
+    function test_recommit_whileDisputed_upheldByTheNewPayout() public {
+        vm.prank(account);
+        disputes.disputePayout(releaseId);
+        SpendCommit memory again =
+            _spendCommit(vaultId, input, _two(releaseId, feeId), keccak256("zecured.disputes.fee.inWindow"));
+        _send(again);
+        assertEq(uint8(_feeCaseStatus(releaseId)), uint8(ClaimStatus.Disputed), "a commitment confirms nothing");
+
+        _upholdWith(again.payoutRef, releaseId);
+        assertEq(uint8(_feeCaseStatus(releaseId)), uint8(ClaimStatus.Paid));
+        assertEq(registry.openVaultCount(), 0);
+        assertEq(registry.lockedZatoshi(), 0);
     }
 }

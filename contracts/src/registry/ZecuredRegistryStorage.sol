@@ -66,6 +66,8 @@ abstract contract ZecuredRegistryStorage is EIP712, IZecuredSignerErrors {
     uint64 internal _lastVaultSettledAt;
     /// @dev T-01: zatoshi of every pending claim (the vaults hold them for Base besides the zZEC supply).
     uint256 internal _pendingClaimZat;
+    /// @dev T-05 (a), D57: claims reopened after a dispute; a late inclusion proof still upholds them.
+    mapping(bytes32 claimId => bool) internal _reopened;
 
     constructor(address[5] memory signers_) EIP712(ZecuredEIP712.REGISTRY_DOMAIN_NAME, ZecuredEIP712.DOMAIN_VERSION) {
         address previous = address(0);

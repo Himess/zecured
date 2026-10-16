@@ -123,6 +123,9 @@ contract ZecuredSpendLogic is ZecuredRegistryStorage, IZecuredSpendCommitsEvents
     ///      this input (the first commitment binds it), paid by its own output (E1), with an unused claim ref, which
     ///      records what the claimant must receive and where. `claimIds[0]` bears `fee`; a Fee claim elsewhere bears
     ///      its own output (T-06). Returns the claim's amount.
+    ///      A new commitment of the claim's own input may also name it once confirmed or disputed (D57): its input
+    ///      carries the same claims (RT-4), so while that input is unspent no payout of it landed, whatever was
+    ///      confirmed (a false confirmation, or one a reorganization undid), and only this payout can pay them.
     function _commitClaim(SpendCommit calldata c, uint256 i, uint64 fee) internal returns (uint64 amount) {
         bytes32 id = c.claimIds[i];
         uint8 output = c.claimOutputs[i];
@@ -131,13 +134,15 @@ contract ZecuredSpendLogic is ZecuredRegistryStorage, IZecuredSpendCommitsEvents
             if (c.claimOutputs[k] == output) revert DuplicateClaimOutput(output);
         }
         Claim storage cl = _claims[id];
-        if (cl.vaultId != c.vaultId || cl.status != ClaimStatus.Pending) revert ClaimNotPayable(id);
+        ClaimStatus status = cl.status;
+        bytes32 bound = _claimInput[id];
+        bool again = bound == c.inputTag && (status == ClaimStatus.Paid || status == ClaimStatus.Disputed);
+        if (cl.vaultId != c.vaultId || (status != ClaimStatus.Pending && !again)) revert ClaimNotPayable(id);
         // F4 (RT-1): each claim's reference is kept under its recipient commitment, distinct within a payout (the
         // payout reference is new, so an entry can only come from an earlier claim of this commitment).
         bytes32 commitment = cl.commitment;
         if (commitment == bytes32(0)) revert ClaimDestinationUnset(id);
         if (_claimRefOf[c.payoutRef][commitment] != bytes32(0)) revert DuplicateClaimCommitment(commitment);
-        bytes32 bound = _claimInput[id];
         if (bound == bytes32(0)) _claimInput[id] = c.inputTag;
         else if (bound != c.inputTag) revert ClaimBoundToAnotherInput(id, bound);
 
@@ -193,7 +198,12 @@ contract ZecuredSpendLogic is ZecuredRegistryStorage, IZecuredSpendCommitsEvents
         address slasher = IZecuredRegistry(address(this)).slasher();
         if (msg.sender != slasher || slasher == address(0)) revert OnlySlasher(msg.sender);
         Claim storage c = _claims[claimId];
-        if (c.status != ClaimStatus.Disputed) revert NotDisputed(claimId);
+        ClaimStatus status = c.status;
+        // D57: a proof that comes after the inclusion window still upholds a reopened claim, also one the bonds paid
+        // meanwhile (their reimbursement is then forgone: the claim's ZEC reached its claimant).
+        if (status != ClaimStatus.Disputed && !(status == ClaimStatus.Pending && _reopened[claimId])) {
+            revert NotDisputed(claimId);
+        }
         // Every commitment of an input pays the same claims (RT-4), so any committed payout of this claim's input pays
         // it.
         bytes32 input = _claimInput[claimId];
@@ -213,6 +223,7 @@ contract ZecuredSpendLogic is ZecuredRegistryStorage, IZecuredSpendCommitsEvents
         // Already counted unpaid; still bound to its input, and its liveness clock (`createdAt`) never restarted.
         c.status = ClaimStatus.Pending;
         c.disputeDueAt = 0;
+        _reopened[claimId] = true;
         emit DisputedClaimReopened(c.vaultId, claimId);
     }
 

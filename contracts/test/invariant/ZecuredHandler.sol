@@ -108,6 +108,8 @@ contract ZecuredHandler is Test {
     mapping(bytes32 vaultId => bytes32[]) internal liveNotes;
     /// The note a refund claim pays back (its account's deposit).
     mapping(bytes32 claimId => bytes32) public refundNoteOf;
+    /// Claims reopened after a dispute: a later proof of their payout still upholds them (D57).
+    mapping(bytes32 claimId => bool) public reopened;
     /// Every tag the Intake accepted, and what it is now.
     bytes32[] public tags;
     mapping(bytes32 tag => uint8) public tagState;
@@ -1006,7 +1008,8 @@ contract ZecuredHandler is Test {
     }
 
     /// The vault's first disputed claim is resolved: upheld by a proof of its payout (the MOCK slasher stands in for
-    /// a verified `Included` proof), or, once the inclusion window is over, reopened by anyone.
+    /// a verified `Included` proof), or, once the inclusion window is over, reopened by anyone. A proof also upholds a
+    /// claim reopened earlier (D57), as long as it is still unpaid.
     function resolveDispute(uint256 vaultSeed, uint256 howSeed) external {
         (bool found, bytes32 vaultId,) = _vault(vaultSeed);
         if (!found) return;
@@ -1016,13 +1019,14 @@ contract ZecuredHandler is Test {
         for (uint64 j; j < count; ++j) {
             bytes32 claimId = registry.claimIdOf(vaultId, j);
             (,,,, ClaimStatus status) = registry.claim(claimId);
-            if (status != ClaimStatus.Disputed) continue;
+            bool late = prove && status == ClaimStatus.Pending && reopened[claimId];
+            if (status != ClaimStatus.Disputed && !late) continue;
             if (prove) {
                 // The handler's payout of an input has a reference derived from it (`_commit`).
                 bytes32 payoutRef = keccak256(abi.encode("zecured.inv.payoutRef", registry.claimInput(claimId)));
                 vm.prank(address(gates));
                 try disputes.upholdPayout(claimId, payoutRef) {
-                    calls["uphold"]++;
+                    calls[late ? "uphold late" : "uphold"]++;
                 } catch {
                     _flag("a proven payout could not be upheld");
                 }
@@ -1031,6 +1035,7 @@ contract ZecuredHandler is Test {
                 if (block.timestamp <= dueAt) return;
                 vm.prank(stranger);
                 try disputes.reopenDisputedClaim(claimId) {
+                    reopened[claimId] = true;
                     calls["reopen"]++;
                 } catch {
                     _flag("a dispute could not be reopened after its inclusion window");
