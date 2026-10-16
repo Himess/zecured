@@ -98,6 +98,10 @@
     "stateMutability": "nonpayable"
   },
   {
+    "type": "fallback",
+    "stateMutability": "nonpayable"
+  },
+  {
     "type": "function",
     "name": "DUST_LIMIT",
     "inputs": [],
