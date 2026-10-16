@@ -105,12 +105,12 @@ contract ZecuredRegistryTest is ZecuredFixture {
             registry.eip712Domain();
         assertEq(name, "ZecuredRegistry");
         assertEq(version, "1");
-        assertEq(chainId, 84532);
+        assertEq(chainId, block.chainid); // 84532 on the judge network
         assertEq(verifyingContract, address(registry));
         (, name, version, chainId, verifyingContract,,) = adapter.eip712Domain();
         assertEq(name, "ZecuredSettlementAdapter");
         assertEq(version, "1");
-        assertEq(chainId, 84532);
+        assertEq(chainId, block.chainid); // 84532 on the judge network
         assertEq(verifyingContract, address(adapter));
 
         bytes32 domainTypehash =
@@ -118,21 +118,29 @@ contract ZecuredRegistryTest is ZecuredFixture {
         assertEq(
             registry.domainSeparator(),
             keccak256(
-                abi.encode(domainTypehash, keccak256("ZecuredRegistry"), keccak256("1"), 84532, address(registry))
+                abi.encode(
+                    domainTypehash, keccak256("ZecuredRegistry"), keccak256("1"), block.chainid, address(registry)
+                )
             )
         );
         assertEq(
             adapter.domainSeparator(),
             keccak256(
                 abi.encode(
-                    domainTypehash, keccak256("ZecuredSettlementAdapter"), keccak256("1"), 84532, address(adapter)
+                    domainTypehash,
+                    keccak256("ZecuredSettlementAdapter"),
+                    keccak256("1"),
+                    block.chainid,
+                    address(adapter)
                 )
             )
         );
     }
 
-    /// The deployed Registry's digests equal the ones an independent EIP-712 implementation derives from wallet JSON.
-    function test_deployedDigests_matchTypedDataJson() public view {
+    /// The deployed Registry's digests equal the ones an independent EIP-712 implementation derives from wallet JSON
+    /// (for chain id 84532: skipped on the mainnet rehearsal fork).
+    function test_deployedDigests_matchTypedDataJson() public {
+        vm.skip(block.chainid != BASE_SEPOLIA_CHAIN_ID);
         bytes32 vaultId = _vaultIdFor(account);
         bytes32 claimId = registry.claimIdOf(vaultId, 0);
         bytes32 commitment = keccak256("zecured.registry.reimburse");

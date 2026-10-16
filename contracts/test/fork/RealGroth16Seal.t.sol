@@ -67,7 +67,7 @@ contract RealGroth16SealTest is ZecuredFixture, RelayFixtures {
     /// Submits the anchor's headers up to 4,488,560 + n - 1 (those not submitted yet).
     function _relayHeaders(uint256 n) internal {
         for (uint256 i = relayed; i < n; ++i) {
-            _warpTo(anchor.headers[i]);
+            _warpForward(anchor.headers[i]);
             relay.submitHeader(anchor.headers[i]);
         }
         if (n > relayed) relayed = n;
