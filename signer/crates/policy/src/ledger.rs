@@ -17,7 +17,7 @@
 //!
 //! Every Base event that burns zZEC creates claims (one per recipient); so do a refund (T-02) and
 //! the opening fee (T-06). Claims are paid in Base order, one payout transaction at a time. A
-//! payout of the main lineage settles up to [`MAX_CLAIMS_PER_PAYOUT`] of them (review İ-01), its
+//! payout of the main lineage settles up to [`MAX_CLAIMS_PER_PAYOUT`] of them (review H-06), its
 //! first claim bearing the ZIP-317 fee out of its recipient's output, except that a Fee claim
 //! riding along bears exactly its own output's share ([`ZIP317_MARGINAL_FEE`]). It spends the
 //! whole main lineage and returns the rest (the still-unpaid claims plus `outstanding`) to the
@@ -37,7 +37,7 @@ pub type Commitment = [u8; 32];
 pub const MARKET_MAKER_GRACE_SECS: u64 = 120;
 
 /// Most claims one payout settles: the Registry's `MAX_CLAIMS_PER_PAYOUT` (a commitment names 1
-/// to 8 claims). Review H-06 / İ-01: a vault's claims would otherwise be paid one payout at a
+/// to 8 claims). Review H-06: a vault's claims would otherwise be paid one payout at a
 /// time, each waiting for the previous change to be mined, so splitting one liquidation into many
 /// small ones could hold every later claim of the vault back for hours.
 pub const MAX_CLAIMS_PER_PAYOUT: usize = 8;
@@ -425,7 +425,7 @@ pub fn next_payout(
         if plan(&group, lineage_value, lineage_notes)?.is_none() {
             continue;
         }
-        // T-06 and İ-01: the vault's Fee claim rides first, then the later payable claims, in
+        // T-06 and H-06: the vault's Fee claim rides first, then the later payable claims, in
         // queue order.
         let riders: Vec<&Claim> = unpaid
             .iter()
@@ -550,7 +550,7 @@ fn unit<'a>(
     Ok(Unit::Pay(group))
 }
 
-/// İ-01: `group`, a payable start of a payout, extended with the claims of `riders` (the vault's
+/// H-06: `group`, a payable start of a payout, extended with the claims of `riders` (the vault's
 /// Fee claim, then the rest of the queue, in order) that the queue would pay on their own, as long
 /// as the payout stays within [`MAX_CLAIMS_PER_PAYOUT`], pays every receiver and names every salt
 /// once (E1), and its first claim still bears the fee of every output. A claim that does not fit is
@@ -744,7 +744,7 @@ mod tests {
             panic!()
         };
         assert_eq!(p.claims, vec![c1.id]);
-        // Without the binding the queue order would start with c0 (and c1 would ride along, İ-01).
+        // Without the binding the queue order would start with c0 (and c1 would ride along, H-06).
         let NextPayout::Pay(p) = next_payout(&claims, known(&[5, 6]), DEPOSIT, 1, 3_000, &[]).unwrap() else {
             panic!()
         };
@@ -1438,7 +1438,7 @@ mod tests {
         assert!(lineage_members(None, &notes[1..]).iter().all(|m| !m));
     }
 
-    // ----- H-06 / İ-01: a payout settles up to eight claims of the vault, the first bearing the fee.
+    // ----- H-06: a payout settles up to eight claims of the vault, the first bearing the fee.
 
     /// A claim paid to `r` (its commitment is `r`'s).
     fn claim_to(id: u8, kind: ClaimKind, amount: u64, order: u64, r: Recipient) -> Claim {
@@ -1665,7 +1665,7 @@ mod tests {
         assert_eq!(p.claims.len(), MAX_CLAIMS_PER_PAYOUT);
     }
 
-    /// RT-3 / T3-5 with İ-01: once a commitment on Base binds a payout's claims to the lineage note,
+    /// RT-3 / T3-5 with H-06: once a commitment on Base binds a payout's claims to the lineage note,
     /// a rebuilt payout is exactly that payout (same claims in the same order, the same fee bearer,
     /// payments and change), whatever became payable since.
     #[test]
@@ -1708,7 +1708,7 @@ mod tests {
         }
     }
 
-    /// The planner before İ-01, kept as the reference: the first payable claim (or close pair),
+    /// The planner before H-06, kept as the reference: the first payable claim (or close pair),
     /// alone. Same queue rules (E1 including salts), no riding along.
     fn single_payout(
         claims: &[Claim],

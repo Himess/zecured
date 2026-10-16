@@ -369,7 +369,7 @@ pub fn mutations(net: &Network) -> Vec<Mutation> {
             },
             Accepted,
         ),
-        // 7. The tag key, bound to the vault by VaultOpened (design review, Claude Web § 2).
+        // 7. The tag key, bound to the vault by VaultOpened (design review).
         m(
             "Activate: another tag key",
             |w| {

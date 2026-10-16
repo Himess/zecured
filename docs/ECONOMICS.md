@@ -1,0 +1,94 @@
+# Economics
+
+Who puts up what, who pays for what, and what the signers' bonds cover. Figures marked *judge* are
+the Base Sepolia deployment's (`contracts/config/zecured-base-sepolia.json`); docs/MAINNET.md gives
+the mainnet values. The decisions behind each rule are in docs/DECISIONS.md (D40 to D54).
+
+## The parties
+
+| Party | Puts up | Gets |
+|---|---|---|
+| Borrower | ZEC, sent to a 3-of-5 FROST vault in the Ironwood pool; it never leaves the pool | zZEC (Base, non-transferable) as Morpho collateral, and USDC borrowed against it |
+| Lender | USDC supplied to the zZEC / USDC market on Morpho Blue | Morpho's interest (AdaptiveCurveIRM) |
+| Liquidator | USDC to repay an unhealthy position | The seized collateral, paid in ZEC on Zcash (a Liquidation claim), with Morpho's incentive: about 12.7 % at the judge market's 62.5 % LLTV |
+| Market maker | USDC to repay a borrower's debt when the borrower closes or deleverages from collateral | The repaid value plus a quoted margin (at most 5 %), in ZEC on Zcash |
+| Signers (five) | USDC bonds; they run the FROST vaults and pay every claim | The opening fee |
+
+## Bonds
+
+Each of the five signers bonds USDC in `SignerBondV2` (*judge*: at least 100 USDC each). What the
+bonds can pay for is the **effective bond**, `min(sum, 5/3 x the three smallest bonds)`: any three
+signers, the fewest who can sign, lose at least 3/5 of it if they steal, so a large bond from one
+signer cannot stand in for small bonds from the others.
+
+A signer leaves in two steps: it requests an unbonding, which stays slashable until it is withdrawn
+`unbondingPeriod` later (*judge*: 54 hours). A full exit needs no open vault, no open violation
+case, and the challenge window passed since the last vault settled; a partial exit must keep
+`minBond` and the coverage cap. The unbonding period outlasts the challenge window, the liveness
+period and the commit grace together, so every claim created before an exit falls due while the
+exiting amount can still pay it.
+
+## The coverage cap
+
+New collateral is accepted only while the bonds cover its value. The Intake reserves a proven
+deposit only if the zatoshi locked on Base (zZEC supply, pending activations and unpaid claims)
+stay under `maxTotalZat` (*judge*: 1.5 ZEC) and, valued at the high side of the price, within
+`coverageBps` of the effective bond (*judge*: 100 %; mainnet at most 50 %). Otherwise the deposit
+lands as a refund: the borrower gets the ZEC back, nothing is minted. A stale cap price delays an
+activation (the proof is sent again) and never turns it into a refund. Refunds may push the locked
+total over the cap; only new mints stop.
+
+## Fees
+
+- **Opening fee** (*judge*: 0.5 %, waived below 20,000 zatoshi): charged when a vault activates, as a
+  Fee claim owed to the signers' treasury; the vault's collateral is its deposit less the fee. A
+  0.05 ZEC vault pays 25,000 zatoshi; a 0.01 ZEC vault pays nothing.
+- **Zcash fees** (ZIP 317): a payout costs `5,000 x max(2, outputs)` zatoshi, borne by its first
+  claim; a Fee claim paid behind another one bears only its own 5,000.
+- **Base gas**: the borrower's smart-account operations are sponsored by our paymaster, for an
+  allowlist of calls only (docs/INTERFACES.md § 4); the signers pay their own commitments and
+  confirmations.
+
+## When the signers misbehave
+
+| What happens | What Base does | Who is paid, from what |
+|---|---|---|
+| The signers spend a vault's ZEC without a commitment (F1), withhold a payout's change (F2) | After the challenge window (*judge*: 24 hours), all five bonds (F1) or the signing ones (F2) are slashed, minting halts, the vault is frozen and then compromised | The prover gets a bounty (10 %, capped at 50 USDC, *judge*); `ZecuredCompensator` pays the victims from the rest |
+| A payout misdirects a claim (F3) or hides it from its claimant (F4) | The signers who signed it are slashed | F3: the claimant's shortfall joins the compensation layers; F4: the slash only |
+| The signers stop paying a claim | After `livenessPeriod` (*judge*: 24 hours, deferred by a payout in flight for 2 hours at most) the claimant takes the claim's value plus 5 % from the bonds, pro rata | The claimant, in USDC; the claim's ZEC then goes to the bonds' Reimburse destination |
+| Three signers confirm a payout that never reached Zcash | The claimant disputes within 24 hours; unless the signers prove the payout's inclusion within 6 hours, the claim is payable again | The claimant, by a new payout or from the bonds |
+| Signers go silent before a vault is active | A proof that cannot be activated lands as a refund; a pending activation can be refunded after a 24-hour pause or a halt | The borrower, in ZEC |
+
+**Compensation layers** (`ZecuredCompensator`). A theft's victims are paid from the slashed bonds in
+layers, each in full before the next gets anything: (1) the prover's bounty; (2) third parties,
+liquidators and market makers, whose claims the vault owed; (3) the lenders: the victim vault's
+debt is repaid on Morpho, with a 1 % allowance for interest, and its unbacked zZEC is burned; (4) the
+owners: their own claims and their equity. Cases within one incident window (*judge*: 3 days) share
+one price. When the bonds cover only part of a vault's debt, the repayment is made and the vault's
+collateral is burned down to the LLTV, so the repayment cannot be borrowed again. What is left goes
+to a fixed sink address, never back to the signers. Freezing a vault never stops anyone repaying its
+debt directly on Morpho.
+
+So: *the bonds compensate the victims: liquidators and lenders before the borrower's own equity.*
+
+**Pause.** Three of five signers can pause new minting for up to 30 days at a time; withdrawals,
+repayments, liquidations and payouts never stop. It is a power one signer already has, by refusing
+to sign a new vault, made explicit and bounded.
+
+**Verifier versions.** Minting needs no signer, except that all five together can schedule a new
+verifier version, which takes effect only after a public delay (*judge*: 10 minutes; mainnet 14 days
+for a deposit guest, 7 for a violation guest).
+
+## What the bonds do not cover
+
+- A theft larger than the bonds. The coverage cap keeps the locked value within the bonds' reach at
+  activation; a later price rise can outgrow them until new minting stops at the cap.
+- All five signers together: they hold every vault's key and can add a verifier version that
+  accepts anything after its delay. Users see the scheduled version on Base for the whole delay
+  (*mainnet*: 7 to 14 days), long enough to exit or claim from the bonds.
+- Liveness beyond the bonds' size: if every claim falls due at once, the bonds pay claims in the
+  order their claimants come, until they run out.
+- Testnet proof of work is cheap to forge; on mainnet the work required on top of a deposit grows
+  with its value (docs/MAINNET.md).
+- Proofs need a prover: someone must build the witness and run the zkVM. The borrower's CLI does it for
+  a theft from its own vault (docs/DEMO.md); the signers do it for their inclusion proofs.

@@ -18,6 +18,7 @@ import {
   type TypedDataDomain,
 } from "viem";
 import { privateKeyToAccount } from "viem/accounts";
+import { DRY_RUN_DOMAIN_SEPARATORS, DRY_RUN_ENV } from "./__fixtures__/deployment";
 import {
   adapterDomain,
   closeRequestDigest,
@@ -27,7 +28,6 @@ import {
   openVaultTypedData,
   randomNonce128,
   randomNonce64,
-  refundRequestTypedData,
   registryDomain,
   safeMessageHash,
   signCloseRequestAsSafe,
@@ -60,7 +60,6 @@ const ADAPTER: Address = "0x2222222222222222222222222222222222222222";
 const ACCOUNT: Address = "0x3333333333333333333333333333333333333333";
 const EXECUTOR: Address = "0x4444444444444444444444444444444444444444";
 const VAULT_ID: Hex = "0x5555555555555555555555555555555555555555555555555555555555555555";
-const DEPOSIT_TAG: Hex = "0x6666666666666666666666666666666666666666666666666666666666666666";
 const USER_COMMITMENT: Hex = "0x7777777777777777777777777777777777777777777777777777777777777777";
 const DEADLINE = 1_800_000_000n;
 
@@ -93,20 +92,33 @@ function sample(type: string, i: number): unknown {
 }
 
 /**
- * Spec types the app deliberately does not implement: the signers' payout commitment, and the
- * self-deleverage request the app does not offer yet. A new spec type fails the next test until
- * it is either implemented here or listed with its reason.
+ * Spec types the app deliberately does not implement, with the reason. A new spec type fails the
+ * next test until it is either implemented here or listed with its reason. The v2 types v3
+ * deleted, and the v3 types only signers sign, may or may not be listed in the spec yet.
  */
 const NOT_IN_APP: Record<string, string> = {
   SpendCommit: "signed by the signer nodes only (Tier 3)",
   DeleverageRequest: "no deleverage screen in the app yet (review E-10)",
+  DepositAttestation: "v2 only: v3 has no signer-attested deposit (D41)",
+  VaultCancellation: "v2 only: v3 has no vault cancellation (D41)",
+  RefundRequest: "v2 only: v3 refunds are Refund claims on Base, whose destination is a Destination (D41)",
+  PauseMinting: "signed by three signer nodes only (T-03, Intake domain)",
+  UnpauseMinting: "signed by three signer nodes only (T-03, Intake domain)",
+  ReimburseDestination: "signed by three signer nodes only (T-05)",
+  ScheduleVersion: "signed by the five signer nodes only (T-07a, ZecuredVersions domain)",
+  RemoveVersion: "signed by three signer nodes only (T-07a, ZecuredVersions domain)",
 };
 
 describe("type strings (docs/INTERFACES.md § 2)", () => {
   const spec = specTypeStrings();
 
-  it("the spec defines exactly the app's types plus the ones it deliberately leaves out", () => {
-    expect([...spec.keys()].sort()).toEqual([...Object.keys(types), ...Object.keys(NOT_IN_APP)].sort());
+  it("the spec defines every type the app signs or checks, and nothing the app neither implements nor excuses", () => {
+    for (const name of Object.keys(types)) expect(spec.has(name), name).toBe(true);
+    for (const name of spec.keys()) expect(name in types || name in NOT_IN_APP, name).toBe(true);
+  });
+
+  it("the app no longer signs anything for an off-chain refund, a deposit attestation or a cancellation", () => {
+    for (const name of ["RefundRequest", "DepositAttestation", "VaultCancellation"]) expect(name in types, name).toBe(false);
   });
 
   it.each(Object.keys(types) as PrimaryType[])("%s matches the spec byte for byte", (name) => {
@@ -137,23 +149,9 @@ describe("domains and digests (Solidity golden vectors)", () => {
   it("domain separators", () => {
     expect(separator(registryDomain(REGISTRY))).toBe("0x489271068185e1811817d2dfae78e2be898ee5fc9768bf01d870981f667ef9f8");
     expect(separator(adapterDomain(ADAPTER))).toBe("0xb62551e236af33b3b84da5fe38134bcea7c80b912f8b172bb4020080457a9260");
-    // contracts/deployments/base-sepolia.dry-run.json (computed on a fork by the contracts).
-    expect(separator(registryDomain("0xbdB942d882882bF795aA9c0Cd20ADe2115c73AAc"))).toBe(
-      "0x69d16596f5fe8b56a5a842fcca4461f0bef9d0a76fc625604317d9581a6b74c7",
-    );
-    expect(separator(adapterDomain("0xC0a2A554dcFB5a1bd7e5E769A2Ad0c33BA0500fc"))).toBe(
-      "0x59e17d33c50be097bde376a1c88c46c405743fb47b43fea0eb1fac767095e5d4",
-    );
-  });
-
-  it("DepositAttestation digest", () => {
-    const digest = hashTypedData({
-      domain: registryDomain(REGISTRY),
-      types: { DepositAttestation: types.DepositAttestation },
-      primaryType: "DepositAttestation",
-      message: { vaultId: VAULT_ID, account: ACCOUNT, amount: 1_000_000n, depositTag: DEPOSIT_TAG },
-    });
-    expect(digest).toBe("0xbe0251d9c909749194da8ebf137e42a33a60d6fba8672a022c4923558fecb90f");
+    // The v3 simulated deployment (lib/__fixtures__/deployment.ts): computed on a fork by the contracts.
+    expect(separator(registryDomain(DRY_RUN_ENV.NEXT_PUBLIC_REGISTRY))).toBe(DRY_RUN_DOMAIN_SEPARATORS.registry);
+    expect(separator(adapterDomain(DRY_RUN_ENV.NEXT_PUBLIC_ADAPTER))).toBe(DRY_RUN_DOMAIN_SEPARATORS.adapter);
   });
 
   it("PayoutConfirmation digest (claimIdsHash = keccak256 of packed claim ids)", () => {
@@ -201,13 +199,6 @@ describe("owner request signatures (cross-checked with Foundry `cast wallet sign
       deadline: DEADLINE,
     }),
     Destination: destinationTypedData(REGISTRY, { vaultId: VAULT_ID, commitment: USER_COMMITMENT, nonce: 7n, deadline: DEADLINE }),
-    RefundRequest: refundRequestTypedData(REGISTRY, {
-      vaultId: VAULT_ID,
-      noteId: "0x9999999999999999999999999999999999999999999999999999999999999999",
-      commitment: USER_COMMITMENT,
-      nonce: 8n,
-      deadline: DEADLINE,
-    }),
     ViewKeyRequest: viewKeyRequestTypedData(REGISTRY, { vaultId: VAULT_ID, nonce: 9n, deadline: DEADLINE }),
   };
   // Produced by alloy (cast 1.4.2) from the equivalent typed-data JSON and TEST_KEY.
@@ -216,8 +207,6 @@ describe("owner request signatures (cross-checked with Foundry `cast wallet sign
       "0xe72475a384072a8d65fcd4f4a7a90d82ea83548acef5ecd3174aa6ed2690c17c35592f2bfe2be0d2c391db7e1a511a8abc46bd9213b5406a41b44a2ee2eaa35e1b",
     Destination:
       "0x0afa9061a6e7284fbd1d1bc3befa8df60cc8cd3e9a604b2e04e5e20b6d91e4c94ff4e34ea82be94c17d0d276f3a6802ea4c7fbb7e9c825077abb22123b3fd68b1c",
-    RefundRequest:
-      "0x7fff48e93c3137aba204e91bb7e0460057f8283e508d7bb36899640837c344900e2041acac826753fdac7919c03d159ab880cf5cbedc73629794217bcbec2df71c",
     ViewKeyRequest:
       "0x055866306057077a8068bb9da720ef5ee8ab98b52bfef6963e51f6c43c42ad8139a9d2873ebc395615a102f6e14e1503ce53741c372e61a590ebc58e97bdf2d31c",
   } as const;

@@ -17,6 +17,15 @@ on:
       - "tier2/methods/**"
       - "tier2/vendor/**"
       - ".github/workflows/guests.yml"
+  # A pull request that changes the guests gets their image ids before it is merged (read-only job).
+  pull_request:
+    paths:
+      - "tier2/statement/**"
+      - "tier2/k4/**"
+      - "tier2/host/**"
+      - "tier2/methods/**"
+      - "tier2/vendor/**"
+      - ".github/workflows/guests.yml"
 
 permissions:
   contents: read

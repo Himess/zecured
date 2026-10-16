@@ -154,7 +154,7 @@ pub fn text_hash(text: &str) -> B256 {
 /// `VaultOpened.tagKeyHash`: `keccak256(K)` of the vault's tag key
 /// `K = BLAKE2b-256("Zecured_TagKey__", UFVK string)` (D24), the UFVK exactly as the owner gets it.
 /// Binding K rather than the viewing key lets a deposit proof carry K alone, and makes every tag
-/// it derives the vault's own (design review, Claude Web § 2).
+/// it derives the vault's own (design review).
 pub fn tag_key_hash(ufvk: &str) -> B256 {
     keccak256(zecured_policy::derive::tag_key(ufvk))
 }

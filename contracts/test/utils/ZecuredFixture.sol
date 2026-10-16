@@ -47,6 +47,10 @@ abstract contract ZecuredFixture is Test {
     address internal constant ADAPTIVE_CURVE_IRM = 0x46415998764C29aB2a25CbeA6254146D50D22687;
     uint256 internal constant LLTV = 0.625e18;
     uint256 internal constant BASE_SEPOLIA_CHAIN_ID = 84532;
+    /// The mainnet rehearsal (`ZECURED_FORK_NETWORK=base-mainnet`): Morpho Blue, the AdaptiveCurveIRM, the 62.5 % LLTV
+    /// and RISC Zero's router (Groth16 selector 0x73c457ba) are at the same addresses there (docs/ref/FACTS.md).
+    uint256 internal constant BASE_MAINNET_CHAIN_ID = 8453;
+    string internal constant DEFAULT_MAINNET_RPC_URL = "https://mainnet.base.org";
     string internal constant DEFAULT_RPC_URL = "https://sepolia.base.org";
     uint256 internal constant DEFAULT_FORK_BLOCK = 47_948_000;
 
@@ -168,13 +172,19 @@ abstract contract ZecuredFixture is Test {
 
     // ------------------------------------------------------------------ setup
 
+    /// Base Sepolia at a pinned block by default; with `ZECURED_FORK_NETWORK=base-mainnet`, Base mainnet
+    /// (`BASE_MAINNET_RPC_URL`, at `ZECURED_FORK_BLOCK` or the latest block): the same suites, read-only.
     function _selectBaseSepoliaFork() internal {
-        string memory rpcUrl = vm.envOr("BASE_SEPOLIA_RPC_URL", string(""));
-        if (bytes(rpcUrl).length == 0) rpcUrl = DEFAULT_RPC_URL;
-        uint256 forkBlock = vm.envOr("ZECURED_FORK_BLOCK", DEFAULT_FORK_BLOCK);
+        bool mainnet =
+            keccak256(bytes(vm.envOr("ZECURED_FORK_NETWORK", string("base-sepolia")))) == keccak256("base-mainnet");
+        string memory rpcUrl = vm.envOr(mainnet ? "BASE_MAINNET_RPC_URL" : "BASE_SEPOLIA_RPC_URL", string(""));
+        if (bytes(rpcUrl).length == 0) rpcUrl = mainnet ? DEFAULT_MAINNET_RPC_URL : DEFAULT_RPC_URL;
+        uint256 forkBlock = vm.envOr("ZECURED_FORK_BLOCK", mainnet ? 0 : DEFAULT_FORK_BLOCK);
         if (forkBlock == 0) vm.createSelectFork(rpcUrl);
         else vm.createSelectFork(rpcUrl, forkBlock);
-        assertEq(block.chainid, BASE_SEPOLIA_CHAIN_ID, "fork is not Base Sepolia");
+        assertEq(
+            block.chainid, mainnet ? BASE_MAINNET_CHAIN_ID : BASE_SEPOLIA_CHAIN_ID, "fork is not the network asked"
+        );
         assertGt(address(MORPHO).code.length, 0, "Morpho Blue missing");
     }
 

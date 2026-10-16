@@ -5,21 +5,42 @@
  * Each reader takes optional dependencies (a viem client and the app config) so tests can run
  * them against a mocked JSON-RPC transport.
  */
-import { createPublicClient, getAddress, http, parseEventLogs, type Address, type Hex, type PublicClient } from "viem";
+import {
+  createPublicClient,
+  encodeAbiParameters,
+  getAddress,
+  http,
+  keccak256,
+  parseEventLogs,
+  zeroAddress,
+  type Address,
+  type Hex,
+  type PublicClient,
+} from "viem";
 import { baseSepolia } from "viem/chains";
 import {
   adapterAbi,
+  bondAbi,
+  CLAIM_KIND,
+  CLAIM_STATUS,
+  compensatorAbi,
+  depositRefundedEvent,
+  disputesAbi,
   erc20Abi,
+  intakeAbi,
   irmAbi,
   morphoAbi,
   ONCHAIN_VAULT_STATUS,
   oracleAbi,
+  REFUND_REASON,
   registryAbi,
   registryEventsAbi,
+  relayAbi,
+  slasherAbi,
 } from "./abi";
 import { api } from "./api";
 import { config as appConfig, marketParams, type AppConfig } from "./config";
-import { borrowAssets, expectedMarket, type MarketState, type PositionState } from "./morpho";
+import { borrowAssets, expectedMarket, mulDivDown, type MarketState, type PositionState } from "./morpho";
 
 let defaultClient: PublicClient | null = null;
 
@@ -179,7 +200,7 @@ export async function isNonceUsed(account: Address, nonce: bigint, d?: ChainDeps
 }
 
 export interface RegistryEvent {
-  name: "VaultActivated" | "ReleaseRequested" | "LiquidationRelease" | "CloseRelease" | "PayoutConfirmed";
+  name: (typeof registryEventsAbi)[number]["name"];
   blockNumber: bigint;
   transactionHash: Hex;
   vaultId: Hex;
@@ -231,4 +252,356 @@ export async function readRecentRegistryEvents(
     toBlock = fromBlock - 1n;
   }
   return out.slice(0, limit);
+}
+
+// ------------------------------------------------------------------ v3: the vault's ledger
+
+export type OnchainVaultStatus = (typeof ONCHAIN_VAULT_STATUS)[number];
+export type OnchainClaimKind = (typeof CLAIM_KIND)[number] | "Unknown";
+export type OnchainClaimStatus = (typeof CLAIM_STATUS)[number] | "Unknown";
+export type RefundReason = (typeof REFUND_REASON)[number];
+
+/**
+ * What the pinned Registry and Intake name on-chain (immutables, read once per client): the
+ * contracts the app only reads, and the periods the vault page explains.
+ */
+export interface Links {
+  /** `registry.slasher()`, `registry.compensator()`, `intake.signerBond()`; null where none is deployed. */
+  slasher: Address | null;
+  compensator: Address | null;
+  bond: Address | null;
+  /** `intake.relay()`: the Zcash header relay a pending activation waits on. */
+  relay: Address;
+  /** IZecuredDisputes `disputeWindow()` (at the Registry): how long after its confirmation a claim can be disputed. */
+  disputeWindow: number;
+  /** IZecuredDisputes `inclusionWindow()`: how long the signers have to prove a disputed payout. */
+  inclusionWindow: number;
+  /** `registry.refundAbandonPeriod()`: a refund without a destination this long can be written off. */
+  refundAbandonPeriod: number;
+  /** `intake.pendingRefundDelay()`: a pause by signatures this long lets the account refund its pending activation. */
+  pendingRefundDelay: number;
+}
+
+/** The pinned Intake is not the one the pinned Registry names: the build's pins are inconsistent. */
+export class IntakeMismatchError extends Error {
+  constructor() {
+    super("The pinned Intake (NEXT_PUBLIC_INTAKE) is not the one the pinned Registry names. Rebuild the app with the deployment's addresses.");
+    this.name = "IntakeMismatchError";
+  }
+}
+
+const linksCache = new WeakMap<PublicClient, Map<string, Promise<Links>>>();
+
+function orNull(a: Address): Address | null {
+  return a === zeroAddress ? null : a;
+}
+
+/** See `Links`; fails with `IntakeMismatchError` unless the Registry names the pinned Intake. */
+export function readLinks(d?: ChainDeps): Promise<Links> {
+  const { c, cfg } = resolve(d);
+  let perClient = linksCache.get(c);
+  if (!perClient) linksCache.set(c, (perClient = new Map()));
+  const key = `${cfg.registry}:${cfg.intake}`.toLowerCase();
+  const cached = perClient.get(key);
+  if (cached) return cached;
+  const reading = (async (): Promise<Links> => {
+    const registry = { address: cfg.registry, abi: registryAbi } as const;
+    const intake = { address: cfg.intake, abi: intakeAbi } as const;
+    const disputes = { address: cfg.registry, abi: disputesAbi } as const;
+    const [named, slasher, compensator, abandon, bond, relay, delay, disputeWindow, inclusionWindow] = await Promise.all([
+      c.readContract({ ...registry, functionName: "intake" }),
+      c.readContract({ ...registry, functionName: "slasher" }),
+      c.readContract({ ...registry, functionName: "compensator" }),
+      c.readContract({ ...registry, functionName: "refundAbandonPeriod" }),
+      c.readContract({ ...intake, functionName: "signerBond" }),
+      c.readContract({ ...intake, functionName: "relay" }),
+      c.readContract({ ...intake, functionName: "pendingRefundDelay" }),
+      c.readContract({ ...disputes, functionName: "disputeWindow" }),
+      c.readContract({ ...disputes, functionName: "inclusionWindow" }),
+    ]);
+    if (getAddress(named) !== getAddress(cfg.intake)) throw new IntakeMismatchError();
+    return {
+      slasher: orNull(slasher),
+      compensator: orNull(compensator),
+      bond: orNull(bond),
+      relay,
+      disputeWindow: Number(disputeWindow),
+      inclusionWindow: Number(inclusionWindow),
+      refundAbandonPeriod: Number(abandon),
+      pendingRefundDelay: Number(delay),
+    };
+  })();
+  perClient.set(key, reading);
+  // A failed read is retried next time.
+  reading.catch(() => perClient.delete(key));
+  return reading;
+}
+
+/** Most claims `readVaultLedger` reads (the newest). */
+export const MAX_LEDGER_CLAIMS = 32;
+
+/** The Registry's `claimIdOf(vaultId, sequence)`: keccak256(abi.encode(vaultId, uint64 sequence)). */
+export function claimIdOf(vaultId: Hex, sequence: bigint): Hex {
+  return keccak256(encodeAbiParameters([{ type: "bytes32" }, { type: "uint64" }], [vaultId, sequence]));
+}
+
+/** One claim of the vault, as the Registry keeps it (`claimDetails`, `payoutDispute`). */
+export interface LedgerClaim {
+  claimId: Hex;
+  /** Its sequence in the vault, from 0 (in creation order). */
+  sequence: number;
+  kind: OnchainClaimKind;
+  status: OnchainClaimStatus;
+  /** zatoshi */
+  amount: bigint;
+  /** The payout's recipient commitment; zero while a Refund has no destination (or the bonds paid the claim). */
+  commitment: Hex;
+  /** When it became payable (Unix s): its creation, or a Refund's destination. */
+  createdAt: number;
+  /** The signers' bonds paid its claimant (T-05); its ZEC now reimburses them. */
+  bondPaid: boolean;
+  /** Who gets its USDC from the bonds or the compensator; zero for Fee and Retired claims. */
+  claimant: Address;
+  /** When it was confirmed paid (Unix s; 0: not, or the confirmation was upheld). */
+  paidAt: number;
+  /** While disputed: when the signers' time to prove the payout ends (Unix s; 0 otherwise). */
+  disputeDueAt: number;
+}
+
+/** The vault's pending activation (K3), with what decides when it finalizes or can be refunded. */
+export interface PendingActivationView {
+  /** zatoshi */
+  amount: bigint;
+  /** Zcash height the relay must reach, and the time that must pass, before anyone can finalize it. */
+  readyHeight: bigint;
+  readyTime: number;
+  /** The relay's best tip height now. */
+  relayTip: bigint;
+  /** The block the deposit proof is anchored to is still on the relay's best chain. */
+  anchorOnBestChain: boolean;
+  /** Theft and other violation cases open on this vault (E2: it waits while any is). */
+  openCases: bigint;
+  /** The Intake's and the bond's gates now. */
+  paused: boolean;
+  pausedUntil: number;
+  pausedSince: number;
+  halted: boolean;
+  fullyBonded: boolean;
+}
+
+export interface VaultLedger {
+  vaultId: Hex;
+  /** Zero while the vault is unknown to Base. */
+  account: Address;
+  outstanding: bigint;
+  status: OnchainVaultStatus;
+  unpaidClaims: number;
+  claims: LedgerClaim[];
+  pending: PendingActivationView | null;
+  /** An F1/F2 case is open on the vault or was executed: the Registry refuses its exits (T-04). */
+  frozen: boolean;
+  /** An executed F1/F2 case: the compensator settles its claims in USDC. */
+  compromised: boolean;
+  links: Links;
+  /** The latest block's timestamp (Unix s). */
+  blockTime: number;
+}
+
+/**
+ * Everything Base keeps about `vaultId` that the vault page shows: the vault, every claim (v3
+ * kinds and statuses, dispute times), its pending activation with the gates that hold it, and
+ * whether a theft case froze or compromised it. Reads only, through the proxy.
+ */
+export async function readVaultLedger(vaultId: Hex, d?: ChainDeps): Promise<VaultLedger> {
+  const { c, cfg } = resolve(d);
+  const links = await readLinks({ client: c, config: cfg });
+  const slasher = links.slasher;
+  const [details, block, pending, frozen, compromised] = await Promise.all([
+    c.readContract({ address: cfg.registry, abi: registryAbi, functionName: "vaultDetails", args: [vaultId] }),
+    c.getBlock({ blockTag: "latest" }),
+    c.readContract({ address: cfg.intake, abi: intakeAbi, functionName: "pendingActivation", args: [vaultId] }),
+    slasher ? c.readContract({ address: slasher, abi: slasherAbi, functionName: "vaultFrozen", args: [vaultId] }) : false,
+    slasher ? c.readContract({ address: slasher, abi: slasherAbi, functionName: "isCompromised", args: [vaultId] }) : false,
+  ]);
+  // The newest MAX_LEDGER_CLAIMS: a vault has a handful, and a wrong count must not flood the proxy.
+  const count = Number(details.claimCount);
+  const first = Math.max(0, count - MAX_LEDGER_CLAIMS);
+  const claims = await Promise.all(
+    Array.from({ length: count - first }, async (_, i): Promise<LedgerClaim> => {
+      const sequence = first + i;
+      const claimId = claimIdOf(vaultId, BigInt(sequence));
+      const cd = await c.readContract({ address: cfg.registry, abi: registryAbi, functionName: "claimDetails", args: [claimId] });
+      const status = CLAIM_STATUS[cd.status] ?? "Unknown";
+      let paidAt = 0;
+      let disputeDueAt = 0;
+      if (status === "Paid" || status === "Disputed") {
+        const [paid, due] = await c.readContract({
+          address: cfg.registry,
+          abi: disputesAbi,
+          functionName: "payoutDispute",
+          args: [claimId],
+        });
+        paidAt = Number(paid);
+        disputeDueAt = Number(due);
+      }
+      return {
+        claimId,
+        sequence,
+        kind: CLAIM_KIND[cd.kind] ?? "Unknown",
+        status,
+        amount: cd.amount,
+        commitment: cd.commitment,
+        createdAt: Number(cd.createdAt),
+        bondPaid: cd.bondPaid,
+        claimant: cd.claimant,
+        paidAt,
+        disputeDueAt,
+      };
+    }),
+  );
+  let pendingView: PendingActivationView | null = null;
+  if (pending.account !== zeroAddress) {
+    const intake = { address: cfg.intake, abi: intakeAbi } as const;
+    const bond = links.bond;
+    const [tip, onBest, paused, until, since, halted, bonded, openCases] = await Promise.all([
+      c.readContract({ address: links.relay, abi: relayAbi, functionName: "bestChainTip" }),
+      c.readContract({ address: links.relay, abi: relayAbi, functionName: "isInBestChain", args: [pending.anchor] }),
+      c.readContract({ ...intake, functionName: "mintingPaused" }),
+      c.readContract({ ...intake, functionName: "pausedUntil" }),
+      c.readContract({ ...intake, functionName: "pausedSince" }),
+      bond ? c.readContract({ address: bond, abi: bondAbi, functionName: "halted" }) : false,
+      bond ? c.readContract({ address: bond, abi: bondAbi, functionName: "fullyBonded" }) : true,
+      slasher ? c.readContract({ address: slasher, abi: slasherAbi, functionName: "openCasesOf", args: [vaultId] }) : 0n,
+    ]);
+    pendingView = {
+      amount: pending.amount,
+      readyHeight: pending.readyHeight,
+      readyTime: Number(pending.readyTime),
+      relayTip: tip[1],
+      anchorOnBestChain: onBest,
+      openCases,
+      paused,
+      pausedUntil: Number(until),
+      pausedSince: Number(since),
+      halted,
+      fullyBonded: bonded,
+    };
+  }
+  return {
+    vaultId,
+    account: details.account,
+    outstanding: details.outstanding,
+    status: ONCHAIN_VAULT_STATUS[details.status] ?? "None",
+    unpaidClaims: Number(details.unpaidClaims),
+    claims,
+    pending: pendingView,
+    frozen,
+    compromised,
+    links,
+    blockTime: Number(block.timestamp),
+  };
+}
+
+/**
+ * Why a deposit landed as `claimId`, a Refund claim of `vaultId` created at `createdAt` (the
+ * Intake's `DepositRefunded`): finds the block of that second (galloping back from the latest
+ * block, then bisecting, `getBlock` only), then reads that block's 2,000-block window of logs.
+ * Null when it is not found within `maxProbes` block reads. Only valid while the claim has no
+ * destination: setting one moves `createdAt`.
+ */
+export async function readRefundReason(
+  vaultId: Hex,
+  claimId: Hex,
+  createdAt: number,
+  opts: { maxProbes?: number } & ChainDeps = {},
+): Promise<RefundReason | null> {
+  const { maxProbes = 40 } = opts;
+  const { c, cfg } = resolve(opts);
+  const latest = await c.getBlock({ blockTag: "latest" });
+  const target = BigInt(createdAt);
+  if (latest.timestamp < target) return null;
+  let probes = 0;
+  const timeOf = async (n: bigint): Promise<bigint> => {
+    if (++probes > maxProbes) throw new Error("too many probes");
+    return (await c.getBlock({ blockNumber: n })).timestamp;
+  };
+  // Invariant: the block at `hi` is at or after the target second, the block at `lo` before it.
+  let hi = latest.number;
+  let lo = -1n;
+  try {
+    let step = LOG_CHUNK;
+    while (lo < 0n) {
+      const n = hi > step ? hi - step : 0n;
+      if ((await timeOf(n)) < target) lo = n;
+      else if (n === 0n) break;
+      else {
+        hi = n;
+        step *= 4n;
+      }
+    }
+    // The second's blocks start at the first block of `hi`'s kind: stop once one window holds them.
+    while (lo >= 0n && hi - lo > LOG_CHUNK - 64n) {
+      const mid = (lo + hi) / 2n;
+      if ((await timeOf(mid)) < target) lo = mid;
+      else hi = mid;
+    }
+  } catch {
+    return null;
+  }
+  const fromBlock = lo + 1n;
+  const toBlock = fromBlock + LOG_CHUNK - 1n < latest.number ? fromBlock + LOG_CHUNK - 1n : latest.number;
+  const logs = await c.getLogs({ address: cfg.intake, event: depositRefundedEvent, args: { vaultId, claimId }, fromBlock, toBlock });
+  const reason = logs[0]?.args.reason;
+  return reason === undefined ? null : (REFUND_REASON[reason] ?? null);
+}
+
+/** What the compensator owes a compromised vault (T-04), read-only. */
+export interface Compensation {
+  /** The incident the vault is a victim in (0: not registered yet). */
+  incident: bigint;
+  /** The vault's tally: its outstanding and Morpho debt then, and whether its account still authorized the Registry. */
+  victim: { tallied: boolean; settled: boolean; authorized: boolean; outstanding: bigint; debt: bigint };
+  /** The incident: closes at, finalized, its price P* (Morpho scale) and the ratios paid to layers 2 and 4 (1e18 = in full). */
+  incidentState: { closesAt: number; finalized: boolean; price: bigint; r2: bigint; r4: bigint } | null;
+  /** USDC (6 decimals) the account's equity comes to, withdrawable once the vault is settled. */
+  equity: bigint;
+  /** Each tallied claim's entitlement: its layer (2: third party, 4: the owner), zatoshi, and USDC once finalized. */
+  entitlements: { claimId: Hex; layer: number; zat: bigint; to: Address; paid: boolean; usdc: bigint | null }[];
+}
+
+/** The compensator's view of `vaultId` and of its `claimIds`; null without a compensator. */
+export async function readCompensation(vaultId: Hex, claimIds: readonly Hex[], d?: ChainDeps): Promise<Compensation | null> {
+  const { c, cfg } = resolve(d);
+  const { compensator } = await readLinks({ client: c, config: cfg });
+  if (!compensator) return null;
+  const at = { address: compensator, abi: compensatorAbi } as const;
+  const [victim, equity, entitlements] = await Promise.all([
+    c.readContract({ ...at, functionName: "victim", args: [vaultId] }),
+    c.readContract({ ...at, functionName: "equityOf", args: [vaultId] }),
+    Promise.all(claimIds.map((claimId) => c.readContract({ ...at, functionName: "entitlement", args: [claimId] }))),
+  ]);
+  const inc = victim.incident === 0n ? null : await c.readContract({ ...at, functionName: "incident", args: [victim.incident] });
+  const usdcOf = (zat: bigint, layer: number): bigint | null => {
+    if (!inc?.finalized) return null;
+    const ratio = layer === 2 ? inc.r2 : inc.r4;
+    return mulDivDown(mulDivDown(zat, inc.price, 10n ** 36n), ratio, 10n ** 18n);
+  };
+  return {
+    incident: victim.incident,
+    victim: {
+      tallied: victim.tallied,
+      settled: victim.settled,
+      authorized: victim.authorized,
+      outstanding: victim.outstanding,
+      debt: victim.debt,
+    },
+    incidentState: inc
+      ? { closesAt: Number(inc.closesAt), finalized: inc.finalized, price: inc.price, r2: inc.r2, r4: inc.r4 }
+      : null,
+    equity,
+    entitlements: claimIds
+      .map((claimId, i) => ({ claimId, e: entitlements[i]! }))
+      .filter(({ e }) => e.incident !== 0n)
+      .map(({ claimId, e }) => ({ claimId, layer: e.layer, zat: e.zat, to: e.to, paid: e.paid, usdc: usdcOf(e.zat, e.layer) })),
+  };
 }

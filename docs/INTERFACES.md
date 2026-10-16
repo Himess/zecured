@@ -101,8 +101,7 @@ VaultOpened(bytes32 vaultId,address owner,address account,uint64 amount,uint32 e
   exactly as the owner receives it (`POST /vaults/:id/viewing-key`). A deposit proof's witness
   carries K, not the UFVK, and the proof derives its deposit tag with the K whose hash it puts in
   the struct: a proof under any other K names a `VaultOpened` nobody signed, so every tag that
-  lands is the vault's own and one note cannot land twice under two tags (design review,
-  Claude Web § 2).
+  lands is the vault's own and one note cannot land twice under two tags (design review).
 - 65-byte `r || s || v` signatures (v = 27/28, low s), as in § 2.2.
 - The app and the CLI accept a vault only if all five signers of the set pinned in their own
   build signed it (app: `NEXT_PUBLIC_SIGNERS`, compared as a set; CLI: the node `eth` addresses
@@ -125,7 +124,7 @@ SpendCommit(bytes32 vaultId,bytes32 inputTag,bytes32[] claimIds,bytes32[] claimR
   (`salt_i` of its recipient commitment, § 1). Txids in internal byte order.
 - `claimOutputs[i]` is the index of the payout's action whose output pays `claimIds[i]`; the indexes
   are distinct, so two claims never share one output (E1, D34).
-- `claimIds[0]` bears the payout's ZIP 317 fee. A payout settles 1 to 8 claims (review İ-01), in
+- `claimIds[0]` bears the payout's ZIP 317 fee. A payout settles 1 to 8 claims (review H-06), in
   the queue's order, with distinct receivers and salts (E1). Arrays are hashed as EIP-712 requires
   (`keccak256` of the concatenated elements); signatures as in § 2.2.
 
@@ -368,8 +367,8 @@ addresses, salts, viewing keys or IPs.
 | `POST /closes` | `{ request: CloseRequest (camelCase), signature }` | `{ txHash }` once `closeWithCollateral` is mined (relayed; executed by the market maker) |
 | `GET /quotes/deleverage/:vaultId?repay=<units>` | — | `{ executor, marginBps (number), repayAssets, mmAmount, remaining, expiresAt (number, Unix s) }` for repaying `repay` loan-token units of the debt (S18; relayed); refused with `repay_above_debt`, `deleverage_too_small` or `deleverage_too_large` |
 | `POST /deleverages` | `{ request: DeleverageRequest (camelCase), signature }` | `{ txHash }` once `deleverageWithCollateral` is mined (relayed; the market maker repays exactly the quoted amount) |
-| `GET /status` | — | `{ commit, treeClean, startedAt, deployment: { chainId, block, registry, slasher, signerBond, mintMode, verifierIsMock, depositImageId, violationImageId, challengeWindow, theftDemo }, zcashTip, nodes: [{ index, mode }], depositProofs: { queued, running, concurrency } }`: the commit the backend was built from and the deployed image ids, so anyone can check that the running system is the submitted code (review G5); `depositProofs`: the deposit proof queue's counts (review H-12; `null` without Tier 2 deposit proofs); nothing about any vault or user; node modes cached 15 s |
-| `GET /config` | — | `{ chainId, registry, adapter, contracts, market, signers, denominations, confirmations, vaultExpiryBlocks, openVaultStampBits, sponsorship }` (`signers`: the deployment's five signer addresses, ascending, or `null`; `openVaultStampBits`: the zero bits of the open-vault stamp) — the app pins contract addresses and signers at build time and uses this only as a consistency check (any mismatch disables Base actions); it takes `sponsorship` (bundler, paymaster and allowlist all configured), denominations, confirmations, the deposit window and the stamp's bits from it |
+| `GET /status` | — | `{ commit, treeClean, startedAt, deployment: { chainId, block, registry, intake, slasher, signerBond, compensator, versions, mintMode, verifierIsMock, depositImageId, violationImageId, challengeWindow, theftDemo, v3 }, zcashTip, nodes: [{ index, mode }], depositProofs: { queued, running, concurrency }, minting: { paused, pausedUntil, pausedSince, halted, fullyBonded, capRoom, mintBlock: { <zatoshi>: MintBlock \| null }, readAt }, versions: { deposit: [Version], violation: [Version] } }`: the commit the backend was built from and the deployed image ids, so anyone can check that the running system is the submitted code (review G5): `deployment.depositImageId` and `violationImageId` are the guests the deployment started with, `versions` (design notes T-07a) every verifier version `ZecuredVersions` lists for each kind, in order (the newest 16), each `{ versionId, selector, imageId, branches, activeAt, active, removed }` (`active`: `isActive(versionId)` now), read every 60 s at most, `null` while unreadable or without the registry; `depositProofs`: the deposit proof queue's counts (review H-12; `null` without Tier 2 deposit proofs); `deployment.v3`: the public v3 parameters, as in `GET /config`; `minting` (design notes T-01, T-03): the Intake's `mintingPaused()`, `pausedUntil()` and `pausedSince()` (Unix s; `pausedUntil` 0: not paused by signatures), the bond's `halted()` and `fullyBonded()`, `capRoom()` (zatoshi, decimal string; 0 while the cap's price is stale, 2^256 - 1 without a cap) and, per vault denomination, `mintBlock(amount)` (`None`, `Halted`, `NotBonded`, `Paused`, `CapExceeded`; `null` while the cap's price is stale), read every 15 s at most, `null` while the chain cannot be read or without a v3 deployment (none of these gates ever blocks an exit); nothing about any vault or user; node modes cached 15 s |
+| `GET /config` | — | `{ chainId, registry, adapter, intake, v3, contracts, market, signers, denominations, confirmations, vaultExpiryBlocks, openVaultStampBits, sponsorship }` (`intake`: the deployment's `ZecuredIntake`, or `null`; `v3`: the deployment's public v3 parameters `{ feeBps, minFeeZat, minRefundZat, refundAbandonPeriod, pendingRefundDelay, maxPause, livenessPeriod, commitGrace, livenessPremiumBps, coverageBps, maxTotalZat, incidentWindow }` (zatoshi, basis points, seconds), or `null` before v3; `signers`: the deployment's five signer addresses, ascending, or `null`; `openVaultStampBits`: the zero bits of the open-vault stamp) — the app pins contract addresses and signers at build time and uses this only as a consistency check (any mismatch disables Base actions); it takes `sponsorship` (bundler, paymaster and allowlist all configured), denominations, confirmations, the deposit window, the stamp's bits and the v3 parameters (the opening fee it shows before a deposit, the refund and liveness periods it explains) from it |
 | `POST /proxy/rpc` | JSON-RPC | Base RPC passthrough (read methods + `eth_sendRawTransaction` disallowed) |
 | `POST /proxy/bundler` | JSON-RPC | ERC-4337 bundler passthrough |
 | `POST /proxy/paymaster` | JSON-RPC | Sponsors only the allowlist below; rejects anything else |
@@ -403,15 +402,23 @@ opened, and keeps accepting its deposit, as before, until its expiry height. Imp
 
 ### 4.1 Paymaster allowlist (enforced by the proxy)
 
-A UserOp is sponsored only if every call it makes is one of:
+A UserOp is sponsored only if every call it makes is one of (targets: the deployment file's
+`contracts`; no ETH value in any call; a MultiSend batch of at most 8 plain calls):
 
 | Target | Calls |
 |---|---|
-| Smart account factory | deployment in the account's first UserOp (`initCode` / `factory`) |
-| `ZecuredRegistry` | `requestRelease`, `requestPartialRelease` |
+| Smart account factory | deployment in the account's first UserOp (`factory` / `factoryData`): a Safe v1.4.1 with the app's exact configuration, created at the sender |
+| `ZecuredRegistry` | `requestRelease`, `requestPartialRelease`; `setRefundDestination(claimId, commitment)` (T-02: a non-zero commitment, and `claimDetails(claimId)` must be a Refund claim whose claimant, the vault's account, is the sender); `disputePayout(claimId)` and `reopenDisputedClaim(claimId)` (T-05 (a), `IZecuredDisputes`, served by the Registry's fallback: `claimDetails(claimId).claimant` must be the sender) |
+| `ZecuredIntake` | `refundPending(vaultId)` (T-03: only the sender's own vault, `vaultOf(sender)`; the Intake lets the account convert its pending activation once a pause by signatures has lasted `pendingRefundDelay`, and anyone after a halt) |
 | `SettlementAdapter` | `invalidateNonce` |
-| Morpho Blue | `setAuthorization` (only for the Registry and the Adapter), `borrow` and `repay` (only the Zecured market) |
-| MockUSDC | `approve` (spender = Morpho) and `transfer` |
+| Morpho Blue | `setAuthorization` (only for the Registry and the Adapter), `borrow` and `repay` (only the Zecured market, on behalf of the sender, no callback data) |
+| Loan token (USDC; MockUSDC on a local fork) | `approve` (spender = Morpho) and `transfer` |
 
-Anything else is rejected. The account never receives ETH. The first UserOp must skip
-authorizations that are already set (Morpho reverts on re-setting).
+The sender must be a Zecured account: bound to a vault (`Registry.vaultOf(sender) != 0`, set by
+the deposit proof that reserved the vault, before the account's first UserOp), except for a
+UserOp whose only calls are about the sender's own claims (refund destinations, disputes,
+reopenings): the claim binds the account, and a deposit that landed only as a refund (a
+Refund-mode proof, a halt, a full cap) binds no account to a vault. Once deployed, the account
+must still be the canonical Safe proxy with the Safe 4337 module as fallback handler. Anything
+else is rejected. The account never receives ETH. The first UserOp must skip authorizations that
+are already set (Morpho reverts on re-setting).

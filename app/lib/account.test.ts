@@ -18,7 +18,17 @@ import { baseSepolia } from "viem/chains";
 import { DRY_RUN_CONFIG, DRY_RUN_ENV } from "./__fixtures__/deployment";
 import { AccountNotDeployedError, loanAccount, SponsorshipUnavailableError } from "./account";
 import { createApi, parseRemoteConfig } from "./api";
-import { assertAllowlisted, borrowCalls, partialReleaseCalls, transferUsdcCalls, type Call } from "./calls";
+import {
+  assertAllowlisted,
+  borrowCalls,
+  disputePayoutCalls,
+  partialReleaseCalls,
+  refundDestinationCalls,
+  refundPendingCalls,
+  reopenDisputedClaimCalls,
+  transferUsdcCalls,
+  type Call,
+} from "./calls";
 import { buildConfig } from "./config";
 import { predictAccountAddress, SAFE, safeFactoryData } from "./safe";
 
@@ -294,6 +304,27 @@ describe("loanAccount.send (ERC-4337 through the backend proxy, faked)", () => {
     });
     await acct.send(calls);
     expect(backendAllowlistCheck(rec.sent!)).toEqual(calls.map((c) => ({ to: getAddress(c.to), data: c.data })));
+  });
+
+  it("v3: a refund's destination, a pending activation's refund, a dispute and a reopening are each one sponsored UserOp", async () => {
+    const claimId: Hex = `0x${"c1".repeat(32)}`;
+    const batches = [
+      refundDestinationCalls({ claimId, commitment: `0x${"77".repeat(32)}`, config }),
+      refundPendingCalls({ vaultId: `0x${"55".repeat(32)}`, config }),
+      disputePayoutCalls({ claimId, config }),
+      reopenDisputedClaimCalls({ claimId, config }),
+    ];
+    for (const calls of batches) {
+      const { rec, acct } = account({ deployed: true });
+      await acct.send(calls);
+      expect(backendAllowlistCheck(rec.sent!)).toEqual(calls.map((c) => ({ to: getAddress(c.to), data: c.data })));
+      expect(rec.sent!.factory ?? null).toBeNull();
+    }
+    // An account whose deposit landed only as a refund deploys itself with its first UserOp, the destination.
+    const { rec, acct } = account();
+    await acct.send(batches[0]!);
+    expect(getAddress(rec.sent!.factory!)).toBe(SAFE.proxyFactory);
+    backendAllowlistCheck(rec.sent!);
   });
 
   it("fails fast without sponsorship (GET /config), before any request or signature", async () => {

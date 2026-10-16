@@ -123,7 +123,7 @@ personalizes the history tree's hashes, so B and T are of it. A deployment regis
 Intake also checks `branchId` against the ids it was deployed with. (NU6.3 is a Testnet epoch too, from 4,134,000 to
 NU7; the Testnet build proves the current NU7 epoch only.)
 
-### 2.3 Why the tag key is bound to the vault (design review, Claude Web § 2)
+### 2.3 Why the tag key is bound to the vault (design review)
 
 With K and the viewing key's hash as separate witness fields, the statement could not check that both come from the
 same UFVK, and the `VaultOpened` signatures would bind only the hash. A borrower could then prove its own deposit

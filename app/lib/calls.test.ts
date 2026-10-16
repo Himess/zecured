@@ -3,16 +3,39 @@ import { fileURLToPath } from "node:url";
 import { describe, expect, it } from "vitest";
 import { decodeFunctionData, encodeErrorResult, encodeFunctionData, slice, type Address, type Hex } from "viem";
 import { DRY_RUN_ENV } from "./__fixtures__/deployment";
-import { adapterAbi, erc20Abi, morphoAbi, registryAbi, registryErrorsAbi } from "./abi";
+import {
+  adapterAbi,
+  bondAbi,
+  CLAIM_KIND,
+  CLAIM_STATUS,
+  compensatorAbi,
+  disputesAbi,
+  erc20Abi,
+  intakeAbi,
+  MINT_BLOCK,
+  morphoAbi,
+  ONCHAIN_VAULT_STATUS,
+  REFUND_REASON,
+  registryAbi,
+  registryErrorsAbi,
+  relayAbi,
+  revertErrorsAbi,
+  slasherAbi,
+} from "./abi";
 import {
   assertAllowlisted,
   authorizeAdapterCalls,
   borrowCalls,
   describeRevert,
+  disputePayoutCalls,
+  formatUtc,
   invalidateNonceCalls,
   NotAllowlistedError,
   partialReleaseCalls,
+  refundDestinationCalls,
+  refundPendingCalls,
   releaseCalls,
+  reopenDisputedClaimCalls,
   repayAndReleaseCalls,
   transferUsdcCalls,
   type Call,
@@ -121,24 +144,142 @@ describe("call batches", () => {
   });
 });
 
-describe("ABI fragments match the compiled ZecuredRegistry (contracts/abi)", () => {
-  const compiled = JSON.parse(
-    readFileSync(fileURLToPath(new URL("../../contracts/abi/ZecuredRegistry.json", import.meta.url)), "utf8"),
-  ) as { type: string; name?: string; inputs?: { type: string }[] }[];
-  const signature = (item: { name?: string; inputs?: readonly { type: string }[] }) =>
-    `${item.name}(${(item.inputs ?? []).map((i) => i.type).join(",")})`;
-  const compiledSignatures = new Set(compiled.filter((i) => i.type === "function" || i.type === "error").map(signature));
+describe("ABI fragments match the compiled contracts (contracts/abi)", () => {
+  interface Param {
+    type: string;
+    components?: readonly Param[];
+  }
+  interface Item {
+    type: string;
+    name?: string;
+    inputs?: readonly Param[];
+    outputs?: readonly Param[];
+  }
+  const compiled = (name: string) =>
+    JSON.parse(readFileSync(fileURLToPath(new URL(`../../contracts/abi/${name}.json`, import.meta.url)), "utf8")) as Item[];
+  /** A type with its tuple components spelled out: the whole shape the app decodes. */
+  const shape = (p: Param): string => (p.components ? `(${p.components.map(shape).join(",")})` : p.type);
+  const signature = (item: Item) =>
+    `${item.type} ${item.name}(${(item.inputs ?? []).map(shape).join(",")}) -> (${(item.outputs ?? []).map(shape).join(",")})`;
+  const check = (file: string, items: readonly Item[]) => {
+    const known = new Set(compiled(file).map(signature));
+    for (const item of items) expect(known.has(signature(item)), `${file}: ${signature(item)}`).toBe(true);
+  };
 
-  it("every Registry function and error the app encodes or decodes exists with the same types", () => {
-    for (const item of [...registryAbi.filter((i) => i.type === "function"), ...registryErrorsAbi]) {
-      expect(compiledSignatures.has(signature(item)), signature(item)).toBe(true);
-    }
+  it("every Registry function and error the app encodes or decodes exists with the same types (0x6990cc7d)", () => {
+    check("ZecuredRegistry", [...registryAbi.filter((i) => i.type !== "event"), ...registryErrorsAbi]);
+  });
+
+  it("the dispute path, at the Registry's address, is IZecuredDisputes'", () => {
+    check("IZecuredDisputes", disputesAbi);
+    // Served by the Registry's fallback: not in its own ABI.
+    expect(compiled("ZecuredRegistry").some((i) => i.name === "disputePayout")).toBe(false);
+    expect(compiled("ZecuredRegistry").some((i) => i.type === "fallback")).toBe(true);
+  });
+
+  it("the Intake, the relay, the slasher, the bond and the compensator", () => {
+    check("ZecuredIntake", intakeAbi);
+    check("ZecuredSlasher", slasherAbi);
+    check("SignerBondV2", bondAbi);
+    check("ZecuredCompensator", compensatorAbi);
+    // The relay's two views, as the Intake's relay implements them (IZcashHeaderRelay).
+    const relaySource = readFileSync(fileURLToPath(new URL("../../contracts/src/relay/IZcashHeaderRelay.sol", import.meta.url)), "utf8");
+    expect(relaySource).toMatch(/function bestChainTip\(\) external view returns \(bytes32 blockHash, uint256 height, uint256 chainWork\)/);
+    expect(relaySource).toMatch(/function isInBestChain\(bytes32 blockHash\) external view returns \(bool\)/);
+    expect(relayAbi.map((i) => i.name)).toEqual(["bestChainTip", "isInBestChain"]);
+  });
+
+  it("the enums the app reads as numbers are the contracts' (append-only)", () => {
+    const source = (path: string) => readFileSync(fileURLToPath(new URL(`../../contracts/src/${path}`, import.meta.url)), "utf8");
+    const members = (text: string, name: string) => {
+      const body = new RegExp(`enum ${name} \\{([^}]*)\\}`).exec(text)?.[1] ?? "";
+      return body
+        .split("\n")
+        .map((l) => l.replace(/\/\/.*$/, "").trim().replace(/,$/, ""))
+        .filter((l) => /^[A-Z]\w*$/.test(l));
+    };
+    const registry = source("interfaces/v3/IZecuredRegistry.sol");
+    const intake = source("interfaces/v3/IZecuredIntake.sol");
+    expect(members(registry, "VaultStatus")).toEqual([...ONCHAIN_VAULT_STATUS]);
+    expect(members(registry, "ClaimKind")).toEqual([...CLAIM_KIND]);
+    expect(members(registry, "ClaimStatus")).toEqual([...CLAIM_STATUS]);
+    expect(members(intake, "MintBlock")).toEqual([...MINT_BLOCK]);
+    expect(members(intake, "RefundReason")).toEqual([...REFUND_REASON]);
+  });
+});
+
+describe("v3 calls: refunds (T-02, T-03) and disputes (T-05 (a))", () => {
+  const CLAIM: Hex = `0x${"c1".repeat(32)}`;
+
+  it("a refund's destination goes to the Registry with the pre-validated commitment, never zero", () => {
+    const calls = refundDestinationCalls({ claimId: CLAIM, commitment: COMMITMENT, config });
+    expect(calls).toEqual([{ to: config.registry, data: calls[0]!.data }]);
+    expect(decodeFunctionData({ abi: registryAbi, data: calls[0]!.data })).toMatchObject({
+      functionName: "setRefundDestination",
+      args: [CLAIM, COMMITMENT],
+    });
+    assertAllowlisted(calls, ACCOUNT, config);
+    expect(() => refundDestinationCalls({ claimId: CLAIM, commitment: `0x${"00".repeat(32)}`, config })).toThrow(/cannot be zero/);
+  });
+
+  it("a pending activation's refund goes to the pinned Intake", () => {
+    const calls = refundPendingCalls({ vaultId: VAULT, config });
+    expect(calls[0]!.to).toBe(config.intake);
+    expect(decodeFunctionData({ abi: intakeAbi, data: calls[0]!.data })).toMatchObject({ functionName: "refundPending", args: [VAULT] });
+    assertAllowlisted(calls, ACCOUNT, config);
+  });
+
+  it("disputing and reopening go to the Registry's address (its fallback)", () => {
+    const dispute = disputePayoutCalls({ claimId: CLAIM, config });
+    const reopen = reopenDisputedClaimCalls({ claimId: CLAIM, config });
+    expect([dispute[0]!.to, reopen[0]!.to]).toEqual([config.registry, config.registry]);
+    expect(decodeFunctionData({ abi: disputesAbi, data: dispute[0]!.data })).toMatchObject({ functionName: "disputePayout", args: [CLAIM] });
+    expect(decodeFunctionData({ abi: disputesAbi, data: reopen[0]!.data })).toMatchObject({
+      functionName: "reopenDisputedClaim",
+      args: [CLAIM],
+    });
+    assertAllowlisted([...dispute, ...reopen], ACCOUNT, config);
+  });
+
+  it("the mirror refuses everything else of v3: other Intake and Registry calls, a zero destination, the wrong contract", () => {
+    const reject = (calls: Call[], pattern: RegExp) => expect(() => assertAllowlisted(calls, ACCOUNT, config)).toThrow(pattern);
+    const intakeView = encodeFunctionData({ abi: intakeAbi, functionName: "pendingActivation", args: [VAULT] });
+    reject([{ to: config.intake, data: intakeView }], /Intake\.pendingActivation/);
+    reject([{ to: config.registry, data: encodeFunctionData({ abi: disputesAbi, functionName: "payoutDispute", args: [CLAIM] }) }], /payoutDispute/);
+    const zero = encodeFunctionData({ abi: registryAbi, functionName: "setRefundDestination", args: [CLAIM, `0x${"00".repeat(32)}`] });
+    reject([{ to: config.registry, data: zero }], /zero refund destination/);
+    // The right call on the wrong contract.
+    reject([{ to: config.intake, data: refundDestinationCalls({ claimId: CLAIM, commitment: COMMITMENT, config })[0]!.data }], /unknown Intake function/);
+    reject([{ to: config.registry, data: refundPendingCalls({ vaultId: VAULT, config })[0]!.data }], /unknown Registry function/);
+    reject([{ to: config.adapter, data: disputePayoutCalls({ claimId: CLAIM, config })[0]!.data }], /unknown Adapter function/);
   });
 });
 
 describe("Registry revert explanations", () => {
-  const encode = (errorName: (typeof registryErrorsAbi)[number]["name"], args: readonly unknown[]) =>
-    encodeErrorResult({ abi: registryErrorsAbi, errorName, args } as never) as Hex;
+  const encode = (errorName: (typeof revertErrorsAbi)[number]["name"], args: readonly unknown[]) =>
+    encodeErrorResult({ abi: revertErrorsAbi, errorName, args } as never) as Hex;
+
+  it("explains v3's refusals: refunds, the freeze, disputes, pending activations", () => {
+    const at = 1_800_000_000n;
+    const cases: [Parameters<typeof encode>[0], readonly unknown[], RegExp][] = [
+      ["NotARefund", [VAULT], /not a refund/],
+      ["RefundBound", [VAULT], /can no longer change/],
+      ["VaultFrozen", [VAULT], /theft case is open/],
+      ["VaultCompromised", [VAULT], /compensator settles its claims in USDC/],
+      ["DisputeVaultCompromised", [VAULT], /compensator settles its claims in USDC/],
+      ["NotDisputable", [VAULT], /not a confirmed payout that can be disputed/],
+      ["NotClaimant", [VAULT, ACCOUNT], /only the claim's own claimant/],
+      ["NotDisputed", [VAULT], /not disputed/],
+      ["NoPendingActivation", [VAULT], /no pending activation/],
+      ["NotRefundableYet", [VAULT], /cannot be refunded yet/],
+      ["NotPendingAccount", [VAULT, ACCOUNT], /only the vault's own account/],
+    ];
+    for (const [name, args, pattern] of cases) expect(describeRevert(new Error(encode(name, args))), name).toMatch(pattern);
+    expect(describeRevert(new Error(encode("DisputeWindowClosed", [VAULT, at])))).toBe(
+      `The Registry refused the dispute: it could be disputed until ${formatUtc(at)}.`,
+    );
+    expect(describeRevert(new Error(encode("InclusionWindowOpen", [VAULT, at])))).toMatch(/until 2027-01-15 08:00 UTC: it can be reopened after that/);
+  });
 
   it("finds the revert data wherever viem nests the bundler's answer", () => {
     const data = encode("ReleaseLtvTooHigh", [160_161n, 320_000n]);

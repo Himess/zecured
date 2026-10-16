@@ -59,10 +59,12 @@ export default function PreparePage() {
               <li>It is mined at or before the vault&apos;s expiry height, and it is the first such note the vault receives.</li>
             </ul>
             <div className="mt-4">
-              <Notice tone="info" title="Everything else is refundable">
+              <Notice tone="info" title="Everything else comes back as a refund">
                 <p>
-                  Wrong amounts, late payments, pool-crossing deposits and extra notes are never attested on Base. They stay in
-                  the vault and you can ask for them back, to an Ironwood address, from the vault&apos;s refund page.
+                  Wrong amounts, late payments, pool-crossing deposits and extra payments never back a loan. A deposit that
+                  reaches the vault is proven on Base either way: as collateral, or as a Refund claim, which you give an
+                  Ironwood destination on the vault&apos;s refund page and the signers pay back minus the network fee. Pay
+                  exactly as shown and you never need it.
                 </p>
               </Notice>
             </div>

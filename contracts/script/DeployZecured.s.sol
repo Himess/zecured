@@ -27,7 +27,7 @@ import {RegistryConfig} from "../src/interfaces/v3/IZecuredRegistry.sol";
 import {IntakeConfig, WorkTier} from "../src/interfaces/v3/IZecuredIntake.sol";
 import {BondConfig} from "../src/interfaces/v3/ISignerBond.sol";
 import {IRiscZeroVerifier} from "../src/interfaces/IRiscZeroVerifier.sol";
-import {IZcashHeaderRelay} from "../src/relay/IZcashHeaderRelay.sol";
+import {IZcashHeaderRelay, ZCASH_TESTNET} from "../src/relay/IZcashHeaderRelay.sol";
 
 /// @title DeployZecured (v3)
 /// @notice Deploys Zecured v3 on the network a config file describes (`contracts/config/zecured-<name>.json`):
@@ -79,6 +79,8 @@ contract DeployZecured is Script {
     /// One network's parameters: contracts/config/zecured-<name>.json.
     struct NetworkConfig {
         string name;
+        /// The Zcash network the relay follows and the guests prove: "zcash-testnet" or "zcash-mainnet" (T-08).
+        string zcashNetwork;
         uint256 chainId;
         bool localFork;
         bool theftDemo;
@@ -195,7 +197,7 @@ contract DeployZecured is Script {
         d.violationImageId = vm.envBytes32("VIOLATION_IMAGE_ID");
         require(d.depositImageId != bytes32(0) && d.violationImageId != bytes32(0), "DeployZecured: zero image id");
         d.relay = vm.envAddress("ZCASH_RELAY");
-        _checkRelay(d.relay);
+        _checkRelay(d.relay, cfg);
         d.feeCommitment = cfg.feeBps == 0 ? bytes32(0) : vm.envBytes32("FEE_COMMITMENT");
 
         vm.startBroadcast(deployerKey);
@@ -216,8 +218,12 @@ contract DeployZecured is Script {
         path = vm.envOr("ZECURED_CONFIG", string.concat("config/zecured-", name, ".json"));
     }
 
-    function _readConfig() internal view returns (NetworkConfig memory c) {
+    function _readConfig() internal view returns (NetworkConfig memory) {
         (string memory name, string memory path) = _configPath();
+        return _readConfigAt(name, path);
+    }
+
+    function _readConfigAt(string memory name, string memory path) internal view returns (NetworkConfig memory c) {
         string memory json = vm.readFile(path);
         c.name = name;
         require(
@@ -225,6 +231,7 @@ contract DeployZecured is Script {
             "DeployZecured: the config is for another DEPLOYMENT_NAME"
         );
         c.chainId = vm.parseJsonUint(json, ".chainId");
+        c.zcashNetwork = vm.parseJsonString(json, ".zcashNetwork");
         c.localFork = vm.parseJsonBool(json, ".localFork");
         c.theftDemo = vm.parseJsonBool(json, ".theftDemo");
         c.morpho = IMorpho(vm.parseJsonAddress(json, ".morpho"));
@@ -540,10 +547,18 @@ contract DeployZecured is Script {
         });
     }
 
-    function _checkRelay(address relay) internal view {
+    /// T-08: the relay follows the config's Zcash network. The first relay (deployed before the network parameters)
+    /// has no `networkId`; it follows Testnet, so it is accepted for a Testnet deployment only.
+    function _checkRelay(address relay, NetworkConfig memory c) internal view {
         require(relay.code.length > 0, "DeployZecured: ZCASH_RELAY has no code");
         (bytes32 tip,,) = IZcashHeaderRelay(relay).bestChainTip();
         require(tip != bytes32(0), "DeployZecured: ZCASH_RELAY is not a header relay");
+        bytes32 wanted = keccak256(bytes(c.zcashNetwork));
+        try IZcashHeaderRelay(relay).networkId() returns (bytes32 id) {
+            require(id == wanted, "DeployZecured: ZCASH_RELAY follows another Zcash network");
+        } catch {
+            require(wanted == ZCASH_TESTNET, "DeployZecured: a relay without a network id follows Testnet only");
+        }
     }
 
     function _seedLender(NetworkConfig memory c, Deployment memory d) internal {
@@ -773,6 +788,12 @@ contract DeployZecured is Script {
         vm.serializeUint(v3, "commitGrace", c.commitGrace);
         vm.serializeUint(v3, "livenessPremiumBps", c.livenessPremiumBps);
         vm.serializeUint(v3, "incidentWindow", c.incidentWindow);
+        vm.serializeUint(v3, "disputeWindow", c.disputeWindow);
+        vm.serializeUint(v3, "inclusionWindow", c.inclusionWindow);
+        vm.serializeUint(v3, "versionDepositDelay", c.versionDepositDelay);
+        vm.serializeUint(v3, "versionViolationDelay", c.versionViolationDelay);
+        vm.serializeUint(v3, "versionEstopDelay", c.versionEstopDelay);
+        vm.serializeString(v3, "zcashNetwork", c.zcashNetwork);
         v3 = vm.serializeAddress(v3, "leftoverSink", c.leftoverSink);
     }
 }

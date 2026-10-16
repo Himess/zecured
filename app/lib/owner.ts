@@ -1,9 +1,11 @@
 /**
  * The borrower's off-chain requests, signed with the per-loan owner key (docs/INTERFACES.md
- * § 2.3, § 4): open a vault, pre-validate a payout destination, ask for a refund, fetch the
- * viewing key. Each builds the EIP-712 message, signs it in the browser and calls the API.
+ * § 2.3, § 4): open a vault, pre-validate a payout destination (an exit's or a refund's), fetch
+ * the viewing key. Each builds the EIP-712 message, signs it in the browser and calls the API.
  * A vault's address and viewing key are accepted only with the signers' signatures (C-4,
- * lib/signers.ts).
+ * lib/signers.ts). There is no off-chain refund any more (v3): a deposit that cannot back a loan
+ * comes back as a Refund claim on Base, whose destination the account sets after this same
+ * pre-validation (lib/calls.ts `refundDestinationCalls`).
  */
 import type { Address, Hex } from "viem";
 import { api as defaultApi, type Api, type OpenVaultResult } from "./api";
@@ -16,7 +18,6 @@ import {
   destinationTypedData,
   openVaultTypedData,
   randomNonce64,
-  refundRequestTypedData,
   REQUEST_TTL_SECONDS,
   signWithOwnerKey,
   viewKeyRequestTypedData,
@@ -134,9 +135,9 @@ export async function openVault(loan: StoredLoan, ctx: OwnerContext = {}): Promi
 }
 
 /**
- * Pre-validates the Ironwood destination of an exit (P2 / P6) with the signers. The app
- * computes the commitment itself and checks that the backend returns the same value.
- * Returns the commitment to use on Base. The salt is sent to the signers only.
+ * Pre-validates the Ironwood destination of an exit (P2 / P6) or of a Refund claim (T-02) with
+ * the signers. The app computes the commitment itself and checks that the backend returns the
+ * same value. Returns the commitment to use on Base. The salt is sent to the signers only.
  */
 export async function submitDestination(
   loan: StoredLoan,
@@ -158,26 +159,6 @@ export async function submitDestination(
     throw new Error("The signers acknowledged a different commitment than the one computed here. Nothing was sent to Base.");
   }
   return { commitment: dest.commitment, hasOtherReceivers: dest.hasOtherReceivers };
-}
-
-/** P5: asks for a non-conforming note back, to an Ironwood address. */
-export async function requestRefund(
-  loan: StoredLoan,
-  vaultId: Hex,
-  noteId: Hex,
-  ua: string,
-  ctx: OwnerContext = {},
-): Promise<boolean> {
-  const a = ctx.api ?? defaultApi;
-  const registry = signingRegistry(ctx);
-  const dest = prepareDestination(ua, "test");
-  const nonce = randomNonce64();
-  const deadline = deadlineIn(REQUEST_TTL_SECONDS, ctx.now);
-  const signature = await signWithOwnerKey(
-    loan.ownerKey,
-    refundRequestTypedData(registry, { vaultId, noteId, commitment: dest.commitment, nonce, deadline }),
-  );
-  return a.postRefund(vaultId, { noteId, receiver: dest.ua, salt: dest.saltHex, nonce, deadline, signature });
 }
 
 /** A vault's viewing key, as the backend returned it. */

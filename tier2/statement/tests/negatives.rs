@@ -305,7 +305,7 @@ fn a_note_has_one_tag_in_both_modes() {
     assert_ne!(activate.abi_encode(), refund.abi_encode());
 }
 
-// ------------------------------------------------------------------ red-team regression (Claude Web § 2)
+// ------------------------------------------------------------------ red-team regression (design review)
 
 /// What the Intake does with a deposit journal, as far as this regression needs: all five
 /// signers signed one `VaultOpened` for the vault (its struct hash), and a tag lands once.

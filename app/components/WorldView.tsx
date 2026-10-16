@@ -149,7 +149,7 @@ export function WorldView() {
             sees={[
               "The vault's notes, balance and timing (they hold its viewing key).",
               "The Ironwood destinations revealed for payouts (receiver and salt).",
-              "Non-conforming deposits, until refunded.",
+              "Payments to a vault that cannot back its loan, until they are refunded.",
             ]}
             hidden={[
               "Your identity, wallet or any ZEC outside the vault.",
@@ -226,7 +226,7 @@ function SignerView({ vaultId, staggered = false }: { vaultId: Hex; staggered?: 
           <li>Amount {formatTaz(v.amount)}</li>
           {v.outstanding !== undefined ? <li>Outstanding {formatTaz(v.outstanding)}</li> : null}
           <li>Deposit deadline: block #{v.expiryHeight.toLocaleString("en-US")}</li>
-          <li>Refundable notes: {v.nonConforming.length}</li>
+          <li>Other payments (not collateral): {v.nonConforming.length}</li>
           <li>
             Payout claims: {v.claims.length} ({v.claims.filter((c) => c.status === "paid").length} paid)
           </li>

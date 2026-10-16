@@ -1,0 +1,98 @@
+# Mainnet
+
+Zecured runs on Base Sepolia and Zcash Testnet. The code is meant to run on mainnet as it is: a
+mainnet deployment changes configuration, and brings what code cannot: independent operators, real
+bonds and liquidity, and an audit. This page says what was checked against mainnet, what the
+configuration changes and why, what a deployment needs, and what is designed but not built. The
+decisions are in docs/DECISIONS.md; the parties and the money are in docs/ECONOMICS.md.
+
+## 1. Checked against mainnet
+
+| What | How | Result |
+|---|---|---|
+| Base contracts on mainnet's Morpho Blue and RISC Zero router | The whole contract suite on a Base mainnet fork: `ZECURED_FORK_NETWORK=base-mainnet ZECURED_FORK_BLOCK=52688338 forge test --isolate` (from `contracts/`; `BASE_MAINNET_RPC_URL` optional) | 533 tests pass and one is skipped (its EIP-712 vectors are for chain id 84532); the invariant campaign holds. Morpho Blue, the AdaptiveCurveIRM, the 62.5 % LLTV and the router are at the same addresses as on Base Sepolia (read on-chain, 2026-10-16) |
+| Real proofs on mainnet's verifier | The same suite's real Groth16 seals (a Testnet deposit, an F1 spend) | Both verify through the mainnet router (Groth16 selector `0x73c457ba`, its emergency-stop wrapper not paused): the deposit mints, the theft slashes all five bonds |
+| Zcash Mainnet header rules | `config/relay-mainnet.json`, checked against Zebra v7.0.0-rc.0 and 1,600 real Mainnet headers (docs/ref/FACTS.md, D49) | The relay follows the real Mainnet chain under the Mainnet rules, and refuses headers that break them (wrong bits, minimum difficulty after a long gap, times out of bounds, a bad Equihash solution, a hash above the target) |
+| Every deployment config | `test/script/DeployConfig.t.sol` reads each `config/zecured-*.json` through the deploy script's checks and the constructors' rules | `config/zecured-base-mainnet.json` passes and has the values below |
+
+Not done yet: a shadow relay following Zcash Mainnet at Mainnet difficulty (it waits for NU7's
+Mainnet height, to be published on 2026-10-20), and a real Mainnet deposit into a Mainnet FROST
+vault (a decision for 2026-10-22).
+
+## 2. Configuration
+
+`contracts/config/zecured-base-sepolia.json` (the judge deployment) against
+`contracts/config/zecured-base-mainnet.json` (the template). Only what differs:
+
+| Parameter | Judge | Mainnet | Why |
+|---|---|---|---|
+| `loanToken` | Circle's Base Sepolia USDC | Circle USDC `0x8335…2913` | |
+| `coverageBps` (k) | 10,000 | 5,000 | With independent operators the bonds should cover twice what is locked |
+| `maxTotalZat` | 1.5 ZEC | 100 ZEC | Start small. The cap is immutable: raising it means a new deployment; within it, the bonds decide |
+| `minBond` | 100 USDC | 50,000 USDC | Five equal bonds that cover 100 ZEC at k = 50 % and about 1,265 USD per ZEC |
+| `bountyCap` | 50 USDC | 10,000 USDC | 10 % of a slash in both |
+| `tierMaxAmountZat` / `tierMinWork` | one tier, 3.5 M (about ten Testnet blocks) | up to 1 / 10 / 100 ZEC: the work of 6 / 20 / 190 Mainnet blocks | Faking a deposit should cost the attacker about three times its value in mining revenue; recompute the raw work from the difficulty at deployment |
+| `slashConfirmationWork` | 38 M | the work of 100 Mainnet blocks | at least `max(100 blocks, 3 x bountyCap / block value)`: a fake case gains at most the bounty |
+| `finalizeDelay` | 150 s | 30 min | Time for the honest feeders to replace a slow fake branch after a feeder outage |
+| `challengeWindow`, `livenessPeriod` | 24 h | 72 h | Time to notice and react, on both sides |
+| `commitGrace` | 2 h | 4 h | A payout's expiry (120 blocks of 75 s) plus a reorganisation margin, before NU7 |
+| `disputeWindow` / `inclusionWindow` | 24 h / 6 h | 72 h / 48 h | Within the challenge window plus the unbonding, which the deploy script checks |
+| `unbondingPeriod` | 54 h | 7 days | Outlasts the challenge window, the liveness period and the commit grace |
+| `incidentWindow` | 3 days | 7 days | Cases of one incident share one price |
+| `capPriceMaxAge` | 1 h (demo price) | 25 h | A Chainlink heartbeat of 24 h plus an hour |
+| `autoPauseOnCase` | off | on | An open F1/F2 case pauses new minting |
+| `journalV2` / `branchIds` | v1 / none | v2 / NU6.3 `0x37A5165B`, NU7 `0x77190AD9` | The epoch of the deposit is part of what is proven |
+| `minRefundZat` | 20,000 | 100,000 | A refund must be worth its own payout |
+| `refundAbandonPeriod` | 30 days | 2 years | |
+| `minSeize` / `minSeizeBps` | 100,000 zat / 0 | 0.05 ZEC / 5 % | No liquidation small enough to grief a vault with dust claims |
+| `versionDepositDelay` / `versionViolationDelay` / `versionEstopDelay` | 10 min each | 14 / 7 / 1 days | A new verifier takes effect only after users had time to see it |
+| `zcashNetwork` | `zcash-testnet` | `zcash-mainnet` | The deploy script checks the relay's network |
+
+`feeBps` (0.5 %) and the leftover sink (the burn address) are business choices; the compensator can
+name a public-good address instead of burning what no victim needs.
+
+## 3. A mainnet deployment
+
+1. **Price feed.** Deploy a `ZecuredPriceFeed` (design notes T-10) over Chainlink's ZEC/USD feed on
+   Base and a second, independent source. It is both the market's oracle (`BASE_ORACLE`) and the
+   cap's price (`CAP_PRICE`). On chain 8453 the deploy script refuses to run without them and never
+   puts the DemoShockOracle (a testnet demo control) in front of the market.
+2. **Relay.** Set `nu7ActivationHeight` in `config/relay-mainnet.json` once NU7's Mainnet height is
+   assigned (it is `type(uint32).max` until then, which no chain crosses), deploy
+   `ZcashHeaderRelay` with it, and run at least two independent feeders.
+3. **Guests.** The `guests` workflow builds the deposit and violation guests for Mainnet; their image
+   ids become the initial versions (`DEPOSIT_IMAGE_ID`, `VIOLATION_IMAGE_ID`).
+4. **Contracts.** `DEPLOYMENT_NAME=base-mainnet forge script script/DeployZecured.s.sol --broadcast`:
+   nine contracts at predicted addresses, whose constructors check the wiring.
+5. **Bonds.** Each operator bonds from its own key (`script/BondSigners.s.sol`); nothing is minted
+   before all five are in.
+6. **Operators.** Five independently run signer nodes (docs/OPERATORS.md), the coordinator, the
+   liquidator and the market maker, with lenders supplying the market.
+7. **An audit** of the contracts, the guests and the signer policy.
+
+## 4. Designed, not built
+
+- **Adapter registry (T-07b).** If Circle blacklisted the SettlementAdapter, liquidations and closes
+  through it would stop, and the remedy today is a migration. The design adds adapters to the
+  version registry: all five signers schedule a new adapter, which zZEC and the Registry accept
+  after a public delay; three signers remove one at once, never the last.
+- **Confirmation by proof (T-05 (b)).** `confirmPayout` would require a proof of the payout's
+  inclusion (the violation guest's `Included` kind) instead of three signatures: one GPU proof (about
+  a minute or two) and about 350,000 gas per payout, and a confirmed payout would no longer be the
+  signers' word. The dispute path (a), deployed, makes a false confirmation answerable instead.
+- **A dispute bond**, should disputes be abused; each confirmation can be disputed once, by its own
+  claimant.
+- **Vault pool (T-12).** Vaults made ahead of time (`VaultPooled`, signed by all five) and assigned
+  to a user by a second message (`VaultAssigned`), also signed by all five, so that opening a vault
+  is immediate and the DKG leaves the user's path. Assignment must take all five: with three, three
+  colluders could assign one pool vault to a user and to themselves and land the user's deposit
+  first.
+- **Fee schedule.** ZIP 317's marginal fee (5,000 zatoshi) and grace actions (2) are constants of
+  the spend logic; a change of Zcash's fee rules would take a new deployment.
+
+## 5. What stays true on mainnet
+
+The bonds cover what the cap admits, not more; five colluding signers can take every vault, and a
+new verifier version can only follow their public delay; proof of work protects a deposit proof
+only by the work it demands; and someone must build each witness and run the prover. docs/ECONOMICS.md
+§ "What the bonds do not cover" says the same in numbers.
