@@ -147,6 +147,8 @@ describe("which signer set (never the backend's in production)", () => {
     chainId: 84532,
     registry: PINNED_REGISTRY,
     adapter: DRY_RUN_ENV.NEXT_PUBLIC_ADAPTER,
+    intake: null,
+    v3: null,
     contracts: null,
     market: null,
     signers,

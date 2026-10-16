@@ -8,8 +8,8 @@ export const metadata: Metadata = { title: "Refunds" };
 export default function RefundPage() {
   return (
     <Page
-      title="Refund a non-conforming deposit"
-      lead="Deposits that did not follow the rules are never attested. Ask for them back, to an Ironwood address."
+      title="Refunds"
+      lead="A deposit that cannot back a loan comes back as a Refund claim on Base. Give it an Ironwood destination here."
     >
       <RefundView />
     </Page>

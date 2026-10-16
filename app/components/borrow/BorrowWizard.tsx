@@ -8,11 +8,21 @@ import { KeyBackup } from "@/components/KeyBackup";
 import { Badge, Button, buttonClass, Card, cx, KeyValue, Mono, Notice, Steps } from "@/components/ui";
 import type { Vault } from "@/lib/api";
 import { config } from "@/lib/config";
-import { notifyLoansChanged, useAction, useLoans, usePosition, useVault, useVaultProof } from "@/lib/hooks";
+import {
+  notifyLoansChanged,
+  useAction,
+  useLoans,
+  useMintingStatus,
+  usePosition,
+  useVault,
+  useVaultLedger,
+  useVaultProof,
+} from "@/lib/hooks";
 import { createLoan, loanStore, short, type StoredLoan } from "@/lib/keys";
 import { checkVaultAddress, openVault } from "@/lib/owner";
 import { vaultHref } from "@/lib/routes";
 import { vaultCheckUnavailable, VaultProofError, type VaultCheck } from "@/lib/signers";
+import { feeNotice, openGate } from "@/lib/v3";
 import { blocksToDuration, formatTaz } from "@/lib/zcash";
 
 const STEPS = ["Amount", "Back up key", "Deposit", "Borrow"];
@@ -101,9 +111,9 @@ export function BorrowWizard() {
         continueToBorrow ? (
           <BorrowStep loan={loan} />
         ) : (
-          <Card title="Your deposit is attested">
+          <Card title="Your deposit is active">
             <p className="mb-4 text-sm text-muted">
-              The signers saw your Ironwood deposit and minted zZEC straight into your account&apos;s Morpho position.
+              Your Ironwood deposit was proven on Base and zZEC was minted straight into your account&apos;s Morpho position.
             </p>
             <Button onClick={() => setContinueToBorrow(true)}>Continue to borrow</Button>
           </Card>
@@ -152,6 +162,10 @@ function AmountStep({
   const groupId = useId();
   const [amount, setAmount] = useState<bigint>(loan ? BigInt(loan.amount) : config.denominations[0]!);
   const [ready, setReady] = useState(false);
+  // T-01, T-03: a vault whose deposit would only come back as a refund is not opened.
+  const minting = useMintingStatus();
+  const gate = openGate(minting.data, amount);
+  const fee = feeNotice(amount, config.v3);
   // The signers did not vouch for the vault the backend returned (C-4).
   const [unvouched, setUnvouched] = useState(false);
   const cannotCheck = vaultCheckUnavailable();
@@ -196,6 +210,9 @@ function AmountStep({
               <span>
                 <span className="block text-lg font-semibold">{formatTaz(d)}</span>
                 <span className="block text-xs text-muted">Standard vault size (everyone uses the same amounts)</span>
+                {!openGate(minting.data, d).allowed ? (
+                  <span className="block text-xs text-warn">A deposit of this size would come back as a refund now.</span>
+                ) : null}
               </span>
             </label>
           ))}
@@ -211,8 +228,16 @@ function AmountStep({
           A fresh owner key and a fresh smart account are created in this browser for this loan only. No wallet
           connection, no ETH.
         </li>
-        <li>Opening the vault happens off-chain: nothing touches Base until your deposit is attested.</li>
+        <li>Opening the vault happens off-chain: nothing touches Base until your deposit is proven there.</li>
+        {fee ? <li>{fee}</li> : null}
       </ul>
+      {gate.message ? (
+        <div className="mt-4">
+          <Notice tone={gate.allowed ? "info" : "danger"} title={gate.allowed ? "Your deposit would wait" : "Not now"}>
+            <p>{gate.message}</p>
+          </Notice>
+        </div>
+      ) : null}
       <div className="mt-4">
         <Notice tone="warn" title="Get your ZEC into Ironwood well before this step">
           <p>
@@ -248,7 +273,7 @@ function AmountStep({
         <Button
           onClick={() => open.run(loan)}
           busy={open.busy}
-          disabled={(!ready && !loan) || !config.ownerSigning || cannotCheck !== null}
+          disabled={(!ready && !loan) || !config.ownerSigning || cannotCheck !== null || !gate.allowed}
         >
           {loan ? "Retry opening the vault" : "Create loan and open vault"}
         </Button>
@@ -291,14 +316,23 @@ function AmountStep({
 function confirmationsText(seen: number | undefined): string {
   const needed = config.confirmations;
   if (seen !== undefined) return needed !== null ? `${seen} of ${needed}` : String(seen);
-  return needed !== null ? `${needed} needed before the signers attest` : "—";
+  return needed !== null ? `${needed} needed before the deposit is proven` : "—";
 }
 
 const STATUS_STEPS = [
   { status: "awaiting_deposit", label: "Waiting for your Ironwood deposit" },
-  { status: "deposit_seen", label: "Deposit seen; signers are attesting it on Base" },
+  { status: "deposit_seen", label: "Deposit seen; it is being proven for Base" },
+  { status: "pending", label: "Proven on Base; waiting to be activated" },
   { status: "active", label: "zZEC minted into your Morpho position" },
 ] as const;
+
+/** Where the deposit is: the signers' status, and Base's pending activation (K3) between proof and mint. */
+function statusStep(vault: Vault | null, basePending: boolean): number {
+  if (vault?.status === "active") return 3;
+  if (basePending) return 2;
+  const i = vault ? STATUS_STEPS.findIndex((s) => s.status === vault.status) : 0;
+  return Math.max(0, i);
+}
 
 /** What the address label says about the signers' signatures (C-4). */
 const VOUCHED: Record<VaultCheck, string> = {
@@ -313,9 +347,13 @@ function DepositStep({ loan, vault, vaultError }: { loan: StoredLoan; vault: Vau
   // The stored address is shown, as text or QR code, only while every signer vouches for it.
   const proof = useVaultProof(loan);
   const vouched = proof.state === "vouched" ? proof.check : null;
-  const statusIndex = vault ? STATUS_STEPS.findIndex((s) => s.status === vault.status) : 0;
-  // Paying again after the deposit was seen, or after expiry, only creates refundable notes.
-  const awaiting = !vault || vault.status === "awaiting_deposit" || vault.status === "unknown";
+  // Base: a proven deposit waiting to be activated, or one that came back as a refund (T-02).
+  const ledger = useVaultLedger(loan.vaultId, 20_000);
+  const l = ledger.data;
+  const statusIndex = statusStep(vault, Boolean(l?.pending));
+  const refunded = Boolean(l && l.claims.some((c) => c.kind === "Refund"));
+  // Paying again after the deposit was seen, or after expiry, does not back the loan.
+  const awaiting = (!vault || vault.status === "awaiting_deposit" || vault.status === "unknown") && !l?.pending && !refunded;
   const expiry = vault?.expiryHeight ?? loan.expiryHeight;
   const blocksLeft = vault?.tipHeight !== undefined && expiry !== undefined ? expiry - vault.tipHeight : null;
 
@@ -348,11 +386,34 @@ function DepositStep({ loan, vault, vaultError }: { loan: StoredLoan; vault: Vau
             Checking the signers&apos; signatures on this vault…
           </p>
         ) : null}
-        {!awaiting && vault?.status === "deposit_seen" ? (
+        {!awaiting && vault?.status === "deposit_seen" && !l?.pending ? (
           <Notice tone="ok" title="Deposit received" live>
             <p>
-              The signers saw your deposit and are attesting it on Base. Do not pay again: extra payments are not attested
-              (they are refundable).
+              The signers saw your deposit; its zero-knowledge proof is being made and sent to Base. Do not pay again: a
+              second payment does not back the loan (it can only come back as a refund).
+            </p>
+          </Notice>
+        ) : null}
+        {l?.pending ? (
+          <Notice tone="ok" title="Deposit proven on Base" live>
+            <p>
+              It waits a few Zcash blocks before anyone can activate it; the backend&apos;s keeper does, and zZEC is minted
+              into your position.{" "}
+              <Link href={vaultHref("position", loan.vaultId!)} prefetch={false}>
+                See when
+              </Link>
+              .
+            </p>
+          </Notice>
+        ) : null}
+        {refunded ? (
+          <Notice tone="warn" title="A deposit came back as a refund" live>
+            <p>
+              A deposit to this vault could not back the loan and was proven on Base as a refund.{" "}
+              <Link href={vaultHref("refund", loan.vaultId!)} prefetch={false}>
+                Give it a destination
+              </Link>{" "}
+              to get it back.
             </p>
           </Notice>
         ) : null}
@@ -422,8 +483,8 @@ function DepositStep({ loan, vault, vaultError }: { loan: StoredLoan; vault: Vau
             </Notice>
             <Notice tone="warn" title="Only an exact Ironwood → Ironwood payment counts">
               <p>
-                Paying from transparent, Sapling or Orchard funds, a different amount, or after the deadline is not attested:
-                it stays in the vault and is refundable to an Ironwood address.
+                Paying from transparent, Sapling or Orchard funds, a different amount, or after the deadline does not back the
+                loan: such a payment comes back only as a refund proven on Base, minus the payout&apos;s network fee.
               </p>
             </Notice>
           </div>
@@ -445,23 +506,23 @@ function DepositStep({ loan, vault, vaultError }: { loan: StoredLoan; vault: Vau
           <div className="mt-4">
             <Notice tone="warn" title="This vault expired without a valid deposit">
               <p>
-                Anything you sent can be refunded.{" "}
+                Start a new loan. Anything you sent comes back only as a refund proven on Base: see the vault&apos;s{" "}
                 <Link href={vaultHref("refund", loan.vaultId!)} prefetch={false}>
-                  Request a refund
+                  refunds
                 </Link>
-                , then start
-                a new loan.
+                .
               </p>
             </Notice>
           </div>
         ) : null}
         {vault && vault.nonConforming.length > 0 ? (
           <div className="mt-4">
-            <Notice tone="warn" title="A deposit did not follow the rules">
+            <Notice tone="warn" title="A payment did not follow the rules">
               <p>
-                {vault.nonConforming.length} note(s) cannot be attested.{" "}
+                {vault.nonConforming.length} payment(s) to this vault cannot back the loan. They come back only as refunds
+                proven on Base:{" "}
                 <Link href={vaultHref("refund", loan.vaultId!)} prefetch={false}>
-                  Get them back
+                  see the refunds
                 </Link>
                 .
               </p>
