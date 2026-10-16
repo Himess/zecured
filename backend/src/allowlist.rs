@@ -8,11 +8,15 @@
 //! - every call it makes is on the list below, with no ETH value anywhere, and a MultiSend
 //!   batch has at most [`MAX_BATCH_CALLS`] calls.
 //!
-//! The proxy (proxy.rs) adds what needs the chain: the sender must be a Zecured account
-//! (`Registry.vaultOf(sender) != 0`, bound by `attestDeposit` before its first UserOp) and, once
-//! deployed, still the canonical SafeProxy with the Safe 4337 module as fallback handler; the
-//! EntryPoint must be v0.7; senders are rate-limited. The smart account therefore never needs
-//! (or receives) ETH, and the paymaster cannot be used for anything but Zecured flows.
+//! It returns the [`Bindings`] the calls need from the chain, which the proxy (proxy.rs) checks
+//! along with the rest of what needs the chain: the sender must be a Zecured account, bound to a
+//! vault by the deposit proof that reserved it (`Registry.vaultOf(sender) != 0`, before its first
+//! UserOp), except for a refund's destination, which only the account of the refunded vault may
+//! give (v3: a deposit that landed only as a refund binds no account); `Intake.refundPending`
+//! only for the sender's own vault; once deployed, the sender must still be the canonical
+//! SafeProxy with the Safe 4337 module as fallback handler; the EntryPoint must be v0.7; senders
+//! are rate-limited. The smart account therefore never needs (or receives) ETH, and the paymaster
+//! cannot be used for anything but Zecured flows.
 //!
 //! Refusal reasons are fixed public strings (L-2).
 
@@ -80,7 +84,9 @@ sol! {
     function transfer(address to, uint256 amount);
     function requestRelease(bytes32 vaultId, bytes32 destCommitment);
     function requestPartialRelease(bytes32 vaultId, uint64 amount, bytes32 destCommitment);
+    function setRefundDestination(bytes32 claimId, bytes32 destCommitment);
     function invalidateNonce(uint256 nonce);
+    function refundPending(bytes32 vaultId);
 }
 
 /// Deployment-specific parameters of the allowlist.
@@ -89,6 +95,8 @@ pub struct Allowlist {
     pub morpho: Address,
     pub registry: Address,
     pub adapter: Address,
+    /// ZecuredIntake (v3): `refundPending`.
+    pub intake: Address,
     pub usdc: Address,
     pub loan_token: Address,
     pub collateral_token: Address,
@@ -131,6 +139,19 @@ pub struct UserOpView {
 
 /// A refusal: a fixed public reason.
 pub type Check = Result<(), &'static str>;
+
+/// What a sponsorable UserOp's calls need from the chain (proxy.rs checks them before sponsoring).
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub struct Bindings {
+    /// Some call is one that only an account bound to a vault makes (everything but
+    /// `setRefundDestination`): `Registry.vaultOf(sender) != 0`.
+    pub bound_sender: bool,
+    /// `Intake.refundPending(vaultId)`: each the sender's own vault, `Registry.vaultOf(sender)`.
+    pub own_vaults: Vec<B256>,
+    /// `Registry.setRefundDestination(claimId, _)`: each a Refund claim of a vault whose account is
+    /// the sender (`Registry.claimDetails(claimId)`: kind Refund, claimant the sender).
+    pub refund_claims: Vec<B256>,
+}
 
 fn need(ok: bool, reason: &'static str) -> Check {
     if ok { Ok(()) } else { Err(reason) }
@@ -182,8 +203,9 @@ impl Allowlist {
             && m.lltv == self.lltv
     }
 
-    /// Decides whether to sponsor `op` (the parts that need no chain access).
-    pub fn check(&self, op: &UserOpView) -> Check {
+    /// Decides whether to sponsor `op` (the parts that need no chain access); returns what its
+    /// calls need from the chain.
+    pub fn check(&self, op: &UserOpView) -> Result<Bindings, &'static str> {
         need(
             op.init_code.as_ref().is_none_or(|c| c.is_empty())
                 && op.paymaster_and_data.as_ref().is_none_or(|p| p.is_empty()),
@@ -213,8 +235,9 @@ impl Allowlist {
             return Err("callData is not a Safe 4337 execution");
         };
         need(value.is_zero(), "no ETH value allowed")?;
+        let mut bindings = Bindings::default();
         match operation {
-            OPERATION_CALL => self.check_call(op.sender, to, &inner),
+            OPERATION_CALL => self.check_call(op.sender, to, &inner, &mut bindings)?,
             OPERATION_DELEGATECALL if to == MULTI_SEND_CALL_ONLY => {
                 let batch = decode::<multiSendCall>(&inner)?;
                 let calls = unpack_multisend(&batch.transactions)?;
@@ -222,12 +245,12 @@ impl Allowlist {
                 for (op_kind, target, value, data) in calls {
                     need(op_kind == OPERATION_CALL, "batched delegatecall not allowed")?;
                     need(value.is_zero(), "no ETH value allowed")?;
-                    self.check_call(op.sender, target, &data)?;
+                    self.check_call(op.sender, target, &data, &mut bindings)?;
                 }
-                Ok(())
             }
-            _ => Err("operation not allowed"),
+            _ => return Err("operation not allowed"),
         }
+        Ok(bindings)
     }
 
     /// The exact account the app creates: one owner, threshold 1, the 4337 module enabled
@@ -253,9 +276,23 @@ impl Allowlist {
         )
     }
 
-    fn check_call(&self, sender: Address, to: Address, data: &[u8]) -> Check {
+    fn check_call(&self, sender: Address, to: Address, data: &[u8], bindings: &mut Bindings) -> Check {
         need(data.len() >= 4, "missing selector")?;
         let selector: [u8; 4] = [data[0], data[1], data[2], data[3]];
+        // T-02: the one call an account that is not bound to a vault may make (a deposit that
+        // landed only as a refund binds none); the proxy checks the claim is the sender's.
+        if to == self.registry && selector == setRefundDestinationCall::SELECTOR {
+            let c = decode::<setRefundDestinationCall>(data)?;
+            need(!c.destCommitment.is_zero(), "a refund destination cannot be zero")?;
+            bindings.refund_claims.push(c.claimId);
+            return Ok(());
+        }
+        bindings.bound_sender = true;
+        // T-03: the proxy checks it is the sender's own vault.
+        if to == self.intake && selector == refundPendingCall::SELECTOR {
+            bindings.own_vaults.push(decode::<refundPendingCall>(data)?.vaultId);
+            return Ok(());
+        }
         if to == self.morpho {
             if selector == setAuthorizationCall::SELECTOR {
                 let c = decode::<setAuthorizationCall>(data)?;
@@ -329,6 +366,7 @@ pub(crate) mod tests {
             morpho: Address::repeat_byte(0x11),
             registry: Address::repeat_byte(0x22),
             adapter: Address::repeat_byte(0x33),
+            intake: Address::repeat_byte(0x88),
             usdc: Address::repeat_byte(0x44),
             loan_token: Address::repeat_byte(0x44),
             collateral_token: Address::repeat_byte(0x55),
@@ -386,7 +424,7 @@ pub(crate) mod tests {
         .into()
     }
 
-    fn batch(calls: &[(Address, Vec<u8>)]) -> Bytes {
+    pub fn batch(calls: &[(Address, Vec<u8>)]) -> Bytes {
         multisend(pack(calls))
     }
 
@@ -415,6 +453,126 @@ pub(crate) mod tests {
             destCommitment: B256::repeat_byte(2),
         }
         .abi_encode()
+    }
+
+    pub fn refund_destination(claim: u8) -> Vec<u8> {
+        setRefundDestinationCall {
+            claimId: B256::repeat_byte(claim),
+            destCommitment: B256::repeat_byte(2),
+        }
+        .abi_encode()
+    }
+
+    pub fn refund_pending(vault: u8) -> Vec<u8> {
+        refundPendingCall {
+            vaultId: B256::repeat_byte(vault),
+        }
+        .abi_encode()
+    }
+
+    /// T-02, T-03: a refund's destination and the refund of a long-paused activation are
+    /// sponsored, each with the binding the proxy then checks on the chain.
+    #[test]
+    fn refunds_are_sponsored_with_their_bindings() {
+        let l = list();
+        let me = Address::repeat_byte(0x99);
+        // Destinations bind no vault: a deposit that landed only as a refund binds no account.
+        let calls = [(l.registry, refund_destination(3)), (l.registry, refund_destination(4))];
+        assert_eq!(
+            l.check(&op(me, batch(&calls))),
+            Ok(Bindings {
+                bound_sender: false,
+                own_vaults: vec![],
+                refund_claims: vec![B256::repeat_byte(3), B256::repeat_byte(4)],
+            })
+        );
+        // Such an account's first UserOp deploys it.
+        let owner = Address::repeat_byte(0x01);
+        let mut first = op(predicted(owner, U256::ZERO), single(l.registry, refund_destination(3)));
+        (first.factory, first.factory_data) = deployment(owner, SAFE_4337_MODULE, U256::ZERO);
+        assert!(!l.check(&first).unwrap().bound_sender);
+        // refundPending, on the Intake: the sender's own vault.
+        assert_eq!(
+            l.check(&op(me, single(l.intake, refund_pending(7)))),
+            Ok(Bindings {
+                bound_sender: true,
+                own_vaults: vec![B256::repeat_byte(7)],
+                refund_claims: vec![],
+            })
+        );
+        // Every other call needs an account bound to a vault, also next to a destination.
+        let mixed = [(l.registry, refund_destination(3)), (l.registry, release())];
+        let b = l.check(&op(me, batch(&mixed))).unwrap();
+        assert!(b.bound_sender);
+        assert_eq!(b.refund_claims, vec![B256::repeat_byte(3)]);
+        assert!(l.check(&op(me, single(l.registry, release()))).unwrap().bound_sender);
+    }
+
+    #[test]
+    fn refund_calls_go_only_to_their_own_contract() {
+        let l = list();
+        let me = Address::repeat_byte(0x99);
+        assert_eq!(l.check(&op(me, single(l.intake, refund_destination(3)))), Err("call not on the allowlist"));
+        assert_eq!(l.check(&op(me, single(l.registry, refund_pending(7)))), Err("call not on the allowlist"));
+        assert_eq!(l.check(&op(me, single(l.adapter, refund_pending(7)))), Err("call not on the allowlist"));
+        let zero = setRefundDestinationCall {
+            claimId: B256::repeat_byte(3),
+            destCommitment: B256::ZERO,
+        }
+        .abi_encode();
+        assert_eq!(l.check(&op(me, single(l.registry, zero))), Err("a refund destination cannot be zero"));
+    }
+
+    sol! {
+        function finalizeActivation(bytes32 vaultId);
+        function dropPendingActivation(bytes32 vaultId);
+        function attestDepositWithProof(bytes journal, bytes seal, bytes[] openedSigs);
+        function pauseMinting(uint64 until, uint256 nonce, uint64 deadline, bytes[] sigs);
+        function abandonRefund(bytes32 claimId);
+        function writeOffDust(bytes32 claimId);
+        function slashLiveness(bytes32 claimId);
+        function withdrawEquity(bytes32 vaultId);
+    }
+
+    /// Nothing else of v3 is sponsored: the Intake's other entry points, the Registry's other
+    /// refund and payout calls (anyone's, never the account's), the bond and the compensator.
+    #[test]
+    fn other_v3_calls_are_refused() {
+        let l = list();
+        let me = Address::repeat_byte(0x99);
+        let id = B256::repeat_byte(7);
+        let bond = Address::repeat_byte(0xb0);
+        let compensator = Address::repeat_byte(0xc0);
+        let refused: [(Address, Vec<u8>); 8] = [
+            (l.intake, finalizeActivationCall { vaultId: id }.abi_encode()),
+            (l.intake, dropPendingActivationCall { vaultId: id }.abi_encode()),
+            (
+                l.intake,
+                attestDepositWithProofCall {
+                    journal: Bytes::new(),
+                    seal: Bytes::new(),
+                    openedSigs: vec![],
+                }
+                .abi_encode(),
+            ),
+            (
+                l.intake,
+                pauseMintingCall {
+                    until: 1,
+                    nonce: U256::ZERO,
+                    deadline: 1,
+                    sigs: vec![],
+                }
+                .abi_encode(),
+            ),
+            (l.registry, abandonRefundCall { claimId: id }.abi_encode()),
+            (l.registry, writeOffDustCall { claimId: id }.abi_encode()),
+            (bond, slashLivenessCall { claimId: id }.abi_encode()),
+            (compensator, withdrawEquityCall { vaultId: id }.abi_encode()),
+        ];
+        for (to, data) in refused {
+            assert_eq!(l.check(&op(me, single(to, data))), Err("call not on the allowlist"));
+        }
     }
 
     /// The app's first UserOp: deploy the Safe, authorize Registry and Adapter, borrow.

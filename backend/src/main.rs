@@ -891,6 +891,8 @@ fn load_allowlist(path: &std::path::Path) -> Option<allowlist::Allowlist> {
         morpho: market("morphoBlue")?.parse().ok()?,
         registry: contract("ZecuredRegistry")?,
         adapter: contract("SettlementAdapter")?,
+        // v3: `refundPending` (T-03). A deployment file without it (v2) sponsors nothing.
+        intake: contract("ZecuredIntake")?,
         // RQ-06: Circle's testnet USDC on Base Sepolia, a MockUSDC on the local fork.
         usdc: contract("LoanToken").or_else(|| contract("MockUSDC"))?,
         loan_token: market("loanToken")?.parse().ok()?,
@@ -1044,7 +1046,7 @@ async fn main() -> Result<()> {
     let allowlist = load_allowlist(&cli.deployments);
     let allowlist_oracle = allowlist.as_ref().map(|a| a.oracle);
     if allowlist.is_none() {
-        warn!("no deployment file: paymaster sponsorship disabled");
+        warn!("no v3 deployment file: paymaster sponsorship disabled");
     }
     let proxy_rpc = if cli.proxy_rpc_url.is_empty() {
         cfg.base_rpc_url.clone()
@@ -1255,6 +1257,82 @@ mod tests {
             assert_eq!(public_config_json(&cfg, &dep, false)["signers"], serde_json::Value::Null);
             assert!(signer_sets_agree(&cfg, &dep));
         }
+    }
+
+    /// A v3 deployment file as the deploy script writes it (`contracts/script/DeployZecured.s.sol`
+    /// `_writeJson`; addresses of a simulated deployment on a Base Sepolia fork), the parts the
+    /// backend reads.
+    fn v3_deployment() -> serde_json::Value {
+        json!({
+            "chainId": 84_532,
+            "block": 48_149_116,
+            "contracts": {
+                "BaseOracle": "0x741452339FA7c93f3a5Ceb5786bDD08d974C78Cf",
+                "CapPrice": "0xB450Fb876A81250eBf19560b8C07b4e6c756dF85",
+                "DemoShockOracle": "0xd2fa242D0167Df86e99A743546e4dd20eCf841Fe",
+                "LoanToken": "0x036CbD53842c5426634e7929541eC2318f3dCF7e",
+                "MockZecOracle": "0x741452339FA7c93f3a5Ceb5786bDD08d974C78Cf",
+                "SettlementAdapter": "0x967466dA65d97c4Ffa5ce657AB84145Ee1a31F3F",
+                "SignerBond": "0x22fD196DBC6da8206f6f62ef0A615A8B17dD407b",
+                "ZZEC": "0x551D6bf39fFf862bc969a5B26b2ea7B723Ef48E6",
+                "ZecuredCompensator": "0x96160571138e7871675821e7023c345eA6B9dD71",
+                "ZecuredIntake": "0x255d5B41cCEF1Bb499b55249bADff5f932ffe467",
+                "ZecuredRegistry": "0x2819fCb1A4a4c73C7291339B5a030c2601C4b259",
+                "ZecuredSlasher": "0x3f163edCE54059Cb3E6aC6d2045cA913650Ea5C9",
+                "ZecuredSpendLogic": "0x1602c63e23191748Ae9212247D5c8FF2FB5D3213",
+            },
+            "market": {
+                "collateralToken": "0x551D6bf39fFf862bc969a5B26b2ea7B723Ef48E6",
+                "irm": "0x46415998764C29aB2a25CbeA6254146D50D22687",
+                "lltv": "625000000000000000",
+                "loanToken": "0x036CbD53842c5426634e7929541eC2318f3dCF7e",
+                "marketId": "0xdec23caf1c50a6c3e327fa03639e56981aa95e58963105f25e3201a60aac6eff",
+                "morphoBlue": "0xBBBBBbbBBb9cC5e90e3b3Af64bdAF62C37EEFFCb",
+                "oracle": "0xd2fa242D0167Df86e99A743546e4dd20eCf841Fe",
+            },
+            "depositProofs": {
+                "intake": "0x255d5B41cCEF1Bb499b55249bADff5f932ffe467",
+                "imageId": format!("0x{}", "11".repeat(32)),
+                "mintMode": "proof-only",
+                "verifierIsMock": false,
+            },
+            "tier3": { "challengeWindow": 86_400, "theftDemo": false, "violationImageId": format!("0x{}", "22".repeat(32)) },
+            "v3": {
+                "autoPauseOnCase": false, "bountyBps": 1_000, "bountyCap": "50000000", "capPriceMaxAge": 3_600,
+                "commitGrace": 7_200, "coverageBps": 10_000, "feeBps": 50,
+                "feeCommitment": format!("0x{}", "33".repeat(32)), "incidentWindow": 259_200,
+                "leftoverSink": "0x000000000000000000000000000000000000dEaD", "livenessPeriod": 86_400,
+                "livenessPremiumBps": 500, "maxPause": 2_592_000, "maxTotalZat": 150_000_000, "minBond": "100000000",
+                "minFeeZat": 20_000, "minRefundZat": 20_000, "minSeizeBps": 0, "pendingRefundDelay": 86_400,
+                "refundAbandonPeriod": 2_592_000, "unbondingPeriod": 194_400,
+            },
+        })
+    }
+
+    /// The paymaster allowlist's contracts come from the deployment file, the Intake included; a
+    /// file without one (v2) sponsors nothing.
+    #[test]
+    fn the_allowlist_reads_the_v3_deployment_file() {
+        let dir = std::env::temp_dir().join(format!("zecured-backend-test-{}", hex::encode(keccak256(b"allowlist"))));
+        std::fs::create_dir_all(&dir).unwrap();
+        let path = dir.join("deployment.json");
+        let dep = v3_deployment();
+        std::fs::write(&path, dep.to_string()).unwrap();
+        let l = load_allowlist(&path).expect("a v3 deployment file");
+        let address = |v: &serde_json::Value| v.as_str().unwrap().parse::<Address>().unwrap();
+        assert_eq!(l.intake, address(&dep["contracts"]["ZecuredIntake"]));
+        assert_eq!(l.registry, address(&dep["contracts"]["ZecuredRegistry"]));
+        assert_eq!(l.adapter, address(&dep["contracts"]["SettlementAdapter"]));
+        // RQ-06: the loan token, Circle's USDC here; the market as Morpho knows it.
+        assert_eq!(l.usdc, address(&dep["contracts"]["LoanToken"]));
+        assert_eq!(l.oracle, address(&dep["market"]["oracle"]));
+        assert_eq!(l.lltv, alloy::primitives::U256::from(625_000_000_000_000_000u64));
+        let mut v2 = dep.clone();
+        v2["contracts"].as_object_mut().unwrap().remove("ZecuredIntake");
+        std::fs::write(&path, v2.to_string()).unwrap();
+        assert!(load_allowlist(&path).is_none(), "no Intake, no sponsorship");
+        assert!(load_allowlist(&dir.join("missing.json")).is_none());
+        let _ = std::fs::remove_dir_all(&dir);
     }
 
     /// L-2: callers only ever get a fixed message and a code.

@@ -403,15 +403,23 @@ opened, and keeps accepting its deposit, as before, until its expiry height. Imp
 
 ### 4.1 Paymaster allowlist (enforced by the proxy)
 
-A UserOp is sponsored only if every call it makes is one of:
+A UserOp is sponsored only if every call it makes is one of (targets: the deployment file's
+`contracts`; no ETH value in any call; a MultiSend batch of at most 8 plain calls):
 
 | Target | Calls |
 |---|---|
-| Smart account factory | deployment in the account's first UserOp (`initCode` / `factory`) |
-| `ZecuredRegistry` | `requestRelease`, `requestPartialRelease` |
+| Smart account factory | deployment in the account's first UserOp (`factory` / `factoryData`): a Safe v1.4.1 with the app's exact configuration, created at the sender |
+| `ZecuredRegistry` | `requestRelease`, `requestPartialRelease`; `setRefundDestination(claimId, commitment)` (T-02: a non-zero commitment, and `claimDetails(claimId)` must be a Refund claim whose claimant, the vault's account, is the sender) |
+| `ZecuredIntake` | `refundPending(vaultId)` (T-03: only the sender's own vault, `vaultOf(sender)`; the Intake lets the account convert its pending activation once a pause by signatures has lasted `pendingRefundDelay`, and anyone after a halt) |
 | `SettlementAdapter` | `invalidateNonce` |
-| Morpho Blue | `setAuthorization` (only for the Registry and the Adapter), `borrow` and `repay` (only the Zecured market) |
-| MockUSDC | `approve` (spender = Morpho) and `transfer` |
+| Morpho Blue | `setAuthorization` (only for the Registry and the Adapter), `borrow` and `repay` (only the Zecured market, on behalf of the sender, no callback data) |
+| Loan token (USDC; MockUSDC on a local fork) | `approve` (spender = Morpho) and `transfer` |
 
-Anything else is rejected. The account never receives ETH. The first UserOp must skip
-authorizations that are already set (Morpho reverts on re-setting).
+The sender must be a Zecured account: bound to a vault (`Registry.vaultOf(sender) != 0`, set by
+the deposit proof that reserved the vault, before the account's first UserOp), except for a
+UserOp whose only calls give refund destinations: a deposit that landed only as a refund (a
+Refund-mode proof, a halt, a full cap) binds no account, and only the refunded vault's account
+may give the destination. Once deployed, the account must still be the canonical Safe proxy with
+the Safe 4337 module as fallback handler. Anything else is rejected. The account never receives
+ETH. The first UserOp must skip authorizations that are already set (Morpho reverts on
+re-setting).
