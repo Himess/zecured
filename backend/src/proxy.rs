@@ -5,9 +5,9 @@
 //! never logged, and only the JSON-RPC methods the app needs are allowed, with bounded batches
 //! and log ranges (L-4). Every request that carries a UserOp must pass the paymaster
 //! allowlist, name EntryPoint v0.7, come from a Zecured account (`Registry.vaultOf(sender)
-//! != 0`, or for a refund's destination the account of the refunded vault; once deployed,
-//! still the canonical SafeProxy), refund only its own pending activation, and stay within a
-//! per-sender rate (M-3). Refusals are fixed messages with a short code (L-2).
+//! != 0`, or for a call about a claim, the claim's own claimant; once deployed, still the
+//! canonical SafeProxy), refund only its own pending activation, and stay within a per-sender
+//! rate (M-3). Refusals are fixed messages with a short code (L-2).
 
 use std::{
     collections::HashMap,
@@ -165,6 +165,8 @@ const NOT_OWN_VAULT: Refusal =
     Refusal::new("not_own_vault", "Not sponsored: only a vault's own account refunds its pending activation.");
 const NOT_OWN_REFUND: Refusal =
     Refusal::new("not_own_refund", "Not sponsored: only the refunded vault's account gives the refund's destination.");
+const NOT_OWN_CLAIM: Refusal =
+    Refusal::new("not_own_claim", "Not sponsored: only a claim's own claimant disputes or reopens it.");
 const NOT_A_SAFE: Refusal =
     Refusal::new("not_a_safe", "Not sponsored: the sender is not a standard Zecured Safe account.");
 const CHECK_UNAVAILABLE: Refusal =
@@ -313,10 +315,12 @@ impl Proxy {
     /// M-3: the sender is a Zecured account and, once deployed, still the canonical SafeProxy with
     /// the Safe 1.4.1 singleton and the Safe 4337 module as fallback handler, so its `callData`
     /// means what the allowlist decoded. Bound to a vault (`Registry.vaultOf`, set by the deposit
-    /// proof that reserved the vault, before the account's first UserOp) for every call but a
-    /// refund's destination (T-02), which only the refunded vault's account may give: a deposit
-    /// that landed only as a refund binds no account. `Intake.refundPending` (T-03) only for the
-    /// sender's own vault. Fails closed if the chain cannot be read.
+    /// proof that reserved the vault, before the account's first UserOp) for every call but those
+    /// about one of its own claims, whose claimant it must be (`Registry.claimDetails`): a
+    /// refund's destination (T-02; a Refund claim, which a deposit that landed only as a refund
+    /// leaves without binding the account), a dispute of a payout confirmation and the reopening
+    /// of a disputed claim (T-05 (a)). `Intake.refundPending` (T-03) only for the sender's own
+    /// vault. Fails closed if the chain cannot be read.
     async fn check_sender(&self, allowlist: &Allowlist, op: &UserOpView, bindings: &Bindings) -> Result<(), Refusal> {
         let cached = self.recently_verified(op.sender);
         let vault = match cached {
@@ -329,13 +333,18 @@ impl Proxy {
         if bindings.own_vaults.iter().any(|v| *v != vault) {
             return Err(NOT_OWN_VAULT);
         }
-        let mut claims = bindings.refund_claims.clone();
+        let mut claims: Vec<B256> = bindings.refund_claims.iter().chain(&bindings.own_claims).copied().collect();
         claims.sort_unstable();
         claims.dedup();
         for claim_id in claims {
             let c = self.claim_details(allowlist.registry, claim_id).await?;
-            if c.kind != CLAIM_KIND_REFUND || c.claimant != op.sender {
+            let refund = bindings.refund_claims.contains(&claim_id);
+            if refund && (c.kind != CLAIM_KIND_REFUND || c.claimant != op.sender) {
                 return Err(NOT_OWN_REFUND);
+            }
+            // Fee and Retired claims have no claimant (zero), which is never the sender.
+            if c.claimant != op.sender {
+                return Err(NOT_OWN_CLAIM);
             }
         }
         if cached.is_none() {
@@ -489,7 +498,7 @@ mod tests {
     use axum::{Router, routing::post};
 
     use super::*;
-    use crate::allowlist::tests::{batch, list, op, refund_destination, refund_pending, single};
+    use crate::allowlist::tests::{batch, dispute, list, op, refund_destination, refund_pending, reopen, single};
 
     /// A Base RPC stub: `bound` senders have a vault (0x07…, or the one in `vaults`); `claims`
     /// are the Registry's claims (kind, claimant); `deployed` senders have the given code and
@@ -697,6 +706,35 @@ mod tests {
         .abi_encode();
         let mixed = batch(&[(l.registry, refund_destination(3)), (l.usdc, transfer)]);
         assert_eq!(sponsor(&p, refund_only, mixed).await, Err(UNKNOWN_SENDER));
+    }
+
+    /// T-05 (a): only a claim's own claimant disputes its confirmation or reopens it. The claim
+    /// binds the account, so an account with only a refund disputes its refund's payout too.
+    #[tokio::test]
+    async fn disputes_only_from_the_claims_own_claimant() {
+        let l = list();
+        let bound = Address::repeat_byte(0x91);
+        let refund_only = Address::repeat_byte(0x92);
+        let liquidator = Address::repeat_byte(0x94);
+        let mut chain = Chain::default();
+        chain.vaults.insert(bound, B256::repeat_byte(0x0b));
+        chain.claims.insert(B256::repeat_byte(5), (0, bound)); // Release
+        chain.claims.insert(B256::repeat_byte(3), (CLAIM_KIND_REFUND, refund_only));
+        chain.claims.insert(B256::repeat_byte(6), (1, liquidator)); // Liquidation
+        chain.claims.insert(B256::repeat_byte(7), (5, Address::ZERO)); // Fee: no claimant
+        for a in [bound, refund_only] {
+            chain.deployed.insert(a, safe(SAFE_SINGLETON, SAFE_4337_MODULE));
+        }
+        let (p, _) = proxy_with(chain).await;
+        let registry = |data: Vec<u8>| single(l.registry, data);
+        assert_eq!(sponsor(&p, bound, registry(dispute(5))).await, Ok(()));
+        assert_eq!(sponsor(&p, bound, registry(reopen(5))).await, Ok(()));
+        assert_eq!(sponsor(&p, refund_only, registry(dispute(3))).await, Ok(()), "a refund-only account");
+        assert_eq!(sponsor(&p, bound, registry(dispute(6))).await, Err(NOT_OWN_CLAIM), "the liquidator's claim");
+        assert_eq!(sponsor(&p, bound, registry(reopen(3))).await, Err(NOT_OWN_CLAIM), "another account's claim");
+        assert_eq!(sponsor(&p, bound, registry(dispute(7))).await, Err(NOT_OWN_CLAIM), "a Fee claim has no claimant");
+        let both = batch(&[(l.registry, dispute(3)), (l.registry, refund_destination(3))]);
+        assert_eq!(sponsor(&p, refund_only, both).await, Ok(()), "one claim, read once, both rules");
     }
 
     /// T-03: only a vault's own account has its pending activation refunded (the Intake also lets

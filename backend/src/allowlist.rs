@@ -11,9 +11,10 @@
 //! It returns the [`Bindings`] the calls need from the chain, which the proxy (proxy.rs) checks
 //! along with the rest of what needs the chain: the sender must be a Zecured account, bound to a
 //! vault by the deposit proof that reserved it (`Registry.vaultOf(sender) != 0`, before its first
-//! UserOp), except for a refund's destination, which only the account of the refunded vault may
-//! give (v3: a deposit that landed only as a refund binds no account); `Intake.refundPending`
-//! only for the sender's own vault; once deployed, the sender must still be the canonical
+//! UserOp), except for the calls about one of its own claims, which the claim itself binds to the
+//! sender (v3: a deposit that landed only as a refund binds no account): a refund's destination,
+//! and disputing or reopening a payout confirmation; `Intake.refundPending` only for the sender's
+//! own vault; once deployed, the sender must still be the canonical
 //! SafeProxy with the Safe 4337 module as fallback handler; the EntryPoint must be v0.7; senders
 //! are rate-limited. The smart account therefore never needs (or receives) ETH, and the paymaster
 //! cannot be used for anything but Zecured flows.
@@ -85,6 +86,8 @@ sol! {
     function requestRelease(bytes32 vaultId, bytes32 destCommitment);
     function requestPartialRelease(bytes32 vaultId, uint64 amount, bytes32 destCommitment);
     function setRefundDestination(bytes32 claimId, bytes32 destCommitment);
+    function disputePayout(bytes32 claimId);
+    function reopenDisputedClaim(bytes32 claimId);
     function invalidateNonce(uint256 nonce);
     function refundPending(bytes32 vaultId);
 }
@@ -143,14 +146,17 @@ pub type Check = Result<(), &'static str>;
 /// What a sponsorable UserOp's calls need from the chain (proxy.rs checks them before sponsoring).
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
 pub struct Bindings {
-    /// Some call is one that only an account bound to a vault makes (everything but
-    /// `setRefundDestination`): `Registry.vaultOf(sender) != 0`.
+    /// Some call is one that only an account bound to a vault makes (every call but those about
+    /// one of the sender's claims): `Registry.vaultOf(sender) != 0`.
     pub bound_sender: bool,
     /// `Intake.refundPending(vaultId)`: each the sender's own vault, `Registry.vaultOf(sender)`.
     pub own_vaults: Vec<B256>,
     /// `Registry.setRefundDestination(claimId, _)`: each a Refund claim of a vault whose account is
     /// the sender (`Registry.claimDetails(claimId)`: kind Refund, claimant the sender).
     pub refund_claims: Vec<B256>,
+    /// `Registry.disputePayout(claimId)`, `Registry.reopenDisputedClaim(claimId)` (T-05 (a), served
+    /// by the Registry's fallback): each a claim whose claimant is the sender.
+    pub own_claims: Vec<B256>,
 }
 
 fn need(ok: bool, reason: &'static str) -> Check {
@@ -279,12 +285,22 @@ impl Allowlist {
     fn check_call(&self, sender: Address, to: Address, data: &[u8], bindings: &mut Bindings) -> Check {
         need(data.len() >= 4, "missing selector")?;
         let selector: [u8; 4] = [data[0], data[1], data[2], data[3]];
-        // T-02: the one call an account that is not bound to a vault may make (a deposit that
-        // landed only as a refund binds none); the proxy checks the claim is the sender's.
+        // The calls about one of the sender's own claims, which an account not bound to a vault may
+        // make too (a deposit that landed only as a refund binds none); the proxy checks the claim
+        // is the sender's. T-02: a refund's destination.
         if to == self.registry && selector == setRefundDestinationCall::SELECTOR {
             let c = decode::<setRefundDestinationCall>(data)?;
             need(!c.destCommitment.is_zero(), "a refund destination cannot be zero")?;
             bindings.refund_claims.push(c.claimId);
+            return Ok(());
+        }
+        // T-05 (a): disputing a payout confirmation, and reopening the claim once nobody proved it.
+        if to == self.registry && selector == disputePayoutCall::SELECTOR {
+            bindings.own_claims.push(decode::<disputePayoutCall>(data)?.claimId);
+            return Ok(());
+        }
+        if to == self.registry && selector == reopenDisputedClaimCall::SELECTOR {
+            bindings.own_claims.push(decode::<reopenDisputedClaimCall>(data)?.claimId);
             return Ok(());
         }
         bindings.bound_sender = true;
@@ -484,6 +500,7 @@ pub(crate) mod tests {
                 bound_sender: false,
                 own_vaults: vec![],
                 refund_claims: vec![B256::repeat_byte(3), B256::repeat_byte(4)],
+                own_claims: vec![],
             })
         );
         // Such an account's first UserOp deploys it.
@@ -498,6 +515,7 @@ pub(crate) mod tests {
                 bound_sender: true,
                 own_vaults: vec![B256::repeat_byte(7)],
                 refund_claims: vec![],
+                own_claims: vec![],
             })
         );
         // Every other call needs an account bound to a vault, also next to a destination.
@@ -523,7 +541,46 @@ pub(crate) mod tests {
         assert_eq!(l.check(&op(me, single(l.registry, zero))), Err("a refund destination cannot be zero"));
     }
 
+    pub fn dispute(claim: u8) -> Vec<u8> {
+        disputePayoutCall {
+            claimId: B256::repeat_byte(claim),
+        }
+        .abi_encode()
+    }
+
+    pub fn reopen(claim: u8) -> Vec<u8> {
+        reopenDisputedClaimCall {
+            claimId: B256::repeat_byte(claim),
+        }
+        .abi_encode()
+    }
+
+    /// T-05 (a): disputing a payout confirmation and reopening the disputed claim, on the
+    /// Registry's address (its fallback serves them), each for a claim of the sender's own.
+    #[test]
+    fn disputes_are_sponsored_for_the_senders_own_claims() {
+        let l = list();
+        let me = Address::repeat_byte(0x99);
+        assert_eq!(
+            l.check(&op(me, batch(&[(l.registry, dispute(5)), (l.registry, reopen(6))]))),
+            Ok(Bindings {
+                bound_sender: false,
+                own_vaults: vec![],
+                refund_claims: vec![],
+                own_claims: vec![B256::repeat_byte(5), B256::repeat_byte(6)],
+            })
+        );
+        // A claim binds its account: no vault needed, unless another call needs one.
+        let mixed = [(l.registry, dispute(5)), (l.registry, release())];
+        assert!(l.check(&op(me, batch(&mixed))).unwrap().bound_sender);
+        for to in [l.intake, l.adapter, l.morpho] {
+            assert_eq!(l.check(&op(me, single(to, dispute(5)))), Err("call not on the allowlist"));
+            assert_eq!(l.check(&op(me, single(to, reopen(5)))), Err("call not on the allowlist"));
+        }
+    }
+
     sol! {
+        function upholdPayout(bytes32 claimId, bytes32 payoutRef);
         function finalizeActivation(bytes32 vaultId);
         function dropPendingActivation(bytes32 vaultId);
         function attestDepositWithProof(bytes journal, bytes seal, bytes[] openedSigs);
@@ -543,7 +600,16 @@ pub(crate) mod tests {
         let id = B256::repeat_byte(7);
         let bond = Address::repeat_byte(0xb0);
         let compensator = Address::repeat_byte(0xc0);
-        let refused: [(Address, Vec<u8>); 8] = [
+        let refused: [(Address, Vec<u8>); 9] = [
+            // The slasher's call, after an Included proof.
+            (
+                l.registry,
+                upholdPayoutCall {
+                    claimId: id,
+                    payoutRef: id,
+                }
+                .abi_encode(),
+            ),
             (l.intake, finalizeActivationCall { vaultId: id }.abi_encode()),
             (l.intake, dropPendingActivationCall { vaultId: id }.abi_encode()),
             (
