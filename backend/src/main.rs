@@ -1204,9 +1204,6 @@ async fn main() -> Result<()> {
             concurrency = cli.deposit_proof_concurrency,
             "deposits are activated with Tier 2 proofs"
         );
-        if !cfg!(unix) {
-            warn!("deposit proofs need a Unix host: the witness reaches the prover through /dev/stdin");
-        }
     }
     let coordinator = Arc::new(coordinator);
 

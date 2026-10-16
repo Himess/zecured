@@ -12,6 +12,9 @@
 //!   zecured-tier2-host export-elf <deposit.bin>              # the embedded guest, to pin it
 //!   zecured-tier2-host parity <witness.json>                 # K4: each change, the same outcome in the zkVM
 //!
+//! A witness path may be `-`: the witness is then read from standard input (a pipe, never a file),
+//! which is how the coordinator passes it on a platform without `/dev/stdin` (H-12).
+//!
 //! `seal.json` is `{ imageId, journal, seal }`, what the Intake's `attestDepositWithProof` (or, for
 //! a violation, `ZecuredSlasher.proveViolation`) takes. The violation guest is pinned the same
 //! way, with `ZECURED_VIOLATION_ELF`.
@@ -66,6 +69,9 @@ impl Guest {
                 let id = compute_image_id(&elf).with_context(|| format!("{var} is not a guest program"))?;
                 Ok(Self { elf, id })
             }
+            // A host built without its guests (RISC0_SKIP_BUILD, e.g. where RISC Zero cannot build
+            // them) proves nothing and names no image id until a guest is pinned.
+            None if elf.is_empty() => bail!("this host embeds no guest: set {var} to the pinned guest"),
             None => Ok(Self {
                 elf: elf.to_vec(),
                 id: Digest::from(id),
@@ -81,7 +87,13 @@ impl Guest {
 /// The witness at `path`, checked natively: its bincode frame (the guest's input) and the
 /// journal the guest must commit.
 fn load_witness(statement: Statement, path: &str) -> Result<(Vec<u8>, Vec<u8>)> {
-    let bytes = std::fs::read(path)?;
+    let bytes = if path == "-" {
+        let mut bytes = Vec::new();
+        std::io::Read::read_to_end(&mut std::io::stdin(), &mut bytes)?;
+        bytes
+    } else {
+        std::fs::read(path)?
+    };
     let refused = |e: &dyn std::fmt::Debug| anyhow::anyhow!("statement refuses the witness natively: {e:?}");
     match statement {
         Statement::Deposit => {

@@ -217,13 +217,12 @@ struct Job {
     seal_path: PathBuf,
 }
 
-/// The witness argument that makes the host read its standard input: the host reads the witness
-/// from a path, and on Unix `/dev/stdin` is the process's own standard input (a pipe here, never a
-/// file). The zkVM provers run on Linux and macOS only.
+/// The witness argument that makes the host read its standard input (a pipe here, never a file):
+/// on Unix the path `/dev/stdin`, elsewhere `-`, which the host reads as its standard input.
 #[cfg(unix)]
-pub(crate) const WITNESS_FROM_STDIN: Option<&str> = Some("/dev/stdin");
+pub(crate) const WITNESS_FROM_STDIN: &str = "/dev/stdin";
 #[cfg(not(unix))]
-pub(crate) const WITNESS_FROM_STDIN: Option<&str> = None;
+pub(crate) const WITNESS_FROM_STDIN: &str = "-";
 
 /// Runs `host command args..`, writing `input` (if any) to its standard input and closing it.
 pub(crate) fn run_host(host: &Path, command: &str, args: &[&OsStr], input: Option<&[u8]>) -> Result<()> {
@@ -259,7 +258,7 @@ pub(crate) async fn prove_into(
     witness: Vec<u8>,
     seal_path: &Path,
 ) -> Result<()> {
-    let stdin = WITNESS_FROM_STDIN.context("proofs need a Unix host (the witness goes through /dev/stdin)")?;
+    let stdin = WITNESS_FROM_STDIN;
     let tmp = seal_path.with_extension("tmp");
     let (host, mock, tmp2) = (settings.host.clone(), settings.mock, tmp.clone());
     tokio::task::spawn_blocking(move || -> Result<()> {
@@ -794,7 +793,7 @@ mod tests {
     /// witness argument: on Unix as the path `/dev/stdin`, which is what the host is given.
     fn copy_stdin(out: &Path) -> (PathBuf, String, Vec<std::ffi::OsString>) {
         if cfg!(unix) {
-            let script = format!("cat {} > \"$0\"", WITNESS_FROM_STDIN.unwrap_or_default());
+            let script = format!("cat {WITNESS_FROM_STDIN} > \"$0\"");
             (PathBuf::from("/bin/sh"), "-c".into(), vec![script.into(), out.as_os_str().to_owned()])
         } else {
             let path = out.display().to_string().replace('\'', "''");

@@ -56,3 +56,8 @@ path = "src/bin/update_headers.rs"
 [[bin]]
 name = "equihash-corpus"
 path = "src/bin/equihash_corpus.rs"
+
+# MOCK, TEST ONLY: the zkVM host's image-id and mock-seal where RISC Zero does not run (local fork).
+[[bin]]
+name = "mock-host"
+path = "src/bin/mock_host.rs"
