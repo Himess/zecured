@@ -388,6 +388,7 @@ fn finish_open(
         inflight: None,
         refunds: vec![],
         paid_here: vec![],
+        reopened: vec![],
         attest_delay: None,
         used_view_nonces: vec![],
         non_conforming: vec![],
@@ -501,10 +502,13 @@ fn apply_event(v: &mut CoordVault, ev: &VaultEvent) {
                         if claim.state == ClaimState::Disputed {
                             claim.state = ClaimState::Unpaid;
                         }
+                        if !v.reopened.contains(&claim.id) {
+                            v.reopened.push(claim.id);
+                        }
                         if v.paid_here.contains(&claim.id) {
                             warn!(
                                 vault = %short(&v.vault_id),
-                                "a confirmation of a payout this coordinator saw mined was reopened: its claimant may take the claim's value from the bonds; the signers pay nothing twice (T-05)"
+                                "a confirmation of a payout this coordinator saw mined was reopened: it still proves the payout's inclusion (D57); meanwhile its claimant may take the claim's value from the bonds, and the signers pay nothing twice (T-05)"
                             );
                         }
                     }
@@ -2010,6 +2014,17 @@ mod tests {
         apply_event(&mut v, &change(ClaimChange::Reopened));
         assert_eq!((v.claims[0].state, v.books()[0].state), (ClaimState::Unpaid, ClaimState::Paid));
         assert!(!v.books()[0].payable());
+        // D57: it proves that payout's inclusion still, which upholds the reopened claim.
+        assert_eq!(v.to_uphold(), vec![[1; 32]]);
+        assert!(!v.is_idle(), "busy proving");
+        apply_event(
+            &mut v,
+            &change(ClaimChange::Upheld {
+                payout_ref: B256::repeat_byte(2),
+            }),
+        );
+        assert_eq!(v.claims[0].state, ClaimState::Paid);
+        assert!(v.to_uphold().is_empty());
     }
 
     /// M-9 (coordinator side): re-applying a chunk after a crash must not reset `outstanding`.

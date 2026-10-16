@@ -265,7 +265,10 @@ fn starts_from(change: &ClaimChange, prev: &ClaimRecord) -> bool {
         ClaimChange::BondPaid => !prev.bond_paid && prev.status == CLAIM_PENDING,
         ClaimChange::WrittenOff | ClaimChange::Compensated => prev.status == CLAIM_PENDING,
         ClaimChange::Disputed { .. } => prev.status == CLAIM_PAID,
-        ClaimChange::Upheld { .. } | ClaimChange::Reopened => prev.status == CLAIM_DISPUTED,
+        // D57: a later proof also upholds a claim reopened after its inclusion window. Applied, it
+        // leaves the claim paid, exactly as a confirmation would: the state Base shows.
+        ClaimChange::Upheld { .. } => prev.status == CLAIM_DISPUTED || prev.status == CLAIM_PENDING,
+        ClaimChange::Reopened => prev.status == CLAIM_DISPUTED,
     }
 }
 
@@ -828,12 +831,13 @@ mod tests {
             status: CLAIM_DISPUTED,
             ..claim_state(CLAIM_PAID)
         };
-        // Paid at 200, disputed at 300, reopened at 400 (pending again).
+        // Paid at 200, disputed at 300, reopened at 400 (pending again), upheld late at 450 (D57).
         chain.claim = vec![
             (100, claim_state(CLAIM_PENDING)),
             (200, claim_state(CLAIM_PAID)),
             (300, disputed),
             (400, claim_state(CLAIM_PENDING)),
+            (450, claim_state(CLAIM_PAID)),
         ];
         let change = |block: u64, change: ClaimChange| {
             event(
@@ -851,18 +855,23 @@ mod tests {
         // Re-dated, or a change that did not happen.
         assert!(forged(verdict(&chain, None, &change(350, ClaimChange::Disputed { due_at: 9_000 })).await.unwrap()));
         assert!(forged(verdict(&chain, None, &change(300, ClaimChange::Compensated)).await.unwrap()));
-        assert!(forged(verdict(&chain, None, &change(200, ClaimChange::Upheld { payout_ref: TAG })).await.unwrap()));
-        // At a later block (state pruned): the dispute was resolved since: stale; the reopening
-        // still shows.
+        assert!(forged(verdict(&chain, None, &change(300, ClaimChange::Upheld { payout_ref: TAG })).await.unwrap()));
+        assert!(forged(verdict(&chain, None, &change(400, ClaimChange::Upheld { payout_ref: TAG })).await.unwrap()));
+        // D57: the reopened claim upheld by a later proof.
+        let late = change(450, ClaimChange::Upheld { payout_ref: TAG });
+        assert!(matches!(verdict(&chain, None, &late).await.unwrap(), Verdict::Proven(_)));
+        // At a later block (state pruned): the dispute and the reopening were resolved since:
+        // stale; the late upholding still shows.
         chain.pruned_below = 500;
         assert!(matches!(verdict(&chain, None, &dispute).await.unwrap(), Verdict::Stale(_)));
-        assert!(matches!(verdict(&chain, None, &reopen).await.unwrap(), Verdict::Proven(_)));
-        // The confirmation at 200: the claim is pending again now (reopened): nothing to apply.
+        assert!(matches!(verdict(&chain, None, &reopen).await.unwrap(), Verdict::Stale(_)));
+        assert!(matches!(verdict(&chain, None, &late).await.unwrap(), Verdict::Proven(_)));
+        // The confirmation at 200: the claim is paid again now (upheld): it still shows.
         let confirmed = event(200, RegistryEvent::PayoutConfirmed(vec![CLAIM]));
-        assert!(matches!(verdict(&chain, None, &confirmed).await.unwrap(), Verdict::Stale(_)));
+        assert!(matches!(verdict(&chain, None, &confirmed).await.unwrap(), Verdict::Proven(_)));
         // A witness that reads another state disputes even a stale verdict.
         let mut other = chain.clone();
-        other.claim.push((450, claim_state(CLAIM_PAID)));
+        other.claim.push((480, claim_state(CLAIM_PENDING)));
         assert!(matches!(verdict(&chain, Some(&other), &dispute).await.unwrap(), Verdict::Disputed(_)));
     }
 

@@ -129,6 +129,10 @@ pub struct CoordVault {
     /// The claims this coordinator saw paid on Zcash: their payout mined and settled here.
     #[serde(default)]
     pub paid_here: Vec<[u8; 32]>,
+    /// T-05 (a), D57: claims reopened on Base after a dispute. A later proof of their payout still
+    /// upholds them; the coordinator proves the payouts it saw mined.
+    #[serde(default)]
+    pub reopened: Vec<[u8; 32]>,
     /// Extra confirmations before proving the deposit (D15), drawn once.
     #[serde(default)]
     pub attest_delay: Option<u32>,
@@ -165,7 +169,7 @@ impl CoordVault {
     pub fn is_idle(&self) -> bool {
         matches!(self.status, VaultStatus::Expired | VaultStatus::Closed | VaultStatus::Cancelled)
             && self.inflight.is_none()
-            && !self.claims.iter().any(|c| c.state == ClaimState::Disputed)
+            && self.to_uphold().is_empty()
             && !self.books().iter().any(|c| c.payable())
             && self.refunds.iter().all(|r| r.done)
     }
@@ -174,6 +178,21 @@ impl CoordVault {
     /// vault, unpaid for good).
     pub fn settled(&self) -> bool {
         !self.books().iter().any(|c| matches!(c.state, ClaimState::Unpaid | ClaimState::Disputed))
+    }
+
+    /// T-05 (a): the claims whose payout this coordinator proves: those disputed on Base, and
+    /// those reopened there whose payout it saw mined (D57: a later proof still upholds them).
+    pub fn to_uphold(&self) -> Vec<[u8; 32]> {
+        self.claims
+            .iter()
+            .filter(|c| {
+                c.state == ClaimState::Disputed
+                    || (c.state == ClaimState::Unpaid
+                        && self.reopened.contains(&c.id)
+                        && self.paid_here.contains(&c.id))
+            })
+            .map(|c| c.id)
+            .collect()
     }
 
     /// The claims as this coordinator's books count them, and plans from: a claim it saw paid on
@@ -336,6 +355,7 @@ pub(crate) mod tests {
             inflight: None,
             refunds: vec![],
             paid_here: vec![],
+            reopened: vec![],
             attest_delay: None,
             used_view_nonces: vec![],
             non_conforming: vec![],

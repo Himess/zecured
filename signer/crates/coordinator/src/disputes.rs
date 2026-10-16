@@ -5,9 +5,11 @@
 //! within the Registry's `inclusionWindow` by proving, with the violation guest's `Included` kind,
 //! that a committed payout of the claim's input is in a Zcash block under a relay header with the
 //! slasher's confirmation work on top (`ZecuredSlasher.proveInclusion`). Otherwise anyone reopens
-//! the claim, and the signers pay it again, or the bonds do.
+//! the claim, and the signers pay it again, or the bonds do. A later proof still upholds a
+//! reopened claim (D57), so that a payout which did land never keeps its vault open for good.
 //!
-//! The coordinator knows its own payouts. For each disputed claim it finds, in the vault's scan, the
+//! The coordinator knows its own payouts. For each disputed claim, and each reopened claim whose
+//! payout it saw mined, it finds, in the vault's scan, the
 //! transaction that spent the claim's input, checks that Base recorded that transaction as the
 //! input's payout (`spendRecord(payoutRef)`), proves its inclusion ahead of the deposit proofs in
 //! the queue, and submits the proof for every disputed claim of that payout. Nothing here is
@@ -27,13 +29,10 @@ use zcash_protocol::TxId;
 use zecured_base::{
     events::{IZcashHeaderRelay, IZecuredRegistry, IZecuredSlasher, VERSION_VIOLATION},
     relay::slash_anchor,
-    verify::CLAIM_DISPUTED,
+    verify::{CLAIM_DISPUTED, CLAIM_PENDING},
 };
 use zecured_deposit_witness::{p2p, violation};
-use zecured_policy::{
-    derive::{deposit_tag, payout_ref, tag_key},
-    ledger::ClaimState,
-};
+use zecured_policy::derive::{deposit_tag, payout_ref, tag_key};
 use zecured_zcash_ops::{lwd, scan::ReceivedNote};
 
 use crate::{
@@ -75,6 +74,12 @@ fn spent_notes(ufvk: &str, notes: &[ReceivedNote]) -> Vec<([u8; 32], TxId, u32)>
             Some((deposit_tag(ufvk, &cmx), n.spent_in?, n.spent_at?))
         })
         .collect()
+}
+
+/// Whether Base still takes an inclusion proof for one of [`CoordVault::to_uphold`]'s claims:
+/// disputed, or pending again after a reopening (D57).
+fn upholdable(status: u8) -> bool {
+    status == CLAIM_DISPUTED || status == CLAIM_PENDING
 }
 
 /// A disputed payout to prove: its transaction, its block and the disputed claims it pays.
@@ -136,18 +141,19 @@ impl Coordinator {
         true
     }
 
-    /// T-05 (a): upholds the vault's disputed payout confirmations that it can prove, one proof per
-    /// payout. Without proofs configured it can only warn: someone else must prove the payout's
-    /// inclusion before the dispute falls due.
+    /// T-05 (a): upholds the vault's disputed payout confirmations that it can prove, and the
+    /// reopened ones whose payout it saw mined (D57), one proof per payout. Without proofs
+    /// configured it can only warn: someone else must prove the payout's inclusion.
     pub(crate) async fn uphold_disputes(&self, v: &CoordVault) -> Result<()> {
-        if !v.claims.iter().any(|c| c.state == ClaimState::Disputed) {
+        let to_uphold = v.to_uphold();
+        if to_uphold.is_empty() {
             return Ok(());
         }
         let Some(prover) = self.proofs.as_ref() else {
             if self.dispute_warning_due(&v.vault_id) {
                 warn!(
                     vault = %short(&v.vault_id),
-                    "a payout confirmation is disputed and this coordinator makes no proofs: prove the payout's inclusion before the dispute falls due (T-05)"
+                    "a payout confirmation is disputed or reopened and this coordinator makes no proofs: prove the payout's inclusion (T-05)"
                 );
             }
             return Ok(());
@@ -161,10 +167,12 @@ impl Coordinator {
         let provider = ProviderBuilder::new().connect_http(self.cfg.base_rpc_url.parse()?);
         let registry = IZecuredRegistry::new(self.cfg.registry, &provider);
         let mut payouts: BTreeMap<B256, Disputed> = BTreeMap::new();
-        for claim in v.claims.iter().filter(|c| c.state == ClaimState::Disputed) {
-            let id = B256::from(claim.id);
-            if registry.claimDetails(id).call().await.context("Registry.claimDetails")?.status != CLAIM_DISPUTED {
-                continue; // upheld or reopened meanwhile: its event follows
+        for claim in to_uphold {
+            let id = B256::from(claim);
+            // Disputed, or reopened (pending again, still upholdable, D57); anything else: upheld,
+            // confirmed again or compensated meanwhile, and its event follows.
+            if !upholdable(registry.claimDetails(id).call().await.context("Registry.claimDetails")?.status) {
+                continue;
             }
             let input = registry.claimInput(id).call().await.context("Registry.claimInput")?;
             let Some(&(_, txid, height)) = spent.iter().find(|(tag, ..)| B256::from(*tag) == input) else {
@@ -299,7 +307,7 @@ impl Coordinator {
         );
         let registry = IZecuredRegistry::new(self.cfg.registry, &provider);
         for claim in claims {
-            if registry.claimDetails(*claim).call().await.context("Registry.claimDetails")?.status != CLAIM_DISPUTED {
+            if !upholdable(registry.claimDetails(*claim).call().await.context("Registry.claimDetails")?.status) {
                 continue;
             }
             let call = slasher.proveInclusion(s.journal.clone(), s.seal.clone(), s.image_id, *claim);
