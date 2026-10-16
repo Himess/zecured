@@ -128,7 +128,13 @@ SpendCommit(bytes32 vaultId,bytes32 inputTag,bytes32[] claimIds,bytes32[] claimR
   the queue's order, with distinct receivers and salts (E1). Arrays are hashed as EIP-712 requires
   (`keccak256` of the concatenated elements); signatures as in § 2.2.
 
-## 3. Contracts (Base Sepolia)
+## 3. Contracts (v3)
+
+The authoritative interfaces, with their NatSpec, are in `contracts/src/interfaces/v3/` (and
+`ISettlementAdapter`, `IZZEC`, `IRiscZeroVerifier`, `IRiscZeroVerifierRouter`,
+`src/relay/IZcashHeaderRelay.sol`); this section lists what each contract offers and its main rules.
+The decisions behind them are D40 to D55 in [DECISIONS.md](DECISIONS.md); the invariants each one
+keeps are in [INVARIANTS.md](INVARIANTS.md). Addresses: `contracts/deployments/<network>.json`.
 
 ### 3.1 `ZZEC` (ERC-20, 8 decimals)
 
@@ -143,128 +149,159 @@ SpendCommit(bytes32 vaultId,bytes32 inputTag,bytes32[] claimIds,bytes32[] claimR
   `balanceOf` accounting). The Registry burns zZEC held by the Adapter directly. Everything
   else reverts (Morpho surfaces it as "transfer reverted"). No account ever holds zZEC (I2).
 
-### 3.2 `ZecuredRegistry`
+### 3.2 `ZecuredIntake`: deposits and the gates of minting
 
 ```solidity
-enum VaultStatus { None, Active, Closed, Cancelled }
-enum ClaimKind   { Release, Liquidation, CloseUser, CloseMarketMaker }
-enum ClaimStatus { None, Pending, Paid, WrittenOff }                                                             // WrittenOff: dust (RT-8)
-enum MintMode    { SignerAttested, ProofOnly }                                                                     // K1, immutable
+enum MintBlock    { None, Halted, NotBonded, Paused, CapExceeded }
+enum RefundReason { ModeRefund, VaultNotNew, PendingExists, AccountHasVault, Halted, CapExceeded, PendingConverted }
 
-function attestDeposit(DepositAttestation calldata att, bytes[] calldata sigs) external;                            // not in ProofOnly
-function attestDepositWithProof(bytes calldata journal, bytes calldata seal, bytes[] calldata openedSigs) external;  // Tier 2: pends
-function finalizeActivation(bytes32 vaultId) external;                                                              // K3: mints
-function dropPendingActivation(bytes32 vaultId) external;                                                           // K3
-function cancelVault(bytes32 vaultId, bytes[] calldata sigs) external;                                              // L-8
-function requestRelease(bytes32 vaultId, bytes32 destCommitment) external returns (bytes32 claimId);
-function requestPartialRelease(bytes32 vaultId, uint64 amount, bytes32 destCommitment) external returns (bytes32 claimId);
-function recordLiquidation(bytes32 vaultId, uint64 seized, bytes32 liquidatorCommitment) external returns (bytes32 claimId);   // adapter only
-function recordClose(bytes32 vaultId, uint64 mmAmount, uint64 userAmount, bytes32 mmCommitment, bytes32 userCommitment)
-    external returns (bytes32 userClaimId, bytes32 mmClaimId);                                                             // adapter only
-function confirmPayout(bytes32 vaultId, bytes32[] calldata claimIds, bytes[] calldata sigs) external;
-function writeOffDust(bytes32 claimId) external;                                                                    // RT-8: anyone
-function DUST_LIMIT() external view returns (uint64);                                                               // 10,000 zat
+function attestDepositWithProof(bytes calldata journal, bytes calldata seal, bytes32 imageId, bytes[] calldata openedSigs)
+    external;                                                            // anyone: a pending activation, or a refund
+function finalizeActivation(bytes32 vaultId) external;                   // anyone: mints (K3)
+function dropPendingActivation(bytes32 vaultId) external;                // anyone, once the anchor left the best chain
+function refundPending(bytes32 vaultId) external returns (bytes32 claimId);   // after a halt (anyone) or a long pause (the account)
+function pauseMinting(uint64 until, uint256 nonce, uint64 deadline, bytes[] calldata sigs) external;   // 3 of 5 (T-03)
+function unpauseMinting(uint256 nonce, uint64 deadline, bytes[] calldata sigs) external;              // 3 of 5
 
-function vaultOf(address account) external view returns (bytes32 vaultId);
-function vault(bytes32 vaultId) external view returns (address account, uint64 outstanding, VaultStatus status);
-function claim(bytes32 claimId) external view returns (bytes32 vaultId, ClaimKind kind, uint64 amount, bytes32 commitment, ClaimStatus status);
-function marketParams() external view returns (MarketParams memory);
-function signers() external view returns (address[5] memory);
-function pendingActivation(bytes32 vaultId) external view returns (address account, uint64 amount, bytes32 depositTag,
-    bytes32 anchor, uint256 readyHeight, uint256 readyTime);
+function mintingPaused() external view returns (bool);
+function mintBlock(uint64 amount) external view returns (MintBlock);    // what would stop a deposit of `amount` now
+function capRoom() external view returns (uint256 zatoshi);             // T-01
+function minConfirmationWorkFor(uint64 amount) external view returns (uint256);   // work tiers (T-08)
+function pendingActivation(bytes32 vaultId) external view returns (PendingActivation memory);
+    // (account, amount, depositTag, anchor, readyHeight, readyTime)
+function versions() external view returns (address);                    // ZecuredVersions (T-07a)
 
-event VaultActivated(bytes32 indexed vaultId, address indexed account, uint64 amount, bytes32 depositTag);
 event ActivationPending(bytes32 indexed vaultId, address indexed account, uint64 amount, bytes32 depositTag,
                         uint256 readyHeight, uint256 readyTime);
 event PendingActivationDropped(bytes32 indexed vaultId);
-event ReleaseRequested(bytes32 indexed vaultId, bytes32 indexed claimId, uint64 amount, bytes32 destCommitment);
-event LiquidationRelease(bytes32 indexed vaultId, bytes32 indexed claimId, uint64 amount, bytes32 recipientCommitment);
-event CloseRelease(bytes32 indexed vaultId, bytes32 userClaimId, bytes32 mmClaimId, uint64 userAmount, uint64 mmAmount,
-                   bytes32 userCommitment, bytes32 mmCommitment);
-event PayoutConfirmed(bytes32 indexed vaultId, bytes32[] claimIds);
-event VaultCancelled(bytes32 indexed vaultId);
-
-// Tier 3 (IZecuredSpendCommits, docs/TIER3.md § 4)
-function commitSpend(SpendCommit calldata c, bytes[] calldata sigs) external;
-function lineageOf(bytes32 tag) external view returns (LineageNote memory);             // (vaultId, value)
-function spendRecord(bytes32 payoutRef) external view returns (SpendRecord memory);    // (recordHash, vaultId, inputTag,
-                                                                                        //  changeTag, changeValue, claimCount, signerBitmap)
-function claimPayment(bytes32 claimRef) external view returns (ClaimPayment memory);   // (claimId, payoutRef, expected,
-                                                                                        //  outputIndex)
-function claimInput(bytes32 claimId) external view returns (bytes32 inputTag);
-function inputClaimSet(bytes32 inputTag) external view returns (bytes32);                // RT-4: the note's claim list hash
-function claimRefOf(bytes32 payoutRef, bytes32 commitment) external view returns (bytes32);  // F4 (RT-1)
-function hashSpendCommit(SpendCommit calldata c) external view returns (bytes32);
-function openVaultCount() external view returns (uint256);
-function lastVaultSettledAt() external view returns (uint64);
-function signerBond() external view returns (ISignerBond);
-event SpendCommitted(bytes32 indexed vaultId, bytes32 indexed payoutRef, bytes32 inputTag, bytes32[] claimIds,
-                     bytes32[] claimRefs, bytes32 changeTag, uint64 changeValue, uint8 signerBitmap);
+event DepositRefunded(bytes32 indexed vaultId, bytes32 indexed claimId, RefundReason reason);
+event MintingPaused(uint64 until, uint8 signerBitmap, uint256 nonce);
+event MintingUnpaused(uint8 signerBitmap, uint256 nonce);
 ```
 
-- `attestDeposit` registers the vault (`outstanding = amount`, `Active`), mints zZEC to itself
-  and calls `Morpho.supplyCollateral(market, amount, onBehalf = account, "")` (I1, I4, I5).
-  Reverts with `MintRequiresProof` in `ProofOnly` mode (K1, D25; the Base Sepolia deployment).
-- `attestDepositWithProof` (Tier 2, D22) accepts a proof instead of an attestation.
-  `journal = abi.encode(bytes32 tipHash, bytes32 vaultId, address account, uint64 amount,
-  bytes32 depositTag, bytes32 vaultOpenedHash)` (exactly 192 bytes); the seal must start with
-  `depositSealSelector` (Y1); it requires `relay.isInBestChain(tipHash)` and
-  `relay.confirmationWork(tipHash) >= minConfirmationWork`, the five signers' signatures
-  (sorted) over the `VaultOpened` digest of `vaultOpenedHash`, and `verifier.verify(seal,
-  depositImageId, sha256(journal))`. It then **reserves** the vault id, the tag and the account
-  and emits `ActivationPending` with `readyHeight = relay tip height + finalizeDepth` and
-  `readyTime = block.timestamp + finalizeDelay` (K3, D26). Disabled (reverts) when the
-  deployment has no verifier. Anyone may relay.
-- Journal v2 (the guest round, design notes T-09), what the v3 Intake decodes (`DepositJournal`,
-  `contracts/src/interfaces/v3/IZecuredIntake.sol`): `abi.encode(uint8 mode, uint32 branchId,
-  bytes32 tipHash, bytes32 vaultId, address account, uint64 amount, bytes32 depositTag, bytes32
+- `attestDepositWithProof` (Tier 2, D22, D41): the seal's router selector and `imageId` must be an
+  active Deposit version of `ZecuredVersions`, and the seal must verify under `imageId`; the anchor
+  (`tipHash`) must be on the relay's best chain with `minConfirmationWorkFor(amount)` on top; all
+  five signers must have signed the journal's `vaultOpenedHash` (Registry domain, sorted); the tag
+  must be unused. The deposit then lands, never twice: as a **pending activation** (the vault, its
+  tag and its account reserved; `readyHeight = relay tip + finalizeDepth`, `readyTime = now +
+  finalizeDelay`), or, when the proof cannot activate the vault (Refund mode, a vault that is not
+  new, an account bound elsewhere, a halt, a full coverage cap), as a **Refund claim** of the vault's
+  account (`DepositRefunded`). A refund never reads the price; a stale cap price makes an
+  activatable proof revert (`CapPriceStale`), to be sent again.
+- Journal v1 (`journalV2() == false`): `abi.encode(bytes32 tipHash, bytes32 vaultId, address
+  account, uint64 amount, bytes32 depositTag, bytes32 vaultOpenedHash)`, exactly 192 bytes, Activate
+  mode. Journal v2 (the guest round, T-09): `abi.encode(uint8 mode, uint32 branchId, bytes32
+  tipHash, bytes32 vaultId, address account, uint64 amount, bytes32 depositTag, bytes32
   vaultOpenedHash)`, exactly 256 bytes. `mode` 0 = Activate (the D5 deposit rule, the vault's
   amount, mined at or below its expiry height), 1 = Refund (any v6 transaction with an Ironwood
-  bundle, a note of any value to the vault's published receiver, at any height); nothing else is
-  ever committed. `branchId` is the consensus branch id of the epoch the proof walked (B and T in
-  it, the transaction of it): the network is a build parameter of the guest, so each network has
-  its own image id; the Testnet guest proves NU7 (`0x77190AD9`) only, the Mainnet guest NU6.3
-  (`0x37A5165B`) or NU7. `amount` is the note's value; `vaultOpenedHash` is `VaultOpened` v2's
-  struct hash (§ 2.5) with the vault's own amount. The deposit tag is the same in both modes,
-  so a note lands once, as collateral or as a refund.
-- `finalizeActivation` (anyone): the relay's tip height `>= readyHeight`, `block.timestamp >=
-  readyTime`, and the anchor still on the best chain under `minConfirmationWork`; then the same
-  effects as `attestDeposit`, emitting `VaultActivated`.
-- `dropPendingActivation` (anyone): only once the anchor is off the relay's best chain, or at any time
-  once a slash has halted minting (RT-6: the activation can never finalize, and the vault must still
-  be cancellable and its deposit refundable); frees the vault id, the tag and the account (nothing
-  was minted).
-- `writeOffDust` (anyone, RT-8): a `Pending` claim of a `Closed` vault, never committed, of at most
-  `DUST_LIMIT` zat (it could never bear a payout's fee), becomes `WrittenOff`, emitting
-  `DustWrittenOff(vaultId, claimId, amount)`; the vault settles when it was its last unpaid claim.
-- `VaultActivated.depositTag` names the note that backs the vault: the signers root its lineage
-  there and never refund it (K2-a, D27).
-- `cancelVault` (D23): 3 signer signatures over `VaultCancellation(vaultId)`; only a vault that
-  is still `None` with no pending proof; it becomes `Cancelled` and can never be activated.
-- `requestRelease`: caller must be the vault's account; withdraws `outstanding` from Morpho on
-  behalf of the account to the Registry (reverts while debt remains), burns it,
-  `outstanding = 0`, `Closed`.
-- `requestPartialRelease` (D14): caller must be the vault's account; `MIN_RELEASE = 100,000 zat
-  <= amount <= outstanding - MIN_RELEASE` (the rest must stay payable on its own); withdraws `amount` from Morpho to the Registry (Morpho enforces
-  LLTV) and additionally requires the position's LTV after the withdrawal to be <= 50%
-  (`MAX_WITHDRAW_LTV_BPS = 5_000`, oracle price, debt rounded up); burns; `outstanding -= amount`;
-  emits `ReleaseRequested` (a `Release` claim); the vault stays `Active`.
-- `recordLiquidation`: `seized <= outstanding` (I9), burns, `outstanding -= seized`; the vault
-  stays `Active` while `outstanding > 0`.
-- `recordClose`: `mmAmount + userAmount == outstanding` (I7), burns, `Closed`, two claims.
-- `claimId = keccak256(abi.encode(vaultId, claimSequence))`, sequence per vault from 0.
-- Tier 3 (D31): `commitSpend` records a payout before the signers sign it (rules in
-  `IZecuredSpendCommits` and docs/TIER3.md § 4: 3 sorted signer signatures, one lineage input of the
-  vault, 1 to 8 distinct pending claims bound to that input on first commitment, one unused claim ref,
-  one distinct output index and one distinct recipient commitment each, the claim list of the note's
-  first commitment if any (RT-4), exact conservation, the ZIP 317 fee fixed by the committed shape).
-  Each claim's reference is kept under its recipient commitment (`claimRefOf`) for F4. `confirmPayout` requires every claim to have been committed. A deposit note is a lineage
-  note from its proof (or attestation) on, and stops being one if its pending activation is dropped.
-  New proofs and activations need the bond contract `fullyBonded()` and not `halted()`;
-  `finalizeActivation` also reverts with `ViolationCaseOpen(vaultId)` while the slasher has a case open
-  on the vault (E2, D34).
+  bundle, a note of any value to the vault's published receiver, at any height). `branchId` is the
+  consensus branch id of the epoch the proof walked, and must be one the deposit version allows:
+  the network is a build parameter of the guest, so each network has its own image id; the
+  Testnet guest proves NU7 (`0x77190AD9`) only, the Mainnet guest NU6.3 (`0x37A5165B`) or NU7.
+  `vaultOpenedHash` is `VaultOpened` v2's struct hash (§ 2.5). The deposit tag is the same in both
+  modes, so a note lands once, as collateral or as a refund.
+- `finalizeActivation` (anyone): the relay's tip `>= readyHeight`, `now >= readyTime`, the anchor
+  still on the best chain under the same work, no open violation case on the vault (E2), not
+  halted, all five bonded, not paused; mints zZEC straight into the account's Morpho position
+  (less the opening fee, § 3.3).
+- `refundPending`: after a halt, anyone; while a pause by signatures has lasted
+  `pendingRefundDelay`, the vault's account. The pending activation becomes a Refund claim.
+- `pauseMinting`: three signers, `now < until <= now + maxPause` (30 days), renewable;
+  `autoPauseOnCase` also pauses while an F1/F2 case is open. Withdrawals, repayments, liquidations
+  and payouts never stop (I22).
+- The coverage cap (T-01): a deposit is reserved only while locked plus pending zatoshi stay within
+  `maxTotalZat` and, at the cap price's high side (`IZecuredCapPrice.priceHigh`), within
+  `coverageBps` of the bond's effective bond (I18).
 
-### 3.3 `SettlementAdapter`
+### 3.3 `ZecuredRegistry` and `ZecuredSpendLogic`
+
+```solidity
+enum VaultStatus { None, Active, Closed, Cancelled, Pending }
+enum ClaimKind   { Release, Liquidation, CloseUser, CloseMarketMaker, Refund, Fee, Retired }
+enum ClaimStatus { None, Pending, Paid, WrittenOff, Compensated, Disputed }
+
+// exits
+function requestRelease(bytes32 vaultId, bytes32 destCommitment) external returns (bytes32 claimId);
+function requestPartialRelease(bytes32 vaultId, uint64 amount, bytes32 destCommitment) external returns (bytes32 claimId);
+function recordLiquidation(bytes32 vaultId, uint64 seized, bytes32 liquidatorCommitment, address claimant)
+    external returns (bytes32 claimId);                                                      // adapter only
+function recordClose(bytes32 vaultId, uint64 mmAmount, uint64 userAmount, bytes32 mmCommitment, bytes32 userCommitment,
+    address mmClaimant) external returns (bytes32 userClaimId, bytes32 mmClaimId);           // adapter only
+// payouts
+function confirmPayout(bytes32 vaultId, bytes32[] calldata claimIds, bytes[] calldata sigs) external;   // 3 of 5
+function writeOffDust(bytes32 claimId) external;                                           // anyone (RT-8)
+// refunds (T-02) and the bonds' claims (T-05)
+function setRefundDestination(bytes32 claimId, bytes32 destCommitment) external;           // the vault's account
+function abandonRefund(bytes32 claimId) external;                                          // anyone, after refundAbandonPeriod
+function setReimburseDestination(bytes32 claimId, bytes32 commitment, uint64 deadline, bytes[] calldata sigs) external;  // 3 of 5
+// hooks
+function reserveDeposit / releaseDeposit / activate / openRefund / convertToRefund(...)     // Intake only
+function retireVault(bytes32 vaultId, uint64 amount) external returns (uint64 retired);   // compensator only
+function settleCompensatedClaim(bytes32 claimId) external;                                // compensator only
+function markBondPaid(bytes32 claimId) external;                                          // bond only
+// views
+function vaultOf(address account) external view returns (bytes32 vaultId);
+function vault(bytes32 vaultId) external view returns (address account, uint64 outstanding, VaultStatus status);
+function vaultDetails(bytes32 vaultId) external view returns (VaultDetails memory);   // + claimCount, unpaidClaims
+function claim(bytes32 claimId) external view returns (bytes32 vaultId, ClaimKind kind, uint64 amount, bytes32 commitment,
+    ClaimStatus status);
+function claimDetails(bytes32 claimId) external view returns (ClaimDetails memory);   // + createdAt, bondPaid, claimant
+function claimIdOf(bytes32 vaultId, uint64 sequence) external pure returns (bytes32);  // keccak256(abi.encode(vaultId, sequence))
+function lockedZatoshi() external view returns (uint256);                              // zZEC supply + pending and disputed claims
+
+// Tier 3 (IZecuredSpendCommits, docs/TIER3.md § 4); commitSpend runs ZecuredSpendLogic's code
+function commitSpend(SpendCommit calldata c, bytes[] calldata sigs) external;          // 3 of 5
+function lineageOf(bytes32 tag) external view returns (LineageNote memory);            // (vaultId, value)
+function spendRecord(bytes32 payoutRef) external view returns (SpendRecord memory);
+function claimPayment(bytes32 claimRef) external view returns (ClaimPayment memory);   // (claimId, payoutRef, expected, outputIndex)
+function claimInput(bytes32 claimId) external view returns (bytes32 inputTag);
+function inputClaimSet(bytes32 inputTag) external view returns (bytes32);              // RT-4
+function claimRefOf(bytes32 payoutRef, bytes32 commitment) external view returns (bytes32);   // F4 (RT-1)
+function lastCommitAt(bytes32 inputTag) external view returns (uint40);               // T-05
+function openVaultCount() external view returns (uint256);
+function lastVaultSettledAt() external view returns (uint64);
+
+// Disputes (IZecuredDisputes, T-05 (a)): served by the Registry's fallback, which runs ZecuredSpendLogic
+function disputePayout(bytes32 claimId) external;                                      // the claim's claimant
+function upholdPayout(bytes32 claimId, bytes32 payoutRef) external;                    // slasher only
+function reopenDisputedClaim(bytes32 claimId) external;                                // anyone, after the inclusion window
+function payoutDispute(bytes32 claimId) external view returns (uint64 paidAt, uint64 dueAt);
+```
+
+- **Activation** (from the Intake): `outstanding = amount − fee`, `Active`; zZEC is minted to the
+  Registry and supplied on behalf of the account (I1, I4, I5). The opening fee (T-06, `feeBps`,
+  waived below `minFeeZat`) is a Fee claim to `feeCommitment`.
+- **Exits** refuse a vault the slasher reports frozen (an open F1/F2 case, T-04).
+  `requestRelease`: the vault's account; withdraws the outstanding to the Registry (reverts while
+  debt remains), burns it, creates a Release claim, then `Closed`. `requestPartialRelease` (D14):
+  `MIN_RELEASE (100,000 zat) <= amount <= outstanding - MIN_RELEASE`, the position's LTV after it at
+  most 50 % (oracle price, debt rounded up); the vault stays `Active`. `recordLiquidation`:
+  `seized <= outstanding` (I9); the claimant is the liquidator or the deleverage's executor.
+  `recordClose`: `mmAmount + userAmount == outstanding` (I7), two claims, `Closed`.
+- **Claims** are paid only by a committed payout (`confirmPayout` requires each claim's input,
+  I16) and only with a destination (I21). A Refund claim's destination comes from its account
+  (`setRefundDestination`, which restarts its liveness clock and revives an abandoned refund); a
+  refund nobody claims is written off after `refundAbandonPeriod`.
+- **The bonds' claims** (T-05): when the bond pays a claim's claimant (`slashLiveness`),
+  `markBondPaid` zeroes its commitment; three signers then give the destination that reimburses
+  the bonds (`setReimburseDestination`).
+- **Compromised vaults** (an executed F1/F2 case): no new claim, no payout; the compensator
+  settles their claims (`settleCompensatedClaim`) and retires their collateral (`retireVault`: all
+  of it once the debt is repaid, else down to the LLTV).
+- **Disputes** (D53): within `disputeWindow` of its confirmation, a claim's claimant may dispute it;
+  the claim is unpaid again until the slasher upholds it with a proof of its payout's inclusion, or
+  anyone reopens it after `inclusionWindow` (then payable again, and from the bonds on its original
+  liveness schedule). Once per confirmation; never a bond-paid claim, an upheld one, or one of a
+  compromised vault.
+- Tier 3 (D31): `commitSpend` records a payout before the signers sign it (3 sorted signer
+  signatures, one lineage input of the vault, 1 to 8 distinct pending claims bound to that input on
+  first commitment, one unused claim reference, one distinct output index and one distinct
+  recipient commitment each, the claim list of the note's first commitment if any (RT-4), exact
+  conservation, the ZIP 317 fee fixed by the committed shape, each Fee claim after the first
+  bearing only its own output). Not for a Pending or compromised vault.
+
+### 3.4 `SettlementAdapter`
 
 ```solidity
 function liquidate(address borrower, uint256 seizedAssets, uint256 repaidShares, bytes32 liquidatorCommitment)
@@ -275,6 +312,7 @@ function deleverageWithCollateral(DeleverageRequest calldata req, bytes calldata
     uint64 minMmAmount) external returns (uint64 mmAmount);       // S18
 function invalidateNonce(uint256 nonce) external;                 // msg.sender = account
 function nonceUsed(address account, uint256 nonce) external view returns (bool);
+function minSeize(uint64 outstanding) external view returns (uint256);   // max(MIN_SEIZE, outstanding * minSeizeBps / 10,000)
 
 function onMorphoLiquidate(uint256 repaidAssets, bytes calldata data) external;   // Morpho only
 function onMorphoRepay(uint256 repaidAssets, bytes calldata data) external;       // Morpho only
@@ -283,71 +321,122 @@ event NonceInvalidated(address indexed account, uint256 nonce);
 ```
 
 - `liquidate`: exactly one of `seizedAssets`/`repaidShares` non-zero (`repaidShares` capped at
-  the borrower's shares read in the same call); seized ≥ `MIN_SEIZE` = 100,000 zat (0.001 ZEC),
-  or seized = the vault's entire remaining `outstanding`, or the liquidation clears all the borrower's debt (dust
-  guard, D11); USDC pulled from `msg.sender` inside
-  `onMorphoLiquidate`; seized zZEC → `Registry.recordLiquidation`.
+  the borrower's shares read in the same call); seized ≥ `minSeize(outstanding)`, or seized = the
+  vault's entire remaining `outstanding`, or the liquidation clears all the borrower's debt (dust
+  guard, D11); USDC pulled from `msg.sender` inside `onMorphoLiquidate`; seized zZEC →
+  `Registry.recordLiquidation` with the liquidator as the claimant.
 - `closeWithCollateral`: `msg.sender == req.executor`, `block.timestamp <= req.deadline`, nonce
   unused and not invalidated, `marginBps <= MAX_MARGIN_BPS`, ERC-1271 valid on `req.account`;
-  repays all borrow shares (USDC pulled from the executor in `onMorphoRepay`), at most `maxRepayAssets` (chosen
-  by the executor: the borrower may borrow more after signing; D21),
+  repays all borrow shares (USDC pulled from the executor in `onMorphoRepay`), at most
+  `maxRepayAssets` (chosen by the executor: the borrower may borrow more after signing; D21),
   `mmAmount = ceil(repaidAssets * (10_000 + marginBps) * 1e36 / (10_000 * price))`,
-  `mmAmount >= minMmAmount` (Y7: chosen by the executor, the price may rise after it quoted),
-  `userAmount = outstanding - mmAmount >= minUserAmount`, withdraws `outstanding` to itself,
-  `Registry.recordClose` (I8).
-- `deleverageWithCollateral` (S18): the same checks as a close (executor, deadline, nonce, margin cap,
-  ERC-1271, the account's own Active vault) plus `repayAssets > 0`; repays exactly `repayAssets`
-  (USDC pulled from the executor in `onMorphoRepay`); `mmAmount` by the close formula, with
-  `mmAmount <= maxCollateral`, `mmAmount >= MIN_SEIZE`, `outstanding - mmAmount >= MIN_SEIZE` (taking the rest is
-  a close) and `mmAmount >= minMmAmount`; withdraws `mmAmount` (Morpho checks the health of the reduced position)
-  and calls `Registry.recordLiquidation`, so the executor's payment is an ordinary third-party claim
-  (`LiquidationRelease` on Base). The vault stays Active; its LTV falls whenever `LTV * (1 + margin) < 1`.
+  `mmAmount >= minMmAmount` (Y7), `userAmount = outstanding - mmAmount >= minUserAmount`, withdraws
+  `outstanding` to itself, `Registry.recordClose` with the executor as the market maker's claimant (I8).
+- `deleverageWithCollateral` (S18): the same checks as a close plus `repayAssets > 0`; repays exactly
+  `repayAssets`; `mmAmount` by the close formula, with `mmAmount <= maxCollateral`, at least
+  `minSeize` taken and left (taking the rest is a close) and `mmAmount >= minMmAmount`; withdraws
+  `mmAmount` and calls `Registry.recordLiquidation` with the executor as the claimant. The vault
+  stays Active.
 
-### 3.4 Tier 3: `SignerBond` and `ZecuredSlasher`
+### 3.5 Tier 3: `SignerBondV2`, `ZecuredSlasher`, `ZecuredCompensator`
 
 ```solidity
-// SignerBond (ISignerBond): BOND 0.01 ether, BOUNTY_BPS 1,000, BOUNTY_CAP 0.005 ether
-function deposit() external payable;                                       // a Registry signer, exactly BOND, once
-function slash(bytes32 caseId, uint8 signerBitmap, address beneficiary) external returns (uint256);  // slasher only
-function claimBounty() external;
-function withdraw(address payable to) external;   // no open vault, no open case, window passed since the last settled
+// SignerBondV2 (ISignerBond): USDC bonds (T-01, T-05)
+function deposit(uint256 amount) external;                         // a Registry signer
+function requestUnbond(uint256 amount) external;                   // slashable until withdrawn
+function cancelUnbond() external;
+function withdrawUnbonded(address to) external;                    // after unbondingPeriod, no open case
+function slashLiveness(bytes32 claimId) external returns (uint256 paid);   // the claim's claimant, once overdue
+function livenessDue(bytes32 claimId) external view returns (uint64 dueAt, uint256 amount);
+function effectiveBond() external view returns (uint256);          // min(sum, 5/3 x the three smallest)
 function fullyBonded() external view returns (bool);
 function halted() external view returns (bool);
+function slash(bytes32 caseId, uint8 signerBitmap, address beneficiary) external returns (uint256 slashed);   // slasher only
+function claimBounty() external;
 
 // ZecuredSlasher (IZecuredSlasher)
 enum ViolationKind { None, Uncommitted, WithheldChange, Misdirected, WrongClaimRef }  // F1..F4
 struct ViolationJournal { ViolationKind kind; bytes32 anchor; address beneficiary; bytes32 ref; bytes32 noteTag;
                           uint64 value; bytes32 destCommitment; uint8 outputIndex; }  // abi.encode: 8 words
-function proveViolation(ViolationKind kind, bytes calldata journal, bytes calldata seal) external returns (bytes32 caseId);
+function proveViolation(ViolationKind kind, bytes calldata journal, bytes calldata seal, bytes32 imageId)
+    external returns (bytes32 caseId);
 function executeSlash(bytes32 caseId) external;                               // after challengeWindow
-function caseIdOf(ViolationKind kind, bytes32 ref, bytes32 noteTag) external pure returns (bytes32);
-function openCaseCount() external view returns (uint256);                     // SignerBond.withdraw needs 0
-function openCasesOf(bytes32 vaultId) external view returns (uint256);        // finalizeActivation needs 0 (E2)
+function proveInclusion(bytes calldata journal, bytes calldata seal, bytes32 imageId, bytes32 claimId) external;   // D53
+function vaultFrozen(bytes32 vaultId) external view returns (bool);          // an open F1/F2 case, or compromised
+function isCompromised(bytes32 vaultId) external view returns (bool);
+
+// ZecuredCompensator (IZecuredCompensator): pulled by anyone, one vault or claim per call
+function tallyClaim(bytes32 claimId) external;
+function tallyVault(bytes32 vaultId) external;
+function finalizeIncident(uint256 incident) external;
+function settleVault(bytes32 vaultId) external;
+function withdrawEntitlement(bytes32 claimId) external returns (uint256 amount);
+function withdrawEquity(bytes32 vaultId) external returns (uint256 amount);
+function sweepLeftover() external returns (uint256 amount);                  // to leftoverSink, once nothing is open
 ```
 
-- The journal's kinds, the Registry records each is checked against, and the dismissal rules are in
-  docs/TIER3.md § 6 (F4: `ref` is the payout's `payoutRef`, `noteTag` the claim reference an honest
-  commitment gives, `keccak256(salt || txid)`, and `destCommitment` the claim's recipient commitment); the guest is `tier2/methods/violation` (one image id per network). The beneficiary is bound in
-  the proof and is never a vault's smart account (smart accounts never receive ETH).
-- The violation guest also proves kind 5, `Included` (the guest round): journal `{5, anchor,
-  beneficiary 0, ref = payoutRef(txid_X), 0, 0, 0, 0}`, "a payout with this reference is in a
-  block under the anchor", for a later contract that confirms payouts by proof (design notes
-  T-05). It is not a violation: `ViolationKind` stops at `WrongClaimRef`, so the v2 slasher
-  refuses it (decoding kind 5 reverts).
-- Deployment: `script/DeployZecured.s.sol` with `VIOLATION_IMAGE_ID`; the signers then bond with
-  `script/BondSigners.s.sol`. Challenge window: at least a day on the judge deployment, 2 minutes only on
-  the separate theft demo (T3-6).
+- **Bonds** (D43): a full exit needs no open vault, no open case and the challenge window since the
+  last vault settled; a partial exit keeps `minBond` and the coverage cap;
+  `unbondingPeriod >= challengeWindow + livenessPeriod + commitGrace`.
+- **Liveness** (D47): a Release, Liquidation, CloseUser, CloseMarketMaker or Refund claim with a
+  destination, not of a frozen vault, is due `livenessPeriod` after it became payable, deferred
+  by a payout committed in flight for `commitGrace` at most; the claimant then takes its value at the
+  oracle price plus `livenessPremiumBps`, pro rata from the bonds (I26).
+- **Violations**: the journal's kinds, the Registry records each is checked against, and the
+  dismissal rules are in docs/TIER3.md § 6; the seal must come from an active Violation version.
+  The beneficiary is bound in the proof and is never a vault's smart account. An executed F1/F2
+  case slashes, halts minting, marks the vault compromised and registers it with the compensator;
+  F3 registers the claim's shortfall.
+- **`proveInclusion`**: the violation guest's kind 5, `Included`: journal `{5, anchor, 0,
+  payoutRef(txid_X), 0, 0, 0, 0}` under the slash's confirmation work; it upholds a disputed claim
+  whose input `payoutRef` spends (§ 3.3).
+- **Compensation** (D46): layers paid in order, each in full before the next: the prover's bounty;
+  third parties; the lenders (the victim vault's debt repaid on Morpho with a 1 % interest
+  allowance, its unbacked zZEC retired); the owners (their claims and equity). Cases within
+  `incidentWindow` share one price.
 
-### 3.5 Mocks (labelled MOCK)
+### 3.6 `ZecuredVersions` (T-07a)
 
-- `MockUSDC` (6 decimals, owner mint).
+```solidity
+enum VersionKind { Deposit, Violation }
+function scheduleVersion(VersionKind kind, bytes4 selector, bytes32 imageId, uint32[4] calldata branches, uint256 nonce,
+    uint64 deadline, bytes[] calldata sigs) external returns (bytes32 versionId);   // all 5, after a delay
+function removeVersion(bytes32 versionId, uint256 nonce, uint64 deadline, bytes[] calldata sigs) external;   // 3 of 5, at once
+function versionIdOf(VersionKind kind, bytes4 selector, bytes32 imageId) external pure returns (bytes32);
+    // keccak256(abi.encode(kind, selector, imageId))
+function isActive(bytes32 versionId) external view returns (bool);
+function activeVersion(VersionKind kind, bytes4 selector, bytes32 imageId) external view returns (Version memory);
+function versionIds(VersionKind kind) external view returns (bytes32[] memory);
+function violationStopped() external view returns (bool);   // every active violation verifier stopped by the router
+```
+
+- A version takes effect `depositDelay` or `violationDelay` after it is scheduled, `estopDelay`
+  while `violationStopped()`; the last active violation version cannot be removed (I28). EIP-712
+  domain `ZecuredVersions` `1`: `ScheduleVersion(uint8 kind,bytes4 selector,bytes32 imageId,uint32[4]
+  branches,uint256 nonce,uint64 deadline)`, `RemoveVersion(bytes32 versionId,uint256 nonce,uint64
+  deadline)`.
+
+### 3.7 `ZecuredPriceFeed` (T-10, mainnet only)
+
+`IOracle.price()` for the market and `IZecuredCapPrice.priceHigh()` for the cap, from Chainlink's
+ZEC/USD (primary) and API3's ZEC/USD (secondary) on Base; `poke()`, `state()`, `lastGoodPrice()`,
+`readSources()`. Rules in docs/DECISIONS.md D55 and the contract's NatSpec. The judge deployment
+does not use it.
+
+### 3.8 Mocks and demo controls (labelled MOCK or DEMO)
+
+- `MockUSDC` (6 decimals, owner mint): the loan token on a local fork only.
 - `MockZecOracle`: `price() = ZEC/USD * 1e34`; owner-only `setPrice`.
+- `DemoShockOracle` (DEMO): the testnet market's oracle, an owner-set shock on top of the base price.
+- `DemoCapPrice` (MOCK / DEMO): the testnet cap's price, the market oracle's, always fresh.
+- `MockRiscZeroVerifier` (MOCK): accepts unproven journals on a local fork; also plays the router and
+  its emergency stop.
 
-### 3.6 Market
+### 3.9 Market
 
-zZEC / MockUSDC / MockZecOracle / AdaptiveCurveIRM `0x46415998764C29aB2a25CbeA6254146D50D22687`
-/ LLTV `0.625e18`, on Morpho Blue `0xBBBBBbbBBb9cC5e90e3b3Af64bdAF62C37EEFFCb`.
-Deployed addresses: `contracts/deployments/base-sepolia.json`.
+zZEC / USDC (Circle's testnet USDC on Base Sepolia) / `DemoShockOracle` / AdaptiveCurveIRM
+`0x46415998764C29aB2a25CbeA6254146D50D22687` / LLTV `0.625e18`, on Morpho Blue
+`0xBBBBBbbBBb9cC5e90e3b3Af64bdAF62C37EEFFCb`.
 
 ## 4. Coordinator API (backend, JSON over HTTPS)
 
