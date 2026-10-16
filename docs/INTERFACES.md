@@ -397,8 +397,9 @@ opened, and keeps accepting its deposit, as before, until its expiry height. Imp
 | `GET /admin/nodes` | — | `{ nodes: [{ index, mode, vaults, compromisable }] }`; `compromisable`: the panel may switch this node to "compromised" (`DEMO_COMPROMISABLE_NODES`) |
 | `POST /admin/nodes/:index/mode` | `{ mode: "normal" \| "compromised" \| "offline" }` | `{ mode }` |
 | `POST /admin/vaults/:id/drain` | `{ to (UA) }` | `{ vaultId, amount, votes: [{ index, signed, reason }], thresholdReached }` — never broadcasts |
-| `GET /admin/oracle` | — | `{ priceUsdCents, raw }` |
-| `POST /admin/oracle` | `{ priceUsdCents }` | `{ priceUsdCents, txHash }` (MOCK oracle, owner key) |
+| `GET /admin/oracle` | — | `{ priceUsdCents, raw, demo, basePriceUsdCents, baseIsMock, shockBps }`: the market oracle's price; `demo`: the market's oracle is the DemoShockOracle (MOCK / DEMO), else `basePriceUsdCents` and `shockBps` are `null` |
+| `POST /admin/oracle` | `{ priceUsdCents }` | `{ priceUsdCents, txHash }` (MOCK base oracle, owner key); `409 not_demo_oracle` when the market's oracle is not a DemoShockOracle (Base mainnet: the ZecuredPriceFeed itself), `409 real_price` when the base below it is a real feed |
+| `POST /admin/shock` | `{ shockBps }` | `{ shockBps, txHash }` (DEMO, owner key: `DemoShockOracle.setShock`); `409 not_demo_oracle` when the market's oracle is not a DemoShockOracle (Base mainnet), `409 shock_refused` for a step the contract refuses |
 
 ### 4.1 Paymaster allowlist (enforced by the proxy)
 
@@ -410,6 +411,7 @@ A UserOp is sponsored only if every call it makes is one of (targets: the deploy
 | Smart account factory | deployment in the account's first UserOp (`factory` / `factoryData`): a Safe v1.4.1 with the app's exact configuration, created at the sender |
 | `ZecuredRegistry` | `requestRelease`, `requestPartialRelease`; `setRefundDestination(claimId, commitment)` (T-02: a non-zero commitment, and `claimDetails(claimId)` must be a Refund claim whose claimant, the vault's account, is the sender); `disputePayout(claimId)` and `reopenDisputedClaim(claimId)` (T-05 (a), `IZecuredDisputes`, served by the Registry's fallback: `claimDetails(claimId).claimant` must be the sender) |
 | `ZecuredIntake` | `refundPending(vaultId)` (T-03: only the sender's own vault, `vaultOf(sender)`; the Intake lets the account convert its pending activation once a pause by signatures has lasted `pendingRefundDelay`, and anyone after a halt) |
+| `SignerBond` (SignerBondV2; the proxy confirms it is the Registry's `signerBond()`) | `slashLiveness(claimId)` only (T-05: the bonds pay an overdue claim): `claimDetails(claimId).claimant` must be the sender, and the call must succeed now: `livenessDue(claimId)` a non-zero `dueAt` no later than the latest block and a non-zero amount, the total of the UserOp's claims within `totalSlashable()`, each claim once |
 | `SettlementAdapter` | `invalidateNonce` |
 | Morpho Blue | `setAuthorization` (only for the Registry and the Adapter), `borrow` and `repay` (only the Zecured market, on behalf of the sender, no callback data) |
 | Loan token (USDC; MockUSDC on a local fork) | `approve` (spender = Morpho) and `transfer` |
@@ -417,8 +419,8 @@ A UserOp is sponsored only if every call it makes is one of (targets: the deploy
 The sender must be a Zecured account: bound to a vault (`Registry.vaultOf(sender) != 0`, set by
 the deposit proof that reserved the vault, before the account's first UserOp), except for a
 UserOp whose only calls are about the sender's own claims (refund destinations, disputes,
-reopenings): the claim binds the account, and a deposit that landed only as a refund (a
-Refund-mode proof, a halt, a full cap) binds no account to a vault. Once deployed, the account
-must still be the canonical Safe proxy with the Safe 4337 module as fallback handler. Anything
-else is rejected. The account never receives ETH. The first UserOp must skip authorizations that
-are already set (Morpho reverts on re-setting).
+reopenings, payments by the bonds): the claim binds the account, and a deposit that landed only
+as a refund (a Refund-mode proof, a halt, a full cap) binds no account to a vault. Once
+deployed, the account must still be the canonical Safe proxy with the Safe 4337 module as
+fallback handler. Anything else is rejected. The account never receives ETH. The first UserOp
+must skip authorizations that are already set (Morpho reverts on re-setting).

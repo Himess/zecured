@@ -7,6 +7,8 @@ import { formatUtc } from "./calls";
 import type { LedgerClaim, PendingActivationView, VaultLedger } from "./chain";
 import {
   abandonableAt,
+  bondPayment,
+  bondPaymentExplainer,
   claimView,
   compensatedClaimIds,
   COMPENSATION_SENTENCE,
@@ -49,6 +51,7 @@ function claim(patch: Partial<LedgerClaim>): LedgerClaim {
     claimant: ACCOUNT,
     paidAt: 0,
     disputeDueAt: 0,
+    liveness: null,
     ...patch,
   };
 }
@@ -303,6 +306,38 @@ describe("disputing a payout confirmation (T-05 (a))", () => {
       dueAt: NOW + 60,
     });
     expect(disputeState(claim({ status: "Disputed", disputeDueAt: NOW - 1 }), ctx).canReopen).toBe(true);
+  });
+});
+
+describe("the bonds paying an overdue claim (T-05)", () => {
+  const ctx = { nowSeconds: NOW, slashable: 1_000_000n };
+  const overdue = { liveness: { dueAt: NOW - 60, usdc: 82_000n } };
+
+  it("overdue: what the bonds pay now, and whether they hold that much", () => {
+    expect(bondPayment(claim(overdue), ctx)).toEqual({ kind: "now", usdc: 82_000n, covered: true });
+    expect(bondPayment(claim({ liveness: { dueAt: NOW, usdc: 82_000n } }), ctx).kind).toBe("now");
+    expect(bondPayment(claim(overdue), { ...ctx, slashable: 81_999n })).toEqual({ kind: "now", usdc: 82_000n, covered: false });
+    // Unknown holdings never hide the action: the bond itself refuses beyond them.
+    expect(bondPayment(claim(overdue), { ...ctx, slashable: null })).toMatchObject({ covered: true });
+  });
+
+  it("not yet: when the bonds pay it if the signers have not", () => {
+    expect(bondPayment(claim({ liveness: { dueAt: NOW + 60, usdc: 82_000n } }), ctx)).toEqual({ kind: "later", dueAt: NOW + 60 });
+  });
+
+  it("never: no reading (not the account's claim, no destination…), settled, already paid by the bonds, nothing to pay", () => {
+    expect(bondPayment(claim({}), ctx)).toEqual({ kind: "none" });
+    expect(bondPayment(claim({ ...overdue, status: "Paid" }), ctx)).toEqual({ kind: "none" });
+    expect(bondPayment(claim({ ...overdue, bondPaid: true }), ctx)).toEqual({ kind: "none" });
+    expect(bondPayment(claim({ liveness: { dueAt: NOW - 60, usdc: 0n } }), ctx)).toEqual({ kind: "none" });
+  });
+
+  it("says in plain words that the claim's ZEC then goes to the bonds instead", () => {
+    const text = bondPaymentExplainer(500);
+    expect(text).toContain("plus a 5 % premium");
+    expect(text).toMatch(/the claim's ZEC no longer comes to you: when the signers pay it out, it goes to the bonds instead/);
+    expect(bondPaymentExplainer(null)).toContain("plus a premium");
+    expect(bondPaymentExplainer(0)).not.toMatch(/premium/);
   });
 });
 

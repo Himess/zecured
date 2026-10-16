@@ -39,7 +39,7 @@ import {
   slasherAbi,
 } from "./abi";
 import { api } from "./api";
-import { config as appConfig, marketParams, type AppConfig } from "./config";
+import { config as appConfig, marketParams, ZERO_BYTES32, type AppConfig } from "./config";
 import { borrowAssets, expectedMarket, mulDivDown, type MarketState, type PositionState } from "./morpho";
 
 let defaultClient: PublicClient | null = null;
@@ -266,7 +266,11 @@ export type RefundReason = (typeof REFUND_REASON)[number];
  * contracts the app only reads, and the periods the vault page explains.
  */
 export interface Links {
-  /** `registry.slasher()`, `registry.compensator()`, `intake.signerBond()`; null where none is deployed. */
+  /**
+   * `registry.slasher()`, `registry.compensator()`, `registry.signerBond()` (which must be the
+   * Intake's too); null where none is deployed. The bond is the one contract the app calls that
+   * is not pinned at build time: it pays an overdue claim (T-05).
+   */
   slasher: Address | null;
   compensator: Address | null;
   bond: Address | null;
@@ -290,13 +294,24 @@ export class IntakeMismatchError extends Error {
   }
 }
 
+/** The pinned Registry and Intake name different signer bonds: the deployment is inconsistent. */
+export class BondMismatchError extends Error {
+  constructor() {
+    super("The pinned Registry and Intake name different signer bonds: this deployment is inconsistent, so the app does not use either.");
+    this.name = "BondMismatchError";
+  }
+}
+
 const linksCache = new WeakMap<PublicClient, Map<string, Promise<Links>>>();
 
 function orNull(a: Address): Address | null {
   return a === zeroAddress ? null : a;
 }
 
-/** See `Links`; fails with `IntakeMismatchError` unless the Registry names the pinned Intake. */
+/**
+ * See `Links`; fails with `IntakeMismatchError` unless the Registry names the pinned Intake, and
+ * with `BondMismatchError` unless the Registry and the Intake name the same bond.
+ */
 export function readLinks(d?: ChainDeps): Promise<Links> {
   const { c, cfg } = resolve(d);
   let perClient = linksCache.get(c);
@@ -308,18 +323,21 @@ export function readLinks(d?: ChainDeps): Promise<Links> {
     const registry = { address: cfg.registry, abi: registryAbi } as const;
     const intake = { address: cfg.intake, abi: intakeAbi } as const;
     const disputes = { address: cfg.registry, abi: disputesAbi } as const;
-    const [named, slasher, compensator, abandon, bond, relay, delay, disputeWindow, inclusionWindow] = await Promise.all([
-      c.readContract({ ...registry, functionName: "intake" }),
-      c.readContract({ ...registry, functionName: "slasher" }),
-      c.readContract({ ...registry, functionName: "compensator" }),
-      c.readContract({ ...registry, functionName: "refundAbandonPeriod" }),
-      c.readContract({ ...intake, functionName: "signerBond" }),
-      c.readContract({ ...intake, functionName: "relay" }),
-      c.readContract({ ...intake, functionName: "pendingRefundDelay" }),
-      c.readContract({ ...disputes, functionName: "disputeWindow" }),
-      c.readContract({ ...disputes, functionName: "inclusionWindow" }),
-    ]);
+    const [named, slasher, compensator, abandon, bond, intakeBond, relay, delay, disputeWindow, inclusionWindow] =
+      await Promise.all([
+        c.readContract({ ...registry, functionName: "intake" }),
+        c.readContract({ ...registry, functionName: "slasher" }),
+        c.readContract({ ...registry, functionName: "compensator" }),
+        c.readContract({ ...registry, functionName: "refundAbandonPeriod" }),
+        c.readContract({ ...registry, functionName: "signerBond" }),
+        c.readContract({ ...intake, functionName: "signerBond" }),
+        c.readContract({ ...intake, functionName: "relay" }),
+        c.readContract({ ...intake, functionName: "pendingRefundDelay" }),
+        c.readContract({ ...disputes, functionName: "disputeWindow" }),
+        c.readContract({ ...disputes, functionName: "inclusionWindow" }),
+      ]);
     if (getAddress(named) !== getAddress(cfg.intake)) throw new IntakeMismatchError();
+    if (getAddress(bond) !== getAddress(intakeBond)) throw new BondMismatchError();
     return {
       slasher: orNull(slasher),
       compensator: orNull(compensator),
@@ -366,6 +384,12 @@ export interface LedgerClaim {
   paidAt: number;
   /** While disputed: when the signers' time to prove the payout ends (Unix s; 0 otherwise). */
   disputeDueAt: number;
+  /**
+   * T-05, read only for the vault's own unpaid claims with a commitment (its account is their
+   * claimant): when the signers' bonds can pay it instead (`livenessDue`: Unix s) and the USDC
+   * (6 decimals) they would pay at the current price, premium included; null when they never do.
+   */
+  liveness: { dueAt: number; usdc: bigint } | null;
 }
 
 /** The vault's pending activation (K3), with what decides when it finalizes or can be refunded. */
@@ -405,17 +429,24 @@ export interface VaultLedger {
   links: Links;
   /** The latest block's timestamp (Unix s). */
   blockTime: number;
+  /**
+   * What the signers' bonds hold now (`totalSlashable`, USDC), read only when the bonds can pay
+   * one of the vault's claims now: a payment beyond it reverts until they hold enough again.
+   */
+  bondsSlashable: bigint | null;
 }
 
 /**
  * Everything Base keeps about `vaultId` that the vault page shows: the vault, every claim (v3
- * kinds and statuses, dispute times), its pending activation with the gates that hold it, and
- * whether a theft case froze or compromised it. Reads only, through the proxy.
+ * kinds and statuses, dispute times, when the bonds pay the account's own claims instead), its
+ * pending activation with the gates that hold it, and whether a theft case froze or compromised
+ * it. Reads only, through the proxy.
  */
 export async function readVaultLedger(vaultId: Hex, d?: ChainDeps): Promise<VaultLedger> {
   const { c, cfg } = resolve(d);
   const links = await readLinks({ client: c, config: cfg });
   const slasher = links.slasher;
+  const bond = links.bond;
   const [details, block, pending, frozen, compromised] = await Promise.all([
     c.readContract({ address: cfg.registry, abi: registryAbi, functionName: "vaultDetails", args: [vaultId] }),
     c.getBlock({ blockTag: "latest" }),
@@ -423,6 +454,7 @@ export async function readVaultLedger(vaultId: Hex, d?: ChainDeps): Promise<Vaul
     slasher ? c.readContract({ address: slasher, abi: slasherAbi, functionName: "vaultFrozen", args: [vaultId] }) : false,
     slasher ? c.readContract({ address: slasher, abi: slasherAbi, functionName: "isCompromised", args: [vaultId] }) : false,
   ]);
+  const blockTime = Number(block.timestamp);
   // The newest MAX_LEDGER_CLAIMS: a vault has a handful, and a wrong count must not flood the proxy.
   const count = Number(details.claimCount);
   const first = Math.max(0, count - MAX_LEDGER_CLAIMS);
@@ -444,6 +476,13 @@ export async function readVaultLedger(vaultId: Hex, d?: ChainDeps): Promise<Vaul
         paidAt = Number(paid);
         disputeDueAt = Number(due);
       }
+      // T-05: only the account's own unpaid claims that have a destination; never on a frozen vault.
+      let liveness: LedgerClaim["liveness"] = null;
+      const own = cd.claimant !== zeroAddress && getAddress(cd.claimant) === getAddress(details.account);
+      if (bond && !frozen && own && status === "Pending" && !cd.bondPaid && cd.commitment.toLowerCase() !== ZERO_BYTES32) {
+        const [dueAt, usdc] = await c.readContract({ address: bond, abi: bondAbi, functionName: "livenessDue", args: [claimId] });
+        if (dueAt !== 0n) liveness = { dueAt: Number(dueAt), usdc };
+      }
       return {
         claimId,
         sequence,
@@ -456,9 +495,13 @@ export async function readVaultLedger(vaultId: Hex, d?: ChainDeps): Promise<Vaul
         claimant: cd.claimant,
         paidAt,
         disputeDueAt,
+        liveness,
       };
     }),
   );
+  const payableNow = claims.some((cl) => cl.liveness !== null && cl.liveness.dueAt <= blockTime && cl.liveness.usdc > 0n);
+  const bondsSlashable =
+    bond && payableNow ? await c.readContract({ address: bond, abi: bondAbi, functionName: "totalSlashable" }) : null;
   let pendingView: PendingActivationView | null = null;
   if (pending.account !== zeroAddress) {
     const intake = { address: cfg.intake, abi: intakeAbi } as const;
@@ -498,7 +541,8 @@ export async function readVaultLedger(vaultId: Hex, d?: ChainDeps): Promise<Vaul
     frozen,
     compromised,
     links,
-    blockTime: Number(block.timestamp),
+    blockTime,
+    bondsSlashable,
   };
 }
 

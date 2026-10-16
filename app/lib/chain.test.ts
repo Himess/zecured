@@ -36,6 +36,7 @@ import {
   slasherAbi,
 } from "./abi";
 import {
+  BondMismatchError,
   claimIdOf,
   ContractsNotDeployedError,
   IntakeMismatchError,
@@ -302,8 +303,24 @@ interface V3World {
   /** What the Registry names as its Intake (the pinned one unless a test says otherwise). */
   intake?: Address;
   slasher?: Address;
+  /** The bond the Registry and the Intake name (BOND unless a test says otherwise), and what it holds. */
+  bond?: Address;
+  intakeBond?: Address;
+  slashable?: bigint;
   vault: { account: Address; outstanding: bigint; status: number };
-  claims: { kind: number; status: number; amount: bigint; commitment?: Hex; createdAt: number; bondPaid?: boolean; claimant: Address; paidAt?: bigint; dueAt?: bigint }[];
+  claims: {
+    kind: number;
+    status: number;
+    amount: bigint;
+    commitment?: Hex;
+    createdAt: number;
+    bondPaid?: boolean;
+    claimant: Address;
+    paidAt?: bigint;
+    dueAt?: bigint;
+    /** The bond's `livenessDue(claimId)`: [dueAt, amount] ([0, 0] unless given). */
+    liveness?: [bigint, bigint];
+  }[];
   pending?: { amount: bigint; readyHeight: bigint; readyTime: bigint };
   frozen?: boolean;
   compromised?: boolean;
@@ -327,6 +344,7 @@ function fakeV3Chain(w: V3World): { client: PublicClient; calls: Map<string, num
         intake: () => w.intake ?? config.intake,
         slasher: () => w.slasher ?? SLASHER,
         compensator: () => COMPENSATOR,
+        signerBond: () => w.bond ?? BOND,
         refundAbandonPeriod: () => 2_592_000n,
         disputeWindow: () => 86_400n,
         inclusionWindow: () => 21_600n,
@@ -357,7 +375,7 @@ function fakeV3Chain(w: V3World): { client: PublicClient; calls: Map<string, num
       config.intake,
       intakeAbi as Abi,
       {
-        signerBond: () => BOND,
+        signerBond: () => w.intakeBond ?? w.bond ?? BOND,
         relay: () => RELAY,
         pendingRefundDelay: () => 86_400n,
         mintingPaused: () => true,
@@ -375,7 +393,16 @@ function fakeV3Chain(w: V3World): { client: PublicClient; calls: Map<string, num
       slasherAbi as Abi,
       { vaultFrozen: () => w.frozen ?? false, isCompromised: () => w.compromised ?? false, openCasesOf: () => 0n },
     ],
-    [BOND, bondAbi as Abi, { halted: () => false, fullyBonded: () => true }],
+    [
+      BOND,
+      bondAbi as Abi,
+      {
+        halted: () => false,
+        fullyBonded: () => true,
+        livenessDue: ([id]) => claimOf(id as Hex)?.liveness ?? [0n, 0n],
+        totalSlashable: () => w.slashable ?? 0n,
+      },
+    ],
     [
       COMPENSATOR,
       compensatorAbi as Abi,
@@ -580,6 +607,68 @@ describe("readVaultLedger", () => {
   it("reports a frozen and a compromised vault", async () => {
     const { client } = fakeV3Chain({ vault: ACTIVE, claims: [], frozen: true, compromised: true });
     expect(await readVaultLedger(VAULT, { client, config })).toMatchObject({ frozen: true, compromised: true });
+  });
+
+  /** The fake chain's latest block time (block 100,000). */
+  const BLOCK_TIME = T0 + 200_000n;
+  const LIQUIDATOR: Address = "0x4444444444444444444444444444444444444444";
+
+  it("T-05: reads when the bonds pay the account's own unpaid claims, and what they hold once one is due", async () => {
+    const { client, calls } = fakeV3Chain({
+      vault: ACTIVE,
+      slashable: 5_000_000n,
+      claims: [
+        // The account's Release, overdue: the bonds pay 82,000 USDC units now.
+        { kind: 0, status: 1, amount: 200_000n, commitment: COMMITMENT, createdAt: 1, claimant: ACCOUNT, liveness: [BLOCK_TIME - 60n, 82_000n] },
+        // The account's Refund with a destination, due in an hour.
+        { kind: 4, status: 1, amount: 50_000n, commitment: COMMITMENT, createdAt: 2, claimant: ACCOUNT, liveness: [BLOCK_TIME + 3_600n, 20_500n] },
+        // Not read: the liquidator's claim, a refund without a destination, a paid claim, one the bonds already paid.
+        { kind: 1, status: 1, amount: 100_000n, commitment: COMMITMENT, createdAt: 3, claimant: LIQUIDATOR, liveness: [1n, 1n] },
+        { kind: 4, status: 1, amount: 50_000n, createdAt: 4, claimant: ACCOUNT, liveness: [1n, 1n] },
+        { kind: 0, status: 2, amount: 100_000n, commitment: COMMITMENT, createdAt: 5, claimant: ACCOUNT, paidAt: 6n, liveness: [1n, 1n] },
+        { kind: 0, status: 1, amount: 100_000n, createdAt: 6, bondPaid: true, claimant: ACCOUNT, liveness: [1n, 1n] },
+        // Read, but the bonds never pay it (e.g. its kind): livenessDue is zero.
+        { kind: 2, status: 1, amount: 10_000n, commitment: COMMITMENT, createdAt: 7, claimant: ACCOUNT },
+      ],
+    });
+    const l = await readVaultLedger(VAULT, { client, config });
+    expect(l.claims.map((c) => c.liveness)).toEqual([
+      { dueAt: Number(BLOCK_TIME - 60n), usdc: 82_000n },
+      { dueAt: Number(BLOCK_TIME + 3_600n), usdc: 20_500n },
+      null,
+      null,
+      null,
+      null,
+      null,
+    ]);
+    expect(calls.get("livenessDue")).toBe(3);
+    expect(l.bondsSlashable).toBe(5_000_000n);
+    expect(calls.get("totalSlashable")).toBe(1);
+  });
+
+  it("T-05: reads what the bonds hold only when one of the claims is due, and nothing on a frozen vault", async () => {
+    const later = { kind: 0, status: 1, amount: 200_000n, commitment: COMMITMENT, createdAt: 1, claimant: ACCOUNT, liveness: [BLOCK_TIME + 1n, 82_000n] as [bigint, bigint] };
+    const notDue = fakeV3Chain({ vault: ACTIVE, claims: [later] });
+    expect(await readVaultLedger(VAULT, { client: notDue.client, config })).toMatchObject({ bondsSlashable: null });
+    expect(notDue.calls.get("totalSlashable")).toBeUndefined();
+    const frozen = fakeV3Chain({ vault: ACTIVE, claims: [{ ...later, liveness: [1n, 82_000n] }], frozen: true });
+    const l = await readVaultLedger(VAULT, { client: frozen.client, config });
+    expect(l.claims[0]!.liveness).toBeNull();
+    expect(frozen.calls.get("livenessDue")).toBeUndefined();
+  });
+
+  it("T-05: the bond is the pinned Registry's; one the Intake does not share is refused, none reads nothing", async () => {
+    const { client } = fakeV3Chain({ vault: ACTIVE, claims: [], intakeBond: SLASHER });
+    await expect(readVaultLedger(VAULT, { client, config })).rejects.toBeInstanceOf(BondMismatchError);
+    const none = fakeV3Chain({
+      bond: ZERO,
+      vault: ACTIVE,
+      claims: [{ kind: 0, status: 1, amount: 1n, commitment: COMMITMENT, createdAt: 1, claimant: ACCOUNT, liveness: [1n, 1n] }],
+    });
+    const l = await readVaultLedger(VAULT, { client: none.client, config });
+    expect(l.links.bond).toBeNull();
+    expect(l.claims[0]!.liveness).toBeNull();
+    expect(none.calls.get("livenessDue")).toBeUndefined();
   });
 });
 
