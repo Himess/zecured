@@ -285,7 +285,7 @@ contract ZecuredHandler is Test {
         string memory expected = _expectedLanding(d, capHeld);
         uint256 supply = zzec.totalSupply();
         (bytes memory journal, bytes memory seal, bytes[] memory sigs) = _proof(d);
-        try intake.attestDepositWithProof(journal, seal, sigs) {
+        try intake.attestDepositWithProof(journal, seal, imageId, sigs) {
             if (zzec.totalSupply() != supply) _flag("a deposit proof minted");
             _recordLanding(d, capHeld, expected);
         } catch (bytes memory reason) {
@@ -1140,7 +1140,7 @@ contract ZecuredHandler is Test {
         });
         capPrice.set(oracle.price());
         (bytes memory journal, bytes memory seal, bytes[] memory sigs) = _proof(d);
-        try intake.attestDepositWithProof(journal, seal, sigs) {
+        try intake.attestDepositWithProof(journal, seal, imageId, sigs) {
             attackSucceeded = true;
         } catch {}
         calls["attack: double landing"]++;
@@ -1167,7 +1167,7 @@ contract ZecuredHandler is Test {
             (, uint256 outsiderKey) = makeAddrAndKey("zecured.inv.outsider");
             sigs[seed % 5] = _sign(outsiderKey, keccak256(abi.encode(sigs[0])));
         }
-        try intake.attestDepositWithProof(journal, seal, sigs) {
+        try intake.attestDepositWithProof(journal, seal, imageId, sigs) {
             attackSucceeded = true;
         } catch {}
         calls["attack: weak VaultOpened"]++;

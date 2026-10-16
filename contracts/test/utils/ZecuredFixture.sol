@@ -18,6 +18,8 @@ import {IOracle} from "morpho-blue/src/interfaces/IOracle.sol";
 import {SignerBondV2} from "../../src/SignerBondV2.sol";
 import {ZecuredSlasher} from "../../src/ZecuredSlasher.sol";
 import {ZecuredCompensator} from "../../src/ZecuredCompensator.sol";
+import {ZecuredVersions} from "../../src/ZecuredVersions.sol";
+import {Version, VersionKind} from "../../src/interfaces/v3/IZecuredVersions.sol";
 import {BondConfig} from "../../src/interfaces/v3/ISignerBond.sol";
 import {CloseRequest, SpendCommit} from "../../src/libraries/ZecuredEIP712.sol";
 import {VaultStatus, ClaimKind, ClaimStatus, RegistryConfig} from "../../src/interfaces/v3/IZecuredRegistry.sol";
@@ -92,6 +94,8 @@ abstract contract ZecuredFixture is Test {
     // Disputes (T-05 (a)), as on the judge deployment.
     uint64 internal constant DISPUTE_WINDOW = 1 days;
     uint64 internal constant INCLUSION_WINDOW = 6 hours;
+    // Verifier versions (T-07a), as on the judge deployment.
+    uint64 internal constant VERSION_DELAY = 10 minutes;
     address internal constant LEFTOVER_SINK = 0x000000000000000000000000000000000000dEaD;
 
     /// @notice The Intake's deposit-proof setup (`_proofSetup`).
@@ -133,6 +137,9 @@ abstract contract ZecuredFixture is Test {
     SignerBondV2 internal bond;
     ZecuredSlasher internal slasher;
     ZecuredCompensator internal compensator;
+    ZecuredVersions internal versions;
+    /// The violation guest's image id of the initial Violation version (`_violationImageId()`).
+    bytes32 internal violationImage;
     /// The Intake's relay and verifier (MOCKs unless a suite's `_proofSetup` says otherwise).
     IZcashHeaderRelay internal headerRelay;
     IRiscZeroVerifier internal proofVerifier;
@@ -243,10 +250,11 @@ abstract contract ZecuredFixture is Test {
         address bond;
         address slasher;
         address compensator;
+        address versions;
     }
 
-    /// Same ordering as script/DeployZecured.s.sol: ZZEC, the spend logic, the Registry, the Adapter, the Intake, and
-    /// (bonded) the bond, the slasher and the compensator, at the deployer's next nonces.
+    /// Same ordering as script/DeployZecured.s.sol: ZZEC, the spend logic, the Registry, the Adapter, the Intake,
+    /// (bonded) the bond, the slasher and the compensator, and the version registry, at the deployer's next nonces.
     function _deploySystem() internal {
         usdc = new MockUSDC(address(this));
         oracle = new MockZecOracle(address(this), PRICE_40);
@@ -257,7 +265,7 @@ abstract contract ZecuredFixture is Test {
         FeeSetup memory fee = _feeSetup();
         bool bonded = _bonded();
         address mockBond = _mockBondAndSlasher();
-        bytes32 violationImage = _violationImageId();
+        violationImage = _violationImageId();
         address otherCompensator = _compensator();
 
         Predicted memory p = _predict(bonded, mockBond, otherCompensator);
@@ -266,8 +274,12 @@ abstract contract ZecuredFixture is Test {
         spendLogic = new ZecuredSpendLogic(p.registry, signerSet, DISPUTE_WINDOW, INCLUSION_WINDOW);
         registry = new ZecuredRegistry(_registryConfig(p, fee));
         adapter = new SettlementAdapter(registry, MIN_SEIZE, 0, 500);
-        intake = new IntakeHarness(_intakeConfig(p.bond, p.slasher, cap));
-        if (bonded) _deployBondAndSlasher(p, violationImage);
+        intake = new IntakeHarness(_intakeConfig(p, cap));
+        if (bonded) _deployBondAndSlasher(p);
+        versions = new ZecuredVersions(
+            address(registry), proofs.verifier, VERSION_DELAY, VERSION_DELAY, VERSION_DELAY, _initialVersions()
+        );
+        assertEq(address(versions), p.versions, "versions address prediction");
         assertEq(address(registry), p.registry, "registry address prediction");
         assertEq(address(adapter), p.adapter, "adapter address prediction");
         assertEq(address(intake), p.intake, "intake address prediction");
@@ -301,6 +313,31 @@ abstract contract ZecuredFixture is Test {
         p.bond = bonded ? vm.computeCreateAddress(address(this), n + 5) : mockBond;
         p.slasher = bonded ? vm.computeCreateAddress(address(this), n + 6) : mockBond;
         p.compensator = bonded ? vm.computeCreateAddress(address(this), n + 7) : otherCompensator;
+        p.versions = vm.computeCreateAddress(address(this), bonded ? n + 8 : n + 5);
+    }
+
+    /// T-07a: the deposit guest (with the journal v2 branch ids, if any) and the violation guest, both through the
+    /// proof setup's verifier selector.
+    function _initialVersions() internal view returns (Version[] memory initial) {
+        (, uint32[4] memory branchIds) = _journalV2();
+        uint32[4] memory none;
+        initial = new Version[](2);
+        initial[0] = Version({
+            kind: VersionKind.Deposit,
+            selector: proofs.sealSelector,
+            imageId: proofs.imageId,
+            branches: branchIds,
+            activeAt: 0,
+            removed: false
+        });
+        initial[1] = Version({
+            kind: VersionKind.Violation,
+            selector: proofs.sealSelector,
+            imageId: violationImage,
+            branches: none,
+            activeAt: 0,
+            removed: false
+        });
     }
 
     function _registryConfig(Predicted memory p, FeeSetup memory fee) internal view returns (RegistryConfig memory) {
@@ -325,7 +362,7 @@ abstract contract ZecuredFixture is Test {
         });
     }
 
-    function _deployBondAndSlasher(Predicted memory p, bytes32 violationImage) internal {
+    function _deployBondAndSlasher(Predicted memory p) internal {
         bond = new SignerBondV2(
             BondConfig({
                 registry: p.registry,
@@ -345,15 +382,7 @@ abstract contract ZecuredFixture is Test {
             })
         );
         slasher = new ZecuredSlasher(
-            p.registry,
-            p.bond,
-            p.compensator,
-            proofs.relay,
-            proofs.verifier,
-            violationImage,
-            proofs.sealSelector,
-            SLASH_WORK,
-            WINDOW
+            p.registry, p.bond, p.compensator, proofs.relay, proofs.verifier, p.versions, SLASH_WORK, WINDOW
         );
         compensator = new ZecuredCompensator(
             p.registry, p.slasher, p.bond, IERC20(address(usdc)), INCIDENT_WINDOW, LEFTOVER_SINK
@@ -374,21 +403,15 @@ abstract contract ZecuredFixture is Test {
         }
     }
 
-    function _intakeConfig(address bond_, address slasher_, CapSetup memory cap)
-        internal
-        view
-        returns (IntakeConfig memory)
-    {
-        (bool v2, uint32[4] memory branchIds) = _journalV2();
+    function _intakeConfig(Predicted memory p, CapSetup memory cap) internal view returns (IntakeConfig memory) {
+        (bool v2,) = _journalV2();
         return IntakeConfig({
             registry: address(registry),
-            signerBond: bond_,
-            slasher: slasher_,
+            signerBond: p.bond,
+            slasher: p.slasher,
             verifier: IRiscZeroVerifier(proofs.verifier),
-            imageId: proofs.imageId,
-            sealSelector: proofs.sealSelector,
+            versions: p.versions,
             journalV2: v2,
-            allowedBranchIds: branchIds,
             relay: IZcashHeaderRelay(proofs.relay),
             workTiers: _workTiers(),
             finalizeDepth: proofs.finalizeDepth,
@@ -468,7 +491,7 @@ abstract contract ZecuredFixture is Test {
         uint256[] memory five = new uint256[](5);
         (five[0], five[1], five[2], five[3], five[4]) = (0, 1, 2, 3, 4);
         bytes[] memory sigs = _signerSigs(MessageHashUtils.toTypedDataHash(registry.domainSeparator(), opened), five);
-        intake.attestDepositWithProof(journal, seal, sigs);
+        intake.attestDepositWithProof(journal, seal, proofs.imageId, sigs);
     }
 
     // ------------------------------------------------------------------ Tier 3 commitments

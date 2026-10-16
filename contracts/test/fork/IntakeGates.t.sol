@@ -80,7 +80,7 @@ contract IntakeGatesTest is ZecuredFixture {
         vaultId = _vaultIdFor(account);
         (bytes memory journal, bytes memory seal, bytes[] memory sigs) =
             _proof(vaultId, account, amount, _depositTagFor(account), intake.minConfirmationWorkFor(amount));
-        intake.attestDepositWithProof(journal, seal, sigs);
+        intake.attestDepositWithProof(journal, seal, proofs.imageId, sigs);
     }
 
     function _ready(bytes32 vaultId) internal {
@@ -141,7 +141,7 @@ contract IntakeGatesTest is ZecuredFixture {
             _proof(cVault, c, SMALL, _depositTagFor(c), MIN_WORK);
         vm.expectEmit(address(intake));
         emit IZecuredIntake.DepositRefunded(cVault, claimId, RefundReason.CapExceeded);
-        intake.attestDepositWithProof(journal, seal, sigs);
+        intake.attestDepositWithProof(journal, seal, proofs.imageId, sigs);
         assertEq(uint8(_status(cVault)), uint8(VaultStatus.Cancelled));
         assertEq(registry.lockedZatoshi() + intake.pendingTotal(), 2 * BIG + SMALL, "the refund is locked too");
     }
@@ -209,11 +209,11 @@ contract IntakeGatesTest is ZecuredFixture {
         (bytes memory journal, bytes memory seal, bytes[] memory sigs) =
             _proof(_vaultIdFor(b), b, SMALL, _depositTagFor(b), MIN_WORK);
         vm.expectRevert(abi.encodeWithSelector(IZecuredIntake.CapPriceStale.selector, updatedAt));
-        intake.attestDepositWithProof(journal, seal, sigs);
+        intake.attestDepositWithProof(journal, seal, proofs.imageId, sigs);
 
         // A second deposit to a known vault lands as a refund regardless.
         (journal, seal, sigs) = _proof(a, makeAddr("gates.a"), SMALL, keccak256("gates.second"), MIN_WORK);
-        intake.attestDepositWithProof(journal, seal, sigs);
+        intake.attestDepositWithProof(journal, seal, proofs.imageId, sigs);
         assertEq(registry.claimCount(a), 1);
 
         // The pending activation finalizes regardless of the cap price.
@@ -223,7 +223,7 @@ contract IntakeGatesTest is ZecuredFixture {
         // Once the price is fresh again, the waiting proof lands.
         capPrice.set(PRICE_40);
         (journal, seal, sigs) = _proof(_vaultIdFor(b), b, SMALL, _depositTagFor(b), MIN_WORK);
-        intake.attestDepositWithProof(journal, seal, sigs);
+        intake.attestDepositWithProof(journal, seal, proofs.imageId, sigs);
         assertEq(uint8(_status(_vaultIdFor(b))), uint8(VaultStatus.Pending));
     }
 
@@ -248,7 +248,7 @@ contract IntakeGatesTest is ZecuredFixture {
 
         (bytes memory journal, bytes memory seal, bytes[] memory sigs) =
             _proof(a, makeAddr("gates.a"), BIG, keccak256("gates.extra"), 4 * MIN_WORK);
-        intake.attestDepositWithProof(journal, seal, sigs);
+        intake.attestDepositWithProof(journal, seal, proofs.imageId, sigs);
         assertEq(registry.lockedZatoshi(), 3 * BIG, "over the cap");
         assertEq(intake.capRoom(), 0);
         bytes32 c = _deposit("gates.c", SMALL);
@@ -334,16 +334,16 @@ contract IntakeGatesTest is ZecuredFixture {
             _proof(_vaultIdFor(account), account, BIG, _depositTagFor(account), MIN_WORK);
         (bytes32 anchor) = abi.decode(journal, (bytes32));
         vm.expectRevert(abi.encodeWithSelector(IZecuredIntake.AnchorNotConfirmed.selector, anchor, MIN_WORK));
-        intake.attestDepositWithProof(journal, seal, sigs);
+        intake.attestDepositWithProof(journal, seal, proofs.imageId, sigs);
         (journal, seal, sigs) = _proof(_vaultIdFor(account), account, BIG, _depositTagFor(account), 4 * MIN_WORK);
-        intake.attestDepositWithProof(journal, seal, sigs);
+        intake.attestDepositWithProof(journal, seal, proofs.imageId, sigs);
         assertEq(uint8(_status(_vaultIdFor(account))), uint8(VaultStatus.Pending));
 
         // Too large for any tier.
         address huge = makeAddr("gates.huge");
         (journal, seal, sigs) = _proof(_vaultIdFor(huge), huge, 10_000_001, _depositTagFor(huge), type(uint256).max);
         vm.expectRevert(abi.encodeWithSelector(IZecuredIntake.AmountAboveLargestTier.selector, uint64(10_000_001)));
-        intake.attestDepositWithProof(journal, seal, sigs);
+        intake.attestDepositWithProof(journal, seal, proofs.imageId, sigs);
     }
 
     /// A refund needs at least `minRefundZat`: a smaller note could never bear its payout's fee, so it stays unproven.
@@ -353,9 +353,9 @@ contract IntakeGatesTest is ZecuredFixture {
         (bytes memory journal, bytes memory seal, bytes[] memory sigs) =
             _proof(a, account, MIN_REFUND - 1, keccak256("gates.dust"), MIN_WORK);
         vm.expectRevert(abi.encodeWithSelector(IZecuredIntake.RefundTooSmall.selector, MIN_REFUND - 1, MIN_REFUND));
-        intake.attestDepositWithProof(journal, seal, sigs);
+        intake.attestDepositWithProof(journal, seal, proofs.imageId, sigs);
         (journal, seal, sigs) = _proof(a, account, MIN_REFUND, keccak256("gates.dust"), MIN_WORK);
-        intake.attestDepositWithProof(journal, seal, sigs);
+        intake.attestDepositWithProof(journal, seal, proofs.imageId, sigs);
         assertEq(registry.claimCount(a), 1);
     }
 }

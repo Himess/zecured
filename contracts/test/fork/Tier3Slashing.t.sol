@@ -11,6 +11,7 @@ import {
 } from "../../src/interfaces/v3/IZecuredSlasher.sol";
 import {ClaimStatus, VaultStatus} from "../../src/interfaces/v3/IZecuredRegistry.sol";
 import {IZecuredIntake} from "../../src/interfaces/v3/IZecuredIntake.sol";
+import {IZecuredVersions, VersionKind} from "../../src/interfaces/v3/IZecuredVersions.sol";
 import {SpendCommit} from "../../src/libraries/ZecuredEIP712.sol";
 import {MockRiscZeroVerifier} from "../../src/mocks/MockRiscZeroVerifier.sol";
 import {MockHeaderRelay} from "../mocks/MockHeaderRelay.sol";
@@ -96,14 +97,16 @@ contract Tier3SlashingTest is ZecuredFixture {
 
     function _prove(bytes memory journal) internal returns (bytes32 caseId) {
         ViolationKind kind = abi.decode(journal, (ViolationJournal)).kind;
-        return slasher.proveViolation(kind, journal, verifier.mockSeal(SUITE_VIOLATION_IMAGE, sha256(journal)));
+        return slasher.proveViolation(
+            kind, journal, verifier.mockSeal(SUITE_VIOLATION_IMAGE, sha256(journal)), violationImage
+        );
     }
 
     function _expectProveRevert(bytes memory journal, bytes memory err) internal {
         ViolationKind kind = abi.decode(journal, (ViolationJournal)).kind;
         bytes memory seal = verifier.mockSeal(SUITE_VIOLATION_IMAGE, sha256(journal));
         vm.expectRevert(err);
-        slasher.proveViolation(kind, journal, seal);
+        slasher.proveViolation(kind, journal, seal, violationImage);
     }
 
     function _partial(uint64 amount) internal returns (bytes32 claimId) {
@@ -298,7 +301,9 @@ contract Tier3SlashingTest is ZecuredFixture {
         (all5[0], all5[1], all5[2], all5[3], all5[4]) = (0, 1, 2, 3, 4);
         bytes[] memory openedSigs =
             _signerSigs(MessageHashUtils.toTypedDataHash(registry.domainSeparator(), opened), all5);
-        intake.attestDepositWithProof(journal, verifier.mockSeal(DEPOSIT_IMAGE, sha256(journal)), openedSigs);
+        intake.attestDepositWithProof(
+            journal, verifier.mockSeal(DEPOSIT_IMAGE, sha256(journal)), proofs.imageId, openedSigs
+        );
 
         bytes32 caseId = _prove(_journal(ViolationKind.Uncommitted, THEFT_REF, pTag, 0, bytes32(0)));
         assertEq(slasher.openCasesOf(pVault), 1);
@@ -409,16 +414,21 @@ contract Tier3SlashingTest is ZecuredFixture {
         slasher.proveViolation(
             ViolationKind.Uncommitted,
             abi.encodePacked(bytes32(0), bytes32(0), bytes32(0), bytes32(0), bytes32(0), bytes32(0)),
-            seal
+            seal,
+            violationImage
         );
-        vm.expectRevert(abi.encodeWithSelector(IZecuredSlasher.InvalidSealSelector.selector, bytes4(0x73c457ba)));
-        slasher.proveViolation(ViolationKind.Uncommitted, journal, abi.encodePacked(bytes4(0x73c457ba), bytes32(0)));
+        // A seal for a verifier no version names (T-07a): the suite's versions use the MOCK selector.
+        bytes32 groth16Version = versions.versionIdOf(VersionKind.Violation, bytes4(0x73c457ba), violationImage);
+        vm.expectRevert(abi.encodeWithSelector(IZecuredVersions.VersionNotActive.selector, groth16Version));
+        slasher.proveViolation(
+            ViolationKind.Uncommitted, journal, abi.encodePacked(bytes4(0x73c457ba), bytes32(0)), violationImage
+        );
         vm.expectRevert(
             abi.encodeWithSelector(
                 IZecuredSlasher.KindMismatch.selector, ViolationKind.WithheldChange, ViolationKind.Uncommitted
             )
         );
-        slasher.proveViolation(ViolationKind.WithheldChange, journal, seal);
+        slasher.proveViolation(ViolationKind.WithheldChange, journal, seal, violationImage);
         // A seal of another journal (here: another beneficiary) does not verify.
         bytes memory other = abi.encode(
             ViolationJournal({
@@ -433,7 +443,7 @@ contract Tier3SlashingTest is ZecuredFixture {
             })
         );
         vm.expectRevert(MockRiscZeroVerifier.MockSealInvalid.selector);
-        slasher.proveViolation(ViolationKind.Uncommitted, other, seal);
+        slasher.proveViolation(ViolationKind.Uncommitted, other, seal, violationImage);
         // Kind None.
         _expectProveRevert(
             _journal(ViolationKind.None, THEFT_REF, depositTag, 0, bytes32(0)),
@@ -567,20 +577,22 @@ contract Tier3SlashingTest is ZecuredFixture {
     // ================================================================== wiring
 
     function test_slasher_constructorChecksTheWiring() public {
-        bytes4 selector = verifier.SELECTOR();
         address r = address(registry);
         address b = address(bond);
         address rl = address(relay);
         address v = address(verifier);
         address cmp = address(compensator);
+        address ver = address(versions);
         // The bond and the Registry name another slasher (the one the fixture deployed).
         vm.expectRevert(IZecuredSlasher.InvalidConfig.selector);
-        new ZecuredSlasher(r, b, cmp, rl, v, SUITE_VIOLATION_IMAGE, selector, SLASH_WORK, WINDOW);
+        new ZecuredSlasher(r, b, cmp, rl, v, ver, SLASH_WORK, WINDOW);
         vm.expectRevert(IZecuredSlasher.ZeroWindow.selector);
-        new ZecuredSlasher(r, b, cmp, rl, v, SUITE_VIOLATION_IMAGE, selector, SLASH_WORK, 0);
+        new ZecuredSlasher(r, b, cmp, rl, v, ver, SLASH_WORK, 0);
         vm.expectRevert(IZecuredSlasher.ZeroAddress.selector);
-        new ZecuredSlasher(address(0), b, cmp, rl, v, SUITE_VIOLATION_IMAGE, selector, SLASH_WORK, WINDOW);
+        new ZecuredSlasher(address(0), b, cmp, rl, v, ver, SLASH_WORK, WINDOW);
+        vm.expectRevert(IZecuredSlasher.ZeroAddress.selector);
+        new ZecuredSlasher(r, b, cmp, rl, v, address(0), SLASH_WORK, WINDOW);
         vm.expectRevert(IZecuredSlasher.InvalidConfig.selector);
-        new ZecuredSlasher(r, b, cmp, rl, v, bytes32(0), selector, SLASH_WORK, WINDOW);
+        new ZecuredSlasher(r, b, cmp, rl, v, ver, 0, WINDOW);
     }
 }

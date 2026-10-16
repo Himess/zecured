@@ -4,6 +4,7 @@ pragma solidity 0.8.28;
 import {MessageHashUtils} from "@openzeppelin/contracts/utils/cryptography/MessageHashUtils.sol";
 import {VaultStatus, ClaimKind, ClaimStatus} from "../../src/interfaces/v3/IZecuredRegistry.sol";
 import {IZecuredIntake, DepositJournal, RefundReason} from "../../src/interfaces/v3/IZecuredIntake.sol";
+import {VersionKind} from "../../src/interfaces/v3/IZecuredVersions.sol";
 import {MockRiscZeroVerifier} from "../../src/mocks/MockRiscZeroVerifier.sol";
 import {MockHeaderRelay} from "../mocks/MockHeaderRelay.sol";
 import {ZecuredFixture} from "../utils/ZecuredFixture.sol";
@@ -59,12 +60,14 @@ contract IntakeJournalV2Test is ZecuredFixture {
 
     function _submit(DepositJournal memory j) internal {
         (bytes memory journal, bytes memory seal, bytes[] memory sigs) = _proofOf(j);
-        intake.attestDepositWithProof(journal, seal, sigs);
+        intake.attestDepositWithProof(journal, seal, proofs.imageId, sigs);
     }
 
     function test_config() public view {
         assertTrue(intake.journalV2());
-        uint32[4] memory branches = intake.allowedBranchIds();
+        // T-07a: the branch ids are the deposit version's.
+        uint32[4] memory branches =
+        versions.version(versions.versionIdOf(VersionKind.Deposit, proofs.sealSelector, proofs.imageId)).branches;
         assertEq(branches[0], NU7);
         assertEq(branches[1], NU6_3);
         assertEq(branches[2], 0);
@@ -95,7 +98,7 @@ contract IntakeJournalV2Test is ZecuredFixture {
         (bytes memory journal, bytes memory seal, bytes[] memory sigs) = _proofOf(j);
         vm.expectEmit(address(intake));
         emit IZecuredIntake.DepositRefunded(j.vaultId, claimId, RefundReason.ModeRefund);
-        intake.attestDepositWithProof(journal, seal, sigs);
+        intake.attestDepositWithProof(journal, seal, proofs.imageId, sigs);
         assertEq(uint8(_status(j.vaultId)), uint8(VaultStatus.Cancelled));
         _assertClaim(claimId, j.vaultId, ClaimKind.Refund, 123_456, bytes32(0), ClaimStatus.Pending);
         assertEq(registry.vaultOf(j.account), bytes32(0));
@@ -106,7 +109,7 @@ contract IntakeJournalV2Test is ZecuredFixture {
         j.mode = ACTIVATE;
         (journal, seal, sigs) = _proofOf(j);
         vm.expectRevert(abi.encodeWithSelector(IZecuredIntake.DepositTagUsed.selector, j.depositTag));
-        intake.attestDepositWithProof(journal, seal, sigs);
+        intake.attestDepositWithProof(journal, seal, proofs.imageId, sigs);
     }
 
     /// A Refund-mode proof of the refund floor's size lands; below it, it does not.
@@ -114,7 +117,7 @@ contract IntakeJournalV2Test is ZecuredFixture {
         DepositJournal memory j = _journalOf("v2.a", REFUND, NU7, MIN_REFUND - 1);
         (bytes memory journal, bytes memory seal, bytes[] memory sigs) = _proofOf(j);
         vm.expectRevert(abi.encodeWithSelector(IZecuredIntake.RefundTooSmall.selector, MIN_REFUND - 1, MIN_REFUND));
-        intake.attestDepositWithProof(journal, seal, sigs);
+        intake.attestDepositWithProof(journal, seal, proofs.imageId, sigs);
         _submit(_journalOf("v2.a", REFUND, NU7, MIN_REFUND));
     }
 
@@ -122,7 +125,7 @@ contract IntakeJournalV2Test is ZecuredFixture {
         DepositJournal memory j = _journalOf("v2.a", 2, NU7, VAULT_001);
         (bytes memory journal, bytes memory seal, bytes[] memory sigs) = _proofOf(j);
         vm.expectRevert(abi.encodeWithSelector(IZecuredIntake.InvalidMode.selector, uint8(2)));
-        intake.attestDepositWithProof(journal, seal, sigs);
+        intake.attestDepositWithProof(journal, seal, proofs.imageId, sigs);
     }
 
     function test_revert_branchNotAllowed() public {
@@ -131,7 +134,7 @@ contract IntakeJournalV2Test is ZecuredFixture {
             DepositJournal memory j = _journalOf("v2.a", ACTIVATE, bad[i], VAULT_001);
             (bytes memory journal, bytes memory seal, bytes[] memory sigs) = _proofOf(j);
             vm.expectRevert(abi.encodeWithSelector(IZecuredIntake.BranchNotAllowed.selector, bad[i]));
-            intake.attestDepositWithProof(journal, seal, sigs);
+            intake.attestDepositWithProof(journal, seal, proofs.imageId, sigs);
         }
     }
 
@@ -147,7 +150,7 @@ contract IntakeJournalV2Test is ZecuredFixture {
             keccak256("zecured.v2.opened")
         );
         vm.expectRevert(abi.encodeWithSelector(IZecuredIntake.InvalidJournalLength.selector, uint256(192)));
-        intake.attestDepositWithProof(journal, "", new bytes[](0));
+        intake.attestDepositWithProof(journal, "", proofs.imageId, new bytes[](0));
     }
 
     /// The decoder refuses dirty words (a mode or a branch id with high bits set) before anything else.
@@ -155,10 +158,10 @@ contract IntakeJournalV2Test is ZecuredFixture {
         bytes memory journal = abi.encode(_journalOf("v2.a", ACTIVATE, NU7, VAULT_001));
         journal[0] = 0x01; // the mode word's high byte
         vm.expectRevert();
-        intake.attestDepositWithProof(journal, "", new bytes[](0));
+        intake.attestDepositWithProof(journal, "", proofs.imageId, new bytes[](0));
         journal = abi.encode(_journalOf("v2.a", ACTIVATE, NU7, VAULT_001));
         journal[32] = 0x01; // the branch id word's high byte
         vm.expectRevert();
-        intake.attestDepositWithProof(journal, "", new bytes[](0));
+        intake.attestDepositWithProof(journal, "", proofs.imageId, new bytes[](0));
     }
 }

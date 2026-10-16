@@ -73,7 +73,7 @@ contract PendingActivationTest is ZecuredFixture {
 
     function _proveTag(bytes32 anchor, bytes32 tag) internal {
         (bytes memory journal, bytes memory seal, bytes[] memory sigs) = _proofOf(anchor, tag);
-        intake.attestDepositWithProof(journal, seal, sigs);
+        intake.attestDepositWithProof(journal, seal, proofs.imageId, sigs);
     }
 
     function _prove(bytes32 anchor) internal {
@@ -283,7 +283,7 @@ contract PendingActivationTest is ZecuredFixture {
         (bytes memory journal, bytes memory seal, bytes[] memory sigs) = _proofOf(ANCHOR, TAG);
         vm.expectEmit(address(intake));
         emit IZecuredIntake.DepositRefunded(VAULT, claimId, RefundReason.Halted);
-        intake.attestDepositWithProof(journal, seal, sigs);
+        intake.attestDepositWithProof(journal, seal, proofs.imageId, sigs);
         assertEq(uint8(_status(VAULT)), uint8(VaultStatus.Cancelled));
         assertEq(registry.vaultOf(account), bytes32(0), "a refund binds no account");
     }

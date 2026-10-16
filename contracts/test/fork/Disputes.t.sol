@@ -4,6 +4,7 @@ pragma solidity 0.8.28;
 import {ClaimStatus} from "../../src/interfaces/v3/IZecuredRegistry.sol";
 import {IZecuredDisputes, IZecuredDisputesEvents} from "../../src/interfaces/v3/IZecuredDisputes.sol";
 import {IZecuredSlasher, ViolationKind} from "../../src/interfaces/v3/IZecuredSlasher.sol";
+import {IZecuredVersions, VersionKind} from "../../src/interfaces/v3/IZecuredVersions.sol";
 import {IZecuredSpendCommitsEvents} from "../../src/interfaces/v3/IZecuredSpendCommits.sol";
 import {ISignerBond} from "../../src/interfaces/v3/ISignerBond.sol";
 import {IZecuredCompensator} from "../../src/interfaces/v3/IZecuredCompensator.sol";
@@ -52,7 +53,15 @@ contract DisputesTest is Tier3Base {
     function _proveIncludedExpectRevert(bytes memory journal, bytes32 id, bytes memory err) internal {
         bytes memory seal = _seal(journal);
         vm.expectRevert(err);
-        slasher.proveInclusion(journal, seal, id);
+        slasher.proveInclusion(journal, seal, violationImage, id);
+    }
+
+    function _proveIncludedExpectRevertWith(bytes memory journal, bytes32 image, bytes32 id, bytes memory err)
+        internal
+    {
+        bytes memory seal = verifier.mockSeal(image, sha256(journal));
+        vm.expectRevert(err);
+        slasher.proveInclusion(journal, seal, image, id);
     }
 
     function _dispute() internal {
@@ -203,7 +212,7 @@ contract DisputesTest is Tier3Base {
         vm.expectEmit(address(registry));
         emit IZecuredDisputesEvents.PayoutUpheld(vaultId, claimId, payoutRef);
         vm.prank(stranger); // anyone submits the proof
-        slasher.proveInclusion(journal, seal, claimId);
+        slasher.proveInclusion(journal, seal, violationImage, claimId);
 
         assertEq(uint8(_claimStatus(claimId)), uint8(ClaimStatus.Paid));
         assertEq(registry.vaultDetails(vaultId).unpaidClaims, 0);
@@ -218,7 +227,7 @@ contract DisputesTest is Tier3Base {
         vm.expectRevert(abi.encodeWithSelector(IZecuredDisputesEvents.NotDisputable.selector, claimId));
         disputes.disputePayout(claimId);
         vm.expectRevert(abi.encodeWithSelector(IZecuredDisputesEvents.NotDisputed.selector, claimId));
-        slasher.proveInclusion(journal, seal, claimId);
+        slasher.proveInclusion(journal, seal, violationImage, claimId);
     }
 
     function test_proveInclusion_reverts() public {
@@ -271,11 +280,20 @@ contract DisputesTest is Tier3Base {
         // The seal: the pinned selector, of this journal, for the violation image.
         bytes memory good = _included(ANCHOR, payoutRef);
         bytes memory badSelector = abi.encodePacked(bytes4(0xdeadbeef), new bytes(32));
-        vm.expectRevert(abi.encodeWithSelector(IZecuredSlasher.InvalidSealSelector.selector, bytes4(0xdeadbeef)));
-        slasher.proveInclusion(good, badSelector, claimId);
+        bytes32 noVersion = versions.versionIdOf(VersionKind.Violation, bytes4(0xdeadbeef), violationImage);
+        vm.expectRevert(abi.encodeWithSelector(IZecuredVersions.VersionNotActive.selector, noVersion));
+        slasher.proveInclusion(good, badSelector, violationImage, claimId);
+        // The deposit guest's image is not a violation version either.
+        bytes32 depositAsViolation = versions.versionIdOf(VersionKind.Violation, verifier.SELECTOR(), DEPOSIT_IMAGE);
+        _proveIncludedExpectRevertWith(
+            good,
+            DEPOSIT_IMAGE,
+            claimId,
+            abi.encodeWithSelector(IZecuredVersions.VersionNotActive.selector, depositAsViolation)
+        );
         bytes memory depositSeal = verifier.mockSeal(DEPOSIT_IMAGE, sha256(good));
         vm.expectRevert();
-        slasher.proveInclusion(good, depositSeal, claimId);
+        slasher.proveInclusion(good, depositSeal, violationImage, claimId);
 
         // A payout that does not pay this claim: never committed, or committed for another input.
         bytes32 uncommitted = keccak256("zecured.disputes.uncommitted");
@@ -302,7 +320,7 @@ contract DisputesTest is Tier3Base {
         disputes.upholdPayout(claimId, payoutRef);
 
         // The right proof still works.
-        slasher.proveInclusion(good, _seal(good), claimId);
+        slasher.proveInclusion(good, _seal(good), violationImage, claimId);
         assertEq(uint8(_claimStatus(claimId)), uint8(ClaimStatus.Paid));
     }
 
@@ -347,7 +365,7 @@ contract DisputesTest is Tier3Base {
         _dispute();
         // Any committed payout of the claim's input upholds it, the first one included.
         bytes memory journal = _included(ANCHOR, payoutRef);
-        slasher.proveInclusion(journal, _seal(journal), claimId);
+        slasher.proveInclusion(journal, _seal(journal), violationImage, claimId);
         assertEq(uint8(_claimStatus(claimId)), uint8(ClaimStatus.Paid));
     }
 
