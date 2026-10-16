@@ -1,6 +1,6 @@
 //! H-2 (security review 2026-10-11): a vault never pays one of its own addresses. A borrower
 //! who set the release destination to the vault's internal address had the payout land as
-//! "change" outside the books and brick the vault; destinations, refund recipients and
+//! "change" outside the books and brick the vault; destinations (a release's or a refund's) and
 //! third-party recipients equal to any vault address (any diversifier, either scope) are now
 //! refused.
 
@@ -11,9 +11,9 @@ use alloy::{
 use orchard::keys::{FullViewingKey, Scope, SpendingKey};
 use rand_core_06::{OsRng, RngCore};
 use x25519_dalek::StaticSecret;
-use zecured_base::{Destination, RefundRequest, registry_domain, sign_typed};
+use zecured_base::{Destination, registry_domain, sign_typed};
 use zecured_node::{
-    DestinationIn, Node, NodeOptions, RecipientIn, RefundIn,
+    DestinationIn, Node, NodeOptions, RecipientIn,
     config::{Identity, NetworkConfig},
     now,
     store::VaultRecord,
@@ -75,16 +75,13 @@ fn vault(owner: Address) -> (VaultRecord, FullViewingKey) {
         ufvk: String::new(),
         address: String::new(),
         decisions: vec![],
-        attestation: None,
         activated: true,
         outstanding: 1_000_000,
         claims: vec![],
-        refunds: vec![],
         used_nonces: vec![],
         inflight: None,
         confirmed: vec![],
         last_event: None,
-        cancelled: false,
         activated_tag: None,
     };
     (record, fvk)
@@ -145,25 +142,6 @@ async fn a_vault_never_pays_its_own_addresses() {
         assert!(err.to_string().contains("own addresses"), "{err}");
         // A third party's recipient (liquidator, market maker).
         assert!(node.add_recipient(recipient(addr, [9; 32])).await.is_err());
-        // A refund of a non-conforming deposit.
-        let salt = [8; 32];
-        let deadline = now() + 600;
-        let msg = RefundRequest {
-            vaultId: VAULT,
-            noteId: B256::repeat_byte(4),
-            commitment: B256::from(commitment(&salt, &addr.to_raw_address_bytes())),
-            nonce: 100 + nonce,
-            deadline,
-        };
-        let refund = RefundIn {
-            note_id: B256::repeat_byte(4),
-            recipient: recipient(addr, salt),
-            nonce: 100 + nonce,
-            deadline,
-            signature: sign_typed(&owner, &registry_domain(CHAIN_ID, REGISTRY), &msg).unwrap(),
-        };
-        let err = node.refund_request(VAULT, refund).await.unwrap_err();
-        assert!(err.to_string().contains("own addresses"), "{err}");
     }
     // Nothing was recorded, not even the nonces.
     assert!(node.store.lock().await.vaults[&VAULT].used_nonces.is_empty());

@@ -25,7 +25,7 @@ use zcash_protocol::consensus::{BlockHeight, BranchId, Network};
 use zecured_base::SpendCommit;
 use zecured_policy::{
     derive::{deposit_tag, payout_ref},
-    ledger::{self, Commitment, NextPayout, PayoutPlan, claim_ref},
+    ledger::{self, Claim, ClaimId, Commitment, MainLineage, NextPayout, PayoutInput, PayoutPlan, claim_ref},
     verify::{ExpectedInput, TxExpectations, Verified, verify_payout},
 };
 use zecured_threshold::{self as threshold, signer_id};
@@ -40,14 +40,16 @@ use crate::{
 /// Blocks the coordinator's view of the Zcash tip may be ahead of ours.
 const TIP_SKEW: u32 = 5;
 
-/// What a signing session is for.
+/// What a signing session is for. A node signs nothing but the payout of claims on Base, each
+/// committed on Base before any share leaves it (Tier 3): no off-chain refund of any note (I30: an
+/// off-chain refund of a note a deployed guest can make a lineage note would later look like a
+/// theft). A deposit that cannot back its vault is refunded through a proof that lands it as a
+/// Refund claim (T-02).
 #[derive(Clone, Debug, Serialize, Deserialize)]
 #[serde(tag = "kind", rename_all = "snake_case")]
 pub enum SignKind {
-    /// Pay these claims (P2, P3, P6).
+    /// Pay these claims (P2, P3, P6, refunds T-02, the opening fee T-06).
     Payout { claim_ids: Vec<B256> },
-    /// Refund this non-conforming note (P5).
-    Refund { note_id: B256 },
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
@@ -199,17 +201,15 @@ pub struct Session {
 impl Session {
     /// The in-flight record this session's payout becomes once its shares are released.
     pub fn inflight(&self) -> Option<Inflight> {
-        match &self.kind {
-            SignKind::Payout { claim_ids } if !self.unchecked => Some(Inflight {
-                claim_ids: claim_ids.iter().map(|c| c.0).collect(),
-                inputs: self.inputs.clone(),
-                txid: Some(self.verified.sighash),
-                expiry_height: self.verified.expiry_height,
-                change: self.change,
-                spend_commit: None,
-            }),
-            _ => None,
-        }
+        let SignKind::Payout { claim_ids } = &self.kind;
+        (!self.unchecked).then(|| Inflight {
+            claim_ids: claim_ids.iter().map(|c| c.0).collect(),
+            inputs: self.inputs.clone(),
+            txid: Some(self.verified.sighash),
+            expiry_height: self.verified.expiry_height,
+            change: self.change,
+            spend_commit: None,
+        })
     }
 }
 
@@ -265,8 +265,29 @@ pub fn check_confirmation(inflight: &Inflight, claim_ids: &[[u8; 32]], txid: &[u
     Ok(())
 }
 
-/// The plan and inputs this node expects for `kind`, from its own view. `bound`: the unpaid
-/// claims a commitment on Base already binds to the vault's lineage note (RT-3).
+/// The main lineage as the planner may pay from it: only for a vault Base activated, and only
+/// while its books add up (I10; the second value says why not). `bound`: the unpaid claims a
+/// commitment on Base already binds to the main lineage note (RT-3).
+pub fn main_lineage<'a>(
+    activated: bool,
+    outstanding: u64,
+    claims: &[Claim],
+    lineage: &[ReceivedNote],
+    bound: &'a [ClaimId],
+) -> (Option<MainLineage<'a>>, Result<(), ledger::LedgerError>) {
+    let value: u64 = lineage.iter().map(ReceivedNote::value).sum();
+    let i10 = ledger::check_i10(value, outstanding, claims);
+    let main = (activated && i10.is_ok()).then_some(MainLineage {
+        value,
+        notes: lineage.len(),
+        bound,
+    });
+    (main, i10)
+}
+
+/// The plan and inputs this node expects for `kind`, from its own view: the vault's next payout,
+/// from its main lineage or from the note of a refunded deposit (I30). `bound`: the unpaid claims
+/// a commitment on Base already binds to the main lineage note (RT-3).
 pub fn expected_plan(
     store: &Store,
     vault: &VaultRecord,
@@ -276,39 +297,28 @@ pub fn expected_plan(
     bound: &[[u8; 32]],
 ) -> Result<(PayoutPlan, Vec<ReceivedNote>)> {
     let fvk = vault_fvk(vault)?;
-    match kind {
-        SignKind::Payout { claim_ids } => {
-            ensure!(vault.activated, "vault is not active on Base");
-            ledger::check_i10(notes.lineage_value(), vault.outstanding, &vault.claims)
-                .map_err(|e| anyhow!("refusing to sign: {e}"))?;
-            // H-2: a recipient that is one of the vault's own addresses is no recipient: the
-            // claim is set aside rather than paid back into the vault outside its books.
-            let recipient = |c: &Commitment| store.recipient(c).filter(|r| !owns_receiver(&fvk, &r.receiver));
-            let next =
-                ledger::next_payout(&vault.claims, recipient, notes.lineage_value(), notes.lineage.len(), now, bound)?;
-            let NextPayout::Pay(plan) = next else {
-                bail!("nothing is payable for this vault right now ({next:?})");
-            };
-            let wanted: Vec<[u8; 32]> = claim_ids.iter().map(|c| c.0).collect();
-            ensure!(plan.claims == wanted, "requested claims are not the next payable claims");
-            Ok((plan, notes.lineage.clone()))
+    let SignKind::Payout { claim_ids } = kind;
+    // H-2: a recipient that is one of the vault's own addresses is no recipient: the claim is set
+    // aside rather than paid back into the vault outside its books.
+    let recipient = |c: &Commitment| store.recipient(c).filter(|r| !owns_receiver(&fvk, &r.receiver));
+    let (main, i10) = main_lineage(vault.activated, vault.outstanding, &vault.claims, &notes.lineage, bound);
+    let next = ledger::next_vault_payout(&vault.claims, recipient, main, &notes.refund_values(), now)?;
+    let wanted: Vec<[u8; 32]> = claim_ids.iter().map(|c| c.0).collect();
+    let plan = match next {
+        NextPayout::Pay(plan) if plan.claims == wanted => plan,
+        other => {
+            i10.map_err(|e| anyhow!("refusing to sign: {e}"))?;
+            match other {
+                NextPayout::Pay(_) => bail!("requested claims are not the next payable claims"),
+                _ => bail!("nothing is payable for this vault right now ({other:?})"),
+            }
         }
-        SignKind::Refund { note_id } => {
-            let (_, note) = notes
-                .non_conforming
-                .iter()
-                .find(|(id, _)| *id == note_id.0)
-                .context("not an unspent non-conforming note")?;
-            let request = vault
-                .refunds
-                .iter()
-                .find(|r| r.note_id == note_id.0)
-                .context("no accepted refund request for this note")?;
-            ensure!(!owns_receiver(&fvk, &request.recipient.receiver), "a refund cannot go to the vault itself");
-            let plan = ledger::refund_plan(note.value(), request.recipient.receiver)?;
-            Ok((plan, vec![note.clone()]))
-        }
-    }
+    };
+    let inputs = match plan.input {
+        PayoutInput::Main => notes.lineage.clone(),
+        PayoutInput::Refund(tag) => notes.refunds.iter().filter(|(t, _)| *t == tag).map(|(_, n)| n.clone()).collect(),
+    };
+    Ok((plan, inputs))
 }
 
 /// Transaction-level expectations for a payout built on top of `tip` (I-4: the tip comes from
@@ -345,10 +355,7 @@ pub fn commit(
     let verified =
         verify_payout(&pczt, &fvk, &expected, plan, &expectations).map_err(|e| anyhow!("PCZT refused: {e}"))?;
     // H-1: checked against the verified transaction, so a retry of the same one is allowed.
-    let prior_inflight = match &req.kind {
-        SignKind::Payout { .. } => check_no_live_payout(inflight, tip, unspent, &verified.sighash)?,
-        SignKind::Refund { .. } => None,
-    };
+    let prior_inflight = check_no_live_payout(inflight, tip, unspent, &verified.sighash)?;
     let inputs = expected.iter().map(|e| e.nullifier).collect();
     start_session(vault, req, verified, inputs, plan.change, prior_inflight, false)
 }

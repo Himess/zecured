@@ -14,6 +14,7 @@ use x25519_dalek::StaticSecret;
 use zecured_node::{
     Node, NodeOptions,
     config::{Identity, NetworkConfig},
+    signing::{CommitRequest, SignKind},
     store::VaultRecord,
 };
 use zecured_zcash_ops::keys::VaultSecret;
@@ -53,16 +54,13 @@ fn vault() -> VaultRecord {
         ufvk: String::new(),
         address: String::new(),
         decisions: vec![],
-        attestation: None,
         activated: false,
         outstanding: 0,
         claims: vec![],
-        refunds: vec![],
         used_nonces: vec![],
         inflight: None,
         confirmed: vec![],
         last_event: None,
-        cancelled: false,
         activated_tag: None,
     }
 }
@@ -97,10 +95,16 @@ async fn a_hanging_light_wallet_server_does_not_lock_the_store() {
     let node = Arc::new(Node::open(cfg, id, &dir, NodeOptions::default()).unwrap());
     node.store.lock().await.save_vault(vault()).unwrap();
 
-    // An attestation request scans the vault through the silent server: it hangs.
+    // A signing request scans the vault through the silent server: it hangs.
     let scanning = tokio::spawn({
         let node = node.clone();
-        async move { node.attest(VAULT).await }
+        let request = CommitRequest {
+            session_id: "locks".into(),
+            vault_id: VAULT,
+            kind: SignKind::Payout { claim_ids: vec![] },
+            pczt: vec![],
+        };
+        async move { node.sign_commit(request).await }
     });
     tokio::time::sleep(Duration::from_millis(500)).await;
     assert!(!scanning.is_finished(), "the scan should still be waiting for the server");

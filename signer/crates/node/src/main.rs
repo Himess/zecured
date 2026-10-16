@@ -72,8 +72,9 @@ enum Cmd {
         /// should not depend on the same Zcash data source as the coordinator.
         #[arg(long, env = "NODE_LIGHTWALLETD_URL")]
         lightwalletd_url: Option<String>,
-        /// Independent light wallet servers (comma-separated) that must all agree with ours on
-        /// a deposit before this node attests it.
+        /// Independent light wallet servers (comma-separated) that must all agree with ours on a
+        /// deposit (C-1). Registry v3 activates vaults on deposit proofs only, so no signing path
+        /// asks them any more; the option stays for existing operator configurations.
         #[arg(long, env = "NODE_LIGHTWALLETD_WITNESS_URLS", value_delimiter = ',')]
         lightwalletd_witness_urls: Vec<String>,
         /// This operator's own Base RPC, instead of the network config's.
@@ -190,6 +191,10 @@ async fn main() -> Result<()> {
                         Ok(0) => {}
                         Ok(n) => info!(applied = n, "base events"),
                         Err(e) => warn!("base sync failed: {e:#}"),
+                    }
+                    // T-05: claims must be paid long before the bonds would pay their claimants.
+                    if let Err(e) = bg.check_liveness().await {
+                        warn!("liveness check failed: {e:#}");
                     }
                     // Public Base RPCs rate-limit aggressively; nodes poll every ~15 s,
                     // staggered by index so five nodes do not burst together.
