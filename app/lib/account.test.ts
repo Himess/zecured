@@ -9,13 +9,15 @@ import {
   parseAbi,
   size,
   slice,
+  type Abi,
   type Address,
   type Hex,
   type PublicClient,
 } from "viem";
 import { privateKeyToAccount } from "viem/accounts";
 import { baseSepolia } from "viem/chains";
-import { DRY_RUN_CONFIG, DRY_RUN_ENV } from "./__fixtures__/deployment";
+import { DRY_RUN_CONFIG, DRY_RUN_CONTRACTS, DRY_RUN_ENV } from "./__fixtures__/deployment";
+import { disputesAbi, intakeAbi, registryAbi } from "./abi";
 import { AccountNotDeployedError, loanAccount, SponsorshipUnavailableError } from "./account";
 import { createApi, parseRemoteConfig } from "./api";
 import {
@@ -26,6 +28,7 @@ import {
   refundDestinationCalls,
   refundPendingCalls,
   reopenDisputedClaimCalls,
+  slashLivenessCalls,
   transferUsdcCalls,
   type Call,
 } from "./calls";
@@ -41,6 +44,26 @@ const BASE = "http://backend.test";
 const PAYMASTER: Address = "0x7777777777777777777777777777777777777777";
 const USER_OP_HASH: Hex = `0x${"9a".repeat(32)}`;
 const TX_HASH: Hex = `0x${"5b".repeat(32)}`;
+/** The signer bond the pinned Registry (and Intake) name: not pinned at build time. */
+const BOND: Address = DRY_RUN_CONTRACTS.SignerBond;
+
+/** What `readLinks` reads from the pinned Registry and Intake. */
+const LINKS: [Address, Abi, Record<string, unknown>][] = [
+  [
+    config.registry,
+    [...registryAbi, ...disputesAbi] as Abi,
+    {
+      intake: config.intake,
+      slasher: DRY_RUN_CONTRACTS.ZecuredSlasher,
+      compensator: DRY_RUN_CONTRACTS.ZecuredCompensator,
+      signerBond: BOND,
+      refundAbandonPeriod: 2_592_000n,
+      disputeWindow: 86_400n,
+      inclusionWindow: 21_600n,
+    },
+  ],
+  [config.intake, intakeAbi as Abi, { signerBond: BOND, relay: "0xab07317f7B9390394271D9c03FE2E912C0E58FA5", pendingRefundDelay: 86_400n }],
+];
 
 /** Methods backend/src/proxy.rs lets through, per endpoint. */
 const ALLOWED = {
@@ -124,7 +147,8 @@ function backendAllowlistCheck(op: Record<string, Hex>): Call[] {
     }
     inner = txs.map((t) => ({ to: t.to, data: t.data }));
   }
-  assertAllowlisted(inner, getAddress(op.sender!), config);
+  // The backend's allowlist knows the bond from its deployment file.
+  assertAllowlisted(inner, getAddress(op.sender!), config, { bond: BOND });
   return inner;
 }
 
@@ -133,10 +157,12 @@ interface Recorded {
   sent?: Record<string, Hex>;
   entryPoint?: Address;
   paymasterOps: Record<string, Hex>[];
+  /** The Registry's and Intake's views read (`readLinks`). */
+  linkReads: string[];
 }
 
 function fakeInfra(opts: { deployed?: boolean } = {}): Recorded {
-  const rec: Recorded = { methods: { rpc: [], bundler: [], paymaster: [] }, paymasterOps: [] };
+  const rec: Recorded = { methods: { rpc: [], bundler: [], paymaster: [] }, paymasterOps: [], linkReads: [] };
   const fetchStub = async (input: RequestInfo | URL, init?: RequestInit) => {
     const url = new URL(String(input));
     const kind = url.pathname.replace("/proxy/", "") as "rpc" | "bundler" | "paymaster";
@@ -158,6 +184,13 @@ function fakeInfra(opts: { deployed?: boolean } = {}): Recorded {
       if (method === "eth_getCode") return opts.deployed ? "0x6080" : "0x";
       if (method === "eth_call") {
         const { to, data } = params[0] as { to: Address; data: Hex };
+        const link = LINKS.find(([a]) => getAddress(a) === getAddress(to));
+        if (link) {
+          const [, abi, values] = link;
+          const { functionName } = decodeFunctionData({ abi, data });
+          rec.linkReads.push(functionName);
+          return encodeFunctionResult({ abi, functionName, result: values[functionName] } as never);
+        }
         expect(getAddress(to)).toBe(SAFE.entryPoint);
         decodeFunctionData({ abi: entryPointAbi, data });
         return encodeFunctionResult({ abi: entryPointAbi, functionName: "getNonce", result: opts.deployed ? 7n : 0n });
@@ -325,6 +358,25 @@ describe("loanAccount.send (ERC-4337 through the backend proxy, faked)", () => {
     await acct.send(batches[0]!);
     expect(getAddress(rec.sent!.factory!)).toBe(SAFE.proxyFactory);
     backendAllowlistCheck(rec.sent!);
+  });
+
+  it("v3: claiming an overdue claim from the bonds is one sponsored UserOp to the bond the pinned Registry names", async () => {
+    const { rec, acct } = account({ deployed: true });
+    const calls = slashLivenessCalls({ claimId: `0x${"c1".repeat(32)}`, bond: BOND });
+    await acct.send(calls);
+    expect(backendAllowlistCheck(rec.sent!)).toEqual(calls.map((c) => ({ to: getAddress(c.to), data: c.data })));
+    expect(rec.linkReads).toContain("signerBond");
+    // A batch to the pinned contracts only reads nothing more.
+    const pinned = account({ deployed: true });
+    await pinned.acct.send(transferUsdcCalls({ to: ACCOUNT, amount: 1n, config }));
+    expect(pinned.rec.linkReads).toEqual([]);
+    // A "bond" the Registry does not name is never sponsorable.
+    const other = account({ deployed: true });
+    const stranger: Address = "0x5555555555555555555555555555555555555555";
+    await expect(other.acct.send(slashLivenessCalls({ claimId: `0x${"c1".repeat(32)}`, bond: stranger }))).rejects.toThrow(
+      `Not sponsorable: call to ${stranger}`,
+    );
+    expect(other.rec.methods.paymaster).toEqual([]);
   });
 
   it("fails fast without sponsorship (GET /config), before any request or signature", async () => {

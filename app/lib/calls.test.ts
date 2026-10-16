@@ -37,8 +37,10 @@ import {
   releaseCalls,
   reopenDisputedClaimCalls,
   repayAndReleaseCalls,
+  slashLivenessCalls,
   transferUsdcCalls,
   type Call,
+  type NamedTargets,
 } from "./calls";
 import { buildConfig, marketParams } from "./config";
 
@@ -255,6 +257,35 @@ describe("v3 calls: refunds (T-02, T-03) and disputes (T-05 (a))", () => {
   });
 });
 
+describe("v3 calls: the bonds pay an overdue claim (T-05)", () => {
+  const CLAIM: Hex = `0x${"c1".repeat(32)}`;
+  const OTHER_CLAIM: Hex = `0x${"c2".repeat(32)}`;
+  const BOND: Address = "0xf42821eF06F68a01bba08c91a16368A83C002586";
+  const named: NamedTargets = { bond: BOND };
+
+  it("slashLiveness goes to the bond the pinned Registry names, one call per claim", () => {
+    const calls = slashLivenessCalls({ claimId: CLAIM, bond: BOND });
+    expect(calls).toEqual([{ to: BOND, data: calls[0]!.data }]);
+    expect(decodeFunctionData({ abi: bondAbi, data: calls[0]!.data })).toMatchObject({ functionName: "slashLiveness", args: [CLAIM] });
+    assertAllowlisted(calls, ACCOUNT, config, named);
+    assertAllowlisted([...calls, ...slashLivenessCalls({ claimId: OTHER_CLAIM, bond: BOND })], ACCOUNT, config, named);
+  });
+
+  it("the mirror refuses the bond's other calls, a claim paid twice, an unknown bond and the call elsewhere", () => {
+    const reject = (calls: Call[], pattern: RegExp, n = named) => expect(() => assertAllowlisted(calls, ACCOUNT, config, n)).toThrow(pattern);
+    const slash = slashLivenessCalls({ claimId: CLAIM, bond: BOND });
+    reject([{ to: BOND, data: encodeFunctionData({ abi: bondAbi, functionName: "totalSlashable" }) }], /SignerBond\.totalSlashable/);
+    reject([{ to: BOND, data: encodeFunctionData({ abi: bondAbi, functionName: "livenessDue", args: [CLAIM] }) }], /SignerBond\.livenessDue/);
+    reject([...slash, ...slash], /the same claim paid from the bonds twice/);
+    // Without the Registry's bond (not read, or unreadable), nothing to a bond is sponsorable.
+    reject(slash, /call to/, { bond: null });
+    expect(() => assertAllowlisted(slash, ACCOUNT, config)).toThrow(/call to/);
+    reject([{ to: config.registry, data: slash[0]!.data }], /unknown Registry function/);
+    // A "bond" that is a pinned contract never widens that contract's rules.
+    reject([{ to: config.registry, data: slash[0]!.data }], /unknown Registry function/, { bond: config.registry });
+  });
+});
+
 describe("Registry revert explanations", () => {
   const encode = (errorName: (typeof revertErrorsAbi)[number]["name"], args: readonly unknown[]) =>
     encodeErrorResult({ abi: revertErrorsAbi, errorName, args } as never) as Hex;
@@ -279,6 +310,17 @@ describe("Registry revert explanations", () => {
       `The Registry refused the dispute: it could be disputed until ${formatUtc(at)}.`,
     );
     expect(describeRevert(new Error(encode("InclusionWindowOpen", [VAULT, at])))).toMatch(/until 2027-01-15 08:00 UTC: it can be reopened after that/);
+  });
+
+  it("explains the bonds' refusals (T-05)", () => {
+    expect(describeRevert(new Error(encode("NotTheClaimant", [VAULT, ACCOUNT])))).toMatch(/only the claim's own claimant/);
+    expect(describeRevert(new Error(encode("NotLivenessEligible", [VAULT])))).toMatch(/cannot pay this claim/);
+    expect(describeRevert(new Error(encode("LivenessNotDue", [VAULT, 1_800_000_000n])))).toBe(
+      `The bonds can pay this claim only from ${formatUtc(1_800_000_000n)}.`,
+    );
+    expect(describeRevert(new Error(encode("InsufficientBond", [82_000n, 40_000n])))).toBe(
+      "The bonds hold 0.04 USDC right now, less than the 0.082 USDC this claim needs. The claim stays payable on Zcash; try again later.",
+    );
   });
 
   it("finds the revert data wherever viem nests the bundler's answer", () => {

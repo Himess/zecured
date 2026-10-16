@@ -603,18 +603,58 @@ async fn close_submit(
 
 // ------------------------------------------------------------------------- demo price controls
 
-/// RQ-06: the market's oracle is a DemoShockOracle (MOCK / DEMO) around a base ZEC/USD price.
+/// RQ-06: off Base mainnet the market's oracle is a DemoShockOracle (MOCK / DEMO) around a base
+/// ZEC/USD price; on Base mainnet the market prices with the ZecuredPriceFeed itself (T-10), and
+/// the demo price controls refuse with [`NOT_DEMO_ORACLE`].
 #[derive(Clone)]
 struct Oracle {
     rpc: String,
-    /// The market's oracle (DemoShockOracle).
+    /// The market's oracle.
     market: Option<Address>,
+    /// The market's oracle when it is the deployment's DemoShockOracle.
+    demo: Option<Address>,
     /// The base oracle, when it is the owner-set MockZecOracle (local fork, or no real feed yet).
     base_mock: Option<Address>,
     owner_key: String,
 }
 
+impl Oracle {
+    /// From the deployment file: `market.oracle`, `contracts.DemoShockOracle` (written only when
+    /// it is the market's oracle, which is checked here too) and `contracts.MockZecOracle`.
+    fn from_deployment(rpc: String, deployment: &serde_json::Value, owner_key: String) -> Self {
+        let address = |section: &str, name: &str| deployment.get(section)?.get(name)?.as_str()?.parse::<Address>().ok();
+        let market = address("market", "oracle");
+        Self {
+            rpc,
+            market,
+            demo: address("contracts", "DemoShockOracle").filter(|demo| Some(*demo) == market),
+            base_mock: address("contracts", "MockZecOracle"),
+            owner_key,
+        }
+    }
+
+    /// The DemoShockOracle, if the market's oracle is one; a fixed refusal otherwise, before any
+    /// chain access.
+    fn demo(&self) -> Result<Address, ApiError> {
+        self.market.ok_or(ApiError::NOT_CONFIGURED)?;
+        self.demo.ok_or(NOT_DEMO_ORACLE)
+    }
+}
+
+/// The market's oracle is a real price feed (Base mainnet): no demo price control.
+const NOT_DEMO_ORACLE: ApiError = ApiError::new(
+    StatusCode::CONFLICT,
+    "not_demo_oracle",
+    "The market's oracle is a real price feed: the demo price controls are off.",
+);
+
 alloy::sol! {
+    /// Morpho's oracle interface, which every market oracle has.
+    #[sol(rpc)]
+    interface IMarketOracle {
+        function price() external view returns (uint256);
+    }
+
     #[sol(rpc)]
     interface IMockZecOracle {
         function price() external view returns (uint256);
@@ -645,19 +685,27 @@ async fn admin_get_oracle(
     check_admin(&t, &headers)?;
     let market = o.market.ok_or(ApiError::NOT_CONFIGURED)?;
     let p = alloy::providers::ProviderBuilder::new().connect_http(o.rpc.parse().map_err(chain_error)?);
-    let shock = IDemoShockOracle::new(market, &p);
-    let effective = shock.price().call().await.map_err(chain_error)?;
-    let base_address = shock.base().call().await.map_err(chain_error)?;
-    let base = IMockZecOracle::new(base_address, &p).price().call().await.map_err(chain_error)?;
-    let shock_bps = shock.shockBps().call().await.map_err(chain_error)?;
+    // The market's price, which Morpho uses: any market oracle has it.
+    let effective = IMarketOracle::new(market, &p).price().call().await.map_err(chain_error)?;
     let cents = |raw: alloy::primitives::U256| (raw / alloy::primitives::U256::from(ORACLE_SCALE_PER_CENT)).to_string();
+    // The demo shock and the price below it, only on a DemoShockOracle (none on Base mainnet).
+    let (base, shock_bps) = match o.demo {
+        Some(demo) => {
+            let shock = IDemoShockOracle::new(demo, &p);
+            let base_address = shock.base().call().await.map_err(chain_error)?;
+            let base = IMockZecOracle::new(base_address, &p).price().call().await.map_err(chain_error)?;
+            let shock_bps = shock.shockBps().call().await.map_err(chain_error)?;
+            (json!(cents(base)), json!(shock_bps.to_string()))
+        }
+        None => (serde_json::Value::Null, serde_json::Value::Null),
+    };
     Ok(Json(json!({
-        // The market's price, which Morpho uses.
         "priceUsdCents": cents(effective),
         "raw": effective.to_string(),
-        "basePriceUsdCents": cents(base),
+        "demo": o.demo.is_some(),
+        "basePriceUsdCents": base,
         "baseIsMock": o.base_mock.is_some(),
-        "shockBps": shock_bps.to_string(),
+        "shockBps": shock_bps,
     })))
 }
 
@@ -674,7 +722,7 @@ fn owner_provider(o: &Oracle) -> Result<impl alloy::providers::Provider, ApiErro
         .connect_http(o.rpc.parse().map_err(chain_error)?))
 }
 
-/// MOCK base price (only when the base oracle is the MockZecOracle).
+/// MOCK base price (only when the base oracle is the MockZecOracle below a DemoShockOracle).
 async fn admin_set_oracle(
     axum::Extension(t): axum::Extension<AdminToken>,
     axum::Extension(o): axum::Extension<Oracle>,
@@ -682,6 +730,7 @@ async fn admin_set_oracle(
     Body(b): Body<OracleBody>,
 ) -> ApiResult {
     check_admin(&t, &headers)?;
+    o.demo()?;
     let address = o.base_mock.ok_or(ApiError::new(
         StatusCode::CONFLICT,
         "real_price",
@@ -711,7 +760,8 @@ struct ShockBody {
 }
 
 /// DEMO: the market's shock (DemoShockOracle.setShock: a lowering keeps at least 75 % of the
-/// current shock and comes at least two minutes after the last one).
+/// current shock and comes at least two minutes after the last one). Refused when the market's
+/// oracle is not a DemoShockOracle (Base mainnet).
 async fn admin_set_shock(
     axum::Extension(t): axum::Extension<AdminToken>,
     axum::Extension(o): axum::Extension<Oracle>,
@@ -719,9 +769,9 @@ async fn admin_set_shock(
     Body(b): Body<ShockBody>,
 ) -> ApiResult {
     check_admin(&t, &headers)?;
-    let market = o.market.ok_or(ApiError::NOT_CONFIGURED)?;
+    let demo = o.demo()?;
     let p = owner_provider(&o)?;
-    let shock = IDemoShockOracle::new(market, &p);
+    let shock = IDemoShockOracle::new(demo, &p);
     let call = shock.setShock(alloy::primitives::U256::from(b.shock_bps));
     // A refused step (too deep, too soon) is the contract's answer, not an outage.
     call.call().await.map_err(|_| {
@@ -939,12 +989,6 @@ fn signer_sets_agree(cfg: &NetworkConfig, dep: &serde_json::Value) -> bool {
 }
 
 /// Reads the allowlist parameters from the deployment file written by the deploy script.
-/// `contracts.<name>` of the deployment file, if present.
-fn deployment_contract(path: &std::path::Path, name: &str) -> Option<Address> {
-    let raw: serde_json::Value = serde_json::from_slice(&std::fs::read(path).ok()?).ok()?;
-    raw.get("contracts")?.get(name)?.as_str()?.parse().ok()
-}
-
 fn load_allowlist(path: &std::path::Path) -> Option<allowlist::Allowlist> {
     let raw: serde_json::Value = serde_json::from_slice(&std::fs::read(path).ok()?).ok()?;
     let contract = |name: &str| raw.get("contracts")?.get(name)?.as_str()?.parse::<Address>().ok();
@@ -955,6 +999,8 @@ fn load_allowlist(path: &std::path::Path) -> Option<allowlist::Allowlist> {
         adapter: contract("SettlementAdapter")?,
         // v3: `refundPending` (T-03). A deployment file without it (v2) sponsors nothing.
         intake: contract("ZecuredIntake")?,
+        // v3: `slashLiveness` (T-05); the proxy confirms it is the Registry's `signerBond()`.
+        bond: contract("SignerBond")?,
         // RQ-06: Circle's testnet USDC on Base Sepolia, a MockUSDC on the local fork.
         usdc: contract("LoanToken").or_else(|| contract("MockUSDC"))?,
         loan_token: market("loanToken")?.parse().ok()?,
@@ -1106,7 +1152,6 @@ async fn main() -> Result<()> {
         );
     }
     let allowlist = load_allowlist(&cli.deployments);
-    let allowlist_oracle = allowlist.as_ref().map(|a| a.oracle);
     if allowlist.is_none() {
         warn!("no v3 deployment file: paymaster sponsorship disabled");
     }
@@ -1173,12 +1218,11 @@ async fn main() -> Result<()> {
         status: status_info(&deployment, &coordinator.cfg),
         admin_token: AdminToken(Arc::new(cli.admin_token.clone())),
         modes,
-        oracle: Oracle {
-            rpc: coordinator.cfg.base_rpc_url.clone(),
-            market: allowlist_oracle,
-            base_mock: deployment_contract(&cli.deployments, "MockZecOracle"),
-            owner_key: cli.oracle_owner_key.clone(),
-        },
+        oracle: Oracle::from_deployment(
+            coordinator.cfg.base_rpc_url.clone(),
+            &deployment,
+            cli.oracle_owner_key.clone(),
+        ),
         market_maker: MarketMaker {
             url: Arc::new(cli.market_maker_url.trim_end_matches('/').to_owned()),
             http: reqwest::Client::builder().timeout(Duration::from_secs(180)).build()?,
@@ -1374,8 +1418,45 @@ mod tests {
         })
     }
 
-    /// The paymaster allowlist's contracts come from the deployment file, the Intake included; a
-    /// file without one (v2) sponsors nothing.
+    /// `v3_deployment()` as on Base mainnet: the market prices with the ZecuredPriceFeed itself
+    /// (T-10), so the file has no DemoShockOracle and no MockZecOracle.
+    fn mainnet_deployment() -> serde_json::Value {
+        let mut dep = v3_deployment();
+        let feed = json!(Address::repeat_byte(0xf0));
+        let contracts = dep["contracts"].as_object_mut().unwrap();
+        contracts.remove("DemoShockOracle");
+        contracts.remove("MockZecOracle");
+        contracts.insert("BaseOracle".into(), feed.clone());
+        contracts.insert("MarketOracle".into(), feed.clone());
+        dep["market"]["oracle"] = feed;
+        dep["chainId"] = json!(8_453);
+        dep
+    }
+
+    /// RQ-06: the demo price controls act only on the market's own DemoShockOracle; without one
+    /// (Base mainnet) they refuse with a fixed error.
+    #[test]
+    fn the_demo_price_controls_need_the_markets_demo_oracle() {
+        let address = |v: &serde_json::Value| v.as_str().unwrap().parse::<Address>().unwrap();
+        let oracle = |dep: &serde_json::Value| Oracle::from_deployment(String::new(), dep, String::new());
+        let dep = v3_deployment();
+        let o = oracle(&dep);
+        assert_eq!(o.market, Some(address(&dep["market"]["oracle"])));
+        assert_eq!(o.demo(), Ok(address(&dep["contracts"]["DemoShockOracle"])));
+        assert_eq!(o.base_mock, Some(address(&dep["contracts"]["MockZecOracle"])));
+        let mainnet = mainnet_deployment();
+        let o = oracle(&mainnet);
+        assert_eq!(o.market, Some(Address::repeat_byte(0xf0)));
+        assert_eq!((o.demo(), o.base_mock), (Err(NOT_DEMO_ORACLE), None));
+        // A DemoShockOracle that is not the market's is never shocked.
+        let mut stray = dep.clone();
+        stray["market"]["oracle"] = json!(Address::repeat_byte(0xf0));
+        assert_eq!(oracle(&stray).demo(), Err(NOT_DEMO_ORACLE));
+        assert_eq!(oracle(&serde_json::Value::Null).demo(), Err(ApiError::NOT_CONFIGURED));
+    }
+
+    /// The paymaster allowlist's contracts come from the deployment file, the Intake and the bond
+    /// included; a file without them (v2) sponsors nothing.
     #[test]
     fn the_allowlist_reads_the_v3_deployment_file() {
         let dir = std::env::temp_dir().join(format!("zecured-backend-test-{}", hex::encode(keccak256(b"allowlist"))));
@@ -1386,16 +1467,19 @@ mod tests {
         let l = load_allowlist(&path).expect("a v3 deployment file");
         let address = |v: &serde_json::Value| v.as_str().unwrap().parse::<Address>().unwrap();
         assert_eq!(l.intake, address(&dep["contracts"]["ZecuredIntake"]));
+        assert_eq!(l.bond, address(&dep["contracts"]["SignerBond"]));
         assert_eq!(l.registry, address(&dep["contracts"]["ZecuredRegistry"]));
         assert_eq!(l.adapter, address(&dep["contracts"]["SettlementAdapter"]));
         // RQ-06: the loan token, Circle's USDC here; the market as Morpho knows it.
         assert_eq!(l.usdc, address(&dep["contracts"]["LoanToken"]));
         assert_eq!(l.oracle, address(&dep["market"]["oracle"]));
         assert_eq!(l.lltv, alloy::primitives::U256::from(625_000_000_000_000_000u64));
-        let mut v2 = dep.clone();
-        v2["contracts"].as_object_mut().unwrap().remove("ZecuredIntake");
-        std::fs::write(&path, v2.to_string()).unwrap();
-        assert!(load_allowlist(&path).is_none(), "no Intake, no sponsorship");
+        for v3_contract in ["ZecuredIntake", "SignerBond"] {
+            let mut v2 = dep.clone();
+            v2["contracts"].as_object_mut().unwrap().remove(v3_contract);
+            std::fs::write(&path, v2.to_string()).unwrap();
+            assert!(load_allowlist(&path).is_none(), "no {v3_contract}, no sponsorship");
+        }
         assert!(load_allowlist(&dir.join("missing.json")).is_none());
         let _ = std::fs::remove_dir_all(&dir);
     }
@@ -1494,12 +1578,8 @@ mod tests {
             status,
             admin_token: AdminToken(Arc::new("tok".into())),
             modes: ModePolicy::parse("4,5", &[1, 2, 3, 4, 5]).unwrap(),
-            oracle: Oracle {
-                rpc: "http://127.0.0.1:9".into(),
-                market: None,
-                base_mock: None,
-                owner_key: String::new(),
-            },
+            // Base mainnet: the market prices with a real feed.
+            oracle: Oracle::from_deployment("http://127.0.0.1:9".into(), &mainnet_deployment(), String::new()),
             market_maker: MarketMaker {
                 url: Arc::new("http://127.0.0.1:9".into()),
                 http: reqwest::Client::new(),
@@ -1551,6 +1631,15 @@ mod tests {
         let (status, body, _) = call(Method::GET, &unknown, "").await;
         assert_eq!((status, body["code"].as_str()), (StatusCode::NOT_FOUND, Some("unknown_vault")));
         assert!(body.get("address").is_none());
+        // RQ-06: on a real feed the demo price controls refuse with a fixed error, before any chain
+        // access (this backend's RPC is unreachable).
+        for (uri, body) in [
+            ("/admin/shock", r#"{"shockBps":500}"#),
+            ("/admin/oracle", r#"{"priceUsdCents":100000}"#),
+        ] {
+            let (status, body, _) = call(Method::POST, uri, body).await;
+            assert_eq!((status, body["code"].as_str()), (StatusCode::CONFLICT, Some("not_demo_oracle")), "{uri}");
+        }
         // C-3: no third compromised node, whatever the token.
         let (status, body, _) = call(Method::POST, "/admin/nodes/1/mode", r#"{"mode":"compromised"}"#).await;
         assert_eq!((status, body["code"].as_str()), (StatusCode::FORBIDDEN, Some("mode_not_allowed")));

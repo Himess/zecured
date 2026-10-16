@@ -5,7 +5,7 @@
  * anything else, so a bug here fails loudly in the browser instead of at the paymaster.
  */
 import { decodeErrorResult, decodeFunctionData, encodeFunctionData, getAddress, type Address, type Hex } from "viem";
-import { adapterAbi, disputesAbi, erc20Abi, intakeAbi, morphoAbi, registryAbi, revertErrorsAbi } from "./abi";
+import { adapterAbi, bondAbi, disputesAbi, erc20Abi, intakeAbi, morphoAbi, registryAbi, revertErrorsAbi } from "./abi";
 import { config as defaultConfig, marketParams, ZERO_BYTES32, type AppConfig, type MarketParams } from "./config";
 import { formatUsdc, MIN_RELEASE } from "./morpho";
 import { formatTaz } from "./zcash";
@@ -202,6 +202,15 @@ export function reopenDisputedClaimCalls(p: { claimId: Hex; config?: AppConfig }
   ];
 }
 
+/**
+ * T-05: the signers' bonds pay the account's overdue claim in USDC (`SignerBond.slashLiveness`),
+ * and the claim's ZEC then goes to the bonds instead. `bond` is the one the pinned Registry
+ * names (`Links.bond`).
+ */
+export function slashLivenessCalls(p: { claimId: Hex; bond: Address }): Call[] {
+  return [{ to: p.bond, data: encodeFunctionData({ abi: bondAbi, functionName: "slashLiveness", args: [p.claimId] }) }];
+}
+
 // ------------------------------------------------------------------ allowlist mirror
 
 export class NotAllowlistedError extends Error {
@@ -230,22 +239,48 @@ function sameMarket(a: MarketParams, b: MarketParams): boolean {
   );
 }
 
+/** The contracts the pinned Registry names that the allowlist has calls for (lib/chain.ts `Links`). */
+export interface NamedTargets {
+  /** The signer bond: `slashLiveness` (null: unknown, so nothing to it is sponsorable). */
+  bond: Address | null;
+}
+
+/** The pinned contracts the allowlist has calls for: a batch to none other needs no `NamedTargets`. */
+export function pinnedTargets(c: AppConfig = defaultConfig): Address[] {
+  return [c.registry, c.intake, c.adapter, c.morpho, c.usdc].map((a) => getAddress(a));
+}
+
 /**
  * Throws `NotAllowlistedError` unless every call is on the paymaster allowlist:
  * Registry.requestRelease / requestPartialRelease, setRefundDestination (non-zero commitment),
  * disputePayout / reopenDisputedClaim (served by the Registry's fallback); Intake.refundPending;
- * Adapter.invalidateNonce; Morpho.setAuthorization (Registry or Adapter only), borrow / repay
- * (Zecured market, onBehalf = account, no callback data); the loan token's approve (spender =
- * Morpho) and transfer. No ETH value anywhere. Mirrors backend/src/allowlist.rs; what needs the
- * chain (the claim is the account's own, the vault is its own) only the backend checks.
+ * the bond's slashLiveness (each claim once); Adapter.invalidateNonce; Morpho.setAuthorization
+ * (Registry or Adapter only), borrow / repay (Zecured market, onBehalf = account, no callback
+ * data); the loan token's approve (spender = Morpho) and transfer. No ETH value anywhere. Mirrors
+ * backend/src/allowlist.rs; what needs the chain (the claim is the account's own, the vault is
+ * its own, the bonds can pay the claim now) only the backend checks.
  */
-export function assertAllowlisted(calls: readonly Call[], account: Address, c: AppConfig = defaultConfig): void {
+export function assertAllowlisted(
+  calls: readonly Call[],
+  account: Address,
+  c: AppConfig = defaultConfig,
+  named: NamedTargets = { bond: null },
+): void {
   if (calls.length === 0) throw new NotAllowlistedError("empty batch");
   const me = getAddress(account);
+  // A "bond" that is one of the pinned contracts never widens that contract's rules.
+  const bond = named.bond !== null && !pinnedTargets(c).includes(getAddress(named.bond)) ? getAddress(named.bond) : null;
+  const bondPaid = new Set<string>();
   for (const call of calls) {
     if (call.value !== undefined && call.value !== 0n) throw new NotAllowlistedError("ETH value");
     const to = getAddress(call.to);
-    if (to === getAddress(c.registry)) {
+    if (to === bond) {
+      const d = decode(bondAbi, call.data, "SignerBond");
+      if (d.functionName !== "slashLiveness") throw new NotAllowlistedError(`SignerBond.${d.functionName}`);
+      const claimId = d.args[0].toLowerCase();
+      if (bondPaid.has(claimId)) throw new NotAllowlistedError("the same claim paid from the bonds twice");
+      bondPaid.add(claimId);
+    } else if (to === getAddress(c.registry)) {
       const d = decode(registryCallsAbi, call.data, "Registry");
       if (d.functionName === "setRefundDestination") {
         if (d.args[1].toLowerCase() === ZERO_BYTES32) throw new NotAllowlistedError("a zero refund destination");
@@ -308,10 +343,10 @@ function hexCandidates(e: unknown): Hex[] {
 }
 
 /**
- * A user-facing explanation of a Registry, dispute or Intake revert (the D14 limits, the vault's
- * state, refunds, disputes) or of Morpho's own checks, found anywhere in `e` (e.g. the
- * bundler's simulation error); null if there is none. viem cannot decode these: calls go out
- * without their ABI.
+ * A user-facing explanation of a Registry, dispute, Intake or bond revert (the D14 limits, the
+ * vault's state, refunds, disputes, payments by the bonds) or of Morpho's own checks, found
+ * anywhere in `e` (e.g. the bundler's simulation error); null if there is none. viem cannot
+ * decode these: calls go out without their ABI.
  */
 export function describeRevert(e: unknown): string | null {
   for (const data of hexCandidates(e)) {
@@ -367,6 +402,14 @@ export function describeRevert(e: unknown): string | null {
         return "The Intake refused: the pending activation cannot be refunded yet (the pause has not lasted long enough, or the deposit's block left the relay's best chain).";
       case "NotPendingAccount":
         return "The Intake refused: while minting is only paused, only the vault's own account can refund its pending activation.";
+      case "NotTheClaimant":
+        return "The bonds refused: only the claim's own claimant can have them pay it.";
+      case "NotLivenessEligible":
+        return "The bonds refused: they cannot pay this claim (it was paid, written off or already paid by the bonds, or a theft case froze its vault).";
+      case "LivenessNotDue":
+        return `The bonds can pay this claim only from ${formatUtc(n(1))}.`;
+      case "InsufficientBond":
+        return `The bonds hold ${formatUsdc(n(1))} USDC right now, less than the ${formatUsdc(n(0))} USDC this claim needs. The claim stays payable on Zcash; try again later.`;
       case "Error":
         if (a[0] === "insufficient collateral") {
           return "Morpho refused the withdrawal: the position would no longer be healthy. Try a smaller amount.";

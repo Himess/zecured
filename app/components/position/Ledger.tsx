@@ -17,13 +17,17 @@ import {
   refundDestinationCalls,
   refundPendingCalls,
   reopenDisputedClaimCalls,
+  slashLivenessCalls,
   type Call,
 } from "@/lib/calls";
 import { readCompensation, type Compensation, type LedgerClaim, type VaultLedger } from "@/lib/chain";
+import { config } from "@/lib/config";
 import { notifyLoansChanged, useAction, useRefundReason } from "@/lib/hooks";
 import { loanStore, short, type StoredLoan } from "@/lib/keys";
 import { formatUsdc } from "@/lib/morpho";
 import {
+  bondPayment,
+  bondPaymentExplainer,
   claimView,
   COMPENSATION_SENTENCE,
   compensatedClaimIds,
@@ -341,6 +345,16 @@ function ClaimRow({
     onChanged();
     return r;
   });
+  // T-05: the bonds pay the account's own overdue claim (the chain's time, as the bond decides).
+  const bond = ledger.links.bond;
+  const bp = bondPayment(claim, { nowSeconds: ledger.blockTime, slashable: ledger.bondsSlashable });
+  const [confirmingBonds, setConfirmingBonds] = useState(false);
+  const fromBonds = useAction(async () => {
+    const r = await send(loan!, slashLivenessCalls({ claimId: claim.claimId, bond: bond! }));
+    setConfirmingBonds(false);
+    onChanged();
+    return r;
+  });
   return (
     <li className="space-y-2 py-3">
       <div className="flex flex-wrap items-center justify-between gap-2">
@@ -397,6 +411,50 @@ function ClaimRow({
         </Notice>
       ) : null}
       {reopen.result ? <TxResult result={reopen.result} what="Claim reopened" /> : null}
+      {mine && bp.kind === "later" ? (
+        <p className="text-xs text-muted">
+          If the signers have not paid it by {formatUtc(bp.dueAt)}, their bonds can pay you its value in USDC instead.
+        </p>
+      ) : null}
+      {mine && bond && bp.kind === "now" ? (
+        <div className="space-y-2">
+          <p className="text-xs">
+            Overdue: the signers&apos; bonds would pay you <strong>{formatUsdc(bp.usdc)} USDC</strong> now.
+          </p>
+          <p className="text-xs text-muted">{bondPaymentExplainer(config.v3?.livenessPremiumBps ?? null)}</p>
+          {!bp.covered ? (
+            <p className="text-xs text-warn">
+              The bonds hold less than that right now ({formatUsdc(ledger.bondsSlashable ?? 0n)} USDC). The claim stays
+              payable on Zcash; try again later.
+            </p>
+          ) : !confirmingBonds ? (
+            <Button variant="secondary" onClick={() => setConfirmingBonds(true)}>
+              Claim from the bonds
+            </Button>
+          ) : (
+            <Notice tone="warn" title={`Take ${formatUsdc(bp.usdc)} USDC from the bonds?`}>
+              <p>
+                This cannot be undone: the claim&apos;s ZEC then goes to the bonds, not to you. The amount follows the price
+                until the transaction lands.
+              </p>
+              <div className="flex flex-wrap gap-2">
+                <Button onClick={() => fromBonds.run()} busy={fromBonds.busy}>
+                  Claim from the bonds (sponsored)
+                </Button>
+                <Button variant="ghost" onClick={() => setConfirmingBonds(false)}>
+                  Cancel
+                </Button>
+              </div>
+            </Notice>
+          )}
+        </div>
+      ) : null}
+      {fromBonds.error ? (
+        <Notice tone="danger" title="Not paid by the bonds" live>
+          <p>{fromBonds.error}</p>
+        </Notice>
+      ) : null}
+      {fromBonds.result ? <TxResult result={fromBonds.result} what="Claim paid from the bonds" /> : null}
     </li>
   );
 }

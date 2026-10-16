@@ -7,8 +7,9 @@
  * `NEXT_PUBLIC_*` variables baked into the build; Morpho and the IRM default to Base Sepolia's
  * canonical deployments. Next.js inlines `process.env.NEXT_PUBLIC_*`, which is why each variable
  * is read with its literal name. Every value here is public. The contracts the app only reads
- * (the slasher, the compensator, the bond, the relay) are the ones the pinned Registry and Intake
- * name on-chain (lib/chain.ts `readLinks`).
+ * (the slasher, the compensator, the relay) are the ones the pinned Registry and Intake name
+ * on-chain (lib/chain.ts `readLinks`), and so is the signer bond, the one contract the account
+ * calls that is not pinned: only its `slashLiveness` (T-05), which approves and sends nothing.
  *
  * The backend's `GET /config` never overrides a pin. It is a consistency check: any
  * disagreement is a hard stop (owner signatures, Base reads and sponsored transactions are

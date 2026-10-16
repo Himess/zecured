@@ -287,6 +287,7 @@ export const registryAbi = [
   { type: "function", name: "intake", stateMutability: "view", inputs: [], outputs: [{ name: "", type: "address" }] },
   { type: "function", name: "slasher", stateMutability: "view", inputs: [], outputs: [{ name: "", type: "address" }] },
   { type: "function", name: "compensator", stateMutability: "view", inputs: [], outputs: [{ name: "", type: "address" }] },
+  { type: "function", name: "signerBond", stateMutability: "view", inputs: [], outputs: [{ name: "", type: "address" }] },
   {
     type: "function",
     name: "refundAbandonPeriod",
@@ -480,10 +481,58 @@ export const slasherAbi = [
   },
 ] as const;
 
-/** SignerBondV2: the gates the Intake reads (T-01). */
+/** SignerBondV2's errors a payment by the bonds can hit (T-05). */
+export const bondErrorsAbi = [
+  {
+    type: "error",
+    name: "NotTheClaimant",
+    inputs: [
+      { name: "claimId", type: "bytes32" },
+      { name: "caller", type: "address" },
+    ],
+  },
+  { type: "error", name: "NotLivenessEligible", inputs: [{ name: "claimId", type: "bytes32" }] },
+  {
+    type: "error",
+    name: "LivenessNotDue",
+    inputs: [
+      { name: "claimId", type: "bytes32" },
+      { name: "dueAt", type: "uint64" },
+    ],
+  },
+  {
+    type: "error",
+    name: "InsufficientBond",
+    inputs: [
+      { name: "due", type: "uint256" },
+      { name: "slashable", type: "uint256" },
+    ],
+  },
+] as const;
+
+/** SignerBondV2: the gates the Intake reads (T-01), and the bonds paying an overdue claim (T-05). */
 export const bondAbi = [
   { type: "function", name: "halted", stateMutability: "view", inputs: [], outputs: [{ name: "", type: "bool" }] },
   { type: "function", name: "fullyBonded", stateMutability: "view", inputs: [], outputs: [{ name: "", type: "bool" }] },
+  {
+    type: "function",
+    name: "livenessDue",
+    stateMutability: "view",
+    inputs: [{ name: "claimId", type: "bytes32" }],
+    outputs: [
+      { name: "dueAt", type: "uint64" },
+      { name: "amount", type: "uint256" },
+    ],
+  },
+  {
+    type: "function",
+    name: "slashLiveness",
+    stateMutability: "nonpayable",
+    inputs: [{ name: "claimId", type: "bytes32" }],
+    outputs: [{ name: "paid", type: "uint256" }],
+  },
+  { type: "function", name: "totalSlashable", stateMutability: "view", inputs: [], outputs: [{ name: "", type: "uint256" }] },
+  ...bondErrorsAbi,
 ] as const;
 
 /** ZecuredCompensator: what a compromised vault's victims get (T-04), read-only. */
@@ -565,7 +614,7 @@ export const compensatorAbi = [
 ] as const;
 
 /** Every revert the app explains (lib/calls.ts `describeRevert`). */
-export const revertErrorsAbi = [...registryErrorsAbi, ...disputesErrorsAbi, ...intakeErrorsAbi] as const;
+export const revertErrorsAbi = [...registryErrorsAbi, ...disputesErrorsAbi, ...intakeErrorsAbi, ...bondErrorsAbi] as const;
 
 /** Registry v3 `VaultStatus` (append-only: off-chain code reads it as a number). */
 export const ONCHAIN_VAULT_STATUS = ["None", "Active", "Closed", "Cancelled", "Pending"] as const;

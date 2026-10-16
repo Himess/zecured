@@ -6,17 +6,21 @@
 //! and log ranges (L-4). Every request that carries a UserOp must pass the paymaster
 //! allowlist, name EntryPoint v0.7, come from a Zecured account (`Registry.vaultOf(sender)
 //! != 0`, or for a call about a claim, the claim's own claimant; once deployed, still the
-//! canonical SafeProxy), refund only its own pending activation, and stay within a per-sender
-//! rate (M-3). Refusals are fixed messages with a short code (L-2).
+//! canonical SafeProxy), refund only its own pending activation, have the bonds pay a claim
+//! only when they can pay it now, and stay within a per-sender rate (M-3). Refusals are fixed
+//! messages with a short code (L-2).
 
 use std::{
     collections::HashMap,
-    sync::{Mutex, PoisonError},
+    sync::{
+        Mutex, PoisonError,
+        atomic::{AtomicBool, Ordering},
+    },
     time::{Duration, Instant},
 };
 
 use alloy::{
-    primitives::{Address, B256},
+    primitives::{Address, B256, U256},
     sol,
     sol_types::SolCall,
 };
@@ -118,6 +122,12 @@ sol! {
     }
 
     function claimDetails(bytes32 claimId) external view returns (ClaimDetails memory);
+    function signerBond() external view returns (address);
+
+    /// SignerBondV2 (T-05): `(0, 0)` for a claim the bonds never pay; it does not check that
+    /// the bonds hold `amount`.
+    function livenessDue(bytes32 claimId) external view returns (uint64 dueAt, uint256 amount);
+    function totalSlashable() external view returns (uint256);
 }
 
 /// `ClaimKind.Refund` (IZecuredRegistry v3; the enum is append-only).
@@ -165,8 +175,14 @@ const NOT_OWN_VAULT: Refusal =
     Refusal::new("not_own_vault", "Not sponsored: only a vault's own account refunds its pending activation.");
 const NOT_OWN_REFUND: Refusal =
     Refusal::new("not_own_refund", "Not sponsored: only the refunded vault's account gives the refund's destination.");
-const NOT_OWN_CLAIM: Refusal =
-    Refusal::new("not_own_claim", "Not sponsored: only a claim's own claimant disputes or reopens it.");
+const NOT_OWN_CLAIM: Refusal = Refusal::new(
+    "not_own_claim",
+    "Not sponsored: only a claim's own claimant disputes it, reopens it or has the bonds pay it.",
+);
+const NOT_PAYABLE_NOW: Refusal = Refusal::new(
+    "not_payable_now",
+    "Not sponsored: the bonds cannot pay this claim now (not overdue yet, not eligible, or more than the bonds hold).",
+);
 const NOT_A_SAFE: Refusal =
     Refusal::new("not_a_safe", "Not sponsored: the sender is not a standard Zecured Safe account.");
 const CHECK_UNAVAILABLE: Refusal =
@@ -194,6 +210,8 @@ pub struct Proxy {
     senders: KeyedBuckets<Address>,
     /// Senders recently found to be Zecured Safes bound to a vault, and that vault.
     verified: Mutex<HashMap<Address, (Instant, B256)>>,
+    /// The allowlist's bond was found to be the Registry's `signerBond()` (immutable).
+    bond_confirmed: AtomicBool,
 }
 
 pub type ProxyState = State<Arc<Proxy>>;
@@ -269,6 +287,7 @@ impl Proxy {
             allowlist,
             senders: KeyedBuckets::new(SENDER_RATE, MAX_SENDERS),
             verified: Mutex::default(),
+            bond_confirmed: AtomicBool::new(false),
         })
     }
 
@@ -319,8 +338,9 @@ impl Proxy {
     /// about one of its own claims, whose claimant it must be (`Registry.claimDetails`): a
     /// refund's destination (T-02; a Refund claim, which a deposit that landed only as a refund
     /// leaves without binding the account), a dispute of a payout confirmation and the reopening
-    /// of a disputed claim (T-05 (a)). `Intake.refundPending` (T-03) only for the sender's own
-    /// vault. Fails closed if the chain cannot be read.
+    /// of a disputed claim (T-05 (a)), and the bonds paying an overdue claim (T-05; only when they
+    /// can pay it now). `Intake.refundPending` (T-03) only for the sender's own vault. Fails
+    /// closed if the chain cannot be read.
     async fn check_sender(&self, allowlist: &Allowlist, op: &UserOpView, bindings: &Bindings) -> Result<(), Refusal> {
         let cached = self.recently_verified(op.sender);
         let vault = match cached {
@@ -333,7 +353,13 @@ impl Proxy {
         if bindings.own_vaults.iter().any(|v| *v != vault) {
             return Err(NOT_OWN_VAULT);
         }
-        let mut claims: Vec<B256> = bindings.refund_claims.iter().chain(&bindings.own_claims).copied().collect();
+        let mut claims: Vec<B256> = bindings
+            .refund_claims
+            .iter()
+            .chain(&bindings.own_claims)
+            .chain(&bindings.liveness_claims)
+            .copied()
+            .collect();
         claims.sort_unstable();
         claims.dedup();
         for claim_id in claims {
@@ -346,6 +372,9 @@ impl Proxy {
             if c.claimant != op.sender {
                 return Err(NOT_OWN_CLAIM);
             }
+        }
+        if !bindings.liveness_claims.is_empty() {
+            self.check_payable_now(allowlist, &bindings.liveness_claims).await?;
         }
         if cached.is_none() {
             // An undeployed sender is checked by the allowlist: its factory data CREATE2-derives it.
@@ -366,8 +395,55 @@ impl Proxy {
     }
 
     async fn claim_details(&self, registry: Address, claim_id: B256) -> Result<ClaimDetails, Refusal> {
-        let out = self.eth_call(registry, claimDetailsCall { claimId: claim_id }.abi_encode()).await?;
-        claimDetailsCall::abi_decode_returns(&out).map_err(|_| CHECK_UNAVAILABLE)
+        self.view(registry, claimDetailsCall { claimId: claim_id }).await
+    }
+
+    /// T-05: `slashLiveness` would succeed now for every claim, so the paymaster never pays for
+    /// a doomed call (its claimant is checked with the other claims): the bond is the Registry's,
+    /// each claim is due (`livenessDue`: a non-zero `dueAt` no later than the latest block, which
+    /// the UserOp's block cannot precede, and a non-zero amount; it is zero for a claim the bonds
+    /// never pay: wrong kind or status, already paid, no commitment, a frozen vault), and the
+    /// bonds hold the total (`totalSlashable`, else `InsufficientBond`).
+    async fn check_payable_now(&self, allowlist: &Allowlist, claims: &[B256]) -> Result<(), Refusal> {
+        self.check_bond(allowlist).await?;
+        let now = self.latest_timestamp().await?;
+        let mut total = U256::ZERO;
+        for &claim_id in claims {
+            let due = self.view(allowlist.bond, livenessDueCall { claimId: claim_id }).await?;
+            if due.dueAt == 0 || due.dueAt > now || due.amount.is_zero() {
+                return Err(NOT_PAYABLE_NOW);
+            }
+            total = total.saturating_add(due.amount);
+        }
+        if self.view(allowlist.bond, totalSlashableCall {}).await? < total {
+            return Err(NOT_PAYABLE_NOW);
+        }
+        Ok(())
+    }
+
+    /// The allowlist's bond (the deployment file's) is the pinned Registry's `signerBond()`,
+    /// which is immutable: confirmed once.
+    async fn check_bond(&self, allowlist: &Allowlist) -> Result<(), Refusal> {
+        if self.bond_confirmed.load(Ordering::Relaxed) {
+            return Ok(());
+        }
+        if self.view(allowlist.registry, signerBondCall {}).await? != allowlist.bond {
+            return Err(NOT_CONFIGURED);
+        }
+        self.bond_confirmed.store(true, Ordering::Relaxed);
+        Ok(())
+    }
+
+    /// The latest block's timestamp.
+    async fn latest_timestamp(&self) -> Result<u64, Refusal> {
+        let block = self.chain_read("eth_getBlockByNumber", json!(["latest", false])).await?;
+        quantity(block.get("timestamp")).ok_or(CHECK_UNAVAILABLE)
+    }
+
+    /// One view call, decoded.
+    async fn view<C: SolCall>(&self, to: Address, call: C) -> Result<C::Return, Refusal> {
+        let out = self.eth_call(to, call.abi_encode()).await?;
+        C::abi_decode_returns(&out).map_err(|_| CHECK_UNAVAILABLE)
     }
 
     /// The deployed sender is the canonical SafeProxy of the Safe 1.4.1 singleton with the Safe
@@ -498,51 +574,88 @@ mod tests {
     use axum::{Router, routing::post};
 
     use super::*;
-    use crate::allowlist::tests::{batch, dispute, list, op, refund_destination, refund_pending, reopen, single};
+    use crate::allowlist::tests::{
+        batch, dispute, list, liveness, op, refund_destination, refund_pending, reopen, single,
+    };
 
     /// A Base RPC stub: `bound` senders have a vault (0x07…, or the one in `vaults`); `claims`
-    /// are the Registry's claims (kind, claimant); `deployed` senders have the given code and
-    /// storage (singleton slot, fallback handler slot).
+    /// are the Registry's claims (kind, claimant); `liveness` the bond's `livenessDue` (dueAt,
+    /// amount; zeros for any other claim), `slashable` its `totalSlashable`, `bond` the Registry's
+    /// `signerBond` (the allowlist's if unset), `now` the latest block's timestamp; `deployed`
+    /// senders have the given code and storage (singleton slot, fallback handler slot).
     #[derive(Default)]
     struct Chain {
         bound: Vec<Address>,
         vaults: HashMap<Address, B256>,
         claims: HashMap<B256, (u8, Address)>,
+        liveness: HashMap<B256, (u64, U256)>,
+        slashable: U256,
+        bond: Option<Address>,
+        now: u64,
         deployed: HashMap<Address, (Vec<u8>, Address, Address)>,
         calls: AtomicUsize,
+        bond_reads: AtomicUsize,
     }
 
     async fn chain_rpc(State(c): State<Arc<Chain>>, Json(req): Json<Value>) -> Json<Value> {
         c.calls.fetch_add(1, Ordering::SeqCst);
         let params = &req["params"];
         let word = |a: Address| format!("0x{}{}", "00".repeat(12), hex::encode(a));
+        let l = list();
         let result = match req["method"].as_str().unwrap() {
             "eth_call" => {
+                let to: Address = params[0]["to"].as_str().unwrap().parse().unwrap();
                 let data = hex_bytes(&params[0]["data"]).unwrap();
-                if let Ok(call) = vaultOfCall::abi_decode(&data) {
-                    let account = call.account;
-                    let id = match c.vaults.get(&account) {
-                        Some(id) => *id,
-                        None if c.bound.contains(&account) => B256::repeat_byte(7),
-                        None => B256::ZERO,
-                    };
-                    json!(id)
-                } else {
-                    let id = claimDetailsCall::abi_decode(&data).unwrap().claimId;
-                    // An unknown claim reads as zeros (status None, no claimant).
-                    let (kind, claimant) = c.claims.get(&id).copied().unwrap_or((0, Address::ZERO));
-                    let details = ClaimDetails {
-                        vaultId: B256::repeat_byte(7),
-                        kind,
-                        status: u8::from(!claimant.is_zero()),
-                        amount: 50_000,
-                        commitment: B256::ZERO,
-                        createdAt: Default::default(),
-                        bondPaid: false,
-                        claimant,
-                    };
-                    json!(Bytes::from(claimDetailsCall::abi_encode_returns(&details)))
-                }
+                let out = match <[u8; 4]>::try_from(&data[..4]).unwrap() {
+                    vaultOfCall::SELECTOR => {
+                        assert_eq!(to, l.registry);
+                        let account = vaultOfCall::abi_decode(&data).unwrap().account;
+                        let id = match c.vaults.get(&account) {
+                            Some(id) => *id,
+                            None if c.bound.contains(&account) => B256::repeat_byte(7),
+                            None => B256::ZERO,
+                        };
+                        vaultOfCall::abi_encode_returns(&id)
+                    }
+                    claimDetailsCall::SELECTOR => {
+                        assert_eq!(to, l.registry);
+                        let id = claimDetailsCall::abi_decode(&data).unwrap().claimId;
+                        // An unknown claim reads as zeros (status None, no claimant).
+                        let (kind, claimant) = c.claims.get(&id).copied().unwrap_or((0, Address::ZERO));
+                        let details = ClaimDetails {
+                            vaultId: B256::repeat_byte(7),
+                            kind,
+                            status: u8::from(!claimant.is_zero()),
+                            amount: 50_000,
+                            commitment: B256::ZERO,
+                            createdAt: Default::default(),
+                            bondPaid: false,
+                            claimant,
+                        };
+                        claimDetailsCall::abi_encode_returns(&details)
+                    }
+                    signerBondCall::SELECTOR => {
+                        assert_eq!(to, l.registry);
+                        c.bond_reads.fetch_add(1, Ordering::SeqCst);
+                        signerBondCall::abi_encode_returns(&c.bond.unwrap_or(l.bond))
+                    }
+                    livenessDueCall::SELECTOR => {
+                        assert_eq!(to, l.bond);
+                        let id = livenessDueCall::abi_decode(&data).unwrap().claimId;
+                        let (due_at, amount) = c.liveness.get(&id).copied().unwrap_or_default();
+                        livenessDueCall::abi_encode_returns(&livenessDueReturn { dueAt: due_at, amount })
+                    }
+                    totalSlashableCall::SELECTOR => {
+                        assert_eq!(to, l.bond);
+                        totalSlashableCall::abi_encode_returns(&c.slashable)
+                    }
+                    s => panic!("unexpected call {}", hex::encode(s)),
+                };
+                json!(Bytes::from(out))
+            }
+            "eth_getBlockByNumber" => {
+                assert_eq!(params[0], "latest");
+                json!({ "number": "0x10", "timestamp": format!("0x{:x}", c.now) })
             }
             "eth_getCode" => {
                 let a: Address = params[0].as_str().unwrap().parse().unwrap();
@@ -735,6 +848,76 @@ mod tests {
         assert_eq!(sponsor(&p, bound, registry(dispute(7))).await, Err(NOT_OWN_CLAIM), "a Fee claim has no claimant");
         let both = batch(&[(l.registry, dispute(3)), (l.registry, refund_destination(3))]);
         assert_eq!(sponsor(&p, refund_only, both).await, Ok(()), "one claim, read once, both rules");
+    }
+
+    /// T-05: the bonds pay an overdue claim only for its own claimant, and only when the call
+    /// would succeed now: due, non-zero, and within what the bonds hold, alone or together.
+    #[tokio::test]
+    async fn bond_payments_only_for_the_claimants_claims_the_bonds_can_pay_now() {
+        let l = list();
+        let bound = Address::repeat_byte(0x91);
+        let refund_only = Address::repeat_byte(0x92);
+        let liquidator = Address::repeat_byte(0x94);
+        let now = 1_800_000_000;
+        let mut chain = Chain {
+            now,
+            slashable: U256::from(1_000_000u64),
+            ..Default::default()
+        };
+        chain.vaults.insert(bound, B256::repeat_byte(0x0b));
+        for a in [bound, refund_only] {
+            chain.deployed.insert(a, safe(SAFE_SINGLETON, SAFE_4337_MODULE));
+        }
+        let claims: [(u8, u8, Address, u64, u64); 8] = [
+            // (claim, kind, claimant, dueAt, amount)
+            (5, 0, bound, now - 1, 400_000),                   // a Release, overdue
+            (3, CLAIM_KIND_REFUND, refund_only, now, 100_000), // due this very second
+            (8, 1, liquidator, now - 1, 100_000),              // the liquidator's Liquidation
+            (6, 0, bound, now + 60, 400_000),                  // due in a minute
+            (9, 0, bound, 0, 0),                               // never paid by the bonds (e.g. a frozen vault)
+            (10, 0, bound, now - 1, 0),                        // nothing to pay at a zero price
+            (11, 0, bound, now - 1, 2_000_000),                // more than the bonds hold
+            (12, 0, bound, now - 1, 700_000),                  // fits alone, not next to claim 5
+        ];
+        for (id, kind, claimant, due_at, amount) in claims {
+            chain.claims.insert(B256::repeat_byte(id), (kind, claimant));
+            chain.liveness.insert(B256::repeat_byte(id), (due_at, U256::from(amount)));
+        }
+        let (p, chain) = proxy_with(chain).await;
+        let slash = |claim: u8| single(l.bond, liveness(claim));
+        assert_eq!(sponsor(&p, bound, slash(5)).await, Ok(()));
+        assert_eq!(sponsor(&p, refund_only, slash(3)).await, Ok(()), "a refund-only account, due now");
+        assert_eq!(sponsor(&p, bound, slash(12)).await, Ok(()));
+        assert_eq!(sponsor(&p, bound, slash(8)).await, Err(NOT_OWN_CLAIM), "someone else's claim");
+        assert_eq!(sponsor(&p, refund_only, slash(5)).await, Err(NOT_OWN_CLAIM), "another account's claim");
+        assert_eq!(sponsor(&p, bound, slash(6)).await, Err(NOT_PAYABLE_NOW), "not due yet");
+        assert_eq!(sponsor(&p, bound, slash(9)).await, Err(NOT_PAYABLE_NOW), "not payable from the bonds");
+        assert_eq!(sponsor(&p, bound, slash(10)).await, Err(NOT_PAYABLE_NOW), "a zero amount");
+        assert_eq!(sponsor(&p, bound, slash(11)).await, Err(NOT_PAYABLE_NOW), "more than the bonds hold");
+        let both = batch(&[(l.bond, liveness(5)), (l.bond, liveness(12))]);
+        assert_eq!(sponsor(&p, bound, both).await, Err(NOT_PAYABLE_NOW), "together more than the bonds hold");
+        // The Registry's bond is read once: it is immutable.
+        assert_eq!(chain.bond_reads.load(Ordering::SeqCst), 1);
+    }
+
+    /// The allowlist's bond must be the pinned Registry's `signerBond()`.
+    #[tokio::test]
+    async fn bond_payments_only_on_the_registrys_bond() {
+        let l = list();
+        let bound = Address::repeat_byte(0x91);
+        let now = 1_800_000_000;
+        let mut chain = Chain {
+            now,
+            slashable: U256::from(1_000_000u64),
+            bond: Some(Address::repeat_byte(0xbb)),
+            ..Default::default()
+        };
+        chain.vaults.insert(bound, B256::repeat_byte(0x0b));
+        chain.deployed.insert(bound, safe(SAFE_SINGLETON, SAFE_4337_MODULE));
+        chain.claims.insert(B256::repeat_byte(5), (0, bound));
+        chain.liveness.insert(B256::repeat_byte(5), (now - 1, U256::from(400_000u64)));
+        let (p, _) = proxy_with(chain).await;
+        assert_eq!(sponsor(&p, bound, single(l.bond, liveness(5))).await, Err(NOT_CONFIGURED));
     }
 
     /// T-03: only a vault's own account has its pending activation refunded (the Intake also lets

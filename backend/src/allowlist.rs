@@ -13,11 +13,12 @@
 //! vault by the deposit proof that reserved it (`Registry.vaultOf(sender) != 0`, before its first
 //! UserOp), except for the calls about one of its own claims, which the claim itself binds to the
 //! sender (v3: a deposit that landed only as a refund binds no account): a refund's destination,
-//! and disputing or reopening a payout confirmation; `Intake.refundPending` only for the sender's
-//! own vault; once deployed, the sender must still be the canonical
-//! SafeProxy with the Safe 4337 module as fallback handler; the EntryPoint must be v0.7; senders
-//! are rate-limited. The smart account therefore never needs (or receives) ETH, and the paymaster
-//! cannot be used for anything but Zecured flows.
+//! disputing or reopening a payout confirmation, and having the bonds pay an overdue claim (only
+//! when they can pay it now); `Intake.refundPending` only for the sender's own vault; once
+//! deployed, the sender must still be the canonical SafeProxy with the Safe 4337 module as
+//! fallback handler; the EntryPoint must be v0.7; senders are rate-limited. The smart account
+//! therefore never needs (or receives) ETH, and the paymaster cannot be used for anything but
+//! Zecured flows.
 //!
 //! Refusal reasons are fixed public strings (L-2).
 
@@ -90,6 +91,7 @@ sol! {
     function reopenDisputedClaim(bytes32 claimId);
     function invalidateNonce(uint256 nonce);
     function refundPending(bytes32 vaultId);
+    function slashLiveness(bytes32 claimId);
 }
 
 /// Deployment-specific parameters of the allowlist.
@@ -100,6 +102,8 @@ pub struct Allowlist {
     pub adapter: Address,
     /// ZecuredIntake (v3): `refundPending`.
     pub intake: Address,
+    /// SignerBondV2 (v3), the Registry's bond: `slashLiveness`.
+    pub bond: Address,
     pub usdc: Address,
     pub loan_token: Address,
     pub collateral_token: Address,
@@ -157,6 +161,9 @@ pub struct Bindings {
     /// `Registry.disputePayout(claimId)`, `Registry.reopenDisputedClaim(claimId)` (T-05 (a), served
     /// by the Registry's fallback): each a claim whose claimant is the sender.
     pub own_claims: Vec<B256>,
+    /// `SignerBond.slashLiveness(claimId)` (T-05): each a claim whose claimant is the sender, which
+    /// the bonds can pay now (`livenessDue` due and non-zero, covered by `totalSlashable`).
+    pub liveness_claims: Vec<B256>,
 }
 
 fn need(ok: bool, reason: &'static str) -> Check {
@@ -303,6 +310,15 @@ impl Allowlist {
             bindings.own_claims.push(decode::<reopenDisputedClaimCall>(data)?.claimId);
             return Ok(());
         }
+        // T-05: the bonds pay an overdue claim to its claimant (that one selector on the bond); the
+        // proxy checks the claim is the sender's and that the bonds can pay it now.
+        if to == self.bond && !self.bond.is_zero() && selector == slashLivenessCall::SELECTOR {
+            let claim_id = decode::<slashLivenessCall>(data)?.claimId;
+            // A second payment of the same claim would revert: never sponsor a doomed call.
+            need(!bindings.liveness_claims.contains(&claim_id), "a claim is paid from the bonds only once")?;
+            bindings.liveness_claims.push(claim_id);
+            return Ok(());
+        }
         bindings.bound_sender = true;
         // T-03: the proxy checks it is the sender's own vault.
         if to == self.intake && selector == refundPendingCall::SELECTOR {
@@ -383,6 +399,7 @@ pub(crate) mod tests {
             registry: Address::repeat_byte(0x22),
             adapter: Address::repeat_byte(0x33),
             intake: Address::repeat_byte(0x88),
+            bond: Address::repeat_byte(0xb0),
             usdc: Address::repeat_byte(0x44),
             loan_token: Address::repeat_byte(0x44),
             collateral_token: Address::repeat_byte(0x55),
@@ -501,6 +518,7 @@ pub(crate) mod tests {
                 own_vaults: vec![],
                 refund_claims: vec![B256::repeat_byte(3), B256::repeat_byte(4)],
                 own_claims: vec![],
+                liveness_claims: vec![],
             })
         );
         // Such an account's first UserOp deploys it.
@@ -516,6 +534,7 @@ pub(crate) mod tests {
                 own_vaults: vec![B256::repeat_byte(7)],
                 refund_claims: vec![],
                 own_claims: vec![],
+                liveness_claims: vec![],
             })
         );
         // Every other call needs an account bound to a vault, also next to a destination.
@@ -568,6 +587,7 @@ pub(crate) mod tests {
                 own_vaults: vec![],
                 refund_claims: vec![],
                 own_claims: vec![B256::repeat_byte(5), B256::repeat_byte(6)],
+                liveness_claims: vec![],
             })
         );
         // A claim binds its account: no vault needed, unless another call needs one.
@@ -579,6 +599,46 @@ pub(crate) mod tests {
         }
     }
 
+    pub fn liveness(claim: u8) -> Vec<u8> {
+        slashLivenessCall {
+            claimId: B256::repeat_byte(claim),
+        }
+        .abi_encode()
+    }
+
+    /// T-05: the bonds paying an overdue claim, on the bond only, each claim once; the claim binds
+    /// the account (the proxy checks its claimant and that the bonds can pay it now).
+    #[test]
+    fn bond_payments_are_sponsored_on_the_bond_only() {
+        let l = list();
+        let me = Address::repeat_byte(0x99);
+        assert_eq!(
+            l.check(&op(me, batch(&[(l.bond, liveness(5)), (l.bond, liveness(6))]))),
+            Ok(Bindings {
+                bound_sender: false,
+                own_vaults: vec![],
+                refund_claims: vec![],
+                own_claims: vec![],
+                liveness_claims: vec![B256::repeat_byte(5), B256::repeat_byte(6)],
+            })
+        );
+        assert_eq!(
+            l.check(&op(me, batch(&[(l.bond, liveness(5)), (l.bond, liveness(5))]))),
+            Err("a claim is paid from the bonds only once")
+        );
+        let mixed = [(l.bond, liveness(5)), (l.registry, release())];
+        assert!(l.check(&op(me, batch(&mixed))).unwrap().bound_sender);
+        for to in [l.registry, l.intake, l.adapter, l.morpho, l.usdc, Address::ZERO] {
+            assert_eq!(l.check(&op(me, single(to, liveness(5)))), Err("call not on the allowlist"));
+        }
+        // A deployment without a bond sponsors no bond payment, not even to the zero address.
+        let no_bond = Allowlist {
+            bond: Address::ZERO,
+            ..list()
+        };
+        assert_eq!(no_bond.check(&op(me, single(Address::ZERO, liveness(5)))), Err("call not on the allowlist"));
+    }
+
     sol! {
         function upholdPayout(bytes32 claimId, bytes32 payoutRef);
         function finalizeActivation(bytes32 vaultId);
@@ -587,20 +647,21 @@ pub(crate) mod tests {
         function pauseMinting(uint64 until, uint256 nonce, uint64 deadline, bytes[] sigs);
         function abandonRefund(bytes32 claimId);
         function writeOffDust(bytes32 claimId);
-        function slashLiveness(bytes32 claimId);
+        function claimBounty();
+        function requestUnbond(uint256 amount);
         function withdrawEquity(bytes32 vaultId);
     }
 
     /// Nothing else of v3 is sponsored: the Intake's other entry points, the Registry's other
-    /// refund and payout calls (anyone's, never the account's), the bond and the compensator.
+    /// refund and payout calls (anyone's, never the account's), the bond's other calls and the
+    /// compensator.
     #[test]
     fn other_v3_calls_are_refused() {
         let l = list();
         let me = Address::repeat_byte(0x99);
         let id = B256::repeat_byte(7);
-        let bond = Address::repeat_byte(0xb0);
         let compensator = Address::repeat_byte(0xc0);
-        let refused: [(Address, Vec<u8>); 9] = [
+        let refused: [(Address, Vec<u8>); 10] = [
             // The slasher's call, after an Included proof.
             (
                 l.registry,
@@ -633,7 +694,14 @@ pub(crate) mod tests {
             ),
             (l.registry, abandonRefundCall { claimId: id }.abi_encode()),
             (l.registry, writeOffDustCall { claimId: id }.abi_encode()),
-            (bond, slashLivenessCall { claimId: id }.abi_encode()),
+            (l.bond, claimBountyCall {}.abi_encode()),
+            (
+                l.bond,
+                requestUnbondCall {
+                    amount: U256::from(1u8),
+                }
+                .abi_encode(),
+            ),
             (compensator, withdrawEquityCall { vaultId: id }.abi_encode()),
         ];
         for (to, data) in refused {

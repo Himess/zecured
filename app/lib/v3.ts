@@ -1,8 +1,9 @@
 /**
  * What v3 adds to a loan, in plain words, as pure functions the pages render: the opening fee
  * (T-06), the minting gates (T-01 cap, T-03 pause, the halt and the bonds), a pending activation
- * (K3), refunds (T-02), payout disputes (T-05 (a)), and the compensation of a compromised vault
- * (T-04). docs/DECISIONS.md D40 to D54 records the rules; the contracts enforce them.
+ * (K3), refunds (T-02), payout disputes (T-05 (a)), the bonds paying an overdue claim (T-05), and
+ * the compensation of a compromised vault (T-04). docs/DECISIONS.md D40 to D54 records the rules;
+ * the contracts enforce them.
  */
 import type { Address, Hex } from "viem";
 import type { MintBlock, MintingStatus } from "./api";
@@ -354,6 +355,41 @@ export function disputeState(
     return { canDispute: false, until: null, canReopen: ctx.nowSeconds > c.disputeDueAt, dueAt: c.disputeDueAt };
   }
   return { canDispute: false, until: null, canReopen: false, dueAt: null };
+}
+
+// ------------------------------------------------------------------ T-05: the bonds pay an overdue claim
+
+/** What the signers' bonds can do about one of the account's own unpaid claims. */
+export type BondPayment =
+  /** Nothing: not the account's claim, no destination yet, settled, already paid by the bonds, a frozen vault. */
+  | { kind: "none" }
+  /** Still within the signers' time: if it is unpaid at `dueAt` (Unix seconds), the bonds pay it instead. */
+  | { kind: "later"; dueAt: number }
+  /** Overdue: the bonds pay `usdc` (6 decimals) now, if they hold that much (`covered`). */
+  | { kind: "now"; usdc: bigint; covered: boolean };
+
+/**
+ * See `BondPayment`, as `SignerBondV2.slashLiveness` decides: from the claim's `livenessDue`
+ * (read for the account's own unpaid claims only), the chain's time and what the bonds hold
+ * (`totalSlashable`, read when a claim is due; a payment beyond it reverts).
+ */
+export function bondPayment(c: LedgerClaim, ctx: { nowSeconds: number; slashable: bigint | null }): BondPayment {
+  const l = c.liveness;
+  if (!l || l.dueAt === 0 || c.status !== "Pending" || c.bondPaid) return { kind: "none" };
+  if (l.dueAt > ctx.nowSeconds) return { kind: "later", dueAt: l.dueAt };
+  if (l.usdc === 0n) return { kind: "none" };
+  return { kind: "now", usdc: l.usdc, covered: ctx.slashable === null || ctx.slashable >= l.usdc };
+}
+
+/** What having the bonds pay a claim means (`premiumBps`: the deployment's `livenessPremiumBps`, if known). */
+export function bondPaymentExplainer(premiumBps: number | null): string {
+  const premium =
+    premiumBps === null
+      ? " plus a premium"
+      : premiumBps > 0
+        ? ` plus a ${(premiumBps / 100).toLocaleString("en-US", { maximumFractionDigits: 2 })} % premium`
+        : "";
+  return `The signers did not pay this claim in time, so their bonds can pay you instead: its value in USDC at the current price${premium}, sent to this loan account. In exchange the claim's ZEC no longer comes to you: when the signers pay it out, it goes to the bonds instead, to reimburse them.`;
 }
 
 // ------------------------------------------------------------------ the ledger as a whole
