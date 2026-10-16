@@ -12,6 +12,10 @@ contracts=(
   "src/ZZEC.sol:ZZEC"
   "src/ZecuredRegistry.sol:ZecuredRegistry"
   "src/SettlementAdapter.sol:SettlementAdapter"
+  "src/ZecuredIntake.sol:ZecuredIntake"
+  "src/SignerBondV2.sol:SignerBondV2"
+  "src/ZecuredSlasher.sol:ZecuredSlasher"
+  "src/ZecuredCompensator.sol:ZecuredCompensator"
   "src/mocks/MockUSDC.sol:MockUSDC"
   "src/mocks/MockZecOracle.sol:MockZecOracle"
 )

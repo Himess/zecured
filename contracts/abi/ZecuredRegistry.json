@@ -3,87 +3,92 @@
     "type": "constructor",
     "inputs": [
       {
-        "name": "morpho_",
-        "type": "address",
-        "internalType": "contract IMorpho"
-      },
-      {
-        "name": "zzec_",
-        "type": "address",
-        "internalType": "contract IZZEC"
-      },
-      {
-        "name": "adapter_",
-        "type": "address",
-        "internalType": "address"
-      },
-      {
-        "name": "loanToken_",
-        "type": "address",
-        "internalType": "address"
-      },
-      {
-        "name": "oracle_",
-        "type": "address",
-        "internalType": "address"
-      },
-      {
-        "name": "irm_",
-        "type": "address",
-        "internalType": "address"
-      },
-      {
-        "name": "lltv_",
-        "type": "uint256",
-        "internalType": "uint256"
-      },
-      {
-        "name": "signers_",
-        "type": "address[5]",
-        "internalType": "address[5]"
-      },
-      {
-        "name": "proofs_",
+        "name": "c",
         "type": "tuple",
-        "internalType": "struct DepositProofConfig",
+        "internalType": "struct RegistryConfig",
         "components": [
           {
-            "name": "verifier",
+            "name": "morpho",
             "type": "address",
-            "internalType": "contract IRiscZeroVerifier"
+            "internalType": "contract IMorpho"
           },
           {
-            "name": "imageId",
-            "type": "bytes32",
-            "internalType": "bytes32"
-          },
-          {
-            "name": "relay",
+            "name": "zzec",
             "type": "address",
-            "internalType": "contract IZcashHeaderRelay"
+            "internalType": "contract IZZEC"
           },
           {
-            "name": "minConfirmationWork",
+            "name": "adapter",
+            "type": "address",
+            "internalType": "address"
+          },
+          {
+            "name": "loanToken",
+            "type": "address",
+            "internalType": "address"
+          },
+          {
+            "name": "oracle",
+            "type": "address",
+            "internalType": "address"
+          },
+          {
+            "name": "irm",
+            "type": "address",
+            "internalType": "address"
+          },
+          {
+            "name": "lltv",
             "type": "uint256",
             "internalType": "uint256"
           },
           {
-            "name": "mintMode",
-            "type": "uint8",
-            "internalType": "enum MintMode"
+            "name": "signers",
+            "type": "address[5]",
+            "internalType": "address[5]"
           },
           {
-            "name": "sealSelector",
-            "type": "bytes4",
-            "internalType": "bytes4"
+            "name": "spendLogic",
+            "type": "address",
+            "internalType": "address"
           },
           {
-            "name": "finalizeDepth",
+            "name": "intake",
+            "type": "address",
+            "internalType": "address"
+          },
+          {
+            "name": "signerBond",
+            "type": "address",
+            "internalType": "address"
+          },
+          {
+            "name": "slasher",
+            "type": "address",
+            "internalType": "address"
+          },
+          {
+            "name": "compensator",
+            "type": "address",
+            "internalType": "address"
+          },
+          {
+            "name": "feeBps",
+            "type": "uint16",
+            "internalType": "uint16"
+          },
+          {
+            "name": "minFeeZat",
             "type": "uint64",
             "internalType": "uint64"
           },
           {
-            "name": "finalizeDelay",
+            "name": "feeCommitment",
+            "type": "bytes32",
+            "internalType": "bytes32"
+          },
+          {
+            "name": "refundAbandonPeriod",
             "type": "uint64",
             "internalType": "uint64"
           }
@@ -94,13 +99,39 @@
   },
   {
     "type": "function",
-    "name": "JOURNAL_LENGTH",
+    "name": "DUST_LIMIT",
+    "inputs": [],
+    "outputs": [
+      {
+        "name": "",
+        "type": "uint64",
+        "internalType": "uint64"
+      }
+    ],
+    "stateMutability": "view"
+  },
+  {
+    "type": "function",
+    "name": "MAX_CLAIMS_PER_PAYOUT",
     "inputs": [],
     "outputs": [
       {
         "name": "",
         "type": "uint256",
         "internalType": "uint256"
+      }
+    ],
+    "stateMutability": "view"
+  },
+  {
+    "type": "function",
+    "name": "MAX_FEE_BPS",
+    "inputs": [],
+    "outputs": [
+      {
+        "name": "",
+        "type": "uint16",
+        "internalType": "uint16"
       }
     ],
     "stateMutability": "view"
@@ -159,6 +190,60 @@
   },
   {
     "type": "function",
+    "name": "ZIP317_MARGINAL_FEE",
+    "inputs": [],
+    "outputs": [
+      {
+        "name": "",
+        "type": "uint64",
+        "internalType": "uint64"
+      }
+    ],
+    "stateMutability": "view"
+  },
+  {
+    "type": "function",
+    "name": "abandonRefund",
+    "inputs": [
+      {
+        "name": "claimId",
+        "type": "bytes32",
+        "internalType": "bytes32"
+      }
+    ],
+    "outputs": [],
+    "stateMutability": "nonpayable"
+  },
+  {
+    "type": "function",
+    "name": "activate",
+    "inputs": [
+      {
+        "name": "vaultId",
+        "type": "bytes32",
+        "internalType": "bytes32"
+      },
+      {
+        "name": "account",
+        "type": "address",
+        "internalType": "address"
+      },
+      {
+        "name": "amount",
+        "type": "uint64",
+        "internalType": "uint64"
+      },
+      {
+        "name": "depositTag",
+        "type": "bytes32",
+        "internalType": "bytes32"
+      }
+    ],
+    "outputs": [],
+    "stateMutability": "nonpayable"
+  },
+  {
+    "type": "function",
     "name": "adapter",
     "inputs": [],
     "outputs": [
@@ -169,87 +254,6 @@
       }
     ],
     "stateMutability": "view"
-  },
-  {
-    "type": "function",
-    "name": "attestDeposit",
-    "inputs": [
-      {
-        "name": "att",
-        "type": "tuple",
-        "internalType": "struct DepositAttestation",
-        "components": [
-          {
-            "name": "vaultId",
-            "type": "bytes32",
-            "internalType": "bytes32"
-          },
-          {
-            "name": "account",
-            "type": "address",
-            "internalType": "address"
-          },
-          {
-            "name": "amount",
-            "type": "uint64",
-            "internalType": "uint64"
-          },
-          {
-            "name": "depositTag",
-            "type": "bytes32",
-            "internalType": "bytes32"
-          }
-        ]
-      },
-      {
-        "name": "sigs",
-        "type": "bytes[]",
-        "internalType": "bytes[]"
-      }
-    ],
-    "outputs": [],
-    "stateMutability": "nonpayable"
-  },
-  {
-    "type": "function",
-    "name": "attestDepositWithProof",
-    "inputs": [
-      {
-        "name": "journal",
-        "type": "bytes",
-        "internalType": "bytes"
-      },
-      {
-        "name": "seal",
-        "type": "bytes",
-        "internalType": "bytes"
-      },
-      {
-        "name": "openedSigs",
-        "type": "bytes[]",
-        "internalType": "bytes[]"
-      }
-    ],
-    "outputs": [],
-    "stateMutability": "nonpayable"
-  },
-  {
-    "type": "function",
-    "name": "cancelVault",
-    "inputs": [
-      {
-        "name": "vaultId",
-        "type": "bytes32",
-        "internalType": "bytes32"
-      },
-      {
-        "name": "sigs",
-        "type": "bytes[]",
-        "internalType": "bytes[]"
-      }
-    ],
-    "outputs": [],
-    "stateMutability": "nonpayable"
   },
   {
     "type": "function",
@@ -311,6 +315,67 @@
   },
   {
     "type": "function",
+    "name": "claimDetails",
+    "inputs": [
+      {
+        "name": "claimId",
+        "type": "bytes32",
+        "internalType": "bytes32"
+      }
+    ],
+    "outputs": [
+      {
+        "name": "d",
+        "type": "tuple",
+        "internalType": "struct ClaimDetails",
+        "components": [
+          {
+            "name": "vaultId",
+            "type": "bytes32",
+            "internalType": "bytes32"
+          },
+          {
+            "name": "kind",
+            "type": "uint8",
+            "internalType": "enum ClaimKind"
+          },
+          {
+            "name": "status",
+            "type": "uint8",
+            "internalType": "enum ClaimStatus"
+          },
+          {
+            "name": "amount",
+            "type": "uint64",
+            "internalType": "uint64"
+          },
+          {
+            "name": "commitment",
+            "type": "bytes32",
+            "internalType": "bytes32"
+          },
+          {
+            "name": "createdAt",
+            "type": "uint40",
+            "internalType": "uint40"
+          },
+          {
+            "name": "bondPaid",
+            "type": "bool",
+            "internalType": "bool"
+          },
+          {
+            "name": "claimant",
+            "type": "address",
+            "internalType": "address"
+          }
+        ]
+      }
+    ],
+    "stateMutability": "view"
+  },
+  {
+    "type": "function",
     "name": "claimIdOf",
     "inputs": [
       {
@@ -332,6 +397,163 @@
       }
     ],
     "stateMutability": "pure"
+  },
+  {
+    "type": "function",
+    "name": "claimInput",
+    "inputs": [
+      {
+        "name": "claimId",
+        "type": "bytes32",
+        "internalType": "bytes32"
+      }
+    ],
+    "outputs": [
+      {
+        "name": "",
+        "type": "bytes32",
+        "internalType": "bytes32"
+      }
+    ],
+    "stateMutability": "view"
+  },
+  {
+    "type": "function",
+    "name": "claimPayment",
+    "inputs": [
+      {
+        "name": "claimRef",
+        "type": "bytes32",
+        "internalType": "bytes32"
+      }
+    ],
+    "outputs": [
+      {
+        "name": "",
+        "type": "tuple",
+        "internalType": "struct ClaimPayment",
+        "components": [
+          {
+            "name": "claimId",
+            "type": "bytes32",
+            "internalType": "bytes32"
+          },
+          {
+            "name": "payoutRef",
+            "type": "bytes32",
+            "internalType": "bytes32"
+          },
+          {
+            "name": "expected",
+            "type": "uint64",
+            "internalType": "uint64"
+          },
+          {
+            "name": "outputIndex",
+            "type": "uint8",
+            "internalType": "uint8"
+          }
+        ]
+      }
+    ],
+    "stateMutability": "view"
+  },
+  {
+    "type": "function",
+    "name": "claimRefOf",
+    "inputs": [
+      {
+        "name": "payoutRef",
+        "type": "bytes32",
+        "internalType": "bytes32"
+      },
+      {
+        "name": "commitment",
+        "type": "bytes32",
+        "internalType": "bytes32"
+      }
+    ],
+    "outputs": [
+      {
+        "name": "",
+        "type": "bytes32",
+        "internalType": "bytes32"
+      }
+    ],
+    "stateMutability": "view"
+  },
+  {
+    "type": "function",
+    "name": "commitSpend",
+    "inputs": [
+      {
+        "name": "c",
+        "type": "tuple",
+        "internalType": "struct SpendCommit",
+        "components": [
+          {
+            "name": "vaultId",
+            "type": "bytes32",
+            "internalType": "bytes32"
+          },
+          {
+            "name": "inputTag",
+            "type": "bytes32",
+            "internalType": "bytes32"
+          },
+          {
+            "name": "claimIds",
+            "type": "bytes32[]",
+            "internalType": "bytes32[]"
+          },
+          {
+            "name": "claimRefs",
+            "type": "bytes32[]",
+            "internalType": "bytes32[]"
+          },
+          {
+            "name": "claimOutputs",
+            "type": "uint8[]",
+            "internalType": "uint8[]"
+          },
+          {
+            "name": "payoutRef",
+            "type": "bytes32",
+            "internalType": "bytes32"
+          },
+          {
+            "name": "changeTag",
+            "type": "bytes32",
+            "internalType": "bytes32"
+          },
+          {
+            "name": "changeValue",
+            "type": "uint64",
+            "internalType": "uint64"
+          }
+        ]
+      },
+      {
+        "name": "",
+        "type": "bytes[]",
+        "internalType": "bytes[]"
+      }
+    ],
+    "outputs": [],
+    "stateMutability": "nonpayable"
+  },
+  {
+    "type": "function",
+    "name": "compensator",
+    "inputs": [],
+    "outputs": [
+      {
+        "name": "",
+        "type": "address",
+        "internalType": "address"
+      }
+    ],
+    "stateMutability": "view"
   },
   {
     "type": "function",
@@ -358,29 +580,37 @@
   },
   {
     "type": "function",
-    "name": "depositImageId",
-    "inputs": [],
-    "outputs": [
+    "name": "convertToRefund",
+    "inputs": [
       {
-        "name": "",
+        "name": "vaultId",
+        "type": "bytes32",
+        "internalType": "bytes32"
+      },
+      {
+        "name": "account",
+        "type": "address",
+        "internalType": "address"
+      },
+      {
+        "name": "amount",
+        "type": "uint64",
+        "internalType": "uint64"
+      },
+      {
+        "name": "depositTag",
         "type": "bytes32",
         "internalType": "bytes32"
       }
     ],
-    "stateMutability": "view"
-  },
-  {
-    "type": "function",
-    "name": "depositSealSelector",
-    "inputs": [],
     "outputs": [
       {
-        "name": "",
-        "type": "bytes4",
-        "internalType": "bytes4"
+        "name": "claimId",
+        "type": "bytes32",
+        "internalType": "bytes32"
       }
     ],
-    "stateMutability": "view"
+    "stateMutability": "nonpayable"
   },
   {
     "type": "function",
@@ -394,22 +624,9 @@
     ],
     "outputs": [
       {
-        "name": "used",
+        "name": "",
         "type": "bool",
         "internalType": "bool"
-      }
-    ],
-    "stateMutability": "view"
-  },
-  {
-    "type": "function",
-    "name": "depositVerifier",
-    "inputs": [],
-    "outputs": [
-      {
-        "name": "",
-        "type": "address",
-        "internalType": "contract IRiscZeroVerifier"
       }
     ],
     "stateMutability": "view"
@@ -426,19 +643,6 @@
       }
     ],
     "stateMutability": "view"
-  },
-  {
-    "type": "function",
-    "name": "dropPendingActivation",
-    "inputs": [
-      {
-        "name": "vaultId",
-        "type": "bytes32",
-        "internalType": "bytes32"
-      }
-    ],
-    "outputs": [],
-    "stateMutability": "nonpayable"
   },
   {
     "type": "function",
@@ -485,75 +689,21 @@
   },
   {
     "type": "function",
-    "name": "finalizeActivation",
-    "inputs": [
-      {
-        "name": "vaultId",
-        "type": "bytes32",
-        "internalType": "bytes32"
-      }
-    ],
-    "outputs": [],
-    "stateMutability": "nonpayable"
-  },
-  {
-    "type": "function",
-    "name": "finalizeDelay",
+    "name": "feeBps",
     "inputs": [],
     "outputs": [
       {
         "name": "",
-        "type": "uint64",
-        "internalType": "uint64"
+        "type": "uint16",
+        "internalType": "uint16"
       }
     ],
     "stateMutability": "view"
   },
   {
     "type": "function",
-    "name": "finalizeDepth",
+    "name": "feeCommitment",
     "inputs": [],
-    "outputs": [
-      {
-        "name": "",
-        "type": "uint64",
-        "internalType": "uint64"
-      }
-    ],
-    "stateMutability": "view"
-  },
-  {
-    "type": "function",
-    "name": "hashDepositAttestation",
-    "inputs": [
-      {
-        "name": "att",
-        "type": "tuple",
-        "internalType": "struct DepositAttestation",
-        "components": [
-          {
-            "name": "vaultId",
-            "type": "bytes32",
-            "internalType": "bytes32"
-          },
-          {
-            "name": "account",
-            "type": "address",
-            "internalType": "address"
-          },
-          {
-            "name": "amount",
-            "type": "uint64",
-            "internalType": "uint64"
-          },
-          {
-            "name": "depositTag",
-            "type": "bytes32",
-            "internalType": "bytes32"
-          }
-        ]
-      }
-    ],
     "outputs": [
       {
         "name": "",
@@ -589,10 +739,100 @@
   },
   {
     "type": "function",
-    "name": "hashVaultCancellation",
+    "name": "hashReimburseDestination",
     "inputs": [
       {
-        "name": "vaultId",
+        "name": "claimId",
+        "type": "bytes32",
+        "internalType": "bytes32"
+      },
+      {
+        "name": "commitment",
+        "type": "bytes32",
+        "internalType": "bytes32"
+      },
+      {
+        "name": "deadline",
+        "type": "uint64",
+        "internalType": "uint64"
+      }
+    ],
+    "outputs": [
+      {
+        "name": "",
+        "type": "bytes32",
+        "internalType": "bytes32"
+      }
+    ],
+    "stateMutability": "view"
+  },
+  {
+    "type": "function",
+    "name": "hashSpendCommit",
+    "inputs": [
+      {
+        "name": "c",
+        "type": "tuple",
+        "internalType": "struct SpendCommit",
+        "components": [
+          {
+            "name": "vaultId",
+            "type": "bytes32",
+            "internalType": "bytes32"
+          },
+          {
+            "name": "inputTag",
+            "type": "bytes32",
+            "internalType": "bytes32"
+          },
+          {
+            "name": "claimIds",
+            "type": "bytes32[]",
+            "internalType": "bytes32[]"
+          },
+          {
+            "name": "claimRefs",
+            "type": "bytes32[]",
+            "internalType": "bytes32[]"
+          },
+          {
+            "name": "claimOutputs",
+            "type": "uint8[]",
+            "internalType": "uint8[]"
+          },
+          {
+            "name": "payoutRef",
+            "type": "bytes32",
+            "internalType": "bytes32"
+          },
+          {
+            "name": "changeTag",
+            "type": "bytes32",
+            "internalType": "bytes32"
+          },
+          {
+            "name": "changeValue",
+            "type": "uint64",
+            "internalType": "uint64"
+          }
+        ]
+      }
+    ],
+    "outputs": [
+      {
+        "name": "",
+        "type": "bytes32",
+        "internalType": "bytes32"
+      }
+    ],
+    "stateMutability": "view"
+  },
+  {
+    "type": "function",
+    "name": "inputClaimSet",
+    "inputs": [
+      {
+        "name": "inputTag",
         "type": "bytes32",
         "internalType": "bytes32"
       }
@@ -605,6 +845,108 @@
       }
     ],
     "stateMutability": "view"
+  },
+  {
+    "type": "function",
+    "name": "intake",
+    "inputs": [],
+    "outputs": [
+      {
+        "name": "",
+        "type": "address",
+        "internalType": "address"
+      }
+    ],
+    "stateMutability": "view"
+  },
+  {
+    "type": "function",
+    "name": "lastCommitAt",
+    "inputs": [
+      {
+        "name": "inputTag",
+        "type": "bytes32",
+        "internalType": "bytes32"
+      }
+    ],
+    "outputs": [
+      {
+        "name": "",
+        "type": "uint40",
+        "internalType": "uint40"
+      }
+    ],
+    "stateMutability": "view"
+  },
+  {
+    "type": "function",
+    "name": "lastVaultSettledAt",
+    "inputs": [],
+    "outputs": [
+      {
+        "name": "",
+        "type": "uint64",
+        "internalType": "uint64"
+      }
+    ],
+    "stateMutability": "view"
+  },
+  {
+    "type": "function",
+    "name": "lineageOf",
+    "inputs": [
+      {
+        "name": "tag",
+        "type": "bytes32",
+        "internalType": "bytes32"
+      }
+    ],
+    "outputs": [
+      {
+        "name": "",
+        "type": "tuple",
+        "internalType": "struct LineageNote",
+        "components": [
+          {
+            "name": "vaultId",
+            "type": "bytes32",
+            "internalType": "bytes32"
+          },
+          {
+            "name": "value",
+            "type": "uint64",
+            "internalType": "uint64"
+          }
+        ]
+      }
+    ],
+    "stateMutability": "view"
+  },
+  {
+    "type": "function",
+    "name": "lockedZatoshi",
+    "inputs": [],
+    "outputs": [
+      {
+        "name": "",
+        "type": "uint256",
+        "internalType": "uint256"
+      }
+    ],
+    "stateMutability": "view"
+  },
+  {
+    "type": "function",
+    "name": "markBondPaid",
+    "inputs": [
+      {
+        "name": "claimId",
+        "type": "bytes32",
+        "internalType": "bytes32"
+      }
+    ],
+    "outputs": [],
+    "stateMutability": "nonpayable"
   },
   {
     "type": "function",
@@ -661,26 +1003,13 @@
   },
   {
     "type": "function",
-    "name": "minConfirmationWork",
+    "name": "minFeeZat",
     "inputs": [],
     "outputs": [
       {
         "name": "",
-        "type": "uint256",
-        "internalType": "uint256"
-      }
-    ],
-    "stateMutability": "view"
-  },
-  {
-    "type": "function",
-    "name": "mintMode",
-    "inputs": [],
-    "outputs": [
-      {
-        "name": "",
-        "type": "uint8",
-        "internalType": "enum MintMode"
+        "type": "uint64",
+        "internalType": "uint64"
       }
     ],
     "stateMutability": "view"
@@ -700,15 +1029,13 @@
   },
   {
     "type": "function",
-    "name": "pendingActivation",
+    "name": "openRefund",
     "inputs": [
       {
         "name": "vaultId",
         "type": "bytes32",
         "internalType": "bytes32"
-      }
-    ],
-    "outputs": [
+      },
       {
         "name": "account",
         "type": "address",
@@ -723,19 +1050,24 @@
         "name": "depositTag",
         "type": "bytes32",
         "internalType": "bytes32"
-      },
+      }
+    ],
+    "outputs": [
       {
-        "name": "anchor",
+        "name": "claimId",
         "type": "bytes32",
         "internalType": "bytes32"
-      },
+      }
+    ],
+    "stateMutability": "nonpayable"
+  },
+  {
+    "type": "function",
+    "name": "openVaultCount",
+    "inputs": [],
+    "outputs": [
       {
-        "name": "readyHeight",
-        "type": "uint256",
-        "internalType": "uint256"
-      },
-      {
-        "name": "readyTime",
+        "name": "",
         "type": "uint256",
         "internalType": "uint256"
       }
@@ -770,6 +1102,11 @@
         "name": "userCommitment",
         "type": "bytes32",
         "internalType": "bytes32"
+      },
+      {
+        "name": "mmClaimant",
+        "type": "address",
+        "internalType": "address"
       }
     ],
     "outputs": [
@@ -804,6 +1141,11 @@
         "name": "liquidatorCommitment",
         "type": "bytes32",
         "internalType": "bytes32"
+      },
+      {
+        "name": "claimant",
+        "type": "address",
+        "internalType": "address"
       }
     ],
     "outputs": [
@@ -817,16 +1159,39 @@
   },
   {
     "type": "function",
-    "name": "relay",
+    "name": "refundAbandonPeriod",
     "inputs": [],
     "outputs": [
       {
         "name": "",
-        "type": "address",
-        "internalType": "contract IZcashHeaderRelay"
+        "type": "uint64",
+        "internalType": "uint64"
       }
     ],
     "stateMutability": "view"
+  },
+  {
+    "type": "function",
+    "name": "releaseDeposit",
+    "inputs": [
+      {
+        "name": "vaultId",
+        "type": "bytes32",
+        "internalType": "bytes32"
+      },
+      {
+        "name": "account",
+        "type": "address",
+        "internalType": "address"
+      },
+      {
+        "name": "depositTag",
+        "type": "bytes32",
+        "internalType": "bytes32"
+      }
+    ],
+    "outputs": [],
+    "stateMutability": "nonpayable"
   },
   {
     "type": "function",
@@ -883,6 +1248,130 @@
   },
   {
     "type": "function",
+    "name": "reserveDeposit",
+    "inputs": [
+      {
+        "name": "vaultId",
+        "type": "bytes32",
+        "internalType": "bytes32"
+      },
+      {
+        "name": "account",
+        "type": "address",
+        "internalType": "address"
+      },
+      {
+        "name": "amount",
+        "type": "uint64",
+        "internalType": "uint64"
+      },
+      {
+        "name": "depositTag",
+        "type": "bytes32",
+        "internalType": "bytes32"
+      }
+    ],
+    "outputs": [],
+    "stateMutability": "nonpayable"
+  },
+  {
+    "type": "function",
+    "name": "retireVault",
+    "inputs": [
+      {
+        "name": "vaultId",
+        "type": "bytes32",
+        "internalType": "bytes32"
+      },
+      {
+        "name": "amount",
+        "type": "uint64",
+        "internalType": "uint64"
+      }
+    ],
+    "outputs": [
+      {
+        "name": "retired",
+        "type": "uint64",
+        "internalType": "uint64"
+      }
+    ],
+    "stateMutability": "nonpayable"
+  },
+  {
+    "type": "function",
+    "name": "setRefundDestination",
+    "inputs": [
+      {
+        "name": "claimId",
+        "type": "bytes32",
+        "internalType": "bytes32"
+      },
+      {
+        "name": "destCommitment",
+        "type": "bytes32",
+        "internalType": "bytes32"
+      }
+    ],
+    "outputs": [],
+    "stateMutability": "nonpayable"
+  },
+  {
+    "type": "function",
+    "name": "setReimburseDestination",
+    "inputs": [
+      {
+        "name": "claimId",
+        "type": "bytes32",
+        "internalType": "bytes32"
+      },
+      {
+        "name": "commitment",
+        "type": "bytes32",
+        "internalType": "bytes32"
+      },
+      {
+        "name": "deadline",
+        "type": "uint64",
+        "internalType": "uint64"
+      },
+      {
+        "name": "sigs",
+        "type": "bytes[]",
+        "internalType": "bytes[]"
+      }
+    ],
+    "outputs": [],
+    "stateMutability": "nonpayable"
+  },
+  {
+    "type": "function",
+    "name": "settleCompensatedClaim",
+    "inputs": [
+      {
+        "name": "claimId",
+        "type": "bytes32",
+        "internalType": "bytes32"
+      }
+    ],
+    "outputs": [],
+    "stateMutability": "nonpayable"
+  },
+  {
+    "type": "function",
+    "name": "signerBond",
+    "inputs": [],
+    "outputs": [
+      {
+        "name": "",
+        "type": "address",
+        "internalType": "address"
+      }
+    ],
+    "stateMutability": "view"
+  },
+  {
+    "type": "function",
     "name": "signers",
     "inputs": [],
     "outputs": [
@@ -890,6 +1379,88 @@
         "name": "",
         "type": "address[5]",
         "internalType": "address[5]"
+      }
+    ],
+    "stateMutability": "view"
+  },
+  {
+    "type": "function",
+    "name": "slasher",
+    "inputs": [],
+    "outputs": [
+      {
+        "name": "",
+        "type": "address",
+        "internalType": "address"
+      }
+    ],
+    "stateMutability": "view"
+  },
+  {
+    "type": "function",
+    "name": "spendLogic",
+    "inputs": [],
+    "outputs": [
+      {
+        "name": "",
+        "type": "address",
+        "internalType": "address"
+      }
+    ],
+    "stateMutability": "view"
+  },
+  {
+    "type": "function",
+    "name": "spendRecord",
+    "inputs": [
+      {
+        "name": "payoutRef",
+        "type": "bytes32",
+        "internalType": "bytes32"
+      }
+    ],
+    "outputs": [
+      {
+        "name": "",
+        "type": "tuple",
+        "internalType": "struct SpendRecord",
+        "components": [
+          {
+            "name": "recordHash",
+            "type": "bytes32",
+            "internalType": "bytes32"
+          },
+          {
+            "name": "vaultId",
+            "type": "bytes32",
+            "internalType": "bytes32"
+          },
+          {
+            "name": "inputTag",
+            "type": "bytes32",
+            "internalType": "bytes32"
+          },
+          {
+            "name": "changeTag",
+            "type": "bytes32",
+            "internalType": "bytes32"
+          },
+          {
+            "name": "changeValue",
+            "type": "uint64",
+            "internalType": "uint64"
+          },
+          {
+            "name": "claimCount",
+            "type": "uint8",
+            "internalType": "uint8"
+          },
+          {
+            "name": "signerBitmap",
+            "type": "uint8",
+            "internalType": "uint8"
+          }
+        ]
       }
     ],
     "stateMutability": "view"
@@ -925,6 +1496,52 @@
   },
   {
     "type": "function",
+    "name": "vaultDetails",
+    "inputs": [
+      {
+        "name": "vaultId",
+        "type": "bytes32",
+        "internalType": "bytes32"
+      }
+    ],
+    "outputs": [
+      {
+        "name": "",
+        "type": "tuple",
+        "internalType": "struct VaultDetails",
+        "components": [
+          {
+            "name": "account",
+            "type": "address",
+            "internalType": "address"
+          },
+          {
+            "name": "outstanding",
+            "type": "uint64",
+            "internalType": "uint64"
+          },
+          {
+            "name": "status",
+            "type": "uint8",
+            "internalType": "enum VaultStatus"
+          },
+          {
+            "name": "claimCount",
+            "type": "uint64",
+            "internalType": "uint64"
+          },
+          {
+            "name": "unpaidClaims",
+            "type": "uint64",
+            "internalType": "uint64"
+          }
+        ]
+      }
+    ],
+    "stateMutability": "view"
+  },
+  {
+    "type": "function",
     "name": "vaultOf",
     "inputs": [
       {
@@ -944,6 +1561,19 @@
   },
   {
     "type": "function",
+    "name": "writeOffDust",
+    "inputs": [
+      {
+        "name": "claimId",
+        "type": "bytes32",
+        "internalType": "bytes32"
+      }
+    ],
+    "outputs": [],
+    "stateMutability": "nonpayable"
+  },
+  {
+    "type": "function",
     "name": "zzec",
     "inputs": [],
     "outputs": [
@@ -957,7 +1587,7 @@
   },
   {
     "type": "event",
-    "name": "ActivationPending",
+    "name": "ClaimBondPaid",
     "inputs": [
       {
         "name": "vaultId",
@@ -966,34 +1596,29 @@
         "internalType": "bytes32"
       },
       {
-        "name": "account",
-        "type": "address",
-        "indexed": true,
-        "internalType": "address"
-      },
-      {
-        "name": "amount",
-        "type": "uint64",
-        "indexed": false,
-        "internalType": "uint64"
-      },
-      {
-        "name": "depositTag",
+        "name": "claimId",
         "type": "bytes32",
-        "indexed": false,
+        "indexed": true,
+        "internalType": "bytes32"
+      }
+    ],
+    "anonymous": false
+  },
+  {
+    "type": "event",
+    "name": "ClaimCompensated",
+    "inputs": [
+      {
+        "name": "vaultId",
+        "type": "bytes32",
+        "indexed": true,
         "internalType": "bytes32"
       },
       {
-        "name": "readyHeight",
-        "type": "uint256",
-        "indexed": false,
-        "internalType": "uint256"
-      },
-      {
-        "name": "readyTime",
-        "type": "uint256",
-        "indexed": false,
-        "internalType": "uint256"
+        "name": "claimId",
+        "type": "bytes32",
+        "indexed": true,
+        "internalType": "bytes32"
       }
     ],
     "anonymous": false
@@ -1049,8 +1674,58 @@
   },
   {
     "type": "event",
+    "name": "DustWrittenOff",
+    "inputs": [
+      {
+        "name": "vaultId",
+        "type": "bytes32",
+        "indexed": true,
+        "internalType": "bytes32"
+      },
+      {
+        "name": "claimId",
+        "type": "bytes32",
+        "indexed": true,
+        "internalType": "bytes32"
+      },
+      {
+        "name": "amount",
+        "type": "uint64",
+        "indexed": false,
+        "internalType": "uint64"
+      }
+    ],
+    "anonymous": false
+  },
+  {
+    "type": "event",
     "name": "EIP712DomainChanged",
     "inputs": [],
+    "anonymous": false
+  },
+  {
+    "type": "event",
+    "name": "FeeCharged",
+    "inputs": [
+      {
+        "name": "vaultId",
+        "type": "bytes32",
+        "indexed": true,
+        "internalType": "bytes32"
+      },
+      {
+        "name": "claimId",
+        "type": "bytes32",
+        "indexed": true,
+        "internalType": "bytes32"
+      },
+      {
+        "name": "fee",
+        "type": "uint64",
+        "indexed": false,
+        "internalType": "uint64"
+      }
+    ],
     "anonymous": false
   },
   {
@@ -1105,12 +1780,105 @@
   },
   {
     "type": "event",
-    "name": "PendingActivationDropped",
+    "name": "RefundAbandoned",
     "inputs": [
       {
         "name": "vaultId",
         "type": "bytes32",
         "indexed": true,
+        "internalType": "bytes32"
+      },
+      {
+        "name": "claimId",
+        "type": "bytes32",
+        "indexed": true,
+        "internalType": "bytes32"
+      }
+    ],
+    "anonymous": false
+  },
+  {
+    "type": "event",
+    "name": "RefundDestinationSet",
+    "inputs": [
+      {
+        "name": "vaultId",
+        "type": "bytes32",
+        "indexed": true,
+        "internalType": "bytes32"
+      },
+      {
+        "name": "claimId",
+        "type": "bytes32",
+        "indexed": true,
+        "internalType": "bytes32"
+      },
+      {
+        "name": "commitment",
+        "type": "bytes32",
+        "indexed": false,
+        "internalType": "bytes32"
+      }
+    ],
+    "anonymous": false
+  },
+  {
+    "type": "event",
+    "name": "RefundOpened",
+    "inputs": [
+      {
+        "name": "vaultId",
+        "type": "bytes32",
+        "indexed": true,
+        "internalType": "bytes32"
+      },
+      {
+        "name": "claimId",
+        "type": "bytes32",
+        "indexed": true,
+        "internalType": "bytes32"
+      },
+      {
+        "name": "account",
+        "type": "address",
+        "indexed": false,
+        "internalType": "address"
+      },
+      {
+        "name": "amount",
+        "type": "uint64",
+        "indexed": false,
+        "internalType": "uint64"
+      },
+      {
+        "name": "depositTag",
+        "type": "bytes32",
+        "indexed": false,
+        "internalType": "bytes32"
+      }
+    ],
+    "anonymous": false
+  },
+  {
+    "type": "event",
+    "name": "ReimburseDestinationSet",
+    "inputs": [
+      {
+        "name": "vaultId",
+        "type": "bytes32",
+        "indexed": true,
+        "internalType": "bytes32"
+      },
+      {
+        "name": "claimId",
+        "type": "bytes32",
+        "indexed": true,
+        "internalType": "bytes32"
+      },
+      {
+        "name": "commitment",
+        "type": "bytes32",
+        "indexed": false,
         "internalType": "bytes32"
       }
     ],
@@ -1149,6 +1917,61 @@
   },
   {
     "type": "event",
+    "name": "SpendCommitted",
+    "inputs": [
+      {
+        "name": "vaultId",
+        "type": "bytes32",
+        "indexed": true,
+        "internalType": "bytes32"
+      },
+      {
+        "name": "payoutRef",
+        "type": "bytes32",
+        "indexed": true,
+        "internalType": "bytes32"
+      },
+      {
+        "name": "inputTag",
+        "type": "bytes32",
+        "indexed": false,
+        "internalType": "bytes32"
+      },
+      {
+        "name": "claimIds",
+        "type": "bytes32[]",
+        "indexed": false,
+        "internalType": "bytes32[]"
+      },
+      {
+        "name": "claimRefs",
+        "type": "bytes32[]",
+        "indexed": false,
+        "internalType": "bytes32[]"
+      },
+      {
+        "name": "changeTag",
+        "type": "bytes32",
+        "indexed": false,
+        "internalType": "bytes32"
+      },
+      {
+        "name": "changeValue",
+        "type": "uint64",
+        "indexed": false,
+        "internalType": "uint64"
+      },
+      {
+        "name": "signerBitmap",
+        "type": "uint8",
+        "indexed": false,
+        "internalType": "uint8"
+      }
+    ],
+    "anonymous": false
+  },
+  {
+    "type": "event",
     "name": "VaultActivated",
     "inputs": [
       {
@@ -1180,13 +2003,69 @@
   },
   {
     "type": "event",
-    "name": "VaultCancelled",
+    "name": "VaultReservationReleased",
     "inputs": [
       {
         "name": "vaultId",
         "type": "bytes32",
         "indexed": true,
         "internalType": "bytes32"
+      }
+    ],
+    "anonymous": false
+  },
+  {
+    "type": "event",
+    "name": "VaultReserved",
+    "inputs": [
+      {
+        "name": "vaultId",
+        "type": "bytes32",
+        "indexed": true,
+        "internalType": "bytes32"
+      },
+      {
+        "name": "account",
+        "type": "address",
+        "indexed": true,
+        "internalType": "address"
+      },
+      {
+        "name": "amount",
+        "type": "uint64",
+        "indexed": false,
+        "internalType": "uint64"
+      },
+      {
+        "name": "depositTag",
+        "type": "bytes32",
+        "indexed": false,
+        "internalType": "bytes32"
+      }
+    ],
+    "anonymous": false
+  },
+  {
+    "type": "event",
+    "name": "VaultRetired",
+    "inputs": [
+      {
+        "name": "vaultId",
+        "type": "bytes32",
+        "indexed": true,
+        "internalType": "bytes32"
+      },
+      {
+        "name": "claimId",
+        "type": "bytes32",
+        "indexed": true,
+        "internalType": "bytes32"
+      },
+      {
+        "name": "retired",
+        "type": "uint64",
+        "indexed": false,
+        "internalType": "uint64"
       }
     ],
     "anonymous": false
@@ -1209,69 +2088,81 @@
   },
   {
     "type": "error",
-    "name": "ActivationIsPending",
-    "inputs": [
-      {
-        "name": "vaultId",
-        "type": "bytes32",
-        "internalType": "bytes32"
-      }
-    ]
-  },
-  {
-    "type": "error",
-    "name": "ActivationNotReady",
-    "inputs": [
-      {
-        "name": "vaultId",
-        "type": "bytes32",
-        "internalType": "bytes32"
-      },
-      {
-        "name": "readyHeight",
-        "type": "uint256",
-        "internalType": "uint256"
-      },
-      {
-        "name": "readyTime",
-        "type": "uint256",
-        "internalType": "uint256"
-      }
-    ]
-  },
-  {
-    "type": "error",
-    "name": "AnchorNotConfirmed",
-    "inputs": [
-      {
-        "name": "tipHash",
-        "type": "bytes32",
-        "internalType": "bytes32"
-      },
-      {
-        "name": "confirmationWork",
-        "type": "uint256",
-        "internalType": "uint256"
-      }
-    ]
-  },
-  {
-    "type": "error",
-    "name": "AnchorStillOnBestChain",
-    "inputs": [
-      {
-        "name": "vaultId",
-        "type": "bytes32",
-        "internalType": "bytes32"
-      }
-    ]
-  },
-  {
-    "type": "error",
     "name": "ClaimAlreadyPaid",
     "inputs": [
       {
         "name": "claimId",
+        "type": "bytes32",
+        "internalType": "bytes32"
+      }
+    ]
+  },
+  {
+    "type": "error",
+    "name": "ClaimBoundToAnotherInput",
+    "inputs": [
+      {
+        "name": "claimId",
+        "type": "bytes32",
+        "internalType": "bytes32"
+      },
+      {
+        "name": "inputTag",
+        "type": "bytes32",
+        "internalType": "bytes32"
+      }
+    ]
+  },
+  {
+    "type": "error",
+    "name": "ClaimDestinationUnset",
+    "inputs": [
+      {
+        "name": "claimId",
+        "type": "bytes32",
+        "internalType": "bytes32"
+      }
+    ]
+  },
+  {
+    "type": "error",
+    "name": "ClaimNotCommitted",
+    "inputs": [
+      {
+        "name": "claimId",
+        "type": "bytes32",
+        "internalType": "bytes32"
+      }
+    ]
+  },
+  {
+    "type": "error",
+    "name": "ClaimNotPayable",
+    "inputs": [
+      {
+        "name": "claimId",
+        "type": "bytes32",
+        "internalType": "bytes32"
+      }
+    ]
+  },
+  {
+    "type": "error",
+    "name": "ClaimRefAlreadyUsed",
+    "inputs": [
+      {
+        "name": "claimRef",
+        "type": "bytes32",
+        "internalType": "bytes32"
+      }
+    ]
+  },
+  {
+    "type": "error",
+    "name": "ClaimSetMismatch",
+    "inputs": [
+      {
+        "name": "inputTag",
         "type": "bytes32",
         "internalType": "bytes32"
       }
@@ -1342,6 +2233,27 @@
   },
   {
     "type": "error",
+    "name": "ConservationBroken",
+    "inputs": [
+      {
+        "name": "lineageValue",
+        "type": "uint64",
+        "internalType": "uint64"
+      },
+      {
+        "name": "claimsTotal",
+        "type": "uint256",
+        "internalType": "uint256"
+      },
+      {
+        "name": "changeValue",
+        "type": "uint64",
+        "internalType": "uint64"
+      }
+    ]
+  },
+  {
+    "type": "error",
     "name": "DebtOutstanding",
     "inputs": [
       {
@@ -1353,17 +2265,56 @@
   },
   {
     "type": "error",
-    "name": "DepositProofsDisabled",
-    "inputs": []
-  },
-  {
-    "type": "error",
     "name": "DepositTagUsed",
     "inputs": [
       {
         "name": "depositTag",
         "type": "bytes32",
         "internalType": "bytes32"
+      }
+    ]
+  },
+  {
+    "type": "error",
+    "name": "DestinationAlreadySet",
+    "inputs": [
+      {
+        "name": "claimId",
+        "type": "bytes32",
+        "internalType": "bytes32"
+      }
+    ]
+  },
+  {
+    "type": "error",
+    "name": "DuplicateClaim",
+    "inputs": [
+      {
+        "name": "claimId",
+        "type": "bytes32",
+        "internalType": "bytes32"
+      }
+    ]
+  },
+  {
+    "type": "error",
+    "name": "DuplicateClaimCommitment",
+    "inputs": [
+      {
+        "name": "commitment",
+        "type": "bytes32",
+        "internalType": "bytes32"
+      }
+    ]
+  },
+  {
+    "type": "error",
+    "name": "DuplicateClaimOutput",
+    "inputs": [
+      {
+        "name": "outputIndex",
+        "type": "uint8",
+        "internalType": "uint8"
       }
     ]
   },
@@ -1396,6 +2347,27 @@
   },
   {
     "type": "error",
+    "name": "FeeBearerIsDust",
+    "inputs": [
+      {
+        "name": "claimId",
+        "type": "bytes32",
+        "internalType": "bytes32"
+      },
+      {
+        "name": "amount",
+        "type": "uint64",
+        "internalType": "uint64"
+      },
+      {
+        "name": "fee",
+        "type": "uint64",
+        "internalType": "uint64"
+      }
+    ]
+  },
+  {
+    "type": "error",
     "name": "InsufficientSignatures",
     "inputs": [
       {
@@ -1407,19 +2379,40 @@
   },
   {
     "type": "error",
-    "name": "InvalidDepositProofConfig",
-    "inputs": []
+    "name": "InvalidChange",
+    "inputs": [
+      {
+        "name": "changeTag",
+        "type": "bytes32",
+        "internalType": "bytes32"
+      },
+      {
+        "name": "changeValue",
+        "type": "uint64",
+        "internalType": "uint64"
+      }
+    ]
   },
   {
     "type": "error",
-    "name": "InvalidJournalLength",
+    "name": "InvalidClaimCount",
     "inputs": [
       {
-        "name": "length",
+        "name": "claims",
+        "type": "uint256",
+        "internalType": "uint256"
+      },
+      {
+        "name": "claimRefs",
         "type": "uint256",
         "internalType": "uint256"
       }
     ]
+  },
+  {
+    "type": "error",
+    "name": "InvalidFeeConfig",
+    "inputs": []
   },
   {
     "type": "error",
@@ -1433,17 +2426,88 @@
   },
   {
     "type": "error",
-    "name": "MintRequiresProof",
-    "inputs": []
-  },
-  {
-    "type": "error",
     "name": "NoClaims",
     "inputs": []
   },
   {
     "type": "error",
-    "name": "NoPendingActivation",
+    "name": "NotALineageNote",
+    "inputs": [
+      {
+        "name": "vaultId",
+        "type": "bytes32",
+        "internalType": "bytes32"
+      },
+      {
+        "name": "inputTag",
+        "type": "bytes32",
+        "internalType": "bytes32"
+      }
+    ]
+  },
+  {
+    "type": "error",
+    "name": "NotARefund",
+    "inputs": [
+      {
+        "name": "claimId",
+        "type": "bytes32",
+        "internalType": "bytes32"
+      }
+    ]
+  },
+  {
+    "type": "error",
+    "name": "NotAbandonable",
+    "inputs": [
+      {
+        "name": "claimId",
+        "type": "bytes32",
+        "internalType": "bytes32"
+      },
+      {
+        "name": "at",
+        "type": "uint64",
+        "internalType": "uint64"
+      }
+    ]
+  },
+  {
+    "type": "error",
+    "name": "NotBondPaid",
+    "inputs": [
+      {
+        "name": "claimId",
+        "type": "bytes32",
+        "internalType": "bytes32"
+      }
+    ]
+  },
+  {
+    "type": "error",
+    "name": "NotCompensable",
+    "inputs": [
+      {
+        "name": "claimId",
+        "type": "bytes32",
+        "internalType": "bytes32"
+      }
+    ]
+  },
+  {
+    "type": "error",
+    "name": "NotDust",
+    "inputs": [
+      {
+        "name": "claimId",
+        "type": "bytes32",
+        "internalType": "bytes32"
+      }
+    ]
+  },
+  {
+    "type": "error",
+    "name": "NotRetirable",
     "inputs": [
       {
         "name": "vaultId",
@@ -1476,6 +2540,61 @@
         "name": "caller",
         "type": "address",
         "internalType": "address"
+      }
+    ]
+  },
+  {
+    "type": "error",
+    "name": "OnlyBond",
+    "inputs": [
+      {
+        "name": "caller",
+        "type": "address",
+        "internalType": "address"
+      }
+    ]
+  },
+  {
+    "type": "error",
+    "name": "OnlyCompensator",
+    "inputs": [
+      {
+        "name": "caller",
+        "type": "address",
+        "internalType": "address"
+      }
+    ]
+  },
+  {
+    "type": "error",
+    "name": "OnlyIntake",
+    "inputs": [
+      {
+        "name": "caller",
+        "type": "address",
+        "internalType": "address"
+      }
+    ]
+  },
+  {
+    "type": "error",
+    "name": "PayoutAlreadyCommitted",
+    "inputs": [
+      {
+        "name": "payoutRef",
+        "type": "bytes32",
+        "internalType": "bytes32"
+      }
+    ]
+  },
+  {
+    "type": "error",
+    "name": "RefundBound",
+    "inputs": [
+      {
+        "name": "claimId",
+        "type": "bytes32",
+        "internalType": "bytes32"
       }
     ]
   },
@@ -1545,6 +2664,17 @@
   },
   {
     "type": "error",
+    "name": "ReservationMismatch",
+    "inputs": [
+      {
+        "name": "vaultId",
+        "type": "bytes32",
+        "internalType": "bytes32"
+      }
+    ]
+  },
+  {
+    "type": "error",
     "name": "SeizeExceedsOutstanding",
     "inputs": [
       {
@@ -1566,6 +2696,17 @@
   },
   {
     "type": "error",
+    "name": "SignatureExpired",
+    "inputs": [
+      {
+        "name": "deadline",
+        "type": "uint64",
+        "internalType": "uint64"
+      }
+    ]
+  },
+  {
+    "type": "error",
     "name": "SignaturesNotSorted",
     "inputs": [
       {
@@ -1574,6 +2715,11 @@
         "internalType": "uint256"
       }
     ]
+  },
+  {
+    "type": "error",
+    "name": "SpendLogicMismatch",
+    "inputs": []
   },
   {
     "type": "error",
@@ -1604,17 +2750,6 @@
   },
   {
     "type": "error",
-    "name": "UnexpectedSealSelector",
-    "inputs": [
-      {
-        "name": "selector",
-        "type": "bytes4",
-        "internalType": "bytes4"
-      }
-    ]
-  },
-  {
-    "type": "error",
     "name": "UnknownClaim",
     "inputs": [
       {
@@ -1637,6 +2772,28 @@
   },
   {
     "type": "error",
+    "name": "VaultCompromised",
+    "inputs": [
+      {
+        "name": "vaultId",
+        "type": "bytes32",
+        "internalType": "bytes32"
+      }
+    ]
+  },
+  {
+    "type": "error",
+    "name": "VaultFrozen",
+    "inputs": [
+      {
+        "name": "vaultId",
+        "type": "bytes32",
+        "internalType": "bytes32"
+      }
+    ]
+  },
+  {
+    "type": "error",
     "name": "VaultIdUsed",
     "inputs": [
       {
@@ -1649,6 +2806,28 @@
   {
     "type": "error",
     "name": "VaultNotActive",
+    "inputs": [
+      {
+        "name": "vaultId",
+        "type": "bytes32",
+        "internalType": "bytes32"
+      }
+    ]
+  },
+  {
+    "type": "error",
+    "name": "VaultNotPending",
+    "inputs": [
+      {
+        "name": "vaultId",
+        "type": "bytes32",
+        "internalType": "bytes32"
+      }
+    ]
+  },
+  {
+    "type": "error",
+    "name": "VaultPending",
     "inputs": [
       {
         "name": "vaultId",
@@ -1685,6 +2864,11 @@
   {
     "type": "error",
     "name": "ZeroDepositTag",
+    "inputs": []
+  },
+  {
+    "type": "error",
+    "name": "ZeroPayoutRef",
     "inputs": []
   },
   {
