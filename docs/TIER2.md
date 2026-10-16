@@ -164,7 +164,8 @@ same work, no violation case open on the vault, and minting neither halted, paus
 chain; the deposit can then be proven against the chain that won. The point is a lagging feeder: an attacker could
 feed a branch of their own and prove a fake deposit in it; the depth and the delay give the honest feeders time to
 replace that branch before anything is minted. The coordinator and `zecured-wallet loan prove` both finalize or drop
-on their own.
+on their own; the coordinator, a keyless keeper, also turns a pending activation into a refund after a halt
+(`refundPending`).
 
 The verifier is RISC Zero's router (`0x0b144e07a0826182b6b59788c34b32bfa86fb711` on Base Sepolia and Base mainnet:
 `verify(bytes,bytes32,bytes32)` present, Groth16 v3.0.0 selector `0x73c457ba` active, checked on-chain). Which
@@ -195,8 +196,8 @@ proof; the router's Groth16 check costs about 2.4 × 10^5.
 ## 4. The deposit tag (D24)
 
 `depositTag = BLAKE2b-256(key = K, personal "Zecured_DepTag__", cmx)`, with the vault's tag key `K =
-BLAKE2b-256("Zecured_TagKey__", UFVK string)`. Signer attestations use the same definition, so a note has one tag on
-both paths and can never mint twice. The depositor can compute it (it has the viewing key), the public cannot link it
+BLAKE2b-256("Zecured_TagKey__", UFVK string)`. The signers name every vault note by the same tag (deposits, refunds and
+change, docs/TIER3.md § 2), so a note has one tag everywhere and lands on Base at most once. The depositor can compute it (it has the viewing key), the public cannot link it
 to the note without K (L9). The cmx is unique per note; K is fixed by the signed `VaultOpened` (`tagKeyHash =
 keccak256(K)`, § 2.3).
 
@@ -215,20 +216,24 @@ guest can prove (before journal v2: another amount, a late payment, or a transac
 still refunded off-chain on the owner's signed request (P5). The judge deployment takes journal v2, so there these
 notes are proven in Refund mode instead.
 
-**Why refunds stay safe while anyone can prove** (review K2, D27). A proof can be made for any note that meets the
-statement, spent or not, while P1 rests on the light wallet server's answers. Four rules keep a refund from ever
-leaving zZEC unbacked:
+**Why off-chain refunds stay safe while anyone can prove** (review K2, D27, I30). A proof can be made for any note
+that meets a deployed guest's statement, spent or not, while P1 rests on the light wallet server's answers. Four rules
+keep an off-chain refund from ever spending a note that backs zZEC, or could:
 
 - P1 and the statement apply the same predicates (`check_deposit_transaction`, `vault_receiver`), so a deposit P1
   accepts is one a proof can prove, and the reverse.
-- Once Base activated a vault, the signers root its lineage at the note named by the `VaultActivated` deposit tag,
-  whatever P1 decided; P1's own choice then becomes refundable. A node that cannot see the activated note halts every
-  refund of the vault and reports it.
-- Before refunding a note of the vault's amount, every node asks the Registry on each of its Base providers: the vault
-  must be cancelled, or activated with that note's tag unused. Never while the vault can still be activated (a pending
-  proof reserves the tag and keeps the vault unactivated).
-- Such a refund waits for twice the deposit depth (2N confirmations), so no reorg brings back a chain where the note
-  was the vault's first deposit.
+- Base, not P1, says which notes back what: the signers root a vault's main lineage at the note named by the
+  `VaultActivated` deposit tag, and pay a note that landed as a refund only through its Refund claim. A node that cannot
+  see the activated note pays nothing from the main lineage and reports it.
+- A node refunds off-chain only a note that no guest of the deployment can land (`zecured_policy::classify::Landing`):
+  it reads the Intake's journal version and refund floor on each of its Base providers, which must agree. Under v1 it
+  refuses every note Activate mode proves (the vault's amount, the deposit rule D5, by the expiry height, to the
+  published receiver: a second payment of it lands as a refund); under v2 every note to the published receiver from
+  `minRefundZat` on. Before it accepts the request, and again before it signs, it checks on each provider that the
+  note is no lineage note and its tag unused. `GET /vaults/:id` marks the deposits it would refund (`offChain`), and
+  the coordinator proves the others as Refund claims once their vault can take no deposit any more.
+- A refund of a note of the vault's amount waits for twice the deposit depth (2N confirmations), so no reorg brings
+  back a chain where a guest could land the note (a late payment mined again by the expiry height).
 
 ## 6. Measurements on real Testnet data
 
