@@ -788,6 +788,12 @@ contract DeployZecured is Script {
         vm.serializeUint(v3, "commitGrace", c.commitGrace);
         vm.serializeUint(v3, "livenessPremiumBps", c.livenessPremiumBps);
         vm.serializeUint(v3, "incidentWindow", c.incidentWindow);
+        vm.serializeUint(v3, "disputeWindow", c.disputeWindow);
+        vm.serializeUint(v3, "inclusionWindow", c.inclusionWindow);
+        vm.serializeUint(v3, "versionDepositDelay", c.versionDepositDelay);
+        vm.serializeUint(v3, "versionViolationDelay", c.versionViolationDelay);
+        vm.serializeUint(v3, "versionEstopDelay", c.versionEstopDelay);
+        vm.serializeString(v3, "zcashNetwork", c.zcashNetwork);
         v3 = vm.serializeAddress(v3, "leftoverSink", c.leftoverSink);
     }
 }
