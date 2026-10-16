@@ -40,6 +40,7 @@
   "minSeizeBps": 500,
   "minWorkFloor": "10765160327562",
   "pendingRefundDelay": 86400,
+  "pricePrimary": "0x69e5BC4988a9AF30Ec827C5609c0D41028446ec0",
   "refundAbandonPeriod": 63072000,
   "slashConfirmationWork": "179419338792700",
   "slashWorkFloor": "179419338792700",

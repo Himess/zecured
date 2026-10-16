@@ -21,6 +21,8 @@ jobs:
         working-directory: contracts
     env:
       BASE_SEPOLIA_RPC_URL: ${{ secrets.BASE_SEPOLIA_RPC_URL }}
+      # The price feed's Base mainnet fork tests skip themselves without it.
+      BASE_MAINNET_RPC_URL: ${{ secrets.BASE_MAINNET_RPC_URL }}
     steps:
       - uses: actions/checkout@v4
         with:
@@ -37,8 +39,8 @@ jobs:
       - name: Build and contract sizes
         run: python3 script/check_sizes.py 1024
 
-      - name: Tests that need no RPC (unit, relay)
-        run: forge test --match-path "test/{unit,relay}/**"
+      - name: Tests that need no RPC (unit, relay, deployment configs)
+        run: forge test --match-path "test/{unit,relay,script}/**"
 
       - name: Fork tests (real Morpho on Base Sepolia)
         if: env.BASE_SEPOLIA_RPC_URL != ''

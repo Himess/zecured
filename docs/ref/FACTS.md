@@ -101,6 +101,18 @@ values; `test/fork/PriceFeedBaseFork.t.sol` checks them against a Base mainnet f
 | Pyth on Base | **Not usable as the secondary today**: ZEC/USD is not pushed on Base. Contract `0x8250f4aF4B972684F7b336503E2D6dFeDeB1487a` (version 1.4.6): last ZEC/USD update 2026-09-04 19:29:54 UTC; the upgraded Pyth Core contract the docs list for Base, `0xbC16aee60f64864882BC6C4E428e148Fc0E272F5` (version 1.4.5-alpha.1): 2026-08-21 10:23:25 UTC; ETH/USD minutes old on both. No deployed `PythAggregatorV3` for ZEC/USD was found: Pyth as a source needs that adapter deployed and someone pushing updates | on-chain `getPriceUnsafe`, `version`; https://docs.pyth.network/price-feeds/core/upgrade/contracts | 2026-10-16 |
 | RedStone on Base | No ZEC feed: RedStone's Base push relayer manifest lists 29 feeds, none for ZEC | `packages/relayer-remote-config/main/relayer-manifests-multi-feed/baseMultiFeed.json` in https://github.com/redstone-finance/redstone-oracles-monorepo (main) | 2026-10-16 |
 
+## Base mainnet (8453): the contracts Zecured uses
+
+Read with `eth_call` on `https://mainnet.base.org` on 2026-10-16 (block about 52,688,000).
+
+| Fact | Value | Verified |
+|---|---|---|
+| Morpho Blue | `0xBBBBBbbBBb9cC5e90e3b3Af64bdAF62C37EEFFCb` (same address as Base Sepolia) | 2026-10-16 |
+| AdaptiveCurveIRM | `0x46415998764C29aB2a25CbeA6254146D50D22687`, `isIrmEnabled` true | 2026-10-16 |
+| LLTV 62.5 % | `isLltvEnabled(625000000000000000)` true | 2026-10-16 |
+| Circle USDC | `0x833589fCD6eDb6E08f4c7C32D4f71b54bdA02913`, 6 decimals | 2026-10-16 |
+| RISC Zero verifier router | `0x0b144E07A0826182B6b59788c34b32Bfa86Fb711` (same address as Base Sepolia); `getVerifier(0x73c457ba)` = `0x9F9994Eb4Cb5200198FEfb470f8b50301662e696`, an emergency-stop wrapper, `paused()` false. On Base Sepolia the same selector's wrapper is `0x724d375B5b622e15f0E64e9Deb76a4cB17877797` around the Groth16 verifier `0x2a098988600d87650Fb061FfAff08B97149Fa84D` | 2026-10-16 |
+
 ## Open (⚠️)
 - Paymaster provider (Pimlico vs CDP) and smart account (Safe vs Kernel) — Spike C.
 - ⚠️ API3's ZEC/USD plan on Base ends 2026-12-20 17:06:53 UTC: a mainnet deployment renews it (or buys its own) or runs ZecuredPriceFeed PrimaryOnly after that date.

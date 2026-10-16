@@ -69,6 +69,8 @@ contract DeployConfigTest is Test {
         assertFalse(c.localFork);
         assertFalse(c.theftDemo);
         assertEq(c.loanToken, 0x833589fCD6eDb6E08f4c7C32D4f71b54bdA02913, "Circle USDC on Base");
+        assertEq(c.pricePrimary, 0x69e5BC4988a9AF30Ec827C5609c0D41028446ec0, "Chainlink ZEC/USD, Standard proxy");
+        assertEq(c.capPriceMaxAge, 90_000, "the price feed's maxSourceAge");
         assertLe(c.coverageBps, 5_000, "k <= 50 % with independent operators");
         assertTrue(c.autoPauseOnCase, "an open F1/F2 case pauses minting");
         assertTrue(c.journalV2, "journal v2");

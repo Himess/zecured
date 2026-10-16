@@ -14,6 +14,8 @@ decisions are in docs/DECISIONS.md; the parties and the money are in docs/ECONOM
 | Real proofs on mainnet's verifier | The same suite's real Groth16 seals (a Testnet deposit, an F1 spend) | Both verify through the mainnet router (Groth16 selector `0x73c457ba`, its emergency-stop wrapper not paused): the deposit mints, the theft slashes all five bonds |
 | Zcash Mainnet header rules | `config/relay-mainnet.json`, checked against Zebra v7.0.0-rc.0 and 1,600 real Mainnet headers (docs/ref/FACTS.md, D49) | The relay follows the real Mainnet chain under the Mainnet rules, and refuses headers that break them (wrong bits, minimum difficulty after a long gap, times out of bounds, a bad Equihash solution, a hash above the target) |
 | Every deployment config | `test/script/DeployConfig.t.sol` reads each `config/zecured-*.json` through the deploy script's checks and the constructors' rules | `config/zecured-base-mainnet.json` passes and has the values below |
+| The price feed on the live sources | `test/fork/PriceFeedBaseFork.t.sol` (needs `BASE_MAINNET_RPC_URL`), run at block 52,688,407 | Both sources fresh; `price()` equal to the oracle of Morpho's cbZEC/USDC market on the same report |
+| The whole deployment, mainnet configuration | On a local anvil fork of Base mainnet: `DeployPriceFeed` over the live Chainlink and API3 feeds, `DeployRelay` with the Mainnet parameters and a real Mainnet checkpoint, `DeployZecured` with `config/zecured-base-mainnet.json`, then `BondSigners` (five bonds of 50,000 USDC) | Nine contracts on Circle USDC, mainnet's Morpho Blue (a new zZEC/USDC market) and RISC Zero router, the feed as both the market's oracle and the cap's price; at a ZEC price of 1,187.68 USD the bonds cover about 105 ZEC, so the 100 ZEC cap is the limit, and minting is open |
 
 Not done yet: a shadow relay following Zcash Mainnet at Mainnet difficulty (it waits for NU7's
 Mainnet height, to be published on 2026-10-20), and a real Mainnet deposit into a Mainnet FROST
@@ -39,7 +41,7 @@ vault (a decision for 2026-10-22).
 | `disputeWindow` / `inclusionWindow` | 24 h / 6 h | 72 h / 48 h | Within the challenge window plus the unbonding, which the deploy script checks |
 | `unbondingPeriod` | 54 h | 7 days | Outlasts the challenge window, the liveness period and the commit grace |
 | `incidentWindow` | 3 days | 7 days | Cases of one incident share one price |
-| `capPriceMaxAge` | 1 h (demo price) | 25 h | A Chainlink heartbeat of 24 h plus an hour |
+| `capPriceMaxAge` | 1 h (demo price) | 25 h | The price feed's `maxSourceAge` (a 24-hour heartbeat plus an hour), which the deploy script requires |
 | `autoPauseOnCase` | off | on | An open F1/F2 case pauses new minting |
 | `journalV2` / `branchIds` | v1 / none | v2 / NU6.3 `0x37A5165B`, NU7 `0x77190AD9` | The epoch of the deposit is part of what is proven |
 | `minRefundZat` | 20,000 | 100,000 | A refund must be worth its own payout |
@@ -53,10 +55,17 @@ name a public-good address instead of burning what no victim needs.
 
 ## 3. A mainnet deployment
 
-1. **Price feed.** Deploy a `ZecuredPriceFeed` (design notes T-10) over Chainlink's ZEC/USD feed on
-   Base and a second, independent source. It is both the market's oracle (`BASE_ORACLE`) and the
-   cap's price (`CAP_PRICE`). On chain 8453 the deploy script refuses to run without them and never
-   puts the DemoShockOracle (a testnet demo control) in front of the market.
+1. **Price feed.** `script/DeployPriceFeed.s.sol` with `config/price-feed-base.json` deploys a
+   `ZecuredPriceFeed` (design notes T-10) over Chainlink's ZEC/USD Standard proxy
+   (`0x69e5…6ec0`, 18 decimals, 24-hour heartbeat) and API3's ZEC/USD reader proxy (`0x24F2…Ec15`),
+   each fresh for 25 hours, agreeing within 5 %. The Standard proxy rather than the SVR-Backup one
+   Morpho's cbZEC market reads: the same aggregator, without the liquidation auction's delay. The
+   feed is both the market's oracle and the cap's price: export `BASE_ORACLE` (and `CAP_PRICE`, which
+   defaults to it); the deploy script checks its primary source, its secondary, that it is not stale
+   and that `capPriceMaxAge` is its `maxSourceAge`, and never puts the DemoShockOracle (a testnet demo
+   control) in front of the market. A keeper calls `poke()` whenever `state()` differs from
+   `recordedState()`, so that the last good price is recorded. API3's plan on Base ends on 2026-12-20:
+   renew it, or the feed runs on Chainlink alone.
 2. **Relay.** Set `nu7ActivationHeight` in `config/relay-mainnet.json` once NU7's Mainnet height is
    assigned (it is `type(uint32).max` until then, which no chain crosses), deploy
    `ZcashHeaderRelay` with it, and run at least two independent feeders.
@@ -87,6 +96,9 @@ name a public-good address instead of burning what no victim needs.
   is immediate and the DKG leaves the user's path. Assignment must take all five: with three, three
   colluders could assign one pool vault to a user and to themselves and land the user's deposit
   first.
+- **Price feed risks.** When the two sources disagree by more than 5 %, the market takes the lower
+  price and the cap the higher: either source can pull liquidations forward, never mint more. The
+  feed does not read Chainlink's L2 sequencer uptime feed; a mainnet deployment may add it.
 - **Fee schedule.** ZIP 317's marginal fee (5,000 zatoshi) and grace actions (2) are constants of
   the spend logic; a change of Zcash's fee rules would take a new deployment.
 
