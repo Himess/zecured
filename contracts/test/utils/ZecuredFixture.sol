@@ -89,6 +89,9 @@ abstract contract ZecuredFixture is Test {
     uint16 internal constant LIVENESS_PREMIUM_BPS = 500;
     uint64 internal constant UNBONDING_PERIOD = 54 hours;
     uint64 internal constant INCIDENT_WINDOW = 3 days;
+    // Disputes (T-05 (a)), as on the judge deployment.
+    uint64 internal constant DISPUTE_WINDOW = 1 days;
+    uint64 internal constant INCLUSION_WINDOW = 6 hours;
     address internal constant LEFTOVER_SINK = 0x000000000000000000000000000000000000dEaD;
 
     /// @notice The Intake's deposit-proof setup (`_proofSetup`).
@@ -260,7 +263,7 @@ abstract contract ZecuredFixture is Test {
         Predicted memory p = _predict(bonded, mockBond, otherCompensator);
         compensatorAddress = p.compensator;
         zzec = new ZZEC(p.registry, p.adapter, address(MORPHO));
-        spendLogic = new ZecuredSpendLogic(p.registry, signerSet);
+        spendLogic = new ZecuredSpendLogic(p.registry, signerSet, DISPUTE_WINDOW, INCLUSION_WINDOW);
         registry = new ZecuredRegistry(_registryConfig(p, fee));
         adapter = new SettlementAdapter(registry, MIN_SEIZE, 0, 500);
         intake = new IntakeHarness(_intakeConfig(p.bond, p.slasher, cap));

@@ -38,8 +38,9 @@ import {CompensationMath} from "./libraries/CompensationMath.sol";
 ///        without an entitlement (`ClaimTallied` with layer 0): they are the signers' own. `Victim.pendingClaims`
 ///        counts the claims tallied with an entitlement, `Victim.talliedClaims` every claim settled. Once a vault is
 ///        compromised, the Registry lets no claim become pending except through the Intake's `refundPending` of a
-///        Pending vault, which `tallyVault` waits for; a claim pending after its incident was finalized could not be
-///        tallied any more and would keep its vault open.
+///        Pending vault, or the end of a dispute opened before (`IZecuredDisputes`: a disputed claim counts as unpaid,
+///        and is upheld or reopened within the inclusion window), both of which `tallyVault` waits for; a claim
+///        pending after its incident was finalized could not be tallied any more and would keep its vault open.
 ///      - Layer 3 counts each authorized victim's debt at tally time plus a 1 % interest allowance
 ///        (`CompensationMath.INTEREST_ALLOWANCE_BPS`), and layer 4 its collateral value less that. The allowance only
 ///        pays interest the account's own equity cannot: the account never keeps more than its equity without it, and
@@ -50,13 +51,13 @@ import {CompensationMath} from "./libraries/CompensationMath.sol";
 ///        fixed by the first call). Incidents are finalized in order, so a later incident never takes the funds first.
 ///      - F3: a claim's entitlement is the smallest of what is known about its loss: a later shortfall lowers an unpaid
 ///        entitlement (the claimant did receive the rest), it never raises one, and it never adds a second one.
-///      - Partial settlement: the Registry has no hook that withdraws and burns collateral down to the LLTV, so a vault
-///        whose share does not cover its debt has the share repaid and keeps its collateral and the rest of its debt,
-///        frozen in the Registry (no exit, no liquidation) but not on Morpho: nothing stops its account from borrowing
-///        against that collateral again up to the LLTV, which can take the repayment back (a lender is never worse off
-///        than with no repayment). While layer 4 is not paid in full, an account below the LLTV can also borrow past
-///        its share before `settleVault` to reach this case. Such a vault, like one whose account revoked the
-///        Registry's authorization, is never retired and stays open, which keeps the leftover locked.
+///      - Partial settlement: a vault whose share does not cover its debt has the share repaid, and the Registry burns
+///        the collateral beyond the least that keeps the rest of the debt healthy at the LLTV (`retireVault` with an
+///        amount), so the repayment cannot be borrowed again against the vault's unbacked zZEC. The vault keeps that
+///        collateral and the rest of its debt, frozen in the Registry (no exit, no liquidation), and stays open, which
+///        keeps the leftover locked. While layer 4 is not paid in full, an account below the LLTV can borrow past its
+///        share before `settleVault` to reach this case. A vault whose account revoked the Registry's authorization is
+///        never retired and stays open as well.
 ///      - The freeze does not stop anyone repaying the vault's debt directly on Morpho; that only lowers what the vault
 ///        needs, and what the account repaid itself comes back to it with its equity.
 contract ZecuredCompensator is IZecuredCompensator, ReentrancyGuardTransient {
@@ -318,8 +319,8 @@ contract ZecuredCompensator is IZecuredCompensator, ReentrancyGuardTransient {
     ///        what is left, up to `max(0, value - debt) * r4 + debt - D` (`CompensationMath.shareOf`): interest and new
     ///        borrowing since the tally come out of the equity, debt repaid directly comes back to the account, and the
     ///        rest (the interest allowance nobody needed) goes back to `funds`;
-    ///      - `D > share`: the share is repaid and nothing else happens (see the contract's notes on partial
-    ///        settlement).
+    ///      - `D > share`: the share is repaid and an active vault's collateral is burned down to the LLTV (see the
+    ///        contract's notes on partial settlement).
     function settleVault(bytes32 vaultId) external nonReentrant {
         Victim storage v = _victims[vaultId];
         uint256 id = v.incident;

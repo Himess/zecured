@@ -22,6 +22,7 @@ import {
     ClaimDetails
 } from "../../src/interfaces/v3/IZecuredRegistry.sol";
 import {IZecuredIntake, PendingActivation} from "../../src/interfaces/v3/IZecuredIntake.sol";
+import {IZecuredDisputes} from "../../src/interfaces/v3/IZecuredDisputes.sol";
 import {CloseRequest, SpendCommit, DeleverageRequest} from "../../src/libraries/ZecuredEIP712.sol";
 import {MockHeaderRelay} from "../mocks/MockHeaderRelay.sol";
 import {MockSignerBond} from "../mocks/MockSignerBond.sol";
@@ -46,8 +47,8 @@ struct HandlerSystem {
 /// @notice Invariant-test handler (v3): deposits through the Intake with deposit proofs (MOCK relay and verifier), their
 ///         pending activations, reorganisations and refunds; the gates of minting (pause by signatures, halt, bonds,
 ///         coverage cap, open cases) and the freeze of a vault; vault lifecycles (borrow, repay, releases, price moves,
-///         liquidations, closes, deleverages), payouts (commitments, confirmations, the opening fee), refund
-///         destinations and abandonment, time; and attacks that must always fail. All against the real Morpho Blue on a
+///         liquidations, closes, deleverages), payouts (commitments, confirmations, the opening fee), disputes of
+///         confirmations (upheld by an inclusion proof, or reopened), refund destinations and abandonment, time; and attacks that must always fail. All against the real Morpho Blue on a
 ///         Base Sepolia fork. Ghost state mirrors what Base should hold; flags record a violation when it happens.
 /// @dev A fixed set of actors keeps the set of Morpho storage slots read from the fork small and cacheable.
 contract ZecuredHandler is Test {
@@ -977,6 +978,65 @@ contract ZecuredHandler is Test {
         } catch {
             _flag("I22: a valid payout commitment reverted");
             return false;
+        }
+    }
+
+    // ------------------------------------------------------------------ disputes (T-05 (a))
+
+    /// The claimant of one of the vault's confirmed claims disputes the confirmation within the dispute window.
+    function dispute(uint256 vaultSeed) external {
+        (bool found, bytes32 vaultId,) = _vault(vaultSeed);
+        if (!found || gates.isCompromised(vaultId)) return;
+        IZecuredDisputes disputes = IZecuredDisputes(address(registry));
+        uint64 count = registry.claimCount(vaultId);
+        for (uint64 j; j < count; ++j) {
+            bytes32 claimId = registry.claimIdOf(vaultId, j);
+            ClaimDetails memory d = registry.claimDetails(claimId);
+            (uint64 paidAt,) = disputes.payoutDispute(claimId);
+            if (d.status != ClaimStatus.Paid || paidAt == 0 || d.bondPaid || d.claimant == address(0)) continue;
+            if (block.timestamp > uint256(paidAt) + disputes.disputeWindow()) continue;
+            vm.prank(d.claimant);
+            try disputes.disputePayout(claimId) {
+                calls["dispute"]++;
+            } catch {
+                _flag("a claimant could not dispute a confirmation within its window");
+            }
+            return;
+        }
+    }
+
+    /// The vault's first disputed claim is resolved: upheld by a proof of its payout (the MOCK slasher stands in for
+    /// a verified `Included` proof), or, once the inclusion window is over, reopened by anyone.
+    function resolveDispute(uint256 vaultSeed, uint256 howSeed) external {
+        (bool found, bytes32 vaultId,) = _vault(vaultSeed);
+        if (!found) return;
+        bool prove = _mix(howSeed) % 2 == 0; // the fuzzer favours false for a plain bool
+        IZecuredDisputes disputes = IZecuredDisputes(address(registry));
+        uint64 count = registry.claimCount(vaultId);
+        for (uint64 j; j < count; ++j) {
+            bytes32 claimId = registry.claimIdOf(vaultId, j);
+            (,,,, ClaimStatus status) = registry.claim(claimId);
+            if (status != ClaimStatus.Disputed) continue;
+            if (prove) {
+                // The handler's payout of an input has a reference derived from it (`_commit`).
+                bytes32 payoutRef = keccak256(abi.encode("zecured.inv.payoutRef", registry.claimInput(claimId)));
+                vm.prank(address(gates));
+                try disputes.upholdPayout(claimId, payoutRef) {
+                    calls["uphold"]++;
+                } catch {
+                    _flag("a proven payout could not be upheld");
+                }
+            } else {
+                (, uint64 dueAt) = disputes.payoutDispute(claimId);
+                if (block.timestamp <= dueAt) return;
+                vm.prank(stranger);
+                try disputes.reopenDisputedClaim(claimId) {
+                    calls["reopen"]++;
+                } catch {
+                    _flag("a dispute could not be reopened after its inclusion window");
+                }
+            }
+            return;
         }
     }
 

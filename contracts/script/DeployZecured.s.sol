@@ -119,6 +119,9 @@ contract DeployZecured is Script {
         uint64 challengeWindow;
         uint256 slashConfirmationWork;
         uint256 slashWorkFloor;
+        // ZecuredSpendLogic: disputes (T-05 (a))
+        uint64 disputeWindow;
+        uint64 inclusionWindow;
         // ZecuredCompensator
         uint64 incidentWindow;
         address leftoverSink;
@@ -237,6 +240,8 @@ contract DeployZecured is Script {
         c.challengeWindow = uint64(vm.parseJsonUint(json, ".challengeWindow"));
         c.slashConfirmationWork = vm.parseJsonUint(json, ".slashConfirmationWork");
         c.slashWorkFloor = vm.parseJsonUint(json, ".slashWorkFloor");
+        c.disputeWindow = uint64(vm.parseJsonUint(json, ".disputeWindow"));
+        c.inclusionWindow = uint64(vm.parseJsonUint(json, ".inclusionWindow"));
         c.incidentWindow = uint64(vm.parseJsonUint(json, ".incidentWindow"));
         c.leftoverSink = vm.parseJsonAddress(json, ".leftoverSink");
     }
@@ -283,6 +288,12 @@ contract DeployZecured is Script {
             );
         }
         require(!c.journalV2 || c.branchIds[0] != 0, "DeployZecured: journal v2 needs its branch ids");
+        // A bond that starts to leave once the last vault settled is still slashable when a claim reopened by a dispute
+        // falls due (IZecuredDisputes).
+        require(
+            uint256(c.disputeWindow) + c.inclusionWindow <= uint256(c.challengeWindow) + c.unbondingPeriod,
+            "DeployZecured: the dispute and inclusion windows outlast the challenge window plus the unbonding"
+        );
     }
 
     // ------------------------------------------------------------------ steps
@@ -350,7 +361,7 @@ contract DeployZecured is Script {
     function _core(NetworkConfig memory c, Deployment memory d, address[5] memory signerSet) internal {
         Predicted memory p = _predict(d.deployer);
         d.zzec = new ZZEC(p.registry, p.adapter, address(c.morpho));
-        d.spendLogic = new ZecuredSpendLogic(p.registry, signerSet);
+        d.spendLogic = new ZecuredSpendLogic(p.registry, signerSet, c.disputeWindow, c.inclusionWindow);
         d.registry = new ZecuredRegistry(_registryConfig(c, d, p, signerSet));
         d.adapter = new SettlementAdapter(d.registry, c.minSeize, c.minSeizeBps, c.maxMarginBps);
         d.intake = new ZecuredIntake(_intakeConfig(c, d, p));

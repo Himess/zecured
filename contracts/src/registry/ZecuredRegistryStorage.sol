@@ -43,6 +43,8 @@ abstract contract ZecuredRegistryStorage is EIP712, IZecuredSignerErrors {
         ClaimStatus status;
         uint40 createdAt; // when the claim became payable (T-05)
         bool bondPaid; // T-05
+        uint40 paidAt; // when it was confirmed paid; zero once its confirmation was upheld (T-05 (a), disputes)
+        uint40 disputeDueAt; // while disputed: the end of the inclusion window
     }
 
     mapping(bytes32 vaultId => Vault) internal _vaults;
@@ -108,5 +110,26 @@ abstract contract ZecuredRegistryStorage is EIP712, IZecuredSignerErrors {
         if (account == _signer3) return 3;
         if (account == _signer4) return 4;
         return SIGNER_SET_SIZE;
+    }
+
+    /// @dev A pending claim leaves the books (paid, written off or compensated); its vault settles once closed or
+    ///      cancelled with no pending claim left.
+    function _closeClaim(Claim storage c, ClaimStatus status) internal {
+        c.status = status;
+        _pendingClaimZat -= c.amount;
+        Vault storage v = _vaults[c.vaultId];
+        v.unpaidClaims -= 1;
+        if (_settled(v)) _settle();
+    }
+
+    /// @dev Closed or cancelled with no pending claim: no longer counted in `openVaultCount`.
+    function _settled(Vault storage v) internal view returns (bool) {
+        return (v.status == VaultStatus.Closed || v.status == VaultStatus.Cancelled) && v.unpaidClaims == 0;
+    }
+
+    function _settle() internal {
+        uint256 open = _openVaults - 1;
+        _openVaults = open;
+        if (open == 0) _lastVaultSettledAt = uint64(block.timestamp);
     }
 }
