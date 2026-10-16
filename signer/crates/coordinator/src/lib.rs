@@ -5,13 +5,15 @@
 //! cannot back a vault, T-02), builds and proves PCZTs, runs the FROST rounds with whichever
 //! signers accept, aggregates, broadcasts, and relays deposit proofs, payout commitments and
 //! confirmations to Base with its own gas key. It also keeps the Intake's pending activations
-//! moving (a keyless keeper: anyone may finalize, drop or convert them). A deposit no guest of the
-//! deployment can land on Base is refunded off-chain at its owner's request (P5 under I30). Every
-//! decision that moves value is taken independently by at least three signer nodes.
+//! moving (a keyless keeper: anyone may finalize, drop or convert them), and upholds the payout
+//! confirmations a claimant disputes by proving the payout's inclusion (T-05 (a)). A deposit no
+//! guest of the deployment can land on Base is refunded off-chain at its owner's request (P5 under
+//! I30). Every decision that moves value is taken independently by at least three signer nodes.
 //!
 //! Errors returned to API callers carry a [`error::PublicError`] (fixed message and code);
 //! details are logged at debug level only, scrubbed of identifiers and numbers.
 
+mod disputes;
 pub mod error;
 mod frost;
 pub mod inflight;
@@ -244,6 +246,8 @@ pub struct Coordinator {
     liveness_warned: std::sync::Mutex<HashMap<B256, Instant>>,
     /// I30: what the deployment's guests can land on Base, read once from the Intake.
     landing: OnceCell<Landing>,
+    /// T-05 (a): when the coordinator last warned about each vault's disputed confirmations.
+    dispute_warned: std::sync::Mutex<HashMap<B256, Instant>>,
     /// TEST ONLY: see [`TEST_WITHHOLD_FLAG`].
     #[cfg(feature = "test-hooks")]
     withhold_flag: std::path::PathBuf,
@@ -383,6 +387,7 @@ fn finish_open(
         claims: vec![],
         inflight: None,
         refunds: vec![],
+        paid_here: vec![],
         attest_delay: None,
         used_view_nonces: vec![],
         non_conforming: vec![],
@@ -488,11 +493,19 @@ fn apply_event(v: &mut CoordVault, ev: &VaultEvent) {
                             claim.state = ClaimState::Compensated;
                         }
                     }
+                    // T-05 (a): Base's state; a claim this coordinator saw paid stays paid in its
+                    // books ([`CoordVault::books`]), and it proves that payout's inclusion.
                     ClaimChange::Disputed { .. } => claim.state = ClaimState::Disputed,
                     ClaimChange::Upheld { .. } => claim.state = ClaimState::Paid,
                     ClaimChange::Reopened => {
                         if claim.state == ClaimState::Disputed {
                             claim.state = ClaimState::Unpaid;
+                        }
+                        if v.paid_here.contains(&claim.id) {
+                            warn!(
+                                vault = %short(&v.vault_id),
+                                "a confirmation of a payout this coordinator saw mined was reopened: its claimant may take the claim's value from the bonds; the signers pay nothing twice (T-05)"
+                            );
                         }
                     }
                 }
@@ -526,6 +539,7 @@ impl Coordinator {
             liveness_period: OnceCell::new(),
             liveness_warned: std::sync::Mutex::default(),
             landing: OnceCell::new(),
+            dispute_warned: std::sync::Mutex::default(),
             #[cfg(feature = "test-hooks")]
             withhold_flag: data_dir.join(TEST_WITHHOLD_FLAG),
             cfg,
@@ -753,7 +767,9 @@ impl Coordinator {
         match v.non_conforming.iter().find(|n| n.note_id == note_id) {
             Some(n) if n.offchain => {}
             Some(_) => return Err(PublicError::RefundOnBase.into()),
-            None => return Err(anyhow!("not a deposit of this vault that has not landed").context(PublicError::BadRequest)),
+            None => {
+                return Err(anyhow!("not a deposit of this vault that has not landed").context(PublicError::BadRequest));
+            }
         }
         let body = RefundIn {
             note_id,
@@ -1076,13 +1092,18 @@ impl Coordinator {
             })
             .await?;
         self.warn_overdue(&v).await;
+        // T-05 (a): a disputed confirmation is upheld by proving the payout's inclusion, whatever
+        // else the vault is doing.
+        if let Err(e) = self.uphold_disputes(&v).await {
+            log_failure(id, "upholding a disputed payout", &e);
+        }
         if idle {
             self.mark_idle_scanned(id);
             return self.prove_refunds(&v, &notes).await;
         }
         // Plan from the same lineage as the signers (H-2): the activated deposit or the change
         // worth exactly the vault's book value; foreign and zero-value notes are ignored.
-        notes.retain_planned_change(ledger::book_value(v.outstanding, &v.claims));
+        notes.retain_planned_change(ledger::book_value(v.outstanding, &v.books()));
 
         if let Some(inflight) = v.inflight.clone() {
             return self.check_inflight(id, inflight, notes.tip).await;
@@ -1173,7 +1194,7 @@ impl Coordinator {
                 return;
             }
         };
-        let late = ledger::overdue(&v.claims, now(), period / 2).len();
+        let late = ledger::overdue(&v.books(), now(), period / 2).len();
         if late == 0 {
             return;
         }
@@ -1255,7 +1276,8 @@ impl Coordinator {
     /// Returns true if a payout was started: the vault's next payout, from its main lineage or from
     /// the note of a refunded deposit, planned exactly as the signers plan it.
     async fn pay_next(&self, v: &CoordVault, notes: &VaultNotes) -> Result<bool> {
-        if !v.claims.iter().any(|c| c.payable()) {
+        let claims = v.books();
+        if !claims.iter().any(|c| c.payable()) {
             return Ok(false);
         }
         // K3 and T-04: nothing is paid from a pending or compromised vault (the Registry refuses
@@ -1264,13 +1286,13 @@ impl Coordinator {
             return Ok(false);
         }
         // RT-3: the claims a commitment on Base binds to the lineage note come first, as the nodes plan.
-        let bound = self.bound_claims(v, notes).await?;
+        let bound = self.bound_claims(v, &claims, notes).await?;
         // The nodes never pay a vault's own addresses (security review H-2): plan the same way.
         let fvk = fvk_of(v)?;
-        let (main, i10) = main_lineage(v.activated_tag.is_some(), v.outstanding, &v.claims, &notes.lineage, &bound);
+        let (main, i10) = main_lineage(v.activated_tag.is_some(), v.outstanding, &claims, &notes.lineage, &bound);
         if let Err(e) = &i10
             && v.activated_tag.is_some()
-            && v.claims.iter().any(|c| c.kind.main_lineage() && c.payable())
+            && claims.iter().any(|c| c.kind.main_lineage() && c.payable())
         {
             warn!(vault = %short(&v.vault_id), "the vault's main lineage does not add up (I10): nothing is paid from it");
             debug!(vault = %short(&v.vault_id), error = %scrubbed(&anyhow!("{e}")), "I10");
@@ -1279,7 +1301,7 @@ impl Coordinator {
             let store = self.store.lock().await;
             let recipient =
                 |c: &_| store.recipient(c).filter(|r| !zecured_node::chain::owns_receiver(&fvk, &r.receiver));
-            ledger::next_vault_payout(&v.claims, recipient, main, &notes.refund_values(), now())?
+            ledger::next_vault_payout(&claims, recipient, main, &notes.refund_values(), now())?
         };
         let NextPayout::Pay(plan) = next else { return Ok(false) };
         let inputs: Vec<ReceivedNote> = match plan.input {
@@ -1344,7 +1366,12 @@ impl Coordinator {
     }
 
     /// RT-3: the unpaid claims that a commitment on Base binds to the vault's main lineage note.
-    async fn bound_claims(&self, v: &CoordVault, notes: &VaultNotes) -> Result<Vec<[u8; 32]>> {
+    async fn bound_claims(
+        &self,
+        v: &CoordVault,
+        claims: &[ledger::Claim],
+        notes: &VaultNotes,
+    ) -> Result<Vec<[u8; 32]>> {
         let [input] = notes.lineage.as_slice() else {
             return Ok(vec![]);
         };
@@ -1353,7 +1380,7 @@ impl Coordinator {
         let provider = ProviderBuilder::new().connect_http(self.cfg.base_rpc_url.parse()?);
         let registry = IZecuredRegistry::new(self.cfg.registry, &provider);
         let mut bound = vec![];
-        for c in v.claims.iter().filter(|c| c.state == ClaimState::Unpaid) {
+        for c in claims.iter().filter(|c| c.state == ClaimState::Unpaid) {
             if registry.claimInput(B256::from(c.id)).call().await.context("Registry.claimInput")? == tag {
                 bound.push(c.id);
             }
@@ -1588,6 +1615,13 @@ impl Coordinator {
         self.update_vault(id, |v| {
             for c in v.claims.iter_mut().filter(|c| inflight.claim_ids.iter().any(|i| i.0 == c.id)) {
                 c.state = ClaimState::Paid;
+            }
+            // Seen mined here (I-5): a later dispute of its confirmation does not reopen it in these
+            // books.
+            for id in &inflight.claim_ids {
+                if !v.paid_here.contains(&id.0) {
+                    v.paid_here.push(id.0);
+                }
             }
             if let Some(note) = inflight.refund_note {
                 for r in v.refunds.iter_mut().filter(|r| r.note_id == note) {
@@ -1964,6 +1998,18 @@ mod tests {
             }),
         );
         assert_eq!(v.claims[0].state, ClaimState::Paid);
+
+        // A claim this coordinator saw paid stays paid in its books, as with the nodes that
+        // confirmed it: disputed, it is still proven (Base's state), and reopened it is not paid
+        // again.
+        v.paid_here = vec![[1; 32]];
+        apply_event(&mut v, &change(ClaimChange::Disputed { due_at: 299 }));
+        assert_eq!(v.claims[0].state, ClaimState::Disputed);
+        assert_eq!(v.books()[0].state, ClaimState::Paid);
+        assert!(!v.is_idle() && v.settled(), "busy proving, but nothing to pay");
+        apply_event(&mut v, &change(ClaimChange::Reopened));
+        assert_eq!((v.claims[0].state, v.books()[0].state), (ClaimState::Unpaid, ClaimState::Paid));
+        assert!(!v.books()[0].payable());
     }
 
     /// M-9 (coordinator side): re-applying a chunk after a crash must not reset `outstanding`.

@@ -126,6 +126,9 @@ pub struct CoordVault {
     /// P5: refunds of deposits no guest can land, as the signers accepted them (I30).
     #[serde(default)]
     pub refunds: Vec<Refund>,
+    /// The claims this coordinator saw paid on Zcash: their payout mined and settled here.
+    #[serde(default)]
+    pub paid_here: Vec<[u8; 32]>,
     /// Extra confirmations before proving the deposit (D15), drawn once.
     #[serde(default)]
     pub attest_delay: Option<u32>,
@@ -162,14 +165,32 @@ impl CoordVault {
     pub fn is_idle(&self) -> bool {
         matches!(self.status, VaultStatus::Expired | VaultStatus::Closed | VaultStatus::Cancelled)
             && self.inflight.is_none()
-            && !self.claims.iter().any(|c| c.payable() || c.state == ClaimState::Disputed)
+            && !self.claims.iter().any(|c| c.state == ClaimState::Disputed)
+            && !self.books().iter().any(|c| c.payable())
             && self.refunds.iter().all(|r| r.done)
     }
 
     /// Nothing is left to pay: no claim pending or disputed (written-off dust stays in the
     /// vault, unpaid for good).
     pub fn settled(&self) -> bool {
-        !self.claims.iter().any(|c| matches!(c.state, ClaimState::Unpaid | ClaimState::Disputed))
+        !self.books().iter().any(|c| matches!(c.state, ClaimState::Unpaid | ClaimState::Disputed))
+    }
+
+    /// The claims as this coordinator's books count them, and plans from: a claim it saw paid on
+    /// Zcash stays paid when its confirmation is disputed or reopened on Base (T-05 (a)), exactly
+    /// as it does for every node that confirmed it, so that both plan the same payouts. Its value
+    /// left the vault with that payout.
+    pub fn books(&self) -> Vec<Claim> {
+        self.claims
+            .iter()
+            .cloned()
+            .map(|mut c| {
+                if self.paid_here.contains(&c.id) {
+                    c.state = ClaimState::Paid;
+                }
+                c
+            })
+            .collect()
     }
 
     /// A conforming deposit was classified (P1): it is mined and has its confirmations.
@@ -314,6 +335,7 @@ pub(crate) mod tests {
             claims: vec![],
             inflight: None,
             refunds: vec![],
+            paid_here: vec![],
             attest_delay: None,
             used_view_nonces: vec![],
             non_conforming: vec![],

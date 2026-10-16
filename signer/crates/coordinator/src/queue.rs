@@ -1,10 +1,12 @@
-//! H-12: the deposit-proof queue.
+//! H-12: the proving queue.
 //!
 //! A deposit proof takes about 10 GB of RAM on a CPU, or 13 GB of GPU memory, for minutes to
 //! hours (docs/TESTING.md). Proofs used to start as soon as each vault's deposit was confirmed, all
 //! at once, so a few cheap deposits could exhaust the machine that also serves the API. Jobs now
 //! wait in one queue, first in first out, and run `concurrency` at a time; a vault has at most one
-//! job, queued or running, and asking again for its proof joins that job.
+//! job, queued or running, and asking again for its proof joins that job. A proof with a deadline,
+//! a disputed payout's inclusion (T-05 (a)), goes to the front of the queue instead (keyed by its
+//! payout); it never interrupts a running proof.
 
 use std::{
     collections::{HashSet, VecDeque},
@@ -71,12 +73,25 @@ impl ProvingQueue {
     /// Queues `job` for `vault`, unless the vault already has a job queued or running. Jobs start
     /// in the order they were queued, as slots free up. Needs a Tokio runtime.
     pub fn enqueue(self: &Arc<Self>, vault: B256, job: impl Future<Output = ()> + Send + 'static) -> Enqueued {
+        self.add(vault, Box::pin(job), false)
+    }
+
+    /// As [`Self::enqueue`], but at the front of the queue: the next free slot runs it.
+    pub fn enqueue_urgent(self: &Arc<Self>, key: B256, job: impl Future<Output = ()> + Send + 'static) -> Enqueued {
+        self.add(key, Box::pin(job), true)
+    }
+
+    fn add(self: &Arc<Self>, key: B256, job: Job, urgent: bool) -> Enqueued {
         {
             let mut s = self.lock();
-            if s.running.contains(&vault) || s.waiting.iter().any(|(v, _)| *v == vault) {
+            if s.running.contains(&key) || s.waiting.iter().any(|(v, _)| *v == key) {
                 return Enqueued::Joined;
             }
-            s.waiting.push_back((vault, Box::pin(job)));
+            if urgent {
+                s.waiting.push_front((key, job));
+            } else {
+                s.waiting.push_back((key, job));
+            }
         }
         self.dispatch();
         Enqueued::Queued
@@ -202,6 +217,29 @@ mod tests {
             no_start(&mut started).await;
         }
         c.finish(4);
+        settle(&q, 0, 0).await;
+    }
+
+    /// T-05 (a): an urgent job (a disputed payout's inclusion) starts at the next free slot, ahead
+    /// of the jobs already waiting, without interrupting the running one.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+    async fn an_urgent_job_goes_first() {
+        let q = ProvingQueue::new(1).unwrap();
+        let (mut c, mut started) = Controlled::new();
+        for i in 1..=3 {
+            assert_eq!(q.enqueue(vault(i), c.job(i)), Enqueued::Queued);
+        }
+        assert_eq!(next_start(&mut started).await, 1);
+        assert_eq!(q.enqueue_urgent(vault(9), c.job(9)), Enqueued::Queued);
+        assert_eq!(q.enqueue_urgent(vault(9), async {}), Enqueued::Joined);
+        no_start(&mut started).await;
+        c.finish(1);
+        assert_eq!(next_start(&mut started).await, 9);
+        for (done, next) in [(9, 2), (2, 3)] {
+            c.finish(done);
+            assert_eq!(next_start(&mut started).await, next);
+        }
+        c.finish(3);
         settle(&q, 0, 0).await;
     }
 
