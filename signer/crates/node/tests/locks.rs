@@ -57,6 +57,7 @@ fn vault() -> VaultRecord {
         activated: false,
         outstanding: 0,
         claims: vec![],
+        refunds: vec![],
         used_nonces: vec![],
         inflight: None,
         confirmed: vec![],

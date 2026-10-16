@@ -24,8 +24,8 @@ use serde::{Deserialize, Serialize};
 use serde_json::json;
 use zcash_protocol::consensus::{BlockHeight, Network};
 use zecured_base::{
-    Destination, OpenVault, VaultOpened, ViewKeyRequest, check_signed_by_all, registry_domain, sign_typed,
-    tag_key_hash, text_hash,
+    Destination, OpenVault, RefundRequest, VaultOpened, ViewKeyRequest, check_signed_by_all, registry_domain,
+    sign_typed, tag_key_hash, text_hash,
 };
 use zecured_zcash_ops::{
     keys::{encode_ironwood_ua, ironwood_receiver},
@@ -159,10 +159,10 @@ enum LoanCmd {
         #[arg(long)]
         to: Option<String>,
     },
-    /// T-02: the vault's Refund claims on Base. A deposit that cannot back the vault (another
-    /// amount, a late or second payment, a transaction with other pools) lands on Base as a Refund
-    /// claim once proven; it is paid back from its own note to the destination the vault's account
-    /// gives (`refund-destination`). Nothing is refunded off-chain.
+    /// T-02: the vault's Refund claims on Base. A deposit that cannot back the vault and that a
+    /// guest of the deployment can land (under journal v2: almost any; under v1: a second payment
+    /// of the vault's amount) lands on Base as a Refund claim once proven; it is paid back from its
+    /// own note to the destination the vault's account gives (`refund-destination`).
     Refunds {
         vault: B256,
         #[arg(long, env = "BASE_SEPOLIA_RPC_URL", default_value = "https://sepolia.base.org")]
@@ -179,6 +179,16 @@ enum LoanCmd {
         to: Option<String>,
         #[arg(long, env = "BASE_SEPOLIA_RPC_URL", default_value = "https://sepolia.base.org")]
         rpc: String,
+    },
+    /// P5: ask for a deposit back off-chain (defaults to this wallet). Only for a deposit that no
+    /// guest of the deployment can land on Base (`offChain` in `status`): the signers refuse any
+    /// other, which is refunded on Base as a Refund claim instead (I30).
+    Refund {
+        vault: B256,
+        #[arg(long)]
+        note: B256,
+        #[arg(long)]
+        to: Option<String>,
     },
     /// T-05 (a): dispute the confirmation of one of the loan's claims whose payout never reached
     /// this wallet (its claimant only, within the dispute window): the signers must then prove the
@@ -892,6 +902,31 @@ async fn loan(wallet: &Path, lwd_url: &str, backend: &str, cmd: LoanCmd) -> Resu
         LoanCmd::Destination { vault, to } => {
             let c = destination(wallet, backend, &vault, to).await?;
             println!("{}", json!({ "commitment": c }));
+        }
+        LoanCmd::Refund { vault, note, to } => {
+            let (mut l, owner, to) = owner_ctx(wallet, &vault, to)?;
+            let salt = fresh_salt();
+            let receiver = ironwood_receiver(&NETWORK, &to)?.to_raw_address_bytes();
+            let nonce = l.next_nonce;
+            let deadline = now() + REQUEST_TTL_SECS;
+            let msg = RefundRequest {
+                vaultId: vault,
+                noteId: note,
+                commitment: B256::from(commitment(&salt, &receiver)),
+                nonce,
+                deadline,
+            };
+            let sig = sign_typed(&owner, &registry_domain(l.chain_id, l.registry), &msg)?;
+            let r = post(
+                backend,
+                &format!("/vaults/{vault}/refund"),
+                json!({ "noteId": note, "receiver": to, "salt": hex::encode(salt), "nonce": nonce.to_string(),
+                        "deadline": deadline.to_string(), "signature": sig }),
+            )
+            .await?;
+            l.next_nonce += 1;
+            write_json(&loan_path(wallet, &vault), &l)?;
+            println!("{}", serde_json::to_string_pretty(&r)?);
         }
         LoanCmd::Refunds { vault, rpc } => {
             let net = network_params()?;

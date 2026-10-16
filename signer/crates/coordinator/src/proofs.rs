@@ -7,9 +7,12 @@
 //! - a vault's conforming deposit in Activate mode: the Intake reserves the vault and, once the
 //!   relay has moved on, activates it (K3), or lands the deposit as a refund when the vault cannot
 //!   take it (T-02);
-//! - every other deposit, once the vault cannot take it as its deposit any more, in Refund mode
-//!   (journal v2, T-09): it lands as a Refund claim, which the signers pay from the deposit's own
-//!   note to the destination the vault's account gives. Nothing is ever refunded off-chain (I30).
+//! - every other deposit a guest of the deployment can land, once the vault cannot take it as its
+//!   deposit any more: it lands as a Refund claim, which the signers pay from the deposit's own
+//!   note to the destination the vault's account gives. Refund mode (journal v2, T-09) proves any
+//!   note to the vault's published receiver from the Intake's floor on; under journal v1 only a
+//!   second payment of the vault's amount can land (Activate mode). A deposit no guest can land is
+//!   refunded off-chain at its owner's request (P5, I30), never one a guest can.
 //!
 //! Proving runs in the background (seconds with a MOCK seal, minutes to hours for a real one,
 //! depending on the machine); each vault pass only queues a job or submits a finished seal. Jobs
@@ -50,11 +53,12 @@ use zecured_deposit_witness::{
     witness::{self, Mode},
 };
 use zecured_node::chain::VaultNotes;
+use zecured_policy::classify::Landing;
 use zecured_policy::derive::deposit_tag;
-use zecured_zcash_ops::{keys, lwd, scan::ReceivedNote};
+use zecured_zcash_ops::{lwd, scan::ReceivedNote};
 
 use crate::{
-    Coordinator, NETWORK, RECEIPT_TIMEOUT,
+    Coordinator, RECEIPT_TIMEOUT,
     error::scrubbed,
     queue::{Enqueued, ProvingQueue, QueueCounts},
     short,
@@ -463,14 +467,14 @@ impl Coordinator {
         Ok(B256::from(deposit_tag(&v.ufvk, &cmx)))
     }
 
-    /// T-02: proves, in Refund mode, the vault's deposits that will never back it, one at a time:
-    /// they land as Refund claims and are paid back from their own notes once the vault's account
-    /// gives their destination. Only once the vault cannot take a deposit any more (active,
-    /// closed, cancelled or expired): on a vault Base does not know yet, a refund would cancel it.
-    /// Needs a deployment that reads v2 journals (Refund mode, T-09); with v1 journals such
-    /// deposits stay in the vault, never refunded off-chain (I30), until the v2 guest is deployed.
-    /// Notes below the Intake's `minRefundZat`, and notes to another address of the vault, cannot
-    /// be proven and stay too.
+    /// T-02: proves the vault's deposits that will never back it and that a guest of the
+    /// deployment can land (I30), one at a time: they land as Refund claims and are paid back from
+    /// their own notes once the vault's account gives their destination. In Refund mode under
+    /// journal v2; under v1, which has no Refund mode, a second payment of the vault's amount in
+    /// Activate mode (the Intake lands it as a refund: the vault is not new). Only once the vault
+    /// cannot take a deposit any more (active, closed, cancelled or expired): on a vault Base does
+    /// not know yet, a refund would cancel it. The deposits no guest can land are refunded
+    /// off-chain at their owner's request instead (P5).
     pub(crate) async fn prove_refunds(&self, v: &CoordVault, notes: &VaultNotes) -> Result<()> {
         let Some(prover) = self.proofs.as_ref() else {
             return Ok(());
@@ -489,19 +493,11 @@ impl Coordinator {
         if prover.queue.contains(&v.vault_id) {
             return Ok(());
         }
+        let landing = self.landing().await?;
         let provider = ProviderBuilder::new().connect_http(self.cfg.base_rpc_url.parse()?);
         let intake = IZecuredIntake::new(self.v3().await?.intake, &provider);
-        if !intake.journalV2().call().await.context("Intake.journalV2")? {
-            debug!(vault = %short(&v.vault_id), "deposits wait for a refund: this deployment reads v1 journals (no Refund mode)");
-            return Ok(());
-        }
-        let min = intake.minRefundZat().call().await.context("Intake.minRefundZat")?;
-        let receiver = keys::ironwood_receiver(&NETWORK, &v.address).ok().map(|r| r.to_raw_address_bytes());
         let registry = IZecuredRegistry::new(self.cfg.registry, &provider);
-        for (_, note) in &notes.unlanded {
-            if note.value() < min || receiver != Some(note.recipient.to_raw_address_bytes()) {
-                continue;
-            }
+        for (_, note) in notes.unlanded.iter().filter(|(id, _)| notes.landable.contains(id)) {
             let cmx = orchard::note::ExtractedNoteCommitment::from(note.note.commitment()).to_bytes();
             let tag = B256::from(deposit_tag(&v.ufvk, &cmx));
             if registry.depositTagUsed(tag).call().await.context("Registry.depositTagUsed")? {
@@ -511,7 +507,11 @@ impl Coordinator {
             if intake.minConfirmationWorkFor(note.value()).call().await.is_err() {
                 continue;
             }
-            return self.prove_deposit(&v.vault_id, &Target::refund(note)).await;
+            let target = match landing {
+                Landing::WithRefunds { .. } => Target::refund(note),
+                Landing::ActivateOnly => Target::activation(note, v.amount),
+            };
+            return self.prove_deposit(&v.vault_id, &target).await;
         }
         Ok(())
     }

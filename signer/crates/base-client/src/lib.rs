@@ -48,6 +48,18 @@ sol! {
         uint64 deadline;
     }
 
+    /// Off-chain, signed by the vault owner key: refund of a deposit that no guest of the
+    /// deployment can land on Base (P5 under I30); a deposit a guest can land is refunded only
+    /// as a Refund claim.
+    #[derive(Debug, PartialEq, Eq)]
+    struct RefundRequest {
+        bytes32 vaultId;
+        bytes32 noteId;
+        bytes32 commitment;
+        uint64 nonce;
+        uint64 deadline;
+    }
+
     /// Off-chain, signed by the vault owner key: release of the vault's viewing key.
     #[derive(Debug, PartialEq, Eq)]
     struct ViewKeyRequest {
@@ -312,6 +324,10 @@ mod tests {
         assert_eq!(
             Destination::eip712_encode_type(),
             "Destination(bytes32 vaultId,bytes32 commitment,uint64 nonce,uint64 deadline)"
+        );
+        assert_eq!(
+            RefundRequest::eip712_encode_type(),
+            "RefundRequest(bytes32 vaultId,bytes32 noteId,bytes32 commitment,uint64 nonce,uint64 deadline)"
         );
         assert_eq!(
             ViewKeyRequest::eip712_encode_type(),

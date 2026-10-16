@@ -3,8 +3,9 @@
 //! The node never trusts the coordinator. It checks owner requests itself (P0), sorts a vault's
 //! notes on its own Zcash view, reads Base events at the safe head (each one checked against the
 //! Registry's state), recomputes every payout plan and verifies the PCZT against it before
-//! contributing a signature share. It signs no deposit (every deposit is proven, Registry v3) and
-//! no refund outside a committed payout (I30).
+//! contributing a signature share. It signs no deposit (every deposit is proven, Registry v3), and
+//! refunds off-chain only a deposit that no guest of the deployment can land on Base (P5 under
+//! I30): every other one leaves the vault as a Refund claim, through a committed payout.
 
 pub mod api;
 pub mod auth;
@@ -34,20 +35,25 @@ use tokio::sync::{Mutex, MutexGuard, OnceCell};
 use tracing::{debug, warn};
 use zcash_protocol::TxId;
 use zecured_base::{
-    Destination, PayoutConfirmation, claim_ids_hash,
-    events::{self, ISignerBond, IZecuredRegistry, IZecuredSlasher, VaultEvent},
+    Destination, PayoutConfirmation, RefundRequest, claim_ids_hash,
+    events::{self, ISignerBond, IZecuredIntake, IZecuredRegistry, IZecuredSlasher, VaultEvent},
     recover_typed, registry_domain, sign_typed, signer_bitmap,
     verify::{VAULT_PENDING, Verdict},
 };
-use zecured_policy::ledger::{self, ClaimState, Recipient};
+use zecured_policy::{
+    classify::Landing,
+    derive::deposit_tag,
+    ledger::{self, ClaimState, Recipient, commitment},
+};
 
 use crate::{
     chain::{VaultNotes, ZcashView, owns_receiver, vault_fvk},
     config::{Identity, NetworkConfig},
     signing::{
-        CommitRequest, CommitResponse, Session, ShareRequest, ShareResponse, SignedSpendCommit, SpendCommitRecord,
+        CommitRequest, CommitResponse, Session, ShareRequest, ShareResponse, SignKind, SignedSpendCommit,
+        SpendCommitRecord,
     },
-    store::{ConfirmedPayout, Store, VaultRecord},
+    store::{ConfirmedPayout, RefundRecord, Store, VaultRecord},
 };
 
 /// Demo switch for the threshold demonstration.
@@ -165,6 +171,8 @@ pub struct Node {
     liveness_period: OnceCell<Option<u64>>,
     /// T-05: when this node last warned about each vault's old payable claims.
     liveness_warned: Mutex<HashMap<B256, std::time::Instant>>,
+    /// I30: what the deployment's guests can land on Base, read once (every provider agreeing).
+    landing: OnceCell<Landing>,
 }
 
 pub fn now() -> u64 {
@@ -208,6 +216,17 @@ pub struct RecipientIn {
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct DestinationIn {
+    #[serde(flatten)]
+    pub recipient: RecipientIn,
+    pub nonce: u64,
+    pub deadline: u64,
+    pub signature: Bytes,
+}
+
+/// P5: the owner's request to refund a deposit that no guest of the deployment can land on Base.
+#[derive(Clone, Debug, Serialize, Deserialize)]
+pub struct RefundIn {
+    pub note_id: B256,
     #[serde(flatten)]
     pub recipient: RecipientIn,
     pub nonce: u64,
@@ -334,6 +353,7 @@ impl Node {
             rejected_events: Mutex::new(HashMap::new()),
             liveness_period: OnceCell::new(),
             liveness_warned: Mutex::new(HashMap::new()),
+            landing: OnceCell::new(),
         })
     }
 
@@ -349,8 +369,16 @@ impl Node {
     /// freeze the node), then records new P1 decisions and returns the store, locked, with the
     /// vault's current record and its notes (main lineage restricted to the planned change, H-2).
     async fn scan_vault(&self, vault_id: &B256) -> Result<(MutexGuard<'_, Store>, VaultRecord, VaultNotes)> {
+        // I30: unknown (Base unreachable), nothing is refundable off-chain; payouts go on.
+        let landing = match self.landing().await {
+            Ok(l) => Some(l),
+            Err(e) => {
+                debug!("the deployment's guests are unknown, no off-chain refund: {e:#}");
+                None
+            }
+        };
         let mut snapshot = self.store.lock().await.vaults.get(vault_id).context("unknown vault")?.clone();
-        let mut notes = self.zcash.lock().await.vault_notes(&mut snapshot, self.cfg.confirmations).await?;
+        let mut notes = self.zcash.lock().await.vault_notes(&mut snapshot, self.cfg.confirmations, landing).await?;
         let mut store = self.store.lock().await;
         let mut v = store.vaults.get(vault_id).context("unknown vault")?.clone();
         if chain::merge_decisions(&mut v.decisions, &snapshot.decisions)? {
@@ -427,6 +455,96 @@ impl Node {
         Ok(B256::from(c))
     }
 
+    /// P5 under I30: the owner asks for a deposit back that no guest of the deployment can land on
+    /// Base (another address of the vault; under journal v1 also another amount, a late payment or
+    /// a transaction with other pools; under v2 a note below the Intake's refund floor). Any other
+    /// deposit leaves the vault only as a Refund claim, once a proof lands it: refunding it here
+    /// would turn into an uncommitted spend of a lineage note (F1) the day someone proves it.
+    pub async fn refund_request(&self, vault_id: B256, r: RefundIn) -> Result<()> {
+        let recipient = parse_recipient(&r.recipient)?;
+        // The owner's signature is checked before anything is scanned.
+        {
+            let store = self.store.lock().await;
+            let v = store.vaults.get(&vault_id).context("unknown vault")?;
+            let msg = RefundRequest {
+                vaultId: vault_id,
+                noteId: r.note_id,
+                commitment: B256::from(commitment(&recipient.salt, &recipient.receiver)),
+                nonce: r.nonce,
+                deadline: r.deadline,
+            };
+            ensure!(recover_typed(&self.domain(), &msg, &r.signature)? == v.owner, "not signed by the vault owner");
+            ensure!(r.deadline >= now(), "request expired");
+            ensure_not_own_receiver(v, &recipient.receiver)?;
+        }
+        let (v, note) = {
+            let (_store, v, notes) = self.scan_vault(&vault_id).await?;
+            let (_, note) = notes.refundable.iter().find(|(id, _)| *id == r.note_id.0).context(
+                "not a deposit that may be refunded off-chain: one a guest can land on Base is refunded as a Refund claim (I30)",
+            )?;
+            (v, note.clone())
+        };
+        self.check_refund_on_base(&v, &note).await?;
+        let mut store = self.store.lock().await;
+        let mut v = store.vaults.get(&vault_id).context("unknown vault")?.clone();
+        ensure!(v.use_nonce(r.nonce), "nonce already used");
+        v.refunds.retain(|x| x.note_id != r.note_id.0);
+        v.refunds.push(RefundRecord {
+            note_id: r.note_id.0,
+            recipient,
+        });
+        store.save_vault(v)?;
+        Ok(())
+    }
+
+    /// I30: what the deployment's guests can land on Base, from the Intake the Registry names: its
+    /// journal version and, for v2, its refund floor. Read once, on every Base provider, which
+    /// must agree: a lying provider must never make a note look unprovable.
+    pub async fn landing(&self) -> Result<Landing> {
+        let landing = self
+            .landing
+            .get_or_try_init(|| async {
+                let mut agreed: Option<Landing> = None;
+                for provider in self.base_providers()? {
+                    let intake =
+                        IZecuredRegistry::new(self.cfg.registry, &provider).intake().call().await.context("Registry.intake")?;
+                    ensure!(intake != Address::ZERO, "the Registry names no Intake");
+                    let intake = IZecuredIntake::new(intake, &provider);
+                    let landing = if intake.journalV2().call().await.context("Intake.journalV2")? {
+                        Landing::WithRefunds {
+                            min_refund: intake.minRefundZat().call().await.context("Intake.minRefundZat")?,
+                        }
+                    } else {
+                        Landing::ActivateOnly
+                    };
+                    match agreed {
+                        Some(first) => ensure!(first == landing, "Base providers disagree on what the Intake takes"),
+                        None => agreed = Some(landing),
+                    }
+                }
+                agreed.context("no Base provider")
+            })
+            .await?;
+        Ok(*landing)
+    }
+
+    /// Before accepting or signing an off-chain refund, on every Base provider: the note is no
+    /// lineage note of any vault (RT-9: a change returned to the external address by colluding
+    /// signers looks like a deposit to refund, and is not) and has never landed (its tag unused).
+    /// That no guest can land it at all is checked on the scan ([`chain::refundable_offchain`]).
+    async fn check_refund_on_base(&self, v: &VaultRecord, note: &zecured_zcash_ops::scan::ReceivedNote) -> Result<()> {
+        let cmx = orchard::note::ExtractedNoteCommitment::from(note.note.commitment()).to_bytes();
+        let tag = B256::from(deposit_tag(&v.ufvk, &cmx));
+        for provider in self.base_providers()? {
+            let registry = IZecuredRegistry::new(self.cfg.registry, &provider);
+            let lineage = registry.lineageOf(tag).call().await.context("Registry.lineageOf")?;
+            ensure!(lineage.vaultId == B256::ZERO, "this note is a lineage note on Base");
+            let used = registry.depositTagUsed(tag).call().await.context("Registry.depositTagUsed")?;
+            ensure!(!used, "this note landed on Base");
+        }
+        Ok(())
+    }
+
     // ----- signing -----
 
     pub async fn sign_commit(&self, req: CommitRequest) -> Result<CommitResponse> {
@@ -442,6 +560,20 @@ impl Node {
 
         let (store, v, notes) = self.scan_vault(&req.vault_id).await?;
         drop(store);
+        if let SignKind::Refund { .. } = &req.kind {
+            // P5 (I30): a deposit no guest can land is no lineage note, so there is nothing to
+            // commit on Base; it is checked there again, on every provider, before signing.
+            let (plan, inputs) = {
+                let store = self.store.lock().await;
+                signing::expected_plan(&store, &v, &notes, &req.kind, now(), &[])?
+            };
+            for note in &inputs {
+                self.check_refund_on_base(&v, note).await?;
+            }
+            let (session, commitments) =
+                signing::commit(&v, &plan, &inputs, notes.tip, &req, v.inflight.as_ref(), &notes.unspent)?;
+            return self.start_session(&req, session, &commitments, None).await;
+        }
         // RT-3: the claims a commitment on Base binds to the main lineage note come first (Base
         // calls never hold the store lock, M-7).
         let bound = self.bound_claims(&v, &notes).await?;
@@ -1007,6 +1139,7 @@ mod tests {
                     bond_paid: false,
                 })
                 .collect(),
+            refunds: vec![],
             used_nonces: vec![],
             inflight,
             confirmed: vec![],

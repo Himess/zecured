@@ -228,6 +228,7 @@ async fn a_confirmation_can_be_given_again() {
             activated: true,
             outstanding: 0,
             claims: vec![],
+            refunds: vec![],
             used_nonces: vec![],
             inflight: None,
             confirmed: vec![ConfirmedPayout {

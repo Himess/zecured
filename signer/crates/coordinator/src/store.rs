@@ -39,8 +39,11 @@ pub enum VaultStatus {
 /// A payout broadcast to Zcash and not yet confirmed on Base.
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct Inflight {
-    /// Claims settled.
+    /// Claims settled (empty for a P5 refund).
     pub claim_ids: Vec<B256>,
+    /// P5: the deposit refunded off-chain, if any (I30: one no guest of the deployment can land).
+    #[serde(default)]
+    pub refund_note: Option<B256>,
     pub txid: String,
     pub expiry_height: u32,
     /// The signed transaction (hex), recorded before the first broadcast and rebroadcast until
@@ -70,6 +73,15 @@ pub struct KeptCommitment {
     pub sigs: Vec<Bytes>,
 }
 
+/// P5: a refund the owner asked for and the signers accepted, of a deposit no guest of the
+/// deployment can land on Base (I30).
+#[derive(Clone, Debug, Serialize, Deserialize)]
+pub struct Refund {
+    pub note_id: B256,
+    pub recipient: Recipient,
+    pub done: bool,
+}
+
 /// One signer node's signature, by node index.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct NodeSignature {
@@ -78,11 +90,15 @@ pub struct NodeSignature {
 }
 
 /// An unspent deposit of a vault that has not landed on Base, as the app shows it: it is refunded
-/// once a proof lands it as a Refund claim (T-02).
+/// once a proof lands it as a Refund claim (T-02), or, if no guest of the deployment can land it,
+/// off-chain at its owner's request (P5, I30).
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct NoteView {
     pub note_id: B256,
     pub amount: u64,
+    /// P5: no guest of the deployment can land it, so its owner may ask for it back off-chain.
+    #[serde(default)]
+    pub offchain: bool,
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
@@ -107,6 +123,9 @@ pub struct CoordVault {
     pub claims: Vec<Claim>,
     #[serde(default)]
     pub inflight: Option<Inflight>,
+    /// P5: refunds of deposits no guest can land, as the signers accepted them (I30).
+    #[serde(default)]
+    pub refunds: Vec<Refund>,
     /// Extra confirmations before proving the deposit (D15), drawn once.
     #[serde(default)]
     pub attest_delay: Option<u32>,
@@ -137,13 +156,14 @@ pub struct CoordVault {
 }
 
 impl CoordVault {
-    /// Nothing is left to do for the vault but to watch for late deposits (which are refunded
-    /// through proofs): no payout in flight, no claim payable nor disputed. A refund waiting for
-    /// its account's destination does not keep it busy: the destination's event does.
+    /// Nothing is left to do for the vault but to watch for late deposits: no payout in flight,
+    /// no claim payable nor disputed, no accepted off-chain refund waiting. A Refund claim waiting
+    /// for its account's destination does not keep it busy: the destination's event does.
     pub fn is_idle(&self) -> bool {
         matches!(self.status, VaultStatus::Expired | VaultStatus::Closed | VaultStatus::Cancelled)
             && self.inflight.is_none()
             && !self.claims.iter().any(|c| c.payable() || c.state == ClaimState::Disputed)
+            && self.refunds.iter().all(|r| r.done)
     }
 
     /// Nothing is left to pay: no claim pending or disputed (written-off dust stays in the
@@ -293,6 +313,7 @@ pub(crate) mod tests {
             outstanding: 0,
             claims: vec![],
             inflight: None,
+            refunds: vec![],
             attest_delay: None,
             used_view_nonces: vec![],
             non_conforming: vec![],
@@ -334,6 +355,7 @@ pub(crate) mod tests {
         let notes = vec![NoteView {
             note_id: B256::repeat_byte(9),
             amount: 20_000,
+            offchain: false,
         }];
         // The pass applies only what its scan produced.
         store.update(&id, |v| v.non_conforming = notes.clone()).unwrap();

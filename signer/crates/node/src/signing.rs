@@ -40,16 +40,17 @@ use crate::{
 /// Blocks the coordinator's view of the Zcash tip may be ahead of ours.
 const TIP_SKEW: u32 = 5;
 
-/// What a signing session is for. A node signs nothing but the payout of claims on Base, each
-/// committed on Base before any share leaves it (Tier 3): no off-chain refund of any note (I30: an
-/// off-chain refund of a note a deployed guest can make a lineage note would later look like a
-/// theft). A deposit that cannot back its vault is refunded through a proof that lands it as a
-/// Refund claim (T-02).
+/// What a signing session is for: the payout of claims on Base, committed on Base before any
+/// share leaves the node (Tier 3), or the off-chain refund of a deposit that no guest of the
+/// deployment can land on Base (P5). A deposit a guest can land is refunded only as a Refund claim
+/// (T-02): an off-chain refund of it would look like a theft once someone proves it (I30).
 #[derive(Clone, Debug, Serialize, Deserialize)]
 #[serde(tag = "kind", rename_all = "snake_case")]
 pub enum SignKind {
     /// Pay these claims (P2, P3, P6, refunds T-02, the opening fee T-06).
     Payout { claim_ids: Vec<B256> },
+    /// P5: refund this deposit, which no guest of the deployment can land (I30).
+    Refund { note_id: B256 },
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
@@ -200,16 +201,19 @@ pub struct Session {
 
 impl Session {
     /// The in-flight record this session's payout becomes once its shares are released.
+    /// Refunds spend no lineage note and are not tracked (H-1 is about the vault's payouts).
     pub fn inflight(&self) -> Option<Inflight> {
-        let SignKind::Payout { claim_ids } = &self.kind;
-        (!self.unchecked).then(|| Inflight {
-            claim_ids: claim_ids.iter().map(|c| c.0).collect(),
-            inputs: self.inputs.clone(),
-            txid: Some(self.verified.sighash),
-            expiry_height: self.verified.expiry_height,
-            change: self.change,
-            spend_commit: None,
-        })
+        match &self.kind {
+            SignKind::Payout { claim_ids } if !self.unchecked => Some(Inflight {
+                claim_ids: claim_ids.iter().map(|c| c.0).collect(),
+                inputs: self.inputs.clone(),
+                txid: Some(self.verified.sighash),
+                expiry_height: self.verified.expiry_height,
+                change: self.change,
+                spend_commit: None,
+            }),
+            _ => None,
+        }
     }
 }
 
@@ -297,7 +301,25 @@ pub fn expected_plan(
     bound: &[[u8; 32]],
 ) -> Result<(PayoutPlan, Vec<ReceivedNote>)> {
     let fvk = vault_fvk(vault)?;
-    let SignKind::Payout { claim_ids } = kind;
+    let claim_ids = match kind {
+        SignKind::Payout { claim_ids } => claim_ids,
+        SignKind::Refund { note_id } => {
+            // P5: a deposit no guest can land (I30), refunded as its owner asked.
+            let (_, note) = notes
+                .refundable
+                .iter()
+                .find(|(id, _)| *id == note_id.0)
+                .context("not a deposit that may be refunded off-chain")?;
+            let request = vault
+                .refunds
+                .iter()
+                .find(|r| r.note_id == note_id.0)
+                .context("no accepted refund request for this note")?;
+            ensure!(!owns_receiver(&fvk, &request.recipient.receiver), "a refund cannot go to the vault itself");
+            let plan = ledger::refund_plan(note_id.0, note.value(), request.recipient.receiver)?;
+            return Ok((plan, vec![note.clone()]));
+        }
+    };
     // H-2: a recipient that is one of the vault's own addresses is no recipient: the claim is set
     // aside rather than paid back into the vault outside its books.
     let recipient = |c: &Commitment| store.recipient(c).filter(|r| !owns_receiver(&fvk, &r.receiver));
@@ -317,6 +339,7 @@ pub fn expected_plan(
     let inputs = match plan.input {
         PayoutInput::Main => notes.lineage.clone(),
         PayoutInput::Refund(tag) => notes.refunds.iter().filter(|(t, _)| *t == tag).map(|(_, n)| n.clone()).collect(),
+        PayoutInput::Unlanded(_) => bail!("a payout of claims never spends a deposit that has not landed"),
     };
     Ok((plan, inputs))
 }
@@ -354,8 +377,12 @@ pub fn commit(
         .collect();
     let verified =
         verify_payout(&pczt, &fvk, &expected, plan, &expectations).map_err(|e| anyhow!("PCZT refused: {e}"))?;
-    // H-1: checked against the verified transaction, so a retry of the same one is allowed.
-    let prior_inflight = check_no_live_payout(inflight, tip, unspent, &verified.sighash)?;
+    // H-1: checked against the verified transaction, so a retry of the same one is allowed. A refund
+    // spends no lineage note and runs beside the vault's payouts.
+    let prior_inflight = match &req.kind {
+        SignKind::Payout { .. } => check_no_live_payout(inflight, tip, unspent, &verified.sighash)?,
+        SignKind::Refund { .. } => None,
+    };
     let inputs = expected.iter().map(|e| e.nullifier).collect();
     start_session(vault, req, verified, inputs, plan.change, prior_inflight, false)
 }

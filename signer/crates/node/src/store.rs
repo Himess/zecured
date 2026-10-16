@@ -64,6 +64,13 @@ pub fn write_atomic(path: &Path, bytes: &[u8]) -> Result<()> {
     Ok(())
 }
 
+/// An accepted P5 refund request: for a deposit no guest of the deployment can land on Base (I30).
+#[derive(Clone, Debug, Serialize, Deserialize)]
+pub struct RefundRecord {
+    pub note_id: [u8; 32],
+    pub recipient: Recipient,
+}
+
 /// A payout this node confirmed (signed `PayoutConfirmation` for), kept so it can sign the same
 /// confirmation again if submitting it to Base failed (H-5).
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
@@ -102,6 +109,9 @@ pub struct VaultRecord {
     /// Every claim of the vault on Base, refunds (T-02) and the opening fee (T-06) included.
     #[serde(default)]
     pub claims: Vec<Claim>,
+    /// P5: accepted refund requests of deposits no guest can land on Base (I30).
+    #[serde(default)]
+    pub refunds: Vec<RefundRecord>,
     /// Owner request nonces already used (P0).
     #[serde(default)]
     pub used_nonces: Vec<u64>,

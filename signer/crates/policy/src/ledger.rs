@@ -219,6 +219,9 @@ pub enum PayoutInput {
     Main,
     /// The note of a deposit Base refunds, by its tag: it pays its own Refund claim (I30).
     Refund([u8; 32]),
+    /// P5: a deposit no guest of the deployment can land on Base, by its note id, refunded
+    /// off-chain to the destination its owner asked for ([`refund_plan`], I30).
+    Unlanded([u8; 32]),
 }
 
 /// A payout transaction every signer can reproduce and check a PCZT against.
@@ -257,6 +260,8 @@ pub enum LedgerError {
         outstanding: u64,
         unpaid: u64,
     },
+    #[error("refund of {value} zat does not cover the fee {fee}")]
+    RefundIsDust { value: u64, fee: u64 },
 }
 
 /// Counted against the main lineage: a main-lineage claim not yet paid on Zcash nor settled in
@@ -672,6 +677,30 @@ pub fn overdue(claims: &[Claim], now: u64, age: u64) -> Vec<&Claim> {
         .iter()
         .filter(|c| c.kind.liveness_covered() && c.payable() && !c.bond_paid && now.saturating_sub(c.created_at) > age)
         .collect()
+}
+
+/// P5: refunds one deposit that no guest of the deployment can land on Base (note id `note_id`,
+/// value `note_value`) to its depositor, net of the fee; no change. Never for a note a guest can
+/// land: that one leaves the vault only as a Refund claim (I30, [`crate::classify::Landing`]).
+pub fn refund_plan(note_id: [u8; 32], note_value: u64, receiver: [u8; 43]) -> Result<PayoutPlan, LedgerError> {
+    let fee = zip317_fee(1, 1);
+    let value = note_value
+        .checked_sub(fee)
+        .filter(|v| *v > 0)
+        .ok_or(LedgerError::RefundIsDust { value: note_value, fee })?;
+    Ok(PayoutPlan {
+        claims: vec![],
+        payments: vec![PlannedPayment {
+            claim: [0; 32],
+            receiver,
+            value,
+            privacy: OutputPrivacy::VaultOvk,
+        }],
+        inputs: 1,
+        change: 0,
+        fee,
+        input: PayoutInput::Unlanded(note_id),
+    })
 }
 
 mod hex43 {
@@ -1266,6 +1295,17 @@ mod tests {
         ];
         let ids: Vec<u8> = overdue(&claims, 60_000, 43_200).iter().map(|c| c.id[0]).collect();
         assert_eq!(ids, vec![1, 7]);
+    }
+
+    /// P5: an off-chain refund is the note less the fee of one input and one output, to one
+    /// receiver, without change; a note that cannot pay its own fee stays in the vault.
+    #[test]
+    fn refund_is_net_of_fee_and_rejects_dust() {
+        let p = refund_plan([7; 32], 1_234_567, [1; 43]).unwrap();
+        assert_eq!(p.payments[0].value, 1_234_567 - FEE_1_IN_1_OUT);
+        assert_eq!((p.change, p.inputs, p.input), (0, 1, PayoutInput::Unlanded([7; 32])));
+        assert!(p.claims.is_empty());
+        assert!(refund_plan([7; 32], FEE_1_IN_1_OUT, [1; 43]).is_err());
     }
 
     #[test]

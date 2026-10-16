@@ -349,6 +349,7 @@ pub fn round3(
         activated: false,
         outstanding: 0,
         claims: vec![],
+        refunds: vec![],
         used_nonces: vec![],
         inflight: None,
         confirmed: vec![],

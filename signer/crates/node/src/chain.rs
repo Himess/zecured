@@ -3,8 +3,9 @@
 //! Zcash: every vault is scanned from its birthday through this node's light wallet server
 //! connection; deposit transactions are checked on the full transaction (P1, D5). The vault's
 //! notes are sorted by what Base says about them: its main lineage, the notes of its refunded
-//! deposits, and deposits that have not landed on Base (which never leave the vault but through a
-//! proof, I30).
+//! deposits, and deposits that have not landed on Base. Of those, a deposit a guest of the
+//! deployment can land leaves the vault only through a proof; only one no guest can land may be
+//! refunded off-chain (P5 under I30).
 //! Base: Registry events are applied up to the `safe` head only, each one checked against the
 //! Registry's state first (C-2), and at most once per vault (M-9).
 
@@ -25,7 +26,7 @@ use zecured_base::{
     verify::{self, ProviderReader, Verdict},
 };
 use zecured_policy::{
-    classify::{self, Classification, DepositNote, DepositRules, NotePosition},
+    classify::{self, Classification, DepositNote, DepositRules, Landing, NotePosition},
     derive::{deposit_tag, note_id},
     ledger::{self, ClaimKind, ClaimState, VaultNote},
 };
@@ -54,12 +55,15 @@ pub struct BaseView<'a> {
     pub activated_tag: Option<[u8; 32]>,
     /// The tags of the vault's refunded deposits (`RefundOpened`): each note pays its own refund.
     pub refund_tags: &'a [[u8; 32]],
+    /// I30: what the deployment's guests can land on Base (the Intake's journal version and
+    /// refund floor). `None` while unknown: then nothing is refunded off-chain.
+    pub landing: Option<Landing>,
 }
 
 /// One scanned note, as far as sorting the vault's notes is concerned.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct NoteFacts {
-    pub height: u32,
+    pub position: NotePosition,
     pub value: u64,
     /// Received at the vault's published address (a deposit), not its internal one.
     pub external: bool,
@@ -67,6 +71,22 @@ pub struct NoteFacts {
     pub tag: [u8; 32],
     /// P1 decision, once made.
     pub decision: Option<Classification>,
+    /// Its transaction is a D5 deposit transaction (deposits only).
+    pub ironwood_only: bool,
+    /// It pays exactly the vault's published receiver (deposits only).
+    pub to_vault_receiver: bool,
+}
+
+impl NoteFacts {
+    /// The note as P1 and the deposit statement see it.
+    pub fn deposit(&self) -> DepositNote {
+        DepositNote {
+            position: self.position,
+            value: self.value,
+            ironwood_only: self.ironwood_only,
+            to_vault_receiver: self.to_vault_receiver,
+        }
+    }
 }
 
 /// The note that roots a vault's main lineage (K2-a).
@@ -91,6 +111,24 @@ pub fn lineage_root(notes: &[NoteFacts], base: &BaseView<'_>) -> Root {
     notes.iter().position(|n| n.external && n.tag == tag).map_or(Root::Missing, Root::Note)
 }
 
+/// P5 under I30: whether an unspent deposit that has not landed on Base may be refunded off-chain.
+/// P1 classified it non-conforming, no guest of the deployment can land it (`landing`; unknown:
+/// never), it pays its own refund's fee, and it is deep enough: a note of the vault's amount waits
+/// twice the deposit depth (K2), so that no reorg brings back a chain where a guest could land it
+/// (a late payment mined again by the expiry height). Every other deposit leaves the vault only as
+/// a Refund claim, once a proof lands it.
+pub fn refundable_offchain(n: &NoteFacts, landing: Option<Landing>, rules: &DepositRules, tip: u32) -> bool {
+    let Some(landing) = landing else {
+        return false;
+    };
+    n.external
+        && matches!(n.decision, Some(Classification::NonConforming(_)))
+        && !landing.can_land(&n.deposit(), rules)
+        && n.value > zecured_zcash_ops::spend::zip317_fee(1, 1)
+        && (n.value != rules.amount
+            || classify::confirmations(n.position.height, tip) >= rules.confirmations.saturating_mul(2))
+}
+
 /// The vault's notes, sorted by what Base says about them (see `zecured_policy::ledger`).
 pub struct VaultNotes {
     pub tip: u32,
@@ -100,9 +138,15 @@ pub struct VaultNotes {
     /// (T-02, I30).
     pub refunds: Vec<([u8; 32], ReceivedNote)>,
     /// Unspent deposits (notes received at the vault's published address) that are no lineage
-    /// note of the vault, by note id: deposits that have not landed on Base yet, as collateral or
-    /// as a refund. Nothing ever spends them but a committed payout once a proof lands them (I30).
+    /// note of the vault, by note id: deposits that have not landed on Base, as collateral or as a
+    /// refund. A committed payout spends one once a proof lands it.
     pub unlanded: Vec<([u8; 32], ReceivedNote)>,
+    /// The note ids of the deposits of [`Self::unlanded`] that a guest of the deployment can land on
+    /// Base (I30): a proof lands each as collateral or as a Refund claim.
+    pub landable: Vec<[u8; 32]>,
+    /// The deposits of [`Self::unlanded`] that may be refunded off-chain (P5): no guest of the
+    /// deployment can land them ([`refundable_offchain`], I30).
+    pub refundable: Vec<([u8; 32], ReceivedNote)>,
     /// P1's conforming deposit, if decided (spent or not): the deposit a proof activates the vault
     /// with.
     pub conforming: Option<ReceivedNote>,
@@ -218,7 +262,12 @@ impl ZcashView {
 
     /// Scans the vault up to the current tip and sorts its notes (node variant). New P1
     /// decisions are added to `v.decisions`; the caller persists them.
-    pub async fn vault_notes(&mut self, v: &mut VaultRecord, confirmations: u32) -> Result<VaultNotes> {
+    pub async fn vault_notes(
+        &mut self,
+        v: &mut VaultRecord,
+        confirmations: u32,
+        landing: Option<Landing>,
+    ) -> Result<VaultNotes> {
         let rules = DepositRules {
             amount: v.amount,
             expiry_height: v.expiry_height,
@@ -232,6 +281,7 @@ impl ZcashView {
             address: &address,
             activated_tag: v.activated_tag,
             refund_tags: &refunds,
+            landing,
         };
         self.notes(&v.vault_id, &fvk, v.birthday, &rules, &mut v.decisions, base).await
     }
@@ -243,7 +293,7 @@ impl ZcashView {
     /// the vault's own transactions returned to its internal address (H-2,
     /// [`ledger::lineage_members`]); [`VaultNotes::retain_planned_change`] then keeps only the
     /// planned change. A refunded deposit's note is its own refund's input (T-02). Every other
-    /// deposit has not landed on Base.
+    /// deposit has not landed on Base; those no guest can land are refundable off-chain (P5).
     pub async fn notes(
         &mut self,
         vault_id: &B256,
@@ -315,12 +365,18 @@ impl ZcashView {
         ordered.sort_by_key(|n| n.position);
         let facts: Vec<NoteFacts> = ordered
             .iter()
-            .map(|n| NoteFacts {
-                height: n.position.height,
-                value: n.value(),
-                external: n.scope == Scope::External,
-                tag: deposit_tag(base.ufvk, &ExtractedNoteCommitment::from(n.note.commitment()).to_bytes()),
-                decision: decision(n),
+            .map(|n| {
+                let position = to_policy_position(&n.position);
+                let shape = deposits.iter().find(|d| d.position == position);
+                NoteFacts {
+                    position,
+                    value: n.value(),
+                    external: n.scope == Scope::External,
+                    tag: deposit_tag(base.ufvk, &ExtractedNoteCommitment::from(n.note.commitment()).to_bytes()),
+                    decision: decision(n),
+                    ironwood_only: shape.is_some_and(|d| d.ironwood_only),
+                    to_vault_receiver: shape.is_some_and(|d| d.to_vault_receiver),
+                }
             })
             .collect();
         let root = lineage_root(&facts, &base);
@@ -355,6 +411,8 @@ impl ZcashView {
             lineage: vec![],
             refunds: vec![],
             unlanded: vec![],
+            landable: vec![],
+            refundable: vec![],
             conforming,
             ignored: vec![],
             unspent: vec![],
@@ -369,7 +427,13 @@ impl ZcashView {
             } else if n.scope == Scope::External && base.refund_tags.contains(&f.tag) {
                 notes.refunds.push((f.tag, n.clone()));
             } else if n.scope == Scope::External {
-                notes.unlanded.push((note_id(&vault_id.0, &to_policy_position(&n.position)), n.clone()));
+                let id = note_id(&vault_id.0, &to_policy_position(&n.position));
+                if base.landing.is_some_and(|l| l.can_land(&f.deposit(), rules)) {
+                    notes.landable.push(id);
+                } else if refundable_offchain(f, base.landing, rules, tip) {
+                    notes.refundable.push((id, n.clone()));
+                }
+                notes.unlanded.push((id, n.clone()));
             } else {
                 notes.ignored.push(n.clone());
             }
@@ -631,6 +695,7 @@ mod tests {
             activated: false,
             outstanding: 0,
             claims: vec![],
+            refunds: vec![],
             used_nonces: vec![],
             inflight: None,
             confirmed: vec![],
@@ -713,11 +778,17 @@ mod tests {
 
     fn deposit(height: u32, value: u64, tag: u8, decision: Option<Classification>) -> NoteFacts {
         NoteFacts {
-            height,
+            position: NotePosition {
+                height,
+                tx_index: 0,
+                action_index: 0,
+            },
             value,
             external: true,
             tag: [tag; 32],
             decision,
+            ironwood_only: true,
+            to_vault_receiver: true,
         }
     }
 
@@ -731,6 +802,7 @@ mod tests {
             address: "",
             activated_tag: activated_tag.map(|t| [t; 32]),
             refund_tags: &[],
+            landing: None,
         }
     }
 
@@ -754,6 +826,69 @@ mod tests {
         };
         assert_eq!(lineage_root(&[internal], &base(Some(2))), Root::Missing);
         assert_eq!(lineage_root(&[], &base(None)), Root::None);
+    }
+
+    // ----- P5 under I30: what may be refunded off-chain -----
+
+    const RULES: DepositRules = DepositRules {
+        amount: 1_000_000,
+        expiry_height: 289,
+        confirmations: 10,
+    };
+    const WRONG_AMOUNT: Option<Classification> =
+        Some(Classification::NonConforming(classify::NonConformingReason::WrongAmount));
+    const LATE: Option<Classification> = Some(Classification::NonConforming(classify::NonConformingReason::Late));
+
+    /// Under v1 only a deposit Activate mode cannot prove is refunded off-chain: another amount, a
+    /// late payment (twice the deposit depth first), a transaction with other pools, another
+    /// address of the vault. A second payment of the vault's amount lands as a Refund claim.
+    #[test]
+    fn under_v1_only_what_activate_mode_cannot_prove_is_refunded_off_chain() {
+        let v1 = Some(Landing::ActivateOnly);
+        assert!(refundable_offchain(&deposit(200, 1_234_567, 1, WRONG_AMOUNT), v1, &RULES, 209));
+        assert!(!refundable_offchain(&deposit(200, 1_000_000, 1, SECOND), v1, &RULES, 1_000), "provable");
+        let late = deposit(300, 1_000_000, 1, LATE);
+        assert!(!refundable_offchain(&late, v1, &RULES, 318), "19 < 2N = 20");
+        assert!(refundable_offchain(&late, v1, &RULES, 319), "20 = 2N");
+        let crossing = NoteFacts {
+            ironwood_only: false,
+            ..deposit(200, 1_000_000, 1, SECOND)
+        };
+        assert!(refundable_offchain(&crossing, v1, &RULES, 1_000));
+        let elsewhere = NoteFacts {
+            to_vault_receiver: false,
+            ..deposit(200, 1_000_000, 1, SECOND)
+        };
+        assert!(refundable_offchain(&elsewhere, v1, &RULES, 1_000));
+    }
+
+    /// Under v2 a guest lands every note to the published receiver from the Intake's floor on:
+    /// only another address of the vault, or a note below the floor, is refunded off-chain.
+    /// Unknown deployments, undecided notes, P1's deposit and change refund nothing off-chain.
+    #[test]
+    fn under_v2_almost_everything_lands_as_a_refund_claim() {
+        let v2 = Some(Landing::WithRefunds { min_refund: 20_000 });
+        for n in [deposit(200, 1_234_567, 1, WRONG_AMOUNT), deposit(300, 1_000_000, 1, LATE)] {
+            assert!(!refundable_offchain(&n, v2, &RULES, 1_000));
+        }
+        assert!(refundable_offchain(&deposit(200, 19_999, 1, WRONG_AMOUNT), v2, &RULES, 1_000));
+        // A note that cannot pay its own refund's fee (10,000 zat) stays in the vault.
+        assert!(!refundable_offchain(&deposit(200, 10_000, 1, WRONG_AMOUNT), v2, &RULES, 1_000));
+        let elsewhere = NoteFacts {
+            to_vault_receiver: false,
+            ..deposit(200, 1_234_567, 1, WRONG_AMOUNT)
+        };
+        assert!(refundable_offchain(&elsewhere, v2, &RULES, 1_000));
+        let other = deposit(200, 1_234_567, 1, WRONG_AMOUNT);
+        assert!(!refundable_offchain(&other, None, &RULES, 1_000), "the deployment is unknown");
+        let v1 = Some(Landing::ActivateOnly);
+        assert!(!refundable_offchain(&deposit(200, 1_234_567, 1, None), v1, &RULES, 1_000), "undecided");
+        assert!(!refundable_offchain(&deposit(200, 1_000_000, 1, CONFORMING), v1, &RULES, 1_000));
+        let change = NoteFacts {
+            external: false,
+            ..deposit(200, 1_234_567, 1, None)
+        };
+        assert!(!refundable_offchain(&change, v1, &RULES, 1_000));
     }
 
     /// M-9: a crash between saving a vault and saving the cursor re-applies the chunk; the
