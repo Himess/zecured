@@ -218,8 +218,12 @@ contract DeployZecured is Script {
         path = vm.envOr("ZECURED_CONFIG", string.concat("config/zecured-", name, ".json"));
     }
 
-    function _readConfig() internal view returns (NetworkConfig memory c) {
+    function _readConfig() internal view returns (NetworkConfig memory) {
         (string memory name, string memory path) = _configPath();
+        return _readConfigAt(name, path);
+    }
+
+    function _readConfigAt(string memory name, string memory path) internal view returns (NetworkConfig memory c) {
         string memory json = vm.readFile(path);
         c.name = name;
         require(
