@@ -61,7 +61,7 @@ export interface MintingNotice {
   body: string[];
 }
 
-/** The denominations a proof of would land as a refund now because of the cap, and whether that is all of them. */
+/** The denominations whose proofs the cap holds back now (R-11: they wait), and whether that is all of them. */
 function capFull(s: MintingStatus, denominations: readonly bigint[]): { all: boolean; some: bigint[] } {
   const exceeded = denominations.filter((d) => s.mintBlock.get(d) === "CapExceeded");
   return { all: denominations.length > 0 && exceeded.length === denominations.length, some: exceeded };
@@ -112,9 +112,9 @@ export function mintingNotices(s: MintingStatus, denominations: readonly bigint[
   if (cap.all) {
     out.push({
       tone: "warn",
-      title: "The coverage cap is full: new deposits land as refunds",
+      title: "The coverage cap is full: new deposits wait for room",
       body: [
-        "New collateral is accepted only while the signers' bonds cover its value. A deposit proven now does not back a loan: it comes back as a refund, minus the payout's network fee. Wait until there is room again before you open a vault.",
+        "New collateral is accepted only while the signers' bonds cover its value. A deposit made now is not lost: its proof waits until there is room, and zZEC is minted then; or you have it proven as a refund instead. Wait until there is room again before you open a vault.",
         EXITS_NEVER_STOP,
       ],
     });
@@ -123,7 +123,7 @@ export function mintingNotices(s: MintingStatus, denominations: readonly bigint[
       tone: "info",
       title: `Room left under the coverage cap: ${formatTaz(s.capRoom)}`,
       body: [
-        `A deposit of ${cap.some.map(formatTaz).join(" or ")} would land as a refund now; the smaller sizes still fit.`,
+        `A deposit of ${cap.some.map(formatTaz).join(" or ")} would wait for room now (or come back as a refund if you ask); the smaller sizes still fit.`,
       ],
     });
   }
@@ -139,7 +139,7 @@ export function mintingNotices(s: MintingStatus, denominations: readonly bigint[
   return out;
 }
 
-/** Whether to open a vault of `amount` now (the app does not open one whose deposit would land as a refund). */
+/** Whether to open a vault of `amount` now (the app opens none whose deposit would land as a refund, or wait for room). */
 export interface OpenGate {
   allowed: boolean;
   /** What happens to a deposit proven now, or null when it would be activated as usual. */
@@ -153,9 +153,10 @@ export function openGate(s: MintingStatus | null, amount: bigint): OpenGate {
     case "Halted":
       return { allowed: false, message: "Minting has stopped for good: a deposit proven now would only come back as a refund." };
     case "CapExceeded":
+      // R-11: the proof of a new vault's deposit reverts while the cap has no room, and is sent again later.
       return {
         allowed: false,
-        message: `The coverage cap has room for ${formatTaz(s.capRoom)} only: a deposit of ${formatTaz(amount)} proven now would only come back as a refund. Try a smaller size, or later.`,
+        message: `The coverage cap has room for ${formatTaz(s.capRoom)} only: a deposit of ${formatTaz(amount)} made now would wait, unminted, until there is room (or come back as a refund if you ask). Try a smaller size, or later.`,
       };
     case "Paused":
       // A pause by signatures runs until `pausedUntil`; past it (as the backend read it), an open theft case pauses.
@@ -297,7 +298,7 @@ export function claimView(
           return {
             label,
             badge: { tone: "warn", text: "Dormant: needs your destination" },
-            detail: `No destination was given in time, so it was set aside: it no longer counts against the coverage cap, and it is still yours. Give it an Ironwood destination to be paid.${writeOff}`,
+            detail: `No destination was given in time, so it was set aside: it no longer counts against the coverage cap, and it is still yours. Giving it an Ironwood destination wakes it, and it is paid.${writeOff}`,
           };
         }
         const dormantAt = ctx.refundDormancy ? c.createdAt + ctx.refundDormancy : null;

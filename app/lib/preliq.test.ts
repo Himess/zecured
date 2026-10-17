@@ -7,6 +7,7 @@ import {
   formatWadPercent,
   PRE_LIQUIDATION_PRESETS,
   PRE_LIQUIDATION_TERM_SECONDS,
+  preLiquidationNow,
   previewSentence,
   termsActive,
   termsOf,
@@ -81,6 +82,41 @@ describe("the band, as the Adapter interpolates it (Morpho's PreLiquidation arit
     expect(bandAt(t, LLTV, 5875n * (WAD / 10_000n))).toEqual({ closeFactor: 30n * PCT, incentive: 1035n * (WAD / 1000n) });
     const near = bandAt(t, LLTV, 55n * PCT + 1n)!;
     expect(near.closeFactor >= 10n * PCT && near.closeFactor < 10n * PCT + 10n ** 6n).toBe(true);
+  });
+});
+
+describe("the position now, with the Adapter's formulas and roundings (track L-PRE)", () => {
+  const t = termsOf(standard, NOW);
+  // 1 ZEC at 40 USD: worth 40.000000 USDC. One borrower, so shares are assets × 1e6.
+  const price = 40n * 10n ** 34n;
+  const at = (debt: bigint) =>
+    preLiquidationNow(
+      t,
+      LLTV,
+      { collateral: 100_000_000n, borrowShares: debt * 10n ** 6n },
+      { totalBorrowAssets: debt, totalBorrowShares: debt * 10n ** 6n },
+      price,
+    );
+
+  it("in the band at 57.5 %: q = 1/3, the factors, the most one call repays and what it takes", () => {
+    expect(at(23_000_000n)).toEqual({
+      state: "band",
+      ltv: 575n * 10n ** 15n,
+      closeFactor: 233_333_333_333_333_333n,
+      incentive: 1_029_999_999_999_999_999n,
+      maxRepayShares: 5_366_666_666_666n,
+      maxRepayAssets: 5_366_667n,
+      // (5,366,666 × 1.029999999999999999, rounded down) × 1e36 / price: 0.13819162 ZEC.
+      seizedAtMax: 13_819_162n,
+    });
+  });
+
+  it("the band's edges: a debt of exactly value × preLltv is below it, exactly value × LLTV is its top", () => {
+    expect(at(22_000_000n)).toEqual({ state: "below", ltv: 55n * PCT });
+    const top = at(25_000_000n);
+    expect(top.state === "band" && [top.closeFactor, top.incentive]).toEqual([50n * PCT, 105n * PCT]);
+    expect(at(25_000_001n).state).toBe("above");
+    expect(at(0n)).toEqual({ state: "none" });
   });
 });
 

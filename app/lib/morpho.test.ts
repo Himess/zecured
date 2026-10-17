@@ -94,6 +94,22 @@ describe("interest accrual (MorphoBalancesLib)", () => {
     const withFee = expectedMarket({ ...market, fee: WAD / 10n }, rate, 1_000n + 30n * 86_400n);
     expect(withFee.totalSupplyShares).toBeGreaterThan(market.totalSupplyShares);
   });
+
+  it("parity vector with the bots and the Adapter (track L-PRE, R-24): one year at 85,220,420 per second", () => {
+    const stored: MarketState = {
+      totalSupplyAssets: 1_000_000_000_000n,
+      totalSupplyShares: 10n ** 18n,
+      totalBorrowAssets: 1_249_000n,
+      totalBorrowShares: 1_249_000_000_000n,
+      lastUpdate: 1_791_664_288n,
+      fee: 0n,
+    };
+    const now = expectedMarket(stored, 85_220_420n, 1_823_200_288n);
+    expect(now.totalBorrowAssets).toBe(1_252_361n);
+    expect(now.totalSupplyAssets).toBe(1_000_000_003_361n);
+    expect(now.totalBorrowShares).toBe(stored.totalBorrowShares);
+    expect(now.totalSupplyShares).toBe(stored.totalSupplyShares);
+  });
 });
 
 describe("risk", () => {

@@ -23,7 +23,8 @@ export const PROOF_MINTING_SENTENCE =
  * - `possible`: the cap blocks this vault's amount now and nothing is on Base;
  * - `confirmed`: the same, and the coordinator says a deposit was seen (`deposit_seen`, or a
  *   `depositSeen` flag a newer backend may add);
- * - `none`: nothing waits for the cap.
+ * - `none`: nothing waits for the cap (also once the deposit was proven as a refund, R-12: it is a
+ *   pending refund, then a Refund claim).
  */
 export function capWait(p: {
   /** GET /vaults/:id `status` (the coordinator's view). */
@@ -34,10 +35,12 @@ export function capWait(p: {
   baseStatus: OnchainVaultStatus | undefined;
   /** Base has a pending activation for the vault. */
   pending: boolean;
+  /** Base has a pending refund or a Refund claim for the vault (R-12). */
+  refunding?: boolean;
   /** GET /status `minting.mintBlock[amount]`. */
   mintBlock: MintBlock | null | undefined;
 }): "none" | "possible" | "confirmed" {
-  if (p.pending || (p.baseStatus !== undefined && p.baseStatus !== "None") || p.mintBlock !== "CapExceeded") return "none";
+  if (p.pending || p.refunding || (p.baseStatus !== undefined && p.baseStatus !== "None") || p.mintBlock !== "CapExceeded") return "none";
   if (p.vaultStatus === "deposit_seen" || p.depositSeen === true) return "confirmed";
   return p.vaultStatus === "awaiting_deposit" ? "possible" : "none";
 }

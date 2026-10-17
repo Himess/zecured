@@ -125,10 +125,11 @@ describe("the minting banner", () => {
     expect(byCase[0]!.title).toBe("New minting is paused while a theft case is open");
   });
 
-  it("bonds short, the cap full (deposits land as refunds), room for the small sizes only, a stale cap price", () => {
+  it("bonds short, the cap full (R-11: deposits wait, or are refunded on request), room for the small sizes only, a stale cap price", () => {
     expect(mintingNotices(minting({ fullyBonded: false }), DENOMINATIONS, NOW)[0]!.title).toBe("Not every signer holds its full bond");
     const full = mintingNotices(minting({ capRoom: 0n }, DENOMINATIONS.map((d) => [d, "CapExceeded"])), DENOMINATIONS, NOW);
-    expect(full[0]!.title).toBe("The coverage cap is full: new deposits land as refunds");
+    expect(full[0]!.title).toBe("The coverage cap is full: new deposits wait for room");
+    expect(full[0]!.body[0]).toMatch(/not lost: its proof waits until there is room.*proven as a refund instead/);
     expect(full[0]!.body).toContain(EXITS_NEVER_STOP);
     const some = mintingNotices(
       minting({ capRoom: 3_000_000n }, [
@@ -140,13 +141,15 @@ describe("the minting banner", () => {
       NOW,
     );
     expect(some[0]).toMatchObject({ tone: "info", title: "Room left under the coverage cap: 0.03 TAZ" });
-    expect(some[0]!.body[0]).toBe("A deposit of 0.05 TAZ or 0.125 TAZ would land as a refund now; the smaller sizes still fit.");
+    expect(some[0]!.body[0]).toBe(
+      "A deposit of 0.05 TAZ or 0.125 TAZ would wait for room now (or come back as a refund if you ask); the smaller sizes still fit.",
+    );
     const stale = mintingNotices(minting({ capRoom: 0n }, DENOMINATIONS.map((d) => [d, null])), DENOMINATIONS, NOW);
     expect(stale.map((n) => n.title)).toEqual(["The coverage cap's price is stale"]);
   });
 });
 
-describe("opening a vault (no deposit that would only come back as a refund)", () => {
+describe("opening a vault (no deposit that would only come back as a refund, or wait for room)", () => {
   const at = (block: MintBlock | null, patch: Partial<MintingStatus> = {}) => openGate(minting(patch, [[5_000_000n, block]]), 5_000_000n);
 
   it("refuses a halt and a full cap; warns of a pause, short bonds and a stale price; says nothing otherwise", () => {
@@ -154,7 +157,7 @@ describe("opening a vault (no deposit that would only come back as a refund)", (
     expect(at("CapExceeded", { capRoom: 1_000_000n })).toEqual({
       allowed: false,
       message:
-        "The coverage cap has room for 0.01 TAZ only: a deposit of 0.05 TAZ proven now would only come back as a refund. Try a smaller size, or later.",
+        "The coverage cap has room for 0.01 TAZ only: a deposit of 0.05 TAZ made now would wait, unminted, until there is room (or come back as a refund if you ask). Try a smaller size, or later.",
     });
     expect(at("Paused", { pausedUntil: NOW + 60 })).toEqual({
       allowed: true,
@@ -305,6 +308,8 @@ describe("delivery badges (section 3 of the v4 design) and dormant refunds (R-11
     expect(view(refund).detail).toContain(`dormant after ${formatUtc(NOW - 3_600 + 172_800)}`);
     expect(view({ ...refund, dormant: true }).badge.text).toBe("Dormant: needs your destination");
     expect(view({ ...refund, dormant: true }).detail).toMatch(/no longer counts against the coverage cap/);
+    // L-INTAKE: a dormant refund wakes when its account gives a destination.
+    expect(view({ ...refund, dormant: true }).detail).toMatch(/Ironwood destination wakes it/);
     // Before v4 (no dormancy), only the write-off is announced.
     expect(claimView(claim(refund), { refundAbandonPeriod: 2_592_000, nowSeconds: NOW }).detail).not.toMatch(/dormant/);
   });

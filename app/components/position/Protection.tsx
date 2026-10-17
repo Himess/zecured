@@ -9,17 +9,33 @@ import type { PositionSnapshot } from "@/lib/chain";
 import { config } from "@/lib/config";
 import { useAction, usePreLiquidation } from "@/lib/hooks";
 import type { StoredLoan } from "@/lib/keys";
-import { formatBps, formatUsdc, ltvBps, WAD } from "@/lib/morpho";
+import { formatBps, formatUsdc, ltvBps } from "@/lib/morpho";
 import {
-  bandAt,
   formatIncentive,
   formatWadPercent,
   PRE_LIQUIDATION_PRESETS,
+  preLiquidationNow,
   previewSentence,
   termsActive,
   termsOf,
+  type PreLiquidationNow,
   type PreLiquidationPreset,
 } from "@/lib/preliq";
+import { formatTaz } from "@/lib/zcash";
+
+/** The "Now" row: below the band, in it (with today's numbers), or past the LLTV. */
+function nowSentence(p: PreLiquidationNow): string {
+  switch (p.state) {
+    case "none":
+      return "No debt: nothing to pre-liquidate.";
+    case "below":
+      return "Below the band: nobody can pre-liquidate.";
+    case "above":
+      return "Above the market's liquidation LTV: a full liquidation applies.";
+    case "band":
+      return `In the band: one pre-liquidation may repay up to ${formatUsdc(p.maxRepayAssets)} USDC (${formatWadPercent(p.closeFactor)} of the debt) and take about ${formatTaz(p.seizedAtMax)} of your collateral for it (a ${formatIncentive(p.incentive)} incentive).`;
+  }
+}
 
 async function send(loan: StoredLoan, calls: Call[]) {
   try {
@@ -97,8 +113,8 @@ export function ProtectionCard({ loan, snapshot, onChanged }: { loan: StoredLoan
   const t = terms.data ?? null;
   const active = t !== null && termsActive(t, nowSeconds) ? t : null;
   const ltv = ltvBps(snapshot.position.collateral, snapshot.price, snapshot.debt);
-  const ltvWad = ltv === null ? null : (ltv * WAD) / 10_000n;
-  const band = active && ltvWad !== null ? bandAt(active, config.lltv, ltvWad) : null;
+  // Where the loan stands now, as the Adapter would decide a pre-liquidation (the market accrued to the latest block).
+  const position = active ? preLiquidationNow(active, config.lltv, snapshot.position, snapshot.market, snapshot.price) : null;
 
   return (
     <div className="space-y-4">
@@ -113,14 +129,7 @@ export function ProtectionCard({ loan, snapshot, onChanged }: { loan: StoredLoan
             rows={[
               ["Starts above", formatWadPercent(active.preLltv)],
               ["Your loan-to-value now", ltv === null ? "—" : formatBps(ltv)],
-              [
-                "Now",
-                band
-                  ? `In the band: one pre-liquidation may repay up to ${formatWadPercent(band.closeFactor)} of the debt for a ${formatIncentive(band.incentive)} incentive.`
-                  : ltvWad !== null && ltvWad > config.lltv
-                    ? "Above the market's liquidation LTV: a full liquidation applies."
-                    : "Below the band: nobody can pre-liquidate.",
-              ],
+              ["Now", position ? nowSentence(position) : "—"],
               ["Terms valid until", formatUtc(active.expiry)],
             ]}
           />

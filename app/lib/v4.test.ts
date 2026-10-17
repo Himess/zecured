@@ -16,6 +16,8 @@ describe("R-11.1: a deposit waiting for room under the coverage cap", () => {
 
   it("none for a deposit already proven, activated or refunded, a closed vault, or anything else holding it", () => {
     expect(capWait({ ...waiting, pending: true })).toBe("none");
+    // R-12: proven as a refund (a pending refund until its claim opens, then the claim).
+    expect(capWait({ ...waiting, vaultStatus: "deposit_seen", refunding: true })).toBe("none");
     expect(capWait({ ...waiting, baseStatus: "Active" })).toBe("none");
     expect(capWait({ ...waiting, baseStatus: "Cancelled" })).toBe("none");
     expect(capWait({ ...waiting, vaultStatus: "expired" })).toBe("none");

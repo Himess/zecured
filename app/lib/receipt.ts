@@ -119,6 +119,18 @@ export function armingState(c: ArmableClaim, ctx: { account: Address; frozen: bo
   return { kind: "armed", payableAt: c.arming.payableAt, dueAt: c.liveness?.dueAt ?? null };
 }
 
+/**
+ * What to say about an armed claim: when the bonds pay it if it is still unpaid then, or, while
+ * `livenessDue` is (0, 0) for it (track L-INTAKE: the price feed is stale, or the compensator owes
+ * the claim; a frozen vault shows no arming at all), that they would pay nothing right now.
+ */
+export function armedNote(state: { payableAt: number; dueAt: number | null }, formatTime: (unixSeconds: number) => string): string {
+  const head = `Bonds' guarantee armed (a signer confirmed the destination at ${formatTime(state.payableAt)})`;
+  return state.dueAt !== null
+    ? `${head}: if it is still unpaid at ${formatTime(state.dueAt)}, the signers' bonds pay you instead.`
+    : `${head}. Right now the bonds would pay nothing (their price feed is stale, or the compensator owes this claim); it stays payable on Zcash.`;
+}
+
 // ------------------------------------------------------------------ what this browser already sent
 
 const ARMED_KEY = "zecured:armed:v1";

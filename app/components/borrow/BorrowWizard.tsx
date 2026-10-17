@@ -166,7 +166,7 @@ function AmountStep({
   const groupId = useId();
   const [amount, setAmount] = useState<bigint>(loan ? BigInt(loan.amount) : config.denominations[0]!);
   const [ready, setReady] = useState(false);
-  // T-01, T-03: a vault whose deposit would only come back as a refund is not opened.
+  // T-01, T-03, R-11: a vault whose deposit would only come back as a refund, or wait for room under the cap, is not opened.
   const minting = useMintingStatus();
   const gate = openGate(minting.data, amount);
   const fee = feeNotice(amount, config.v3);
@@ -227,7 +227,7 @@ function AmountStep({
                 <span className="block text-lg font-semibold">{formatTaz(d)}</span>
                 <span className="block text-xs text-muted">Standard vault size (everyone uses the same amounts)</span>
                 {!openGate(minting.data, d).allowed ? (
-                  <span className="block text-xs text-warn">A deposit of this size would come back as a refund now.</span>
+                  <span className="block text-xs text-warn">A deposit of this size cannot back a loan right now.</span>
                 ) : null}
               </span>
             </label>
@@ -398,8 +398,11 @@ function DepositStep({ loan, vault, vaultError }: { loan: StoredLoan; vault: Vau
   const l = ledger.data;
   const statusIndex = statusStep(vault, Boolean(l?.pending));
   const refunded = Boolean(l && l.claims.some((c) => c.kind === "Refund"));
+  // R-12: proven as a refund, its claim not open yet.
+  const refundPending = (l?.pendingRefunds?.length ?? 0) > 0;
   // Paying again after the deposit was seen, or after expiry, does not back the loan.
-  const awaiting = (!vault || vault.status === "awaiting_deposit" || vault.status === "unknown") && !l?.pending && !refunded;
+  const awaiting =
+    (!vault || vault.status === "awaiting_deposit" || vault.status === "unknown") && !l?.pending && !refunded && !refundPending;
   const expiry = vault?.expiryHeight ?? loan.expiryHeight;
   const blocksLeft = vault?.tipHeight !== undefined && expiry !== undefined ? expiry - vault.tipHeight : null;
   // R-11.1: the deposit is on Zcash but its proof waits for room under the coverage cap.
@@ -409,6 +412,7 @@ function DepositStep({ loan, vault, vaultError }: { loan: StoredLoan; vault: Vau
     depositSeen: vault?.depositSeen,
     baseStatus: l?.status,
     pending: Boolean(l?.pending),
+    refunding: refunded || refundPending,
     mintBlock: minting.data?.mintBlock.get(amount),
   });
   const refundInstead = useAction(async () => {
@@ -474,7 +478,8 @@ function DepositStep({ loan, vault, vaultError }: { loan: StoredLoan; vault: Vau
                 <Link href={vaultHref("refund", loan.vaultId!)} prefetch={false}>
                   refunds page
                 </Link>
-                , where you give it an Ironwood destination (the payout&apos;s network fee is deducted).
+                , pending for a few Zcash blocks until its claim opens; you then give it an Ironwood destination there (the
+                payout&apos;s network fee is deducted).
               </p>
             ) : (
               <>
@@ -494,6 +499,18 @@ function DepositStep({ loan, vault, vaultError }: { loan: StoredLoan; vault: Vau
               into your position.{" "}
               <Link href={vaultHref("position", loan.vaultId!)} prefetch={false}>
                 See when
+              </Link>
+              .
+            </p>
+          </Notice>
+        ) : null}
+        {refundPending && !refunded ? (
+          <Notice tone="info" title="Your deposit was proven as a refund" live>
+            <p>
+              Its proof is on Base and waits a few Zcash blocks, like an activation, before its refund opens (pending until
+              then). The backend&apos;s keeper opens it; you then give it an Ironwood destination on the{" "}
+              <Link href={vaultHref("refund", loan.vaultId!)} prefetch={false}>
+                refunds page
               </Link>
               .
             </p>

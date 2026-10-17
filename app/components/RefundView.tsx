@@ -2,7 +2,7 @@
 
 import Link from "next/link";
 import { MissingVaultId, useMounted } from "./client";
-import { PendingActivationCard, RefundsCard } from "./position/Ledger";
+import { PendingActivationCard, PendingRefundsCard, RefundsCard } from "./position/Ledger";
 import { buttonClass, Card, Notice } from "./ui";
 import { config } from "@/lib/config";
 import { useLoanByVault, useUrlFragment, useVault, useVaultLedger } from "@/lib/hooks";
@@ -39,9 +39,10 @@ export function RefundView() {
       <Notice tone="info" title="How deposits come back">
         <p>
           Only one exact Ironwood payment of the vault&apos;s amount, before its deadline, backs a loan. Any other deposit
-          that reaches the vault (a second payment, a deposit while minting is halted or the coverage cap is full, or one
-          proven as a refund) is proven on Base as a Refund claim. You give it an Ironwood destination here, and the signers
-          pay it, minus the network fee, through a commitment on Base like every payout.
+          that reaches the vault (a second payment, a deposit while minting is halted, or one you had proven as a refund
+          rather than wait for room under the coverage cap) is proven on Base as a refund: pending for a few Zcash blocks,
+          then a Refund claim. You give it an Ironwood destination here, and the signers pay it, minus the network fee,
+          through a commitment on Base like every payout.
           {config.v3
             ? ` A refund left without a destination for ${formatPeriod(config.v3.refundAbandonPeriod)} can be written off; you can still revive it later by giving one.`
             : null}
@@ -67,8 +68,9 @@ export function RefundView() {
       ) : null}
       {ledger.loading ? <p className="text-sm text-muted">Reading the vault on Base…</p> : null}
       {l?.pending ? <PendingActivationCard ledger={l} loan={loan} onChanged={refresh} /> : null}
+      {l ? <PendingRefundsCard ledger={l} /> : null}
       {l ? <RefundsCard ledger={l} loan={loan} onChanged={refresh} /> : null}
-      {l && refunds.length === 0 ? (
+      {l && refunds.length === 0 && (l.pendingRefunds?.length ?? 0) === 0 ? (
         <Card>
           <p className="text-sm text-muted">This vault has no refunds on Base.</p>
         </Card>

@@ -1,12 +1,13 @@
 import { existsSync, readFileSync } from "node:fs";
 import { fileURLToPath } from "node:url";
 import { describe, expect, it } from "vitest";
-import { toEventSignature, toFunctionSignature, type AbiEvent, type AbiFunction } from "viem";
+import { toEventSignature, toFunctionSelector, toFunctionSignature, type AbiEvent, type AbiFunction } from "viem";
 import {
   adapterV4Abi,
   bondV4Abi,
   bondViewsAbi,
   erc20AllowanceAbi,
+  intakeV4Abi,
   intakeViewsAbi,
   morphoSupplyAbi,
   refundsV4Abi,
@@ -47,6 +48,9 @@ describe("v4 fragments: the V4 interface freeze's signatures", () => {
     const pre = find(adapterV4Abi, "event", "PreLiquidated");
     expect(signature(pre)).toBe("PreLiquidated(bytes32,address,address,uint256,uint64)");
     expect(indexed(pre)).toEqual([true, true, true, false, false]);
+    // The selectors track L-PRE's compiled Adapter has (and the backend's allowlist pins).
+    expect(toFunctionSelector(find(adapterV4Abi, "function", "setPreLiquidation") as AbiFunction)).toBe("0x3b8f1fc8");
+    expect(toFunctionSelector(find(adapterV4Abi, "function", "clearPreLiquidation") as AbiFunction)).toBe("0xad90c3b3");
   });
 
   it("the Registry (sections 1, 2, 4): PayoutConfirmed names the payout, PayoutProven, RefundDormant", () => {
@@ -57,6 +61,16 @@ describe("v4 fragments: the V4 interface freeze's signatures", () => {
     expect(signature(proven)).toBe("PayoutProven(bytes32,bytes32,bytes32)");
     expect(indexed(proven)).toEqual([true, true, false]);
     expect(signature(find(registryV4EventsAbi, "event", "RefundDormant"))).toBe("RefundDormant(bytes32,bytes32)");
+  });
+
+  it("the Intake (section 4, R-12): RefundPending, a pending refund by deposit tag, and their total", () => {
+    const pending = find(intakeV4Abi, "event", "RefundPending");
+    expect(signature(pending)).toBe("RefundPending(bytes32,bytes32,uint8,uint256,uint256)");
+    expect(indexed(pending)).toEqual([true, true, false, false, false]);
+    expect(signature(find(intakeV4Abi, "function", "pendingRefund"))).toBe("pendingRefund(bytes32)");
+    const out = (find(intakeV4Abi, "function", "pendingRefund") as AbiFunction).outputs[0] as unknown as { components: readonly { type: string }[] };
+    expect(out.components.map((c) => c.type)).toEqual(["bytes32", "address", "uint64", "uint8", "bytes32", "uint256", "uint256", "bytes32"]);
+    expect(signature(find(intakeV4Abi, "function", "pendingRefundTotal"))).toBe("pendingRefundTotal()");
   });
 
   it("ZecuredSwap (section 5): open with the SwapQuote, refund, and the five events", () => {
@@ -119,6 +133,7 @@ describe("fragments against the compiled contracts (contracts/abi), once they co
     check("SignerBondV2", bondV4Abi.filter((i) => i.type !== "error"), false);
     check("SettlementAdapter", adapterV4Abi.filter((i) => i.type !== "error"), false);
     check("ZecuredRegistry", registryV4EventsAbi, false);
+    check("ZecuredIntake", intakeV4Abi, false);
     check("ZecuredSwap", swapAbi, false);
   });
 

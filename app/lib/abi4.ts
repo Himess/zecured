@@ -208,6 +208,50 @@ export const registryV4EventsAbi = [
   },
 ] as const;
 
+/** R-12: a proof landed as a refund; its claim opens at `finalizeRefund` (`reason` is a `RefundReason`). */
+export const refundPendingEvent = {
+  type: "event",
+  name: "RefundPending",
+  inputs: [
+    { name: "vaultId", type: "bytes32", indexed: true },
+    { name: "depositTag", type: "bytes32", indexed: true },
+    { name: "reason", type: "uint8", indexed: false },
+    { name: "readyHeight", type: "uint256", indexed: false },
+    { name: "readyTime", type: "uint256", indexed: false },
+  ],
+} as const;
+
+/**
+ * The Intake, v4 (R-12, V4 freeze section 4): a deposit proven as a refund waits, like an activation
+ * (K3), before its Refund claim opens (`finalizeRefund`); pending refunds are keyed by deposit tag.
+ */
+export const intakeV4Abi = [
+  refundPendingEvent,
+  {
+    type: "function",
+    name: "pendingRefund",
+    stateMutability: "view",
+    inputs: [{ name: "depositTag", type: "bytes32" }],
+    outputs: [
+      {
+        type: "tuple",
+        name: "",
+        components: [
+          { name: "vaultId", type: "bytes32" },
+          { name: "account", type: "address" },
+          { name: "amount", type: "uint64" },
+          { name: "reason", type: "uint8" },
+          { name: "anchor", type: "bytes32" },
+          { name: "readyHeight", type: "uint256" },
+          { name: "readyTime", type: "uint256" },
+          { name: "versionId", type: "bytes32" },
+        ],
+      },
+    ],
+  },
+  { type: "function", name: "pendingRefundTotal", stateMutability: "view", inputs: [], outputs: [{ name: "", type: "uint64" }] },
+] as const;
+
 /** The Intake's views the status page reads (v3, in contracts/abi). */
 export const intakeViewsAbi = [
   { type: "function", name: "capRoom", stateMutability: "view", inputs: [], outputs: [{ name: "zatoshi", type: "uint256" }] },

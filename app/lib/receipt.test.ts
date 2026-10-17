@@ -3,6 +3,7 @@ import { hashTypedData, keccak256, toBytes, type Address, type Hex } from "viem"
 import { privateKeyToAccount } from "viem/accounts";
 import type { LivenessReceipt } from "./api";
 import {
+  armedNote,
   armingState,
   bondDomain,
   checkReceipt,
@@ -119,6 +120,19 @@ describe("which of the account's claims to arm", () => {
     none({}, { ...ctx, frozen: true });
     none({}, { ...ctx, compromised: true });
     none({ arming: null });
+  });
+});
+
+describe("what the page says about an armed claim", () => {
+  const fmt = (s: number) => `t${s}`;
+
+  it("when the bonds pay it if it is still unpaid then, or that they would pay nothing now (livenessDue (0, 0))", () => {
+    expect(armedNote({ payableAt: 100, dueAt: 86_500 }, fmt)).toBe(
+      "Bonds' guarantee armed (a signer confirmed the destination at t100): if it is still unpaid at t86500, the signers' bonds pay you instead.",
+    );
+    const stale = armedNote({ payableAt: 100, dueAt: null }, fmt);
+    expect(stale).toMatch(/would pay nothing \(their price feed is stale, or the compensator owes this claim\); it stays payable on Zcash/);
+    expect(stale).not.toMatch(/still unpaid at/);
   });
 });
 

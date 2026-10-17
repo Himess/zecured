@@ -28,7 +28,7 @@ import { formatTaz } from "@/lib/zcash";
 import { STATUS_LABEL } from "../status";
 import { Exits, PendingClose, SendUsdcForm } from "./Exits";
 import { Deleverage } from "./Deleverage";
-import { ClaimsCard, PendingActivationCard, RefundsCard, TheftNotice } from "./Ledger";
+import { ClaimsCard, PendingActivationCard, PendingRefundsCard, RefundsCard, TheftNotice } from "./Ledger";
 import { PartialRelease } from "./PartialRelease";
 import { ProtectionCard } from "./Protection";
 
@@ -210,6 +210,7 @@ export function PositionView() {
         </Card>
       ) : null}
 
+      {l ? <PendingRefundsCard ledger={l} /> : null}
       {l ? <RefundsCard ledger={l} loan={loan} onChanged={refresh} /> : null}
 
       {l ? (

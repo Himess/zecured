@@ -26,7 +26,7 @@ import { config } from "@/lib/config";
 import { notifyLoansChanged, useAction, useRefundReason } from "@/lib/hooks";
 import { browserStorage, loanStore, short, type StoredLoan } from "@/lib/keys";
 import { formatUsdc } from "@/lib/morpho";
-import { armingState, checkReceipt, rememberArming, rememberedArmings, wasArmedHere } from "@/lib/receipt";
+import { armedNote, armingState, checkReceipt, rememberArming, rememberedArmings, wasArmedHere } from "@/lib/receipt";
 import {
   bondPayment,
   bondPaymentExplainer,
@@ -156,6 +156,45 @@ export function PendingActivationCard({
           </p>
         ) : null}
       </div>
+    </Card>
+  );
+}
+
+// ------------------------------------------------------------------ R-12: pending refunds
+
+/**
+ * Deposits proven as refunds whose claims have not opened yet (R-12): each waits a few Zcash blocks,
+ * like an activation, before anyone (the backend's keeper) opens its Refund claim; only then can it
+ * take a destination.
+ */
+export function PendingRefundsCard({ ledger }: { ledger: VaultLedger }) {
+  const list = ledger.pendingRefunds ?? [];
+  if (list.length === 0) return null;
+  const t = now();
+  return (
+    <Card
+      title={list.length === 1 ? "A deposit was proven as a refund" : `${list.length} deposits were proven as refunds`}
+      action={<Badge tone="info">Pending refund</Badge>}
+    >
+      <p className="mb-4 text-sm text-muted">
+        The proof is on Base. Like an activation, it waits until the Zcash header relay has seen a few more blocks and a
+        short delay has passed; then its Refund claim opens (the backend&apos;s keeper does it) and you give it an Ironwood
+        destination here. Until then it is pending.
+      </p>
+      <ul className="space-y-3">
+        {list.map((r) => (
+          <li key={r.depositTag} className="rounded-lg border border-border p-4">
+            <KeyValue
+              rows={[
+                ["Deposit", formatTaz(r.amount)],
+                ["Why", r.reason ? REFUND_REASON_TEXT[r.reason] : "Not readable from Base."],
+                ["Claim opens from Zcash height", `#${r.readyHeight.toLocaleString("en-US")}`],
+                ["Not before", `${formatUtc(r.readyTime)}${t >= r.readyTime ? " (passed)" : ""}`],
+              ]}
+            />
+          </li>
+        ))}
+      </ul>
     </Card>
   );
 }
@@ -541,13 +580,7 @@ function LivenessGuarantee({
 
   if (state.kind === "none" || !bond) return null;
   if (state.kind === "armed") {
-    const dueAt = state.dueAt ?? (config.v3 ? state.payableAt + config.v3.livenessPeriod : null);
-    return (
-      <p className="text-xs text-muted">
-        Bonds&apos; guarantee armed (a signer confirmed the destination at {formatUtc(state.payableAt)})
-        {dueAt !== null ? `: if it is still unpaid at ${formatUtc(dueAt)}, the signers' bonds pay you instead.` : "."}
-      </p>
-    );
+    return <p className="text-xs text-muted">{armedNote(state, formatUtc)}</p>;
   }
   if (!loan) {
     return (

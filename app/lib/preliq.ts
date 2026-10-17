@@ -5,7 +5,17 @@
  * The Settlement Adapter keeps the terms per account and does the work; this module only builds
  * them, checks them as the Adapter does, and explains them. Values in WAD (1e18 = 100 %).
  */
-import { liquidationIncentiveFactor, mulDivDown, WAD } from "./morpho";
+import {
+  liquidationIncentiveFactor,
+  mulDivDown,
+  mulDivUp,
+  ORACLE_PRICE_SCALE,
+  toAssetsDown,
+  toAssetsUp,
+  WAD,
+  type MarketState,
+  type PositionState,
+} from "./morpho";
 
 export interface PreLiquidationTerms {
   /** The LTV above which pre-liquidation may start (WAD). */
@@ -88,6 +98,60 @@ export function bandAt(t: PreLiquidationTerms, lltv: bigint, ltv: bigint): { clo
     closeFactor: t.preLcf1 + mulDivDown(q, t.preLcf2 - t.preLcf1, WAD),
     incentive: t.preLif1 + mulDivDown(q, t.preLif2 - t.preLif1, WAD),
   };
+}
+
+/** Where the position stands against the terms now, as `SettlementAdapter.preLiquidate` decides. */
+export type PreLiquidationNow =
+  /** No debt, or no collateral value. */
+  | { state: "none" }
+  /** `borrowed <= value * preLltv`: nobody can pre-liquidate. */
+  | { state: "below"; ltv: bigint }
+  /** `borrowed > value * LLTV`: a full liquidation applies instead. */
+  | { state: "above"; ltv: bigint }
+  /**
+   * In the band: the close and incentive factors at this LTV, the most one pre-liquidation may repay
+   * (borrow shares, and the USDC Morpho pulls for them) and the collateral it would take for that.
+   */
+  | {
+      state: "band";
+      ltv: bigint;
+      closeFactor: bigint;
+      incentive: bigint;
+      maxRepayShares: bigint;
+      maxRepayAssets: bigint;
+      /** zatoshi, before the Adapter's floor checks (at least the D11 floor taken, and left in the vault). */
+      seizedAtMax: bigint;
+    };
+
+/**
+ * See `PreLiquidationNow`, with the Adapter's formulas and roundings (track L-PRE): the collateral
+ * value `coll * price / 1e36` and the debt as Morpho's health check counts it (rounded up); in the
+ * band iff `value * preLltv / 1e18 < debt <= value * LLTV / 1e18`; `ltv = ceil(debt * 1e18 / value)`,
+ * `q = (ltv - preLltv) * 1e18 / (LLTV - preLltv)`, the factors linear in `q` (rounded down); at most
+ * `shares * preLcf / 1e18` repaid (USDC rounded up), and `seized = (assetsDown(shares) * preLif / 1e18)
+ * * 1e36 / price`, every step rounded down. `market` must carry the interest accrued until now.
+ */
+export function preLiquidationNow(
+  t: Pick<PreLiquidationTerms, "preLltv" | "preLcf1" | "preLcf2" | "preLif1" | "preLif2">,
+  lltv: bigint,
+  position: Pick<PositionState, "collateral" | "borrowShares">,
+  market: Pick<MarketState, "totalBorrowAssets" | "totalBorrowShares">,
+  price: bigint,
+): PreLiquidationNow {
+  const value = mulDivDown(position.collateral, price, ORACLE_PRICE_SCALE);
+  const borrowed = toAssetsUp(position.borrowShares, market.totalBorrowAssets, market.totalBorrowShares);
+  if (borrowed === 0n || value === 0n || price === 0n) return { state: "none" };
+  const ltv = mulDivUp(borrowed, WAD, value);
+  if (borrowed <= mulDivDown(value, t.preLltv, WAD)) return { state: "below", ltv };
+  if (borrowed > mulDivDown(value, lltv, WAD)) return { state: "above", ltv };
+  const q = mulDivDown(ltv - t.preLltv, WAD, lltv - t.preLltv);
+  const closeFactor = t.preLcf1 + mulDivDown(q, t.preLcf2 - t.preLcf1, WAD);
+  const incentive = t.preLif1 + mulDivDown(q, t.preLif2 - t.preLif1, WAD);
+  const maxRepayShares = mulDivDown(position.borrowShares, closeFactor, WAD);
+  const maxRepayAssets = toAssetsUp(maxRepayShares, market.totalBorrowAssets, market.totalBorrowShares);
+  const repaidDown = toAssetsDown(maxRepayShares, market.totalBorrowAssets, market.totalBorrowShares);
+  const seizedAtMax = mulDivDown(mulDivDown(repaidDown, incentive, WAD), ORACLE_PRICE_SCALE, price);
+  return { state: "band", ltv, closeFactor, incentive, maxRepayShares, maxRepayAssets, seizedAtMax };
 }
 
 /** WAD → "55 %", "2.5 %", "12.7 %" (one decimal at most, rounded to the nearest tenth). */

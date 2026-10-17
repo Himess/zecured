@@ -35,7 +35,7 @@ import {
   relayAbi,
   slasherAbi,
 } from "./abi";
-import { bondV4Abi, refundsV4Abi, registryViewsAbi } from "./abi4";
+import { bondV4Abi, intakeV4Abi, refundPendingEvent, refundsV4Abi, registryViewsAbi } from "./abi4";
 import {
   BondMismatchError,
   claimIdOf,
@@ -43,7 +43,9 @@ import {
   IntakeMismatchError,
   LOG_CHUNK,
   MAX_LEDGER_CLAIMS,
+  PENDING_REFUND_LOOKBACK,
   readCompensation,
+  readPendingRefunds,
   readPosition,
   readRecentRegistryEvents,
   readRefundReason,
@@ -333,6 +335,8 @@ interface V3World {
    * index, its `claimInput`, the bond's `livenessArming`, whether it is dormant; the dormancy period.
    */
   v4?: { inputs?: Record<number, Hex>; armings?: Record<number, [Hex, bigint]>; dormant?: number[]; dormancy?: bigint };
+  /** R-12: the Intake's RefundPending events (block, tag) and whether each is still pending. */
+  pendingRefunds?: { block: bigint; tag: Hex; amount: bigint; reason: number; open: boolean; vaultId?: Hex }[];
 }
 
 /** A Base node with the v3 contracts of the dry-run deployment, counting the calls to each function. */
@@ -392,8 +396,14 @@ function fakeV3Chain(w: V3World): { client: PublicClient; calls: Map<string, num
     ],
     [
       config.intake,
-      intakeAbi as Abi,
+      [...intakeAbi, ...intakeV4Abi] as Abi,
       {
+        pendingRefund: ([tag]) => {
+          const r = w.pendingRefunds?.find((x) => x.tag === tag && x.open);
+          return r
+            ? { vaultId: r.vaultId ?? VAULT, account: ACCOUNT, amount: r.amount, reason: r.reason, anchor: ANCHOR, readyHeight: 4_500_010n, readyTime: NOW + 600n, versionId: NONE32 }
+            : { vaultId: NONE32, account: ZERO, amount: 0n, reason: 0, anchor: NONE32, readyHeight: 0n, readyTime: 0n, versionId: NONE32 };
+        },
         signerBond: () => w.intakeBond ?? w.bond ?? BOND,
         relay: () => RELAY,
         pendingRefundDelay: () => 86_400n,
@@ -500,6 +510,23 @@ function fakeV3Chain(w: V3World): { client: PublicClient; calls: Map<string, num
             logRanges.push([from, to]);
             expect(to - from).toBeLessThan(LOG_CHUNK);
             expect(f.address.toLowerCase()).toBe(config.intake.toLowerCase());
+            const [pendingTopic] = encodeEventTopics({ abi: [refundPendingEvent], eventName: "RefundPending" });
+            if (f.topics[0]?.toLowerCase() === pendingTopic!.toLowerCase()) {
+              expect(f.topics[1]?.toLowerCase()).toBe(VAULT.toLowerCase());
+              return (w.pendingRefunds ?? [])
+                .filter((x) => x.block >= from && x.block <= to)
+                .map((x, i) => ({
+                  address: config.intake,
+                  topics: encodeEventTopics({ abi: [refundPendingEvent], eventName: "RefundPending", args: { vaultId: VAULT, depositTag: x.tag } }),
+                  data: encodeAbiParameters([{ type: "uint8" }, { type: "uint256" }, { type: "uint256" }], [x.reason, 4_500_010n, NOW + 600n]),
+                  blockNumber: numberToHex(x.block),
+                  blockHash: `0x${"33".repeat(32)}`,
+                  transactionHash: `0x${"55".repeat(32)}`,
+                  transactionIndex: "0x0",
+                  logIndex: numberToHex(i),
+                  removed: false,
+                }));
+            }
             const r = w.refund;
             if (!r || r.block < from || r.block > to) return [];
             const topics = encodeEventTopics({ abi: [depositRefundedEvent], eventName: "DepositRefunded", args: { vaultId: VAULT, claimId: r.claimId } });
@@ -576,8 +603,8 @@ describe("readVaultLedger", () => {
     await readVaultLedger(VAULT, { client, config });
     expect(calls.get("intake")).toBe(1);
     expect(calls.get("vaultDetails")).toBe(2);
-    // Only read methods the backend proxy allows.
-    expect([...calls.keys()].filter((k) => k.startsWith("eth_"))).toEqual(["eth_call", "eth_getBlockByNumber"]);
+    // Only read methods the backend proxy allows (logs in 2,000-block windows: R-12's pending refunds).
+    expect([...calls.keys()].filter((k) => k.startsWith("eth_"))).toEqual(["eth_call", "eth_getBlockByNumber", "eth_getLogs"]);
   });
 
   it("reads a pending activation with the relay's tip and the gates that hold it", async () => {
@@ -658,6 +685,34 @@ describe("readVaultLedger", () => {
     const v3 = fakeV3Chain({ vault: ACTIVE, claims: [{ kind: 0, status: 1, amount: 1n, commitment: COMMITMENT, createdAt: 1, claimant: ACCOUNT }] });
     const old = await readVaultLedger(VAULT, { client: v3.client, config });
     expect(old.claims.map((c) => [c.committed, c.arming, c.dormant])).toEqual([[null, null, null]]);
+  });
+
+  it("R-12: pending refunds from the Intake's RefundPending events until their claims open; scanned once, then on", async () => {
+    const tag = (b: number) => `0x${b.toString(16).padStart(2, "0").repeat(32)}` as Hex;
+    const w = {
+      vault: { account: ZERO, outstanding: 0n, status: 0 },
+      claims: [],
+      pendingRefunds: [
+        { block: 99_500n, tag: tag(1), amount: 1_000_000n, reason: 0, open: true },
+        { block: 99_900n, tag: tag(2), amount: 20_000n, reason: 1, open: false },
+        // Older than the first look back: not seen (a pending refund lasts minutes to hours).
+        { block: 100_000n - PENDING_REFUND_LOOKBACK - 1n, tag: tag(3), amount: 5n, reason: 0, open: true },
+      ],
+    };
+    const { client, logRanges } = fakeV3Chain(w);
+    const l = await readVaultLedger(VAULT, { client, config });
+    expect(l.pendingRefunds).toEqual([
+      { depositTag: tag(1), amount: 1_000_000n, reason: "ModeRefund", readyHeight: 4_500_010n, readyTime: Number(NOW + 600n) },
+    ]);
+    expect(logRanges).toHaveLength(5);
+    expect(logRanges[0]![0]).toBe(100_000n - PENDING_REFUND_LOOKBACK + 1n);
+    // The next read scans only the blocks it has not seen; a finalized refund leaves the list.
+    w.pendingRefunds[0]!.open = false;
+    expect(await readPendingRefunds(VAULT, 100_010n, { client, config })).toEqual([]);
+    expect(logRanges.at(-1)).toEqual([100_001n, 100_010n]);
+    // A v3 deployment's ledger: none.
+    const v3 = fakeV3Chain({ vault: ACTIVE, claims: [] });
+    expect((await readVaultLedger(VAULT, { client: v3.client, config })).pendingRefunds).toEqual([]);
   });
 
   /** The fake chain's latest block time (block 100,000). */

@@ -37,7 +37,15 @@ import {
   relayAbi,
   slasherAbi,
 } from "./abi";
-import { adapterV4Abi, bondV4Abi, refundsV4Abi, registryV4EventsAbi, registryViewsAbi } from "./abi4";
+import {
+  adapterV4Abi,
+  bondV4Abi,
+  intakeV4Abi,
+  refundPendingEvent,
+  refundsV4Abi,
+  registryV4EventsAbi,
+  registryViewsAbi,
+} from "./abi4";
 import { api } from "./api";
 import { config as appConfig, marketParams, ZERO_BYTES32, type AppConfig } from "./config";
 import { viemChain } from "./deployment";
@@ -452,6 +460,66 @@ export interface PendingActivationView {
   fullyBonded: boolean;
 }
 
+/**
+ * R-12 (v4): a deposit proven as a refund that waits, like an activation (K3), before its Refund
+ * claim opens (`finalizeRefund`, which the backend's keeper calls once it is ready). Until then it
+ * is a pending refund, without a claim, so it cannot take a destination yet.
+ */
+export interface PendingRefundView {
+  depositTag: Hex;
+  /** zatoshi */
+  amount: bigint;
+  reason: RefundReason | null;
+  /** Zcash height the relay must reach, and the time that must pass, before its claim can open. */
+  readyHeight: bigint;
+  readyTime: number;
+}
+
+/** How far back the first read of a vault looks for pending refunds: 5 windows, about 5.5 h of Base blocks. */
+export const PENDING_REFUND_LOOKBACK = 5n * LOG_CHUNK;
+
+const refundScans = new WeakMap<PublicClient, Map<string, { next: bigint; tags: Set<Hex> }>>();
+
+/**
+ * The vault's pending refunds (R-12): the deposit tags of its `RefundPending` events, scanned once
+ * from `PENDING_REFUND_LOOKBACK` blocks before `latest` and then incrementally (a pending refund
+ * lasts minutes to hours), each still pending per the Intake's `pendingRefund(tag)`. A v3 Intake
+ * emits no such event: always empty there.
+ */
+export async function readPendingRefunds(vaultId: Hex, latest: bigint, d?: ChainDeps): Promise<PendingRefundView[]> {
+  const { c, cfg } = resolve(d);
+  let perClient = refundScans.get(c);
+  if (!perClient) refundScans.set(c, (perClient = new Map()));
+  const key = `${cfg.intake}:${vaultId}`.toLowerCase();
+  const floor = latest >= PENDING_REFUND_LOOKBACK ? latest - PENDING_REFUND_LOOKBACK + 1n : 0n;
+  const scan = perClient.get(key) ?? { next: floor, tags: new Set<Hex>() };
+  for (let from = scan.next > floor ? scan.next : floor; from <= latest; ) {
+    const to = from + LOG_CHUNK - 1n < latest ? from + LOG_CHUNK - 1n : latest;
+    const logs = await c.getLogs({ address: cfg.intake, event: refundPendingEvent, args: { vaultId }, fromBlock: from, toBlock: to });
+    for (const log of logs) if (log.args.depositTag) scan.tags.add(log.args.depositTag);
+    from = to + 1n;
+  }
+  scan.next = latest + 1n;
+  perClient.set(key, scan);
+  const out: PendingRefundView[] = [];
+  for (const tag of [...scan.tags]) {
+    const p = await c.readContract({ address: cfg.intake, abi: intakeV4Abi, functionName: "pendingRefund", args: [tag] });
+    // Finalized into a Refund claim, or dropped: nothing pending any more.
+    if (p.account === zeroAddress || p.vaultId.toLowerCase() !== vaultId.toLowerCase()) {
+      scan.tags.delete(tag);
+      continue;
+    }
+    out.push({
+      depositTag: tag,
+      amount: p.amount,
+      reason: REFUND_REASON[p.reason] ?? null,
+      readyHeight: p.readyHeight,
+      readyTime: Number(p.readyTime),
+    });
+  }
+  return out;
+}
+
 export interface VaultLedger {
   vaultId: Hex;
   /** Zero while the vault is unknown to Base. */
@@ -461,6 +529,8 @@ export interface VaultLedger {
   unpaidClaims: number;
   claims: LedgerClaim[];
   pending: PendingActivationView | null;
+  /** R-12 (v4): deposits proven as refunds whose claims have not opened yet; null when they could not be read. */
+  pendingRefunds: PendingRefundView[] | null;
   /** An F1/F2 case is open on the vault or was executed: the Registry refuses its exits (T-04). */
   frozen: boolean;
   /** An executed F1/F2 case: the compensator settles its claims in USDC. */
@@ -563,6 +633,7 @@ export async function readVaultLedger(vaultId: Hex, d?: ChainDeps): Promise<Vaul
       };
     }),
   );
+  const pendingRefunds = await readPendingRefunds(vaultId, block.number, { client: c, config: cfg }).catch(() => null);
   const payableNow = claims.some((cl) => cl.liveness !== null && cl.liveness.dueAt <= blockTime && cl.liveness.usdc > 0n);
   const bondsSlashable =
     bond && payableNow ? await c.readContract({ address: bond, abi: bondAbi, functionName: "totalSlashable" }) : null;
@@ -602,6 +673,7 @@ export async function readVaultLedger(vaultId: Hex, d?: ChainDeps): Promise<Vaul
     unpaidClaims: Number(details.unpaidClaims),
     claims,
     pending: pendingView,
+    pendingRefunds,
     frozen,
     compromised,
     links,

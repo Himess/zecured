@@ -121,9 +121,13 @@ sponsored UserOp and follows the new Release claim until it is paid.
 
 v3 (contracts/src/interfaces/v3, docs/DECISIONS.md D40 to D54):
 
-- **Refunds (T-02).** A deposit that cannot back a loan (a second payment, a deposit while
-  minting is halted or the coverage cap is full, a Refund-mode proof) lands on Base as a Refund
-  claim. Its destination is pre-validated exactly like an exit's, then set with one sponsored
+- **Refunds (T-02, v4 R-11 and R-12).** A deposit that cannot back a loan (a second payment, a
+  deposit while minting is halted, a Refund-mode proof) lands on Base as a pending refund
+  (`RefundPending`), which waits like an activation until `finalizeRefund` opens its Refund claim;
+  the vault pages list it as pending until then. A new vault's deposit that the coverage cap has
+  no room for is no longer refunded: its proof waits and is sent again once there is room, or its
+  owner asks for a Refund-mode proof instead ("Refund my deposit instead",
+  `POST /vaults/:id/prove-refund`). A refund's destination is pre-validated exactly like an exit's, then set with one sponsored
   UserOp, `Registry.setRefundDestination(claimId, commitment)`; the same revives a refund written
   off after `refundAbandonPeriod` without a destination. The reason it landed is read from the
   Intake's `DepositRefunded` event of the claim's creation second.
