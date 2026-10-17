@@ -103,7 +103,7 @@ contract SignerBondV2 is ISignerBond, ReentrancyGuardTransient, EIP712 {
     bool public halted;
     /// @inheritdoc ISignerBond
     mapping(address beneficiary => uint256) public bountyOf;
-    mapping(bytes32 claimId => Arming) private _armings;
+    mapping(bytes32 claimId => Arming) internal _armings;
 
     /// @param cfg See `BondConfig`. The Registry must be deployed (its dispute windows are read, R-18) and so must the
     ///        oracle (whether it reports a feed state is read, R-9); the slasher, the Intake and the compensator may be

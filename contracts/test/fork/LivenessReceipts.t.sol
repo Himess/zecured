@@ -48,11 +48,12 @@ contract LivenessReceiptsTest is Tier3Base {
         assertEq(usdc.balanceOf(account), before + amount);
         assertTrue(registry.claimDetails(claimId).bondPaid);
 
-        // The bonds' reimbursement: three signers name its destination, the payout is committed and confirmed.
+        // The bonds' reimbursement: the signers name its destination (all five sign, which R-6 requires), the payout
+        // is committed and confirmed.
         bytes32 dest = keccak256("zecured.receipts.reimburse");
         uint64 deadline = uint64(block.timestamp + 1 hours);
         registry.setReimburseDestination(
-            claimId, dest, deadline, _threeSigs(registry.hashReimburseDestination(claimId, dest, deadline))
+            claimId, dest, deadline, _signerSigs(registry.hashReimburseDestination(claimId, dest, deadline), _all5())
         );
         _send(_spendCommit(vaultId, _depositTagFor(account), _one(claimId), "zecured.receipts.reimburse"));
         _confirm(vaultId, _one(claimId));
