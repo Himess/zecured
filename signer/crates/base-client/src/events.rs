@@ -405,8 +405,9 @@ pub enum RegistryEvent {
     /// (R-1); disputable for `disputeWindow` until proven.
     PayoutConfirmed { payout_ref: B256, claims: Vec<B256> },
     /// R-16: a deposit took the tag `tag` that a commitment of this vault (the event's vault, the
-    /// old owner of the tag) had registered as a change tag. An honest commitment's change can never
-    /// carry a deposit's tag: the commitment's signers registered a false record.
+    /// old owner of the tag) had registered as a change tag: another vault's deposit, or a refund to
+    /// this same vault (R-12). An honest commitment's change can never carry a deposit's tag: the
+    /// commitment's signers registered a false record.
     ChangeTagOverridden { tag: B256 },
     /// Tier 3: a payout of `input_tag` was committed (`payout_ref`, for `claims`). The coordinator
     /// follows it to prove the payout's delivery (section 3); signer nodes read the records they

@@ -17,8 +17,9 @@
 //! - `PayoutConfirmed` (R-1): the payout is a committed payout of that vault, and every claim, of
 //!   that vault and bound to the payout's input, is paid (or already disputed) from the event's
 //!   block on and was pending before it;
-//! - `ChangeTagOverridden` (R-16): the tag was a lineage note of the event's vault before it and is
-//!   a used deposit tag of another vault from it on.
+//! - `ChangeTagOverridden` (R-16): the tag was a change record of the event's vault before it (its
+//!   lineage note, not a used deposit tag) and is a used deposit tag from it on: of another vault's
+//!   deposit, or of a refund to the same vault (R-12).
 //!
 //! What a node then applies is the claim as the Registry holds it at the block it read, not as
 //! the log tells it: a claim's destination, state and whether the bonds paid it change after it
@@ -371,14 +372,15 @@ pub async fn check_event<R: RegistryReader>(reader: &R, ev: &VaultEvent, at: At)
             problems.push("signer nodes do not apply this event (the coordinator's only)".into());
         }
         RegistryEvent::ChangeTagOverridden { tag } => {
-            // R-16: from the event's block on, a deposit of another vault holds the tag (released
-            // since if that deposit's reservation was dropped: stale); before it, the tag was a
-            // lineage note of this vault (a change tag of one of its commitments).
+            // R-16: from the event's block on, a deposit holds the tag as a used deposit tag (another
+            // vault's deposit, or a refund to this same vault, R-12; released since if that deposit's
+            // reservation was dropped: stale); before it, the tag was a change record of this vault:
+            // its lineage note, and not a used deposit tag.
             let used = reader.tag_used_at(*tag, after).await?;
             evidence.tags.push(used);
             let lineage = reader.lineage_at(*tag, after).await?;
             evidence.lineages.push(lineage);
-            if !used || lineage.vault_id == B256::ZERO || lineage.vault_id == ev.vault_id {
+            if !used || lineage.vault_id == B256::ZERO {
                 match at {
                     At::EventBlock => problems.push("the Registry does not show the tag taken by a deposit".into()),
                     At::Later(_) => stale = Some("the tag changed hands again since".into()),
@@ -387,8 +389,10 @@ pub async fn check_event<R: RegistryReader>(reader: &R, ev: &VaultEvent, at: At)
             if let Some(b) = before {
                 let prev = reader.lineage_at(*tag, b).await?;
                 evidence.lineages.push(prev);
-                if prev.vault_id != ev.vault_id {
-                    problems.push("the tag was not a lineage note of the vault before the event's block".into());
+                let used_before = reader.tag_used_at(*tag, b).await?;
+                evidence.tags.push(used_before);
+                if prev.vault_id != ev.vault_id || used_before {
+                    problems.push("the tag was not a change record of the vault before the event's block".into());
                 }
             }
         }
@@ -1237,6 +1241,37 @@ mod tests {
         ));
         tags.pruned_below = 500;
         assert!(matches!(verdict(&tags, None, &overridden(300)).await.unwrap(), Verdict::Stale(_)));
+    }
+
+    /// R-16 with R-12: a refund proven to the same vault overrides that vault's own false change
+    /// record; the event names the vault itself, and is proven by the same rule.
+    #[tokio::test]
+    async fn a_refund_to_the_same_vault_may_override_its_own_change_record() {
+        let mut tags = honest();
+        tags.lineage = vec![
+            (
+                150,
+                Lineage {
+                    vault_id: VAULT,
+                    value: 700_000,
+                },
+            ),
+            (
+                300,
+                Lineage {
+                    vault_id: VAULT,
+                    value: 1_000_000,
+                },
+            ),
+        ];
+        tags.tag = vec![(300, true)];
+        let overridden = |block: u64| event(block, RegistryEvent::ChangeTagOverridden { tag: TAG });
+        assert!(matches!(verdict(&tags, None, &overridden(300)).await.unwrap(), Verdict::Proven(_)));
+        // A tag that was already a used deposit tag before the event was no change record.
+        let mut deposit = honest();
+        deposit.lineage = tags.lineage.clone();
+        deposit.tag = vec![(40, true)];
+        assert!(forged(verdict(&deposit, None, &overridden(300)).await.unwrap()), "already a deposit tag");
     }
 
     #[tokio::test]

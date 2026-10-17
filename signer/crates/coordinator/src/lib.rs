@@ -523,7 +523,7 @@ fn apply_event(v: &mut CoordVault, ev: &VaultEvent) {
         RegistryEvent::ChangeTagOverridden { .. } => {
             error!(
                 vault = %short(&v.vault_id),
-                "a deposit of another vault took a change tag of this vault's commitment (R-16): that commitment's signers registered a false change"
+                "a deposit took a change tag of this vault's commitment (R-16): that commitment's signers registered a false change"
             );
         }
         RegistryEvent::Reserved { deposit_tag, .. } => {
