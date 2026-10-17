@@ -22,7 +22,12 @@ import { assertAllowlisted, pinnedTargets, type Call, type NamedTargets } from "
 import { ContractsNotDeployedError, isDeployedAt, publicClient, readLinks, type ChainDeps } from "./chain";
 import { config as defaultConfig, type AppConfig } from "./config";
 import { viemChain } from "./deployment";
-import { signCloseRequestAsSafe, type CloseRequestMessage } from "./eip712";
+import {
+  signCloseRequestAsSafe,
+  signDeleverageRequestAsSafe,
+  type CloseRequestMessage,
+  type DeleverageRequestMessage,
+} from "./eip712";
 import { predictAccountAddress, SAFE } from "./safe";
 
 export interface SentUserOp {
@@ -43,6 +48,8 @@ export interface LoanAccount {
    * the Adapter does not unwrap ERC-6492.
    */
   signCloseRequest(req: CloseRequestMessage): Promise<Hex>;
+  /** P-7: the same for a DeleverageRequest (S18: repay part of the debt from collateral). */
+  signDeleverageRequest(req: DeleverageRequestMessage): Promise<Hex>;
   /** Sends `calls` as one sponsored UserOp and waits for inclusion. */
   send(calls: readonly Call[]): Promise<SentUserOp>;
 }
@@ -131,6 +138,12 @@ export function loanAccount(ownerKey: Hex, deps: AccountDeps = {}): LoanAccount 
       if (!config.contractsDeployed) throw new ContractsNotDeployedError();
       if (!(await isDeployedAt(address, chain()))) throw new AccountNotDeployedError();
       return signCloseRequestAsSafe(ownerKey, config.adapter, address, req);
+    },
+
+    async signDeleverageRequest(req) {
+      if (!config.contractsDeployed) throw new ContractsNotDeployedError();
+      if (!(await isDeployedAt(address, chain()))) throw new AccountNotDeployedError();
+      return signDeleverageRequestAsSafe(ownerKey, config.adapter, address, req);
     },
 
     async send(calls) {

@@ -3,11 +3,12 @@
 import { useId, useState } from "react";
 import type { Hex } from "viem";
 import { prepareDestination, UnifiedAddressError } from "@/lib/commitment";
+import { config } from "@/lib/config";
 import { DEPLOYMENT } from "@/lib/deployment";
-import { notifyLoansChanged, useAction } from "@/lib/hooks";
+import { notifyLoansChanged, useAction, useDemoStatus } from "@/lib/hooks";
 import { loanStore, short, type StoredLoan } from "@/lib/keys";
 import { submitDestination } from "@/lib/owner";
-import { Button, Mono, Notice } from "./ui";
+import { Badge, Button, Mono, Notice } from "./ui";
 
 /** Validates a destination as the user types; returns an error message or null. */
 export function destinationError(ua: string): string | null {
@@ -83,12 +84,15 @@ export function DestinationStep({
   onDone: (commitment: Hex) => void;
 }) {
   const [ua, setUa] = useState("");
-  const submit = useAction(async () => {
-    const { commitment } = await submitDestination(loan, vaultId, ua);
+  const submit = useAction(async (address: string) => {
+    const { commitment } = await submitDestination(loan, vaultId, address);
     loanStore().update(loan.id, { destinationCommitment: commitment });
     notifyLoansChanged();
     return commitment;
   });
+  // P-1 (DEMO): a demo vault's ZEC may go back to the demo wallet when the user has no address of their own.
+  const demo = useDemoStatus();
+  const demoReturn = loan.demo && config.demoPath && demo.data?.enabled ? demo.data.returnAddress : null;
 
   return (
     <div className="space-y-4">
@@ -110,7 +114,7 @@ export function DestinationStep({
       <IronwoodAddressInput value={ua} onChange={setUa} />
       <Button
         onClick={async () => {
-          const c = await submit.run();
+          const c = await submit.run(ua);
           if (c) onDone(c);
         }}
         busy={submit.busy}
@@ -118,6 +122,24 @@ export function DestinationStep({
       >
         Validate destination with the signers
       </Button>
+      {demoReturn ? (
+        <div className="space-y-2 rounded-lg border border-dashed border-warn/60 p-3 text-sm">
+          <p className="flex flex-wrap items-center gap-2">
+            <Badge tone="warn">DEMO</Badge> No Ironwood address of your own?
+          </p>
+          <p className="text-muted">This vault was funded by the demo wallet: its ZEC can go back there instead.</p>
+          <Button
+            variant="secondary"
+            onClick={async () => {
+              const c = await submit.run(demoReturn);
+              if (c) onDone(c);
+            }}
+            busy={submit.busy}
+          >
+            Send it back to the demo wallet (DEMO)
+          </Button>
+        </div>
+      ) : null}
       {submit.error ? (
         <Notice tone="danger" title="The destination was not accepted" live>
           <p>{submit.error}</p>

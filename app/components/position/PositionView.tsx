@@ -9,6 +9,7 @@ import { Badge, buttonClass, Card, KeyValue, Mono, Notice, Stat } from "@/compon
 import type { Claim } from "@/lib/api";
 import { config } from "@/lib/config";
 import { useLoanByVault, usePosition, useUrlFragment, useVault, useVaultLedger } from "@/lib/hooks";
+import { priceSourceName } from "@/lib/labels";
 import {
   collateralValue,
   formatBps,
@@ -26,8 +27,10 @@ import { CLAIM_KIND_LABEL, feeClaim, refundsToClaim } from "@/lib/v3";
 import { formatTaz } from "@/lib/zcash";
 import { STATUS_LABEL } from "../status";
 import { Exits, PendingClose, SendUsdcForm } from "./Exits";
+import { Deleverage } from "./Deleverage";
 import { ClaimsCard, PendingActivationCard, RefundsCard, TheftNotice } from "./Ledger";
 import { PartialRelease } from "./PartialRelease";
+import { ProtectionCard } from "./Protection";
 
 const ZERO_ACCOUNT = "0x0000000000000000000000000000000000000000";
 
@@ -149,7 +152,7 @@ export function PositionView() {
             hint={hf !== null && hf < WAD ? "liquidatable" : "liquidation below 1.00"}
           />
           <Stat label="Liquidation price" value={lp ? formatUsdPrice(lp) : "—"} hint="ZEC/USD" />
-          <Stat label="ZEC price" value={p ? formatUsdPrice(p.price) : "—"} hint="the market's oracle (MOCK / DEMO on testnet)" />
+          <Stat label="ZEC price" value={p ? formatUsdPrice(p.price) : "—"} hint={priceSourceName()} />
           <Stat label="Loan-to-value" value={ltv !== null && ltv !== undefined ? formatBps(ltv) : "—"} hint="max 62.5 %" />
         </dl>
         {fee ? (
@@ -247,6 +250,16 @@ export function PositionView() {
           {!loan.pendingClose && !frozen ? (
             <Card title="Withdraw part of your ZEC">
               <PartialRelease loan={loan} vault={v} snapshot={p} onChanged={refresh} />
+            </Card>
+          ) : null}
+          {p.debt > 0n && !loan.pendingClose && !frozen ? (
+            <Card title="Reduce debt with collateral">
+              <Deleverage loan={loan} vault={v} snapshot={p} onChanged={refresh} />
+            </Card>
+          ) : null}
+          {!frozen ? (
+            <Card title="Protect my loan">
+              <ProtectionCard loan={loan} snapshot={p} onChanged={refresh} />
             </Card>
           ) : null}
           {borrowRoom && !loan.pendingClose && !frozen ? (

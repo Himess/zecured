@@ -37,11 +37,12 @@ import {
   relayAbi,
   slasherAbi,
 } from "./abi";
-import { bondV4Abi, refundsV4Abi, registryViewsAbi } from "./abi4";
+import { adapterV4Abi, bondV4Abi, refundsV4Abi, registryV4EventsAbi, registryViewsAbi } from "./abi4";
 import { api } from "./api";
 import { config as appConfig, marketParams, ZERO_BYTES32, type AppConfig } from "./config";
 import { viemChain } from "./deployment";
 import { borrowAssets, expectedMarket, mulDivDown, type MarketState, type PositionState } from "./morpho";
+import type { PreLiquidationTerms } from "./preliq";
 
 let defaultClient: PublicClient | null = null;
 
@@ -195,13 +196,27 @@ export async function readReleaseClaim(vaultId: Hex, transactionHash: Hex, d?: C
   return ours ? { claimId: ours.args.claimId.toLowerCase() as Hex, amount: ours.args.amount } : null;
 }
 
+/**
+ * v4: the account's pre-liquidation terms on the Settlement Adapter (`preLiquidationTerms`; all
+ * zero when never set or cleared); null when the Adapter has no pre-liquidation (v3).
+ */
+export async function readPreLiquidationTerms(account: Address, d?: ChainDeps): Promise<PreLiquidationTerms | null> {
+  const { c, cfg } = resolve(d);
+  try {
+    const t = await c.readContract({ address: cfg.adapter, abi: adapterV4Abi, functionName: "preLiquidationTerms", args: [account] });
+    return { preLltv: t.preLltv, preLcf1: t.preLcf1, preLcf2: t.preLcf2, preLif1: t.preLif1, preLif2: t.preLif2, expiry: t.expiry };
+  } catch {
+    return null;
+  }
+}
+
 export async function isNonceUsed(account: Address, nonce: bigint, d?: ChainDeps): Promise<boolean> {
   const { c, cfg } = resolve(d);
   return c.readContract({ address: cfg.adapter, abi: adapterAbi, functionName: "nonceUsed", args: [account, nonce] });
 }
 
 export interface RegistryEvent {
-  name: (typeof registryEventsAbi)[number]["name"];
+  name: (typeof registryEventsAbi)[number]["name"] | (typeof registryV4EventsAbi)[number]["name"];
   blockNumber: bigint;
   transactionHash: Hex;
   vaultId: Hex;
@@ -229,7 +244,7 @@ export async function readRecentRegistryEvents(
     const fromBlock = toBlock >= LOG_CHUNK ? toBlock - LOG_CHUNK + 1n : 0n;
     let logs;
     try {
-      logs = await c.getLogs({ address: cfg.registry, events: registryEventsAbi, fromBlock, toBlock });
+      logs = await c.getLogs({ address: cfg.registry, events: [...registryEventsAbi, ...registryV4EventsAbi], fromBlock, toBlock });
     } catch (e) {
       if (i === 0) throw e;
       break;

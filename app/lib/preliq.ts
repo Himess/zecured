@@ -72,7 +72,7 @@ export function termsProblem(t: PreLiquidationTerms, lltv: bigint): string | nul
 }
 
 /** The terms are set (not cleared) and still apply at `nowSeconds`. */
-export function termsActive(t: PreLiquidationTerms | null, nowSeconds: bigint): t is PreLiquidationTerms {
+export function termsActive(t: PreLiquidationTerms | null, nowSeconds: bigint): boolean {
   return t !== null && t.preLltv !== 0n && t.expiry > nowSeconds;
 }
 

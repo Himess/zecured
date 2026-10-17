@@ -64,6 +64,10 @@ export interface StoredLoan {
    */
   destinationCommitment?: Hex;
   pendingClose?: PendingClose;
+  /** P-1 (DEMO): the demo wallet paid this loan's deposit; its exits may go back to the demo wallet. */
+  demo?: boolean;
+  /** P-8: the user restored this loan's backup file in this browser, so the backup is known to work. */
+  backupVerified?: boolean;
 }
 
 export interface KeyValueStorage {
@@ -135,6 +139,8 @@ export function parseLoan(raw: unknown): StoredLoan {
     loan.vaultSignatures = signatures.map((s) => ({ index: s.index, signature: s.signature.toLowerCase() as Hex }));
   }
   if (r.backedUp === true) loan.backedUp = true;
+  if (r.demo === true) loan.demo = true;
+  if (r.backupVerified === true) loan.backupVerified = true;
   if (isBytes32(r.destinationCommitment)) loan.destinationCommitment = r.destinationCommitment;
   const pc = r.pendingClose as Record<string, unknown> | undefined;
   if (
@@ -212,6 +218,26 @@ export function importLoan(text: string): StoredLoan {
     return parseLoan(obj.loan);
   }
   return parseLoan(parsed);
+}
+
+/**
+ * P-8: the restore test of a backup. `text` (the file the user saved, read back) must parse as a
+ * backup and restore this very loan: its owner key, hence its account, and its vault once opened.
+ */
+export function verifyBackup(text: string, loan: StoredLoan): { ok: true } | { ok: false; reason: string } {
+  let restored: StoredLoan;
+  try {
+    restored = importLoan(text);
+  } catch (e) {
+    return { ok: false, reason: `this file does not restore a loan (${e instanceof Error ? e.message : "unreadable"})` };
+  }
+  if (restored.ownerKey !== loan.ownerKey || restored.account !== loan.account) {
+    return { ok: false, reason: "this file restores another loan's key" };
+  }
+  if (loan.vaultId && restored.vaultId?.toLowerCase() !== loan.vaultId.toLowerCase()) {
+    return { ok: false, reason: "this file was saved before the vault opened: save a new backup now" };
+  }
+  return { ok: true };
 }
 
 /** Loan storage on top of a key/value store; every method is failure-tolerant. */

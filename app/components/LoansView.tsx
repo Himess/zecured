@@ -97,7 +97,14 @@ function LoanRow({ loan }: { loan: StoredLoan }) {
           </p>
           <p className="text-xs text-faint">
             Created {new Date(loan.createdAt).toLocaleString()} ·{" "}
-            {loan.backedUp ? "backed up" : <span className="text-warn">not backed up</span>}
+            {loan.backupVerified ? (
+              "backup verified"
+            ) : loan.backedUp ? (
+              <span className="text-warn">backed up, not verified by a restore</span>
+            ) : (
+              <span className="text-warn">not backed up</span>
+            )}
+            {loan.demo ? " · DEMO (paid by the demo wallet)" : null}
           </p>
           {vault.error && loan.vaultId ? <p className="text-xs text-warn">Status unavailable: {vault.error}</p> : null}
         </div>
