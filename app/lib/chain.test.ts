@@ -35,6 +35,7 @@ import {
   relayAbi,
   slasherAbi,
 } from "./abi";
+import { bondV4Abi, refundsV4Abi, registryViewsAbi } from "./abi4";
 import {
   BondMismatchError,
   claimIdOf,
@@ -327,6 +328,11 @@ interface V3World {
   /** Blocks in the chain, and the block whose DepositRefunded (reason) the Intake emitted, if any. */
   latestBlock?: bigint;
   refund?: { block: bigint; claimId: Hex; reason: number };
+  /**
+   * v4 contracts (absent: a v3 deployment, whose Registry and bond revert these calls): per claim
+   * index, its `claimInput`, the bond's `livenessArming`, whether it is dormant; the dormancy period.
+   */
+  v4?: { inputs?: Record<number, Hex>; armings?: Record<number, [Hex, bigint]>; dormant?: number[]; dormancy?: bigint };
 }
 
 /** A Base node with the v3 contracts of the dry-run deployment, counting the calls to each function. */
@@ -336,11 +342,24 @@ function fakeV3Chain(w: V3World): { client: PublicClient; calls: Map<string, num
   const latest = w.latestBlock ?? 100_000n;
   const claimIds = w.claims.map((_, i) => claimIdOf(VAULT, BigInt(i)));
   const claimOf = (id: Hex) => w.claims[claimIds.findIndex((c) => c === id.toLowerCase())];
+  const indexOf = (id: unknown) => claimIds.findIndex((c) => c === String(id).toLowerCase());
+  const v4 = w.v4;
+  const registryV4: Record<string, (args: readonly unknown[]) => unknown> = v4
+    ? {
+        claimInput: ([id]) => v4.inputs?.[indexOf(id)] ?? NONE32,
+        refundDormancy: () => v4.dormancy ?? 172_800n,
+        isRefundDormant: ([id]) => v4.dormant?.includes(indexOf(id)) ?? false,
+      }
+    : {};
+  const bondV4: Record<string, (args: readonly unknown[]) => unknown> = v4
+    ? { livenessArming: ([id]) => v4.armings?.[indexOf(id)] ?? [NONE32, 0n] }
+    : {};
   const contracts: [Address, Abi, Record<string, (args: readonly unknown[]) => unknown>][] = [
     [
       config.registry,
-      [...registryAbi, ...disputesAbi] as Abi,
+      [...registryAbi, ...disputesAbi, ...registryViewsAbi, ...refundsV4Abi] as Abi,
       {
+        ...registryV4,
         intake: () => w.intake ?? config.intake,
         slasher: () => w.slasher ?? SLASHER,
         compensator: () => COMPENSATOR,
@@ -395,8 +414,9 @@ function fakeV3Chain(w: V3World): { client: PublicClient; calls: Map<string, num
     ],
     [
       BOND,
-      bondAbi as Abi,
+      [...bondAbi, ...bondV4Abi] as Abi,
       {
+        ...bondV4,
         halted: () => false,
         fullyBonded: () => true,
         livenessDue: ([id]) => claimOf(id as Hex)?.liveness ?? [0n, 0n],
@@ -546,6 +566,8 @@ describe("readVaultLedger", () => {
       inclusionWindow: 21_600,
       refundAbandonPeriod: 2_592_000,
       pendingRefundDelay: 86_400,
+      // A v3 Registry has no refund dormancy (R-11 is v4).
+      refundDormancy: null,
     });
     expect(l.blockTime).toBe(Number(T0 + 200_000n));
     // Nothing about a pending activation when there is none.
@@ -607,6 +629,35 @@ describe("readVaultLedger", () => {
   it("reports a frozen and a compromised vault", async () => {
     const { client } = fakeV3Chain({ vault: ACTIVE, claims: [], frozen: true, compromised: true });
     expect(await readVaultLedger(VAULT, { client, config })).toMatchObject({ frozen: true, compromised: true });
+  });
+
+  it("v4: which pending claims the signers committed (Sent), the bond's armings (R-5), dormant refunds (R-11)", async () => {
+    const LIQ: Address = "0x4444444444444444444444444444444444444444";
+    const { client } = fakeV3Chain({
+      vault: ACTIVE,
+      claims: [
+        { kind: 0, status: 1, amount: 200_000n, commitment: COMMITMENT, createdAt: 1, claimant: ACCOUNT },
+        { kind: 0, status: 1, amount: 100_000n, commitment: COMMITMENT, createdAt: 2, claimant: ACCOUNT },
+        { kind: 4, status: 1, amount: 50_000n, createdAt: 3, claimant: ACCOUNT },
+        { kind: 1, status: 1, amount: 30_000n, commitment: COMMITMENT, createdAt: 4, claimant: LIQ },
+        { kind: 0, status: 2, amount: 10_000n, commitment: COMMITMENT, createdAt: 5, claimant: ACCOUNT, paidAt: 0n },
+      ],
+      v4: { inputs: { 0: `0x${"66".repeat(32)}`, 3: `0x${"77".repeat(32)}` }, armings: { 0: [COMMITMENT, 1_790_000_500n] }, dormant: [2] },
+    });
+    const l = await readVaultLedger(VAULT, { client, config });
+    expect(l.links.refundDormancy).toBe(172_800);
+    expect(l.claims.map((c) => [c.committed, c.arming, c.dormant])).toEqual([
+      [true, { commitment: COMMITMENT, payableAt: 1_790_000_500 }, null],
+      [false, { commitment: NONE32, payableAt: 0 }, null],
+      [null, null, true],
+      // Another claimant's claim: committed is public, its arming is not the account's business.
+      [true, null, null],
+      [null, null, null],
+    ]);
+    // On a v3 deployment the same reads come back empty, never failing the ledger.
+    const v3 = fakeV3Chain({ vault: ACTIVE, claims: [{ kind: 0, status: 1, amount: 1n, commitment: COMMITMENT, createdAt: 1, claimant: ACCOUNT }] });
+    const old = await readVaultLedger(VAULT, { client: v3.client, config });
+    expect(old.claims.map((c) => [c.committed, c.arming, c.dormant])).toEqual([[null, null, null]]);
   });
 
   /** The fake chain's latest block time (block 100,000). */

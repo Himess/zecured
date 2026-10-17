@@ -17,7 +17,6 @@ import {
   type Hex,
   type PublicClient,
 } from "viem";
-import { baseSepolia } from "viem/chains";
 import {
   adapterAbi,
   bondAbi,
@@ -38,16 +37,18 @@ import {
   relayAbi,
   slasherAbi,
 } from "./abi";
+import { bondV4Abi, refundsV4Abi, registryViewsAbi } from "./abi4";
 import { api } from "./api";
 import { config as appConfig, marketParams, ZERO_BYTES32, type AppConfig } from "./config";
+import { viemChain } from "./deployment";
 import { borrowAssets, expectedMarket, mulDivDown, type MarketState, type PositionState } from "./morpho";
 
 let defaultClient: PublicClient | null = null;
 
-/** viem public client bound to the backend proxy. */
+/** viem public client bound to the backend proxy (Base Sepolia, or Base on the mainnet beta). */
 export function publicClient(): PublicClient {
   defaultClient ??= createPublicClient({
-    chain: baseSepolia,
+    chain: viemChain(),
     transport: http(api.proxyUrl("rpc"), {
       timeout: 15_000,
       retryCount: 1,
@@ -284,6 +285,11 @@ export interface Links {
   refundAbandonPeriod: number;
   /** `intake.pendingRefundDelay()`: a pause by signatures this long lets the account refund its pending activation. */
   pendingRefundDelay: number;
+  /**
+   * v4 (R-11), at the Registry's address: a Refund claim without a destination this long can be
+   * marked dormant (out of the coverage cap until a destination is given); null before v4.
+   */
+  refundDormancy: number | null;
 }
 
 /** The pinned Intake is not the one the pinned Registry names: the build's pins are inconsistent. */
@@ -338,6 +344,10 @@ export function readLinks(d?: ChainDeps): Promise<Links> {
       ]);
     if (getAddress(named) !== getAddress(cfg.intake)) throw new IntakeMismatchError();
     if (getAddress(bond) !== getAddress(intakeBond)) throw new BondMismatchError();
+    // v4 only: a v3 Registry's fallback has no such function (the call reverts).
+    const dormancy = await c
+      .readContract({ address: cfg.registry, abi: refundsV4Abi, functionName: "refundDormancy" })
+      .catch(() => null);
     return {
       slasher: orNull(slasher),
       compensator: orNull(compensator),
@@ -347,6 +357,7 @@ export function readLinks(d?: ChainDeps): Promise<Links> {
       inclusionWindow: Number(inclusionWindow),
       refundAbandonPeriod: Number(abandon),
       pendingRefundDelay: Number(delay),
+      refundDormancy: dormancy === null ? null : Number(dormancy),
     };
   })();
   perClient.set(key, reading);
@@ -390,6 +401,19 @@ export interface LedgerClaim {
    * (6 decimals) they would pay at the current price, premium included; null when they never do.
    */
   liveness: { dueAt: number; usdc: bigint } | null;
+  /**
+   * The signers committed a payout of it on Base (`claimInput(claimId) != 0`): it is on its way on
+   * Zcash ("Sent"). Read for pending claims with a destination; null when not read.
+   */
+  committed: boolean | null;
+  /**
+   * R-5, read for the account's own pending claims with a destination: the bond's arming
+   * (`livenessArming`), whose commitment must be the claim's current one; null when the bond has no
+   * arming (v3) or it was not read.
+   */
+  arming: { commitment: Hex; payableAt: number } | null;
+  /** R-11: a Refund claim without a destination set aside as dormant (`isRefundDormant`); null when not read. */
+  dormant: boolean | null;
 }
 
 /** The vault's pending activation (K3), with what decides when it finalizes or can be refunded. */
@@ -478,11 +502,33 @@ export async function readVaultLedger(vaultId: Hex, d?: ChainDeps): Promise<Vaul
       }
       // T-05: only the account's own unpaid claims that have a destination; never on a frozen vault.
       let liveness: LedgerClaim["liveness"] = null;
+      let arming: LedgerClaim["arming"] = null;
       const own = cd.claimant !== zeroAddress && getAddress(cd.claimant) === getAddress(details.account);
-      if (bond && !frozen && own && status === "Pending" && !cd.bondPaid && cd.commitment.toLowerCase() !== ZERO_BYTES32) {
-        const [dueAt, usdc] = await c.readContract({ address: bond, abi: bondAbi, functionName: "livenessDue", args: [claimId] });
+      const withDestination = cd.commitment.toLowerCase() !== ZERO_BYTES32;
+      if (bond && !frozen && own && status === "Pending" && !cd.bondPaid && withDestination) {
+        const [[dueAt, usdc], armed] = await Promise.all([
+          c.readContract({ address: bond, abi: bondAbi, functionName: "livenessDue", args: [claimId] }),
+          // R-5 (v4 bonds only; a v3 bond has no arming and needs none).
+          c.readContract({ address: bond, abi: bondV4Abi, functionName: "livenessArming", args: [claimId] }).catch(() => null),
+        ]);
         if (dueAt !== 0n) liveness = { dueAt: Number(dueAt), usdc };
+        if (armed) arming = { commitment: armed[0], payableAt: Number(armed[1]) };
       }
+      // Section 3 of the v4 design: a pending claim the signers committed a payout of is "Sent".
+      const committed =
+        status === "Pending" && withDestination
+          ? await c
+              .readContract({ address: cfg.registry, abi: registryViewsAbi, functionName: "claimInput", args: [claimId] })
+              .then((input) => input.toLowerCase() !== ZERO_BYTES32)
+              .catch(() => null)
+          : null;
+      // R-11 (v4): a Refund claim without a destination may have been set aside as dormant.
+      const dormant =
+        links.refundDormancy !== null && CLAIM_KIND[cd.kind] === "Refund" && status === "Pending" && !withDestination
+          ? await c
+              .readContract({ address: cfg.registry, abi: refundsV4Abi, functionName: "isRefundDormant", args: [claimId] })
+              .catch(() => null)
+          : null;
       return {
         claimId,
         sequence,
@@ -496,6 +542,9 @@ export async function readVaultLedger(vaultId: Hex, d?: ChainDeps): Promise<Vaul
         paidAt,
         disputeDueAt,
         liveness,
+        committed,
+        arming,
+        dormant,
       };
     }),
   );

@@ -2,7 +2,6 @@ import { readFileSync } from "node:fs";
 import { fileURLToPath } from "node:url";
 import { describe, expect, it } from "vitest";
 import {
-  concatHex,
   encodeAbiParameters,
   getTypesForEIP712Domain,
   hashDomain,
@@ -24,13 +23,17 @@ import {
   closeRequestDigest,
   closeRequestTypedData,
   deadlineIn,
+  deleverageRequestDigest,
+  deleverageRequestTypedData,
   destinationTypedData,
   openVaultTypedData,
+  proveRefundTypedData,
   randomNonce128,
   randomNonce64,
   registryDomain,
   safeMessageHash,
   signCloseRequestAsSafe,
+  signDeleverageRequestAsSafe,
   signWithOwnerKey,
   typeString,
   types,
@@ -38,6 +41,7 @@ import {
   type CloseRequestMessage,
   type PrimaryType,
 } from "./eip712";
+import { DESTINATION_RECEIVED_TYPES } from "./receipt";
 
 // ------------------------------------------------------------------ the spec
 
@@ -98,7 +102,7 @@ function sample(type: string, i: number): unknown {
  */
 const NOT_IN_APP: Record<string, string> = {
   SpendCommit: "signed by the signer nodes only (Tier 3)",
-  DeleverageRequest: "no deleverage screen in the app yet (review E-10)",
+  PayoutConfirmation: "signed by the signer nodes and checked by the Registry; the app neither signs nor checks it (R-1 names its payout)",
   DepositAttestation: "v2 only: v3 has no signer-attested deposit (D41)",
   VaultCancellation: "v2 only: v3 has no vault cancellation (D41)",
   RefundRequest: "v2 only: v3 refunds are Refund claims on Base, whose destination is a Destination (D41)",
@@ -109,12 +113,30 @@ const NOT_IN_APP: Record<string, string> = {
   RemoveVersion: "signed by three signer nodes only (T-07a, ZecuredVersions domain)",
 };
 
+/**
+ * v4 types the app signs whose docs/INTERFACES.md entry comes with the v4 docs (the integration owner
+ * adds it): pinned here as track OFF's signer/crates/base-client pins them, and byte for byte against
+ * the spec once it has them.
+ */
+const PENDING_SPEC: Record<string, string> = {
+  ProveRefund: "ProveRefund(bytes32 vaultId,uint64 nonce,uint64 deadline)",
+};
+
+/** Spec types the app checks outside lib/eip712.ts, with their type string there. */
+const ELSEWHERE: Record<string, string> = {
+  DestinationReceived: typeStringOf("DestinationReceived", DESTINATION_RECEIVED_TYPES.DestinationReceived),
+};
+
+function typeStringOf(name: string, fields: readonly { name: string; type: string }[]): string {
+  return `${name}(${fields.map((f) => `${f.type} ${f.name}`).join(",")})`;
+}
+
 describe("type strings (docs/INTERFACES.md § 2)", () => {
   const spec = specTypeStrings();
 
   it("the spec defines every type the app signs or checks, and nothing the app neither implements nor excuses", () => {
-    for (const name of Object.keys(types)) expect(spec.has(name), name).toBe(true);
-    for (const name of spec.keys()) expect(name in types || name in NOT_IN_APP, name).toBe(true);
+    for (const name of Object.keys(types)) expect(spec.has(name) || name in PENDING_SPEC, name).toBe(true);
+    for (const name of spec.keys()) expect(name in types || name in NOT_IN_APP || name in ELSEWHERE, name).toBe(true);
   });
 
   it("the app no longer signs anything for an off-chain refund, a deposit attestation or a cancellation", () => {
@@ -122,7 +144,12 @@ describe("type strings (docs/INTERFACES.md § 2)", () => {
   });
 
   it.each(Object.keys(types) as PrimaryType[])("%s matches the spec byte for byte", (name) => {
-    expect(typeString(name)).toBe(spec.get(name));
+    expect(typeString(name)).toBe(spec.get(name) ?? PENDING_SPEC[name]);
+  });
+
+  it("types checked elsewhere match the spec once it has them (R-5's receipt: the V4 freeze's string)", () => {
+    expect(ELSEWHERE.DestinationReceived).toBe("DestinationReceived(bytes32 claimId,bytes32 commitment,uint64 receivedAt)");
+    for (const [name, s] of Object.entries(ELSEWHERE)) if (spec.has(name)) expect(s).toBe(spec.get(name));
   });
 
   it.each(Object.keys(types) as PrimaryType[])(
@@ -134,7 +161,7 @@ describe("type strings (docs/INTERFACES.md § 2)", () => {
       const manual = keccak256(
         encodeAbiParameters(
           [{ type: "bytes32" }, ...fields.map((f) => ({ type: f.type }))],
-          [keccak256(toBytes(spec.get(name)!)), ...fields.map((f, i) => sample(f.type, i))],
+          [keccak256(toBytes(spec.get(name) ?? PENDING_SPEC[name]!)), ...fields.map((f, i) => sample(f.type, i))],
         ),
       );
       expect(viemHash).toBe(manual);
@@ -154,16 +181,24 @@ describe("domains and digests (Solidity golden vectors)", () => {
     expect(separator(adapterDomain(DRY_RUN_ENV.NEXT_PUBLIC_ADAPTER))).toBe(DRY_RUN_DOMAIN_SEPARATORS.adapter);
   });
 
-  it("PayoutConfirmation digest (claimIdsHash = keccak256 of packed claim ids)", () => {
-    const claimId = (seq: bigint) => keccak256(encodeAbiParameters([{ type: "bytes32" }, { type: "uint64" }], [VAULT_ID, seq]));
-    const claimIdsHash = keccak256(concatHex([claimId(0n), claimId(1n)]));
-    const digest = hashTypedData({
-      domain: registryDomain(REGISTRY),
-      types: { PayoutConfirmation: types.PayoutConfirmation },
-      primaryType: "PayoutConfirmation",
-      message: { vaultId: VAULT_ID, claimIdsHash },
-    });
-    expect(digest).toBe("0xf166a0191609bbccd2b7aa9e7527b1553a418f7626902cc10099034b838e4973");
+  it("DeleverageRequest digest (P-7; GOLDEN_DELEVERAGE_REQUEST_DIGEST)", () => {
+    const req = {
+      vaultId: VAULT_ID,
+      account: ACCOUNT,
+      executor: EXECUTOR,
+      marginBps: 100,
+      repayAssets: 500_000n,
+      maxCollateral: 1_262_500n,
+      nonce: 42n,
+      deadline: DEADLINE,
+    };
+    expect(deleverageRequestDigest(ADAPTER, req)).toBe("0x54c59f01064cf8a39e3c1036566f3e83c7cd9c5b21d3256c70f4adc4f1297211");
+    expect(hashTypedData(deleverageRequestTypedData(ADAPTER, req))).toBe(deleverageRequestDigest(ADAPTER, req));
+  });
+
+  it("ProveRefund digest (R-11; the vector track OFF's signer/crates/base-client computes with alloy)", () => {
+    const digest = hashTypedData(proveRefundTypedData(REGISTRY, { vaultId: VAULT_ID, nonce: 7n, deadline: DEADLINE }));
+    expect(digest).toBe("0xb1522edf19e997dfcba694e83f4b4547f831c977262371b3d57e17ca2bf5f5d5");
   });
 
   it("CloseRequest digest", () => {
@@ -249,6 +284,24 @@ describe("CloseRequest through the Safe (ERC-1271, docs/spikes/SPIKE_C.md)", () 
 
   it("refuses a request whose account is not the signing Safe", async () => {
     await expect(signCloseRequestAsSafe(TEST_KEY, ADAPTER, EXECUTOR, CLOSE_REQUEST)).rejects.toThrow(/account/);
+  });
+
+  it("signs a DeleverageRequest the same way (P-7): SafeMessage of its digest, by the owner", async () => {
+    const req = {
+      vaultId: VAULT_ID,
+      account: ACCOUNT,
+      executor: EXECUTOR,
+      marginBps: 100,
+      repayAssets: 500_000n,
+      maxCollateral: 1_262_500n,
+      nonce: 42n,
+      deadline: DEADLINE,
+    };
+    const sig = await signDeleverageRequestAsSafe(TEST_KEY, ADAPTER, ACCOUNT, req);
+    expect(await recoverAddress({ hash: safeMessageHash(ACCOUNT, deleverageRequestDigest(ADAPTER, req)), signature: sig })).toBe(
+      TEST_OWNER,
+    );
+    await expect(signDeleverageRequestAsSafe(TEST_KEY, ADAPTER, EXECUTOR, req)).rejects.toThrow(/account/);
   });
 });
 

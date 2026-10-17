@@ -52,6 +52,9 @@ function claim(patch: Partial<LedgerClaim>): LedgerClaim {
     paidAt: 0,
     disputeDueAt: 0,
     liveness: null,
+    committed: null,
+    arming: null,
+    dormant: null,
     ...patch,
   };
 }
@@ -265,7 +268,7 @@ describe("claims in plain words", () => {
     expect(view({ kind: "Refund", commitment: NONE32, createdAt: NOW }).badge.text).toBe("Needs your destination");
     expect(view({ kind: "Refund", commitment: NONE32, createdAt: NOW }).detail).toContain(formatUtc(NOW + 2_592_000));
     expect(view({ kind: "Fee", claimant: ZERO }).detail).toMatch(/next payout, to the signers' treasury/);
-    expect(view({ status: "Paid" }).badge).toEqual({ tone: "ok", text: "Paid" });
+    expect(view({ status: "Paid", paidAt: NOW - 60 }).badge).toEqual({ tone: "ok", text: "Signers confirmed" });
     expect(view({ kind: "Refund", status: "WrittenOff", commitment: NONE32 }).badge.text).toBe("Abandoned");
     expect(view({ status: "WrittenOff", amount: 9_000n }).detail).toMatch(/dust/);
     expect(view({ status: "Compensated" }).detail).toBe("This vault was compromised: the compensator pays this claim in USDC instead.");
@@ -273,6 +276,37 @@ describe("claims in plain words", () => {
     expect(view({ status: "Disputed", disputeDueAt: NOW + 60 }).detail).toContain(formatUtc(NOW + 60));
     expect(view({ status: "Disputed", disputeDueAt: NOW - 60 }).detail).toMatch(/can be reopened/);
     expect(view({ bondPaid: true, commitment: NONE32 }).badge.text).toBe("Paid from the bonds");
+  });
+});
+
+describe("delivery badges (section 3 of the v4 design) and dormant refunds (R-11)", () => {
+  const ctx = { refundAbandonPeriod: 2_592_000, nowSeconds: NOW, disputeWindow: 86_400, refundDormancy: 172_800 };
+  const view = (patch: Partial<LedgerClaim>) => claimView(claim(patch), ctx);
+
+  it("queued, sent, confirmed and disputable, proven", () => {
+    expect(view({ committed: false }).badge).toEqual({ tone: "warn", text: "Pending" });
+    expect(view({ committed: null }).badge).toEqual({ tone: "warn", text: "Pending" });
+    expect(view({ committed: true }).badge).toEqual({ tone: "info", text: "Sent" });
+    expect(view({ committed: true }).detail).toMatch(/committed its payout on Base/);
+    expect(view({ status: "Paid", paidAt: NOW - 60 }).badge).toEqual({
+      tone: "info",
+      text: `Signers confirmed — disputable until ${formatUtc(NOW - 60 + 86_400)}`,
+    });
+    expect(view({ status: "Paid", paidAt: NOW - 86_401 }).badge).toEqual({ tone: "ok", text: "Signers confirmed" });
+    expect(view({ status: "Paid", paidAt: 0 }).badge).toEqual({ tone: "ok", text: "Delivery proven on Base ✓" });
+    expect(view({ status: "Paid", paidAt: 0 }).detail).toMatch(/final/);
+    // A Fee claim stays a bookkeeping line, committed or not.
+    expect(view({ kind: "Fee", claimant: ZERO, committed: true }).badge).toEqual({ tone: "neutral", text: "Pending" });
+  });
+
+  it("a refund without a destination: when it is set aside, and once it is", () => {
+    const refund = { kind: "Refund" as const, commitment: NONE32, createdAt: NOW - 3_600 };
+    expect(view(refund).badge.text).toBe("Needs your destination");
+    expect(view(refund).detail).toContain(`dormant after ${formatUtc(NOW - 3_600 + 172_800)}`);
+    expect(view({ ...refund, dormant: true }).badge.text).toBe("Dormant: needs your destination");
+    expect(view({ ...refund, dormant: true }).detail).toMatch(/no longer counts against the coverage cap/);
+    // Before v4 (no dormancy), only the write-off is announced.
+    expect(claimView(claim(refund), { refundAbandonPeriod: 2_592_000, nowSeconds: NOW }).detail).not.toMatch(/dormant/);
   });
 });
 
