@@ -332,8 +332,12 @@ provers run:
 | violation-test | `0x65705f75c5482b2b0cf6fee12760b2364d48213bb2933f3882dc2d92f824866e` | `45205f4e390e5d017213ffd399c9231d0300a227d46db7e2f711f0abdc33dd38` |
 | deposit-main | `0x53f8f8e3664ce908c4ea072f239e18b6fa8b01d68c01fc162b4ae2e31b2cd5c5` | `b85d9d21f4bad6d7998506cb09431d5057a334a06732ebdfa3a4472fe811c461` |
 | violation-main | `0x24edd49e52447665146009687b6b85e3f0b6184883cbf635a762048cd1a5ce33` | `dfc746ce0e6c6c2c1f6f5323ebe3c7ef371ab6bd4c3c8f6d08c656adbef3c789` |
+| payment-test (Zecured Swap) | `0x199bf772d0780413a07081b4889f0473c8ae558c6d8c4dca96eef49b5e486134` | `26439f49d26a18560d03a8ba2849888c25f8cf059f1d55d6609f9a697cb29386` |
+| payment-main (Zecured Swap) | `0x1c2def3eb121bd3240700ca554ab455e03420981856fda3f580b930f731038b2` | `3d9d4488acec0c5a93438e714e9b54d100fac0df26897f7a0fbce9c29fb52531` |
 
-These ids and ELF hashes are pinned in `tier2/pinned-image-ids.txt`: the workflow fails when a build gives a pinned
+The payment guests (the swap's statement, `tier2/payment-statement`) were built the same way on 2026-10-17, twice with
+the same ids, their parity suite passing on both networks. These ids and ELF hashes are pinned in
+`tier2/pinned-image-ids.txt`: the workflow fails when a build gives a pinned
 guest another id or ELF, so shared code cannot move them unnoticed.
 
 The judge deployment and the theft demo take journal v2 with the Testnet pair and the NU7 epoch (branch id

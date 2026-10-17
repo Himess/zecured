@@ -177,6 +177,8 @@ passing ([docs/TIER2.md](docs/TIER2.md) § 8.1 lists the ELFs' hashes):
 | violation-test | `0x65705f75c5482b2b0cf6fee12760b2364d48213bb2933f3882dc2d92f824866e` |
 | deposit-main | `0x53f8f8e3664ce908c4ea072f239e18b6fa8b01d68c01fc162b4ae2e31b2cd5c5` |
 | violation-main | `0x24edd49e52447665146009687b6b85e3f0b6184883cbf635a762048cd1a5ce33` |
+| payment-test (swap, 2026-10-17) | `0x199bf772d0780413a07081b4889f0473c8ae558c6d8c4dca96eef49b5e486134` |
+| payment-main (swap, 2026-10-17) | `0x1c2def3eb121bd3240700ca554ab455e03420981856fda3f580b930f731038b2` |
 
 The ids of a deployment's network must equal the deployed ones (`deployments/base-sepolia.json` for
 Testnet). A build without
