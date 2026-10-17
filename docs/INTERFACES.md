@@ -41,11 +41,14 @@ like any claim (docs/TIER2.md § 5). No node signs either any more.
 ### 2.2 Signed by signer nodes (ECDSA, verified on-chain by the Registry)
 
 ```
-PayoutConfirmation(bytes32 vaultId,bytes32 claimIdsHash)
+PayoutConfirmation(bytes32 vaultId,bytes32 payoutRef,bytes32 claimIdsHash)
 ```
 
-- `claimIdsHash = keccak256(abi.encodePacked(claimIds))`. A confirmation is three signers' word:
-  each claimant may dispute it for `disputeWindow` (D53, docs/TIER3.md § 10).
+- v4 (R-1, D76): `claimIdsHash = keccak256(abi.encodePacked(claimIds))`, and the confirmation names
+  the committed payout (`payoutRef`) it confirms, so it cannot be replayed for another payout or after
+  a reopening. A signed confirmation is a fast first step that each claimant may dispute for
+  `disputeWindow` (D53); a payout is final on Base only once its inclusion in a Zcash block is proven
+  (proven delivery, § 3.5, docs/TIER3.md § 5).
 - `depositTag` (D24), the tag every Base record names a vault note by: `BLAKE2b-256(key =
   BLAKE2b-256(personal = "Zecured_TagKey__", UFVK string), personal = "Zecured_DepTag__", cmx)`,
   what a deposit proof computes; unlinkable to any Zcash data without the vault's tag key. The
@@ -300,7 +303,11 @@ function recordLiquidation(bytes32 vaultId, uint64 seized, bytes32 liquidatorCom
 function recordClose(bytes32 vaultId, uint64 mmAmount, uint64 userAmount, bytes32 mmCommitment, bytes32 userCommitment,
     address mmClaimant) external returns (bytes32 userClaimId, bytes32 mmClaimId);           // adapter only
 // payouts
-function confirmPayout(bytes32 vaultId, bytes32[] calldata claimIds, bytes[] calldata sigs) external;   // 3 of 5
+function confirmPayout(bytes32 vaultId, bytes32 payoutRef, bytes32[] calldata claimIds, bytes[] calldata sigs)
+    external;                                           // 3 of 5; v4: IZecuredPayouts, run by the spend logic
+function payoutConfirmed(bytes32 payoutRef) external view returns (bool);                  // v4: each payout once
+function expireConfirmation(bytes32 claimId) external;                                     // v4: anyone (R-3)
+function unprovenConfirmations(bytes32 vaultId) external view returns (uint256);           // v4 (R-3)
 function writeOffDust(bytes32 claimId) external;                                           // anyone (RT-8)
 // refunds (T-02) and the bonds' claims (T-05)
 function setRefundDestination(bytes32 claimId, bytes32 destCommitment) external;           // the vault's account
@@ -313,7 +320,9 @@ function reserveDeposit / releaseDeposit / activate / reserveRefund / convertToR
 function openReservedRefund(bytes32 vaultId, bytes32 depositTag) external returns (bytes32 claimId);   // v4, Intake only
 function releaseRefund(bytes32 vaultId, bytes32 depositTag) external;                      // v4, Intake only
 function retireVault(bytes32 vaultId, uint64 amount) external returns (uint64 retired);   // compensator only
-function settleCompensatedClaim(bytes32 claimId) external;                                // compensator only
+function settleCompensatedClaim(bytes32 claimId) external;                                // compensator only (spend logic)
+function closeMisdirectedClaim(bytes32 claimId) external;                                 // v4: compensator only, at F3 (R-7)
+function markVaultCompensated(bytes32 vaultId) external;                                  // v4: compensator only (R-20)
 function markBondPaid(bytes32 claimId) external;                                          // bond only
 // views
 function vaultOf(address account) external view returns (bytes32 vaultId);
@@ -364,11 +373,31 @@ function payoutDispute(bytes32 claimId) external view returns (uint64 paidAt, ui
   the v4 refund functions run in `ZecuredSpendLogic` (`IZecuredRefunds`), the first two through
   stubs that keep their selectors on the Registry.
 - **The bonds' claims** (T-05): when the bond pays a claim's claimant (`slashLiveness`),
-  `markBondPaid` zeroes its commitment; three signers then give the destination that reimburses
-  the bonds (`setReimburseDestination`).
+  `markBondPaid` zeroes its commitment; all five signers then give the destination that
+  reimburses the bonds (`setReimburseDestination`, v4: R-6).
+- **Confirmations** (v4, R-1, R-3): `confirmPayout` needs a payout committed for the vault, confirms
+  each payout once (`payoutConfirmed`), and every claim must be pending, of the vault and bound to
+  that payout's input; never a reopened claim (proof only), never on a frozen vault. A confirmation
+  made within `disputeWindow` before a freeze counts as unpaid unless proven (the compensator tallies
+  it after the proof window); `expireConfirmation` makes an older one final; the compensator's
+  `tallyVault` waits until `unprovenConfirmations` is zero. Events `PayoutConfirmed(vaultId,
+  payoutRef, claimIds)`, `ConfirmationExpired(vaultId, claimId)`.
+- **Proven delivery** (v4, D76): `upholdPayout` (slasher only) takes every proof transition: a
+  committed pending claim (also on a frozen or compromised vault, before the compensator tallied
+  it), a confirmed one (its `paidAt` becomes 0), a disputed one and a reopened one; a final claim
+  (Paid with `paidAt == 0`) reverts `AlreadyFinal`, and the payout must be a committed payout of the
+  claim's own input and vault. Event `PayoutProven(vaultId, claimId, payoutRef)` (`PayoutUpheld`
+  stays for disputed and reopened claims).
+- **Change tags** (v4, R-16): a proven deposit overrides a change record under its tag
+  (`ChangeTagOverridden(tag, oldVaultId)`): another vault's record loses its claim set and commit
+  time, and its claims may be bound again; the vault's own record (a refund to the same vault) keeps
+  its claim set (RT-4); F1 and `upholdPayout` count only commitments of the note's own vault.
 - **Compromised vaults** (an executed F1/F2 case): no new claim, no payout; the compensator
   settles their claims (`settleCompensatedClaim`) and retires their collateral (`retireVault`: all
-  of it once the debt is repaid, else down to the LLTV).
+  of it once the debt is repaid, else down to the LLTV). v4: the collateral is burned down to the LLTV
+  already at the slash (R-19), an executed F3 closes its claim (`closeMisdirectedClaim`, R-7), and a
+  settled victim left active leaves `openVaultCount` and `lockedZatoshi` (`markVaultCompensated`,
+  `VaultCompensated`, R-20) while anyone may burn it again or retire it once its debt is gone.
 - **Disputes** (D53): within `disputeWindow` of its confirmation, a claim's claimant may dispute it;
   the claim is unpaid again until the slasher upholds it with a proof of its payout's inclusion, or
   anyone reopens it after `inclusionWindow` (then payable again, and from the bonds on its original
@@ -471,6 +500,11 @@ struct ViolationJournal { ViolationKind kind; bytes32 anchor; address beneficiar
 function proveViolation(ViolationKind kind, bytes calldata journal, bytes calldata seal, bytes32 imageId)
     external returns (bytes32 caseId);
 function executeSlash(bytes32 caseId) external;                               // after challengeWindow
+function proveInclusionBatch(bytes calldata journal, bytes calldata seal, bytes32 imageId, bytes32[] calldata claimIds)
+    external returns (uint256 upheld);                  // v4: one verification, claims already final skipped
+function proveInclusionByCase(bytes32 caseId, bytes32[] calldata claimIds) external returns (uint256 upheld);   // v4: executed F2/F4
+function compromisedAt(bytes32 vaultId) external view returns (uint64);   // v4 (R-2)
+function frozenSince(bytes32 vaultId) external view returns (uint64);     // v4 (R-3)
 function proveInclusion(bytes calldata journal, bytes calldata seal, bytes32 imageId, bytes32 claimId) external;   // D53
 function vaultFrozen(bytes32 vaultId) external view returns (bool);          // an open F1/F2 case, or compromised
 function isCompromised(bytes32 vaultId) external view returns (bool);
@@ -502,13 +536,21 @@ function sweepLeftover() external returns (uint256 amount);                  // 
   The beneficiary is bound in the proof and is never a vault's smart account. An executed F1/F2
   case slashes, halts minting, marks the vault compromised and registers it with the compensator;
   F3 registers the claim's shortfall.
-- **`proveInclusion`**: the violation guest's kind 5, `Included`: journal `{5, anchor, 0,
-  payoutRef(txid_X), 0, 0, 0, 0}` under the slash's confirmation work; it upholds a disputed claim
-  whose input `payoutRef` spends (§ 3.3).
-- **Compensation** (D46): layers paid in order, each in full before the next: the prover's bounty;
-  third parties; the lenders (the victim vault's debt repaid on Morpho with a 1 % interest
-  allowance, its unbacked zZEC retired); the owners (their claims and equity). Cases within
-  `incidentWindow` share one price.
+- **`proveInclusion`, `proveInclusionBatch`**: the violation guest's kind 5, `Included`: journal
+  `{5, anchor, 0, payoutRef(txid_X), 0, 0, 0, 0}` under the slash's confirmation work; it makes final
+  every claim of the payout `payoutRef` names (§ 3.3, proven delivery). The batch verifies once and
+  skips claims already final, so nobody can make it revert by front-running one.
+  `proveInclusionByCase`: an executed F2 or F4 case's journal already proves its payout's block, so it
+  makes that payout's claims final (R-2).
+- **Compensation** (D46; v4: D77, D79): layers paid in order, each in full before the next: the
+  prover's bounty; third parties; the lenders (the victim vault's debt repaid on Morpho with a 1 %
+  interest allowance, its unbacked zZEC retired); the owners (their claims and equity). Cases within
+  `incidentWindow` share one price. v4: `executeSlash` burns a compromised vault's collateral down
+  to the LLTV at once (`burnCollateral`, `CollateralBurned`; a call starved of gas reverts and anyone
+  retries; equity is still that of the outstanding at the compromise, R-19); `tallyClaim` waits
+  `compromisedAt + inclusionWindow` for a committed claim (`ProofWindowOpen`, R-2) and takes an
+  abandoned refund until the incident is finalized (R-21); `tallyVault` waits for the vault's open
+  confirmations (`ConfirmationsUnsettled`, R-3).
 
 ### 3.6 `ZecuredVersions` (T-07a)
 

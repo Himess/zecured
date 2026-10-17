@@ -93,10 +93,10 @@ name a public-good address instead of burning what no victim needs.
   through it would stop, and the remedy today is a migration. The design adds adapters to the
   version registry: all five signers schedule a new adapter, which zZEC and the Registry accept
   after a public delay; three signers remove one at once, never the last.
-- **Confirmation by proof (T-05 (b)).** `confirmPayout` would require a proof of the payout's
-  inclusion (the violation guest's `Included` kind) instead of three signatures: one GPU proof (about
-  a minute or two) and about 350,000 gas per payout, and a confirmed payout would no longer be the
-  signers' word. The dispute path (a), deployed, makes a false confirmation answerable instead.
+- **Confirmations by proof only.** Since v4 every payout is proven (proven delivery, D76): a payout
+  is final on Base only on a proof of its inclusion, and a signed confirmation is a disputable first
+  step. Mainnet could drop signed confirmations altogether, at the cost of a proof's delay (about an
+  hour of confirmation work, then one GPU proof) before a claim counts as paid.
 - **A dispute bond, a launch condition.** On the judge deployment a claimant disputes a
   confirmation for free, once per confirmation. Mainnet launches with a small bond on each dispute,
   returned when the dispute reopens the claim and paid to the prover when an inclusion proof upholds

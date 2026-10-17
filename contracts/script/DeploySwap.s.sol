@@ -238,6 +238,10 @@ contract DeploySwap is Script {
         vm.serializeUint(k, "chainId", c.chainId);
         vm.serializeString(k, "zcashNetwork", c.zcashNetwork);
         vm.serializeAddress(k, "ZecuredSwap", address(d.swap));
+        // As the lending record: the deployment block and a `contracts` object, which the leak scanner reads.
+        vm.serializeUint(k, "block", block.number);
+        string memory contracts = vm.serializeAddress("swapContracts", "ZecuredSwap", address(d.swap));
+        vm.serializeString(k, "contracts", contracts);
         vm.serializeAddress(k, "usdc", d.usdc);
         vm.serializeAddress(k, "verifier", d.verifier);
         vm.serializeAddress(k, "versions", d.versions);

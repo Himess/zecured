@@ -131,7 +131,9 @@ against Foundry's EIP-712 implementation) and `zecured-base` `spend_commit_golde
 - binds every claim to `inputTag`;
 - emits `SpendCommitted`.
 
-`confirmPayout` additionally requires each claim to have been committed.
+`confirmPayout` (v4, R-1) names the committed payout it confirms (`payoutRef`), once per payout,
+for pending claims of the vault bound to that payout's input; never a reopened claim, never on a
+frozen vault. A confirmation is a fast first step; the payout is final once proven (§ 5).
 
 `finalizeActivation` reverts with `ViolationCaseOpen` while the slasher has a case open on the vault
 (`openCasesOf(vaultId)`, E2). A deposit note stolen while its activation is pending (it is a lineage
@@ -210,7 +212,7 @@ a witness RPC (set by default outside the local fork).
   on Base with a destination: a Refund claim once its account gave one, from its own note alone (its
   own lineage; the main lineage backs only the main claims, I10); a Fee claim rides with the vault's
   first exit, behind it, and heads a payout only when nothing else waits; a claim the bonds paid goes
-  to the destination three signers gave for their reimbursement, without the vault's ovk. A disputed
+  to the destination all five signers gave for their reimbursement (v4, R-6), without the vault's ovk. A disputed
   claim counts unpaid but is not payable until it is reopened, and then only by a payout of its input
   with the same claim list (RT-4), which may name the list's confirmed claims again (D57): while the
   input is unspent, no payout of it landed. A node that confirmed the payout itself keeps it paid,
@@ -230,15 +232,18 @@ a witness RPC (set by default outside the local fork).
 - Liveness (T-05): every node and the coordinator warn when a payable claim is older than half the
   bonds' `livenessPeriod`, at most every half hour per vault, naming the vault by its id prefix only.
 
-**Disputed confirmations (D53).** The coordinator upholds the confirmations of its own payouts: for a
-disputed claim it finds the transaction that spent the claim's input in its scan, checks that Base
-recorded it as that input's payout, proves its inclusion with the violation guest (`Included`, the
-witness holding only K) ahead of every deposit proof in its queue, and calls `proveInclusion` for each
-disputed claim of that payout. It does the same for a claim reopened after its inclusion window whose
-payout it saw mined: a later proof still upholds it (D57), so that a payout which did land never keeps
-its vault open for good. Without proofs configured it only warns: someone must prove it before the
-dispute falls due. A claimant disputes with `zecured-wallet loan dispute` (TEST ONLY, the owner
-EOA as the account; the app sends the same call by UserOp).
+**Proven delivery (v4, D76).** A payout is final on Base only once its inclusion in a Zcash block
+is proven in zero knowledge. The coordinator proves every payout it committed: once the payout's block
+has `slashConfirmationWork` on top of it, it builds the `Included` witness (journal `(5, anchor, 0,
+payoutRef, 0, 0, 0, 0)`, the witness holding only K) and calls `proveInclusionBatch` for the payout's
+claims that are not final yet. Each becomes final (`Paid`, `paidAt == 0`) from whatever state it is in:
+committed and pending (also on a frozen or compromised vault, until the compensator tallies it),
+confirmed, disputed or reopened. Its queue proves deposits first, then disputes, swap settlements and
+routine inclusions. Anyone can prove a payout the same way, with only the vault's K. The signed
+confirmation stays as a fast first step: at most one per payout, never a reopened claim, never on a
+frozen vault; a claimant who sees it before the proof may dispute it (D53), and a dispute is answered
+by the same proof. A claimant disputes with `zecured-wallet loan dispute` (TEST ONLY, the owner EOA as
+the account; the app sends the same call by UserOp).
 
 **Off-chain refunds (P5)** need no commitment, and exist only for deposits that no guest of the
 deployment can land on Base (I30, docs/TIER2.md § 5): those never become lineage notes, so no zZEC
@@ -318,9 +323,10 @@ redirect the reward (`test_prove_revertsOnABadJournalOrSeal`: a seal for another
 - Private input: the vault's tag key K.
 - The guest shows: `ref = payoutRef(txid_X)` for an X in a block under the anchor. Journal
   `{5, anchor, 0, ref, 0, 0, 0, 0}` (no beneficiary).
-- It upholds a disputed payout confirmation (D53), or a reopened one (D57):
-  `ZecuredSlasher.proveInclusion(journal, seal, imageId, claimId)` checks it like a violation's seal
-  and anchor, then the Registry checks that `ref` is a committed payout of the claim's input. `proveViolation` refuses it (`ViolationKind` stops at
+- It makes a payout final (proven delivery, § 5): `ZecuredSlasher.proveInclusionBatch(journal, seal,
+  imageId, claimIds)` (or `proveInclusion` for one claim) checks it like a violation's seal and anchor,
+  then the Registry checks that `ref` is a committed payout of each claim's own input and vault; it
+  upholds a disputed confirmation (D53) or a reopened one (D57) the same way. `proveViolation` refuses it (`ViolationKind` stops at
   `WrongClaimRef`).
 
 **Cases.** `proveViolation(kind, journal, seal, imageId)`:
@@ -378,7 +384,7 @@ or recipient.
 | F2 WithheldChange | a committed payout without the change its record names | the record's signers | any holder of the vault's viewing key | the viewing key |
 | F3 Misdirected | a claim's committed output paying less than the claim expects | the record's signers | the claimant: the borrower, a liquidator or a market maker | the claimant's salt, receiver and incoming viewing key |
 | F4 WrongClaimRef | a commitment naming a claim under a reference that hides the payout from its claimant | the record's signers | holders of K and the claim's salt: the borrower for its own claims, any signer for every claim | K, the claim's salt and receiver |
-| `Included` (not a violation) | a committed payout is in a Zcash block | none | holders of K: the coordinator, any signer, the borrower | K |
+| `Included` (not a violation) | a committed payout is in a Zcash block: its claims are final (proven delivery) | none | holders of K: the coordinator, any signer, the borrower | K |
 
 ## 7. Bonds: `SignerBondV2` (S5, S6; D43 to D47)
 
@@ -462,9 +468,10 @@ misconfiguration end in an error message, never in a theft on the judge network:
   refusal is not theft; it is answered by the bonds (T-05, § 7), up to their size. Three related
   cases:
   - **A payout confirmed but never mined.** Three colluders can have `confirmPayout` accept a
-    committed payout that never landed. Its claimant disputes the confirmation (D53): unless the
-    signers prove the payout's inclusion in time (`proveInclusion`, the `Included` kind), the claim
-    is payable again, and from the bonds on its original liveness schedule. The unspent input
+    committed payout that never landed, but a confirmation is not final: only a proof of the
+    payout's inclusion makes the claim final (§ 5). Its claimant disputes the confirmation (D53):
+    unless someone proves the payout's inclusion in time (the `Included` kind), the claim is payable
+    again, and from the bonds on its original liveness schedule. The unspent input
     remains a lineage note: spending it without a commitment is F1, and any later commitment from it
     must carry its full value (conservation) and its whole claim list, the confirmed claims included
     (RT-4, D57), so the payout can be made again. A proof that comes after the window still upholds

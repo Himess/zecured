@@ -7584,6 +7584,20 @@ dependencies = [
 ]
 
 [[package]]
+name = "zecured-recipient"
+version = "0.1.0"
+dependencies = [
+ "anyhow",
+ "clap",
+ "hex",
+ "rand_core 0.6.4",
+ "serde_json",
+ "zcash_protocol",
+ "zecured-policy",
+ "zecured-zcash-ops",
+]
+
+[[package]]
 name = "zecured-spike"
 version = "0.1.0"
 dependencies = [

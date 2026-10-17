@@ -17,7 +17,9 @@ without a commitment or under a false one — or paying any claim to anyone but 
 on Base with a zero-knowledge proof that reveals no Zcash transaction, note or address, and it
 slashes the signers' bonds ([TIER3.md](TIER3.md)); the bonds compensate the victims: liquidators and
 lenders before the borrower's own equity. If they just stop paying, the claimant is paid from the
-bonds after 24 hours (72 on mainnet); a payout they confirm but never send can be disputed. Nor can
+bonds 24 hours (72 on mainnet) after any signer acknowledged its destination; and a payout is final
+on Base only once its inclusion in a Zcash block is proven, so confirming a payout they never sent
+settles nothing, and its claimant can dispute it. Nor can
 they mint unbacked zZEC: a deposit is activated on a zero-knowledge proof (RISC Zero) that the note
 is in a Zcash block committed by a header our on-chain relay verified with Equihash, without
 revealing which block ([TIER2.md](TIER2.md)), and new collateral is accepted only while the bonds
@@ -47,10 +49,32 @@ leaves the shielded pool.
 The vault tracks an outstanding amount. The liquidator gets only the seized ZEC; the rest stays
 yours, and you take it back by repaying or closing from collateral.
 
-**Is this a bridge or a swap?**
-No. The ZEC never leaves Zcash's shielded Ironwood pool, and nothing is sold. Holding ZEC shielded
-no longer means giving up liquidity: you can borrow dollars on Base without selling or unshielding
-it, and USDC lenders on Base gain a new market backed by Zcash collateral.
+**Is this a bridge?**
+No. Neither product moves ZEC off Zcash or mints a tradable token for it. Borrowing keeps your ZEC
+in a shielded vault and mints only a non-transferable collateral receipt into Morpho. The swap pays
+real shielded ZEC on Zcash and releases escrowed USDC on Base on a proof of that payment: nothing is
+wrapped, and nobody holds both sides.
+
+**How does the swap work without a custodian?**
+The taker's USDC is locked in `ZecuredSwap` for one order. The market maker pays shielded ZEC to the
+taker's receiver with `"ZSWP" || orderId` at the start of the note's memo, then proves in the RISC
+Zero zkVM that the note is in a Zcash block under a header the relay verified, that it pays the
+order's receiver commitment, and at least the order's amount. The contract releases the USDC after
+the same readiness wait as a deposit; with no valid proof before the order's deadline, the taker takes
+the USDC back ([SWAP.md](SWAP.md)).
+
+**Can one Zcash payment settle two orders?**
+No. The memo names one order id, which binds the chain, the contract, the maker and its nonce; a
+second order needs a second note, even to the same receiver.
+
+**What if the market maker never pays?**
+The taker loses time, not money: once the pay window has passed (at most 6 hours here) the USDC
+comes back. A maker stake for mainnet is in [MAINNET.md](MAINNET.md).
+
+**When is a payout final?**
+When its inclusion in a Zcash block is proven on Base (`PayoutProven`). The signers' signed
+confirmation comes first and can be disputed by its claimant; the coordinator proves every payout,
+and anyone can, with only the vault's tag key.
 
 **Do you cross pools?**
 No. Deposits must be Ironwood → Ironwood (no transparent, Sapling or Orchard-pool parts — the
