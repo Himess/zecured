@@ -160,7 +160,7 @@ proofs of payouts, pre-liquidation and the swap, which no campaign exercised bef
 | V-2 | Medium | A refund to an existing vault could override that same vault's false change record, and the override cleared the tag's claim set: a later commitment of the note could leave out a claim bound to it, which a proof of that payout then made final although it was never paid | **Fixed** before merging: the vault's own record keeps its claim set (`test_R16_theVaultsOwnRecordKeepsItsClaimSet`; the exploit now hits `ClaimSetMismatch`) |
 | V-3 | Low | The nodes refused a `ChangeTagOverridden` naming the deposit's own vault, which R-12's refunds make legitimate | **Fixed**: the nodes accept it when the tag was the vault's change record, and not a deposit tag, before the event (`a_refund_to_the_same_vault_may_override_its_own_change_record`) |
 | V-4 | Medium | A refund reserved before its vault was compromised could neither open (the vault is compromised) nor be dropped (its anchor stays valid), so the compensator never saw that depositor | **Open**: being fixed before the contract freeze |
-| V-5 | Low | The lending market maker sent its liveness armings and its closes from one key through two providers: a nonce race could fail a user's close | **Open**: being fixed before the contract freeze |
+| V-5 | Low | The lending market maker sent its liveness armings and its closes from one key through two providers: a nonce race could fail a user's close | **Fixed**: every transaction of the market maker goes through one provider and one nonce lock that re-reads the node after a refused send (`concurrent_sends_get_distinct_nonces`; the anvil test sends a close-like transaction and an arming at once) |
 
 ## Remaining risks
 
