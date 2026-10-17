@@ -1,14 +1,16 @@
 #!/usr/bin/env python3
-"""Zecured watchdog (review G2, G3): checks that every service is up, the header relay keeps up with
-Zcash, and every operational balance stays above its floor, and sends an alarm when one stops
-holding (and again when it recovers).
+"""Zecured watchdog (review G2, G3, v4 O-7): checks that every service is up, the header relay keeps
+up with Zcash, every operational balance stays above its floor (Base Sepolia and Base mainnet ETH,
+the loan token, the demo wallet's TAZ, the market maker's inventory) and the coverage cap keeps
+room (R-11.3), and sends an alarm when one stops holding (and again when it recovers).
 
 Standard library only; run every few minutes by infra/systemd/zecured-watchdog.timer. All settings
 come from the environment (infra/watchdog/watchdog.env.example), so thresholds, endpoints and the
 alarm channel change without a code change (G1).
 
-Alarms never carry a user address, viewing key, salt or IP: they name a check, our own operational
-accounts and numbers, nothing about any vault.
+Alarms never carry an address, a key, a viewing key, a salt or an IP: they name a check, our own
+operational accounts by name and numbers, nothing about any vault. Endpoint URLs (which may carry
+an API key) are never printed either: a failure names only its kind.
 """
 
 import json
@@ -40,24 +42,101 @@ def http_json(url, body=None):
         return json.loads(r.read())
 
 
-def rpc(method, params):
-    out = http_json(env("BASE_RPC_URL", "https://sepolia.base.org"),
+def rpc(method, params, url=None):
+    out = http_json(url or env("BASE_RPC_URL", "https://sepolia.base.org"),
                     {"jsonrpc": "2.0", "id": 1, "method": method, "params": params})
     if "error" in out:
         raise RuntimeError(f"{method}: {out['error'].get('message', 'error')}")
     return out["result"]
 
 
-def call(to, data):
-    return rpc("eth_call", [{"to": to, "data": data}, "latest"])
+def call(to, data, url=None):
+    return rpc("eth_call", [{"to": to, "data": data}, "latest"], url)
 
 
 def word(address):
     return address.lower().removeprefix("0x").rjust(64, "0")
 
 
-def eth_balance(address):
-    return int(rpc("eth_getBalance", [address, "latest"]), 16) / 1e18
+def eth_balance(address, url=None):
+    return int(rpc("eth_getBalance", [address, "latest"], url), 16) / 1e18
+
+
+def eth_checks(prefix, chain, accounts, default_floor, url=None):
+    """ETH floors of `accounts` ("name:0xabc,..."), per name `MIN_ETH[_MAINNET]_<NAME>`."""
+    floor_var = "MIN_ETH" if prefix == "eth" else "MIN_ETH_MAINNET"
+    floor = float(env(floor_var, default_floor))
+    for name, address in named_list(accounts):
+        check = f"{prefix}-{name}"
+        try:
+            limit = float(env(f"{floor_var}_{name.upper()}", str(floor)))
+            balance = eth_balance(address, url)
+            yield check, balance >= limit, f"{name}{chain} has {balance:.4f} ETH (floor {limit})"
+        except Exception as e:  # noqa: BLE001 - any failure is the alarm
+            yield check, False, f"{name}{chain} balance unreadable: {type(e).__name__}"
+
+
+def usdc_checks(prefix, chain, token, accounts, url=None):
+    """Loan-token (6 decimals) floors of `accounts`, per name `MIN_USDC[_MAINNET]_<NAME>`."""
+    floor_var = "MIN_USDC" if prefix == "usdc" else "MIN_USDC_MAINNET"
+    for name, address in named_list(accounts):
+        check = f"{prefix}-{name}"
+        try:
+            units = int(call(token, "0x70a08231" + word(address), url), 16) / 1e6  # balanceOf
+            limit = float(env(f"{floor_var}_{name.upper()}", "100"))
+            yield check, units >= limit, f"{name}{chain} has {units:.2f} USDC (floor {limit})"
+        except Exception as e:  # noqa: BLE001
+            yield check, False, f"{name}{chain} USDC unreadable: {type(e).__name__}"
+
+
+def json_field(value, path):
+    """`path` ("a.b") of a JSON object, as a number (JSON numbers and decimal strings)."""
+    for key in path.split("."):
+        value = value[key]
+    return float(value)
+
+
+def json_checks(entries):
+    """O-7: numeric fields of status endpoints that must stay above a floor, for balances only a
+    service knows (the market maker's inventory): "name|url|field|floor,..." (`field` may be a
+    dotted path). The URL is never printed."""
+    for entry in (entries or "").split(","):
+        parts = [p.strip() for p in entry.split("|")]
+        if len(parts) != 4:
+            continue
+        name, url, field, floor = parts
+        check = f"json-{name}"
+        try:
+            value = json_field(http_json(url), field)
+            limit = float(floor)
+            yield check, value >= limit, f"{name}: {field} is {number(value)} (floor {number(limit)})"
+        except Exception as e:  # noqa: BLE001
+            yield check, False, f"{name}: {field} unreadable: {type(e).__name__}"
+
+
+def number(value):
+    """A whole number without an exponent (zatoshi), anything else as it is."""
+    return f"{value:.0f}" if value == int(value) else f"{value}"
+
+
+def cap_fill(registry, intake, limit):
+    """R-11.3: how full the coverage cap is: locked and pending zatoshi (the Registry's
+    `lockedZatoshi` and the Intake's `pendingTotal` and, since v4, `pendingRefundTotal`) over those
+    plus the room the Intake still admits (`capRoom`)."""
+    locked = int(call(registry, "0x4271109c"), 16)  # lockedZatoshi()
+    pending = int(call(intake, "0x36a1b5a0"), 16)  # pendingTotal()
+    try:
+        pending += int(call(intake, "0x46236eb9"), 16)  # pendingRefundTotal() (v4)
+    except Exception:  # noqa: BLE001 - an Intake from before v4
+        pass
+    room = int(call(intake, "0xdcbc2d60"), 16)  # capRoom()
+    used = locked + pending
+    fill = used / (used + room) if used + room else 0.0
+    return (
+        fill < limit,
+        f"coverage cap {fill:.0%} full: {used / 1e8:.4f} ZEC locked or pending, {min(room, 10**18) / 1e8:.4f} ZEC "
+        f"of room left (alarm at {limit:.0%}; new vaults wait once it is full)",
+    )
 
 
 def named_list(value):
@@ -98,14 +177,15 @@ def checks():
         except Exception as e:  # noqa: BLE001
             yield "relay-lag", False, f"header relay unreadable: {type(e).__name__}"
 
-    floor = float(env("MIN_ETH", "0.01"))
-    for name, address in named_list(env("WATCH_ETH")):
-        try:
-            limit = float(env(f"MIN_ETH_{name.upper()}", str(floor)))
-            balance = eth_balance(address)
-            yield f"eth-{name}", balance >= limit, f"{name} has {balance:.4f} ETH (floor {limit})"
-        except Exception as e:  # noqa: BLE001
-            yield f"eth-{name}", False, f"{name} balance unreadable: {type(e).__name__}"
+    yield from eth_checks("eth", "", env("WATCH_ETH"), "0.01")
+
+    # O-7: the mainnet beta's own accounts on Base mainnet, when this watchdog watches both stacks.
+    mainnet = env("MAINNET_RPC_URL")
+    if mainnet:
+        yield from eth_checks("mainnet-eth", " (Base mainnet)", env("WATCH_ETH_MAINNET"), "0.005", mainnet)
+        if env("MAINNET_USDC"):
+            yield from usdc_checks("mainnet-usdc", " (Base mainnet)", env("MAINNET_USDC"),
+                                   env("WATCH_USDC_MAINNET"), mainnet)
 
     entry_point, paymaster = env("ENTRYPOINT"), env("PAYMASTER")
     if entry_point and paymaster:
@@ -116,14 +196,34 @@ def checks():
         except Exception as e:  # noqa: BLE001
             yield "paymaster", False, f"paymaster deposit unreadable: {type(e).__name__}"
 
-    usdc = env("USDC")
-    for name, address in named_list(env("WATCH_USDC")):
+    if env("USDC"):
+        yield from usdc_checks("usdc", "", env("USDC"), env("WATCH_USDC"))
+
+    # O-7: the demo wallet that pays judges' vaults in TAZ (the backend's /demo/status says when it
+    # runs low; it never shows the wallet's address or balance).
+    if env("WATCH_DEMO_TAZ") == "1":
         try:
-            units = int(call(usdc, "0x70a08231" + word(address)), 16) / 1e6
-            limit = float(env(f"MIN_USDC_{name.upper()}", "100"))
-            yield f"usdc-{name}", units >= limit, f"{name} has {units:.2f} USDC (floor {limit})"
+            demo = http_json(env("DEMO_STATUS_URL", f"{backend}/demo/status"))
+            if not demo.get("enabled"):
+                yield "demo-taz", False, "the demo path is off"
+            elif demo.get("lowBalance"):
+                yield "demo-taz", False, "the demo wallet runs low on TAZ: top it up"
+            else:
+                yield "demo-taz", True, "the demo wallet has TAZ"
         except Exception as e:  # noqa: BLE001
-            yield f"usdc-{name}", False, f"{name} USDC unreadable: {type(e).__name__}"
+            yield "demo-taz", False, f"demo wallet status unreadable: {type(e).__name__}"
+
+    # O-7: balances only a service knows (the market maker's ZEC inventory), by status field.
+    yield from json_checks(env("WATCH_JSON"))
+
+    # R-11.3: the coverage cap fills up; new vaults wait (or their owners ask for a refund) once full.
+    registry, intake = env("REGISTRY"), env("INTAKE")
+    if registry and intake:
+        try:
+            ok, message = cap_fill(registry, intake, float(env("CAP_FILL_ALARM", "0.70")))
+            yield "cap-fill", ok, message
+        except Exception as e:  # noqa: BLE001
+            yield "cap-fill", False, f"coverage cap unreadable (a stale cap price?): {type(e).__name__}"
 
     bond = env("SIGNER_BOND")
     if bond:

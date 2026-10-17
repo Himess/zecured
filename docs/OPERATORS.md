@@ -17,7 +17,8 @@ decision from its own view of both chains:
 | Deposit attestation (`/v1/vaults/:id/attest`) | Policy P1 on its own scan of the vault: an Ironwood-only note of exactly the denomination, before the vault's expiry height, with enough confirmations, first in chain order |
 | Destination / refund pre-validation | The owner's signature, nonce and deadline; a valid Ironwood receiver; the refund note is an unspent non-conforming deposit |
 | Payout signing (`/v1/sign/commit`, `/v1/sign/share`) | Its own plan from Base claims (Registry events up to Base's `safe` head) and its own ledger (I10), then the PCZT against that plan: inputs, recipients, amounts, fee, change, value balance, `ovk = None` for third parties, expiry window |
-| Payout confirmation (`/v1/vaults/:id/confirm`) | The transaction is mined with enough confirmations and spends the vault notes of the payout it signed |
+| Payout confirmation (`/v1/vaults/:id/confirm`) | The transaction is mined with enough confirmations and spends the vault notes of the payout it signed; v4 (R-1): it signs `PayoutConfirmation(vaultId, payoutRef, claimIdsHash)` with the `payoutRef` it derives itself from that transaction, never for a reopened claim (only a proof settles one) |
+| Liveness receipt (`/v1/receipts`, v4, R-5) | It holds the claim's destination preimage, `keccak256(salt \|\| receiver)` is the claim's current commitment, the receiver is a valid Ironwood receiver and none of the vault's own addresses, the claim is pending, not bond-paid and of a kind the bonds cover, and the bond's own `domainSeparator()` is the receipts' domain; `receivedAt` is when it first held that recipient |
 
 ## What a node trusts
 
@@ -92,7 +93,9 @@ nodes' stores freezes the affected vaults; three leaked stores are enough to ste
 
 ## Operations
 
-- **Health:** `GET /v1/health` → `{ index, mode, vaults }`.
+- **Health:** `GET /v1/health` → `{ index, mode, vaults, base_block }`; the coordinator waits up to
+  60 s for every node's `base_block` to reach a Base event before it asks them to sign on it (O-2),
+  then falls back to its usual retries.
 - **Event logs:** Registry events are read with `eth_getLogs` in ranges the provider accepts: up
   to `ZECURED_LOG_RANGE` blocks (default 2,000), halved whenever the provider refuses a range
   (Base Sepolia's public RPC allows 200), so no setting is needed for a stricter provider.

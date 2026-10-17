@@ -66,7 +66,7 @@ pub fn confirmation<T: SolStruct>(
 #[cfg(test)]
 mod tests {
     use alloy::{primitives::B256, signers::local::PrivateKeySigner};
-    use zecured_base::{PayoutConfirmation, claim_ids_hash, registry_domain, sign_typed};
+    use zecured_base::{payout_confirmation, registry_domain, sign_typed};
 
     use super::*;
 
@@ -101,10 +101,7 @@ mod tests {
     #[test]
     fn exactly_three_sorted_signatures_are_sent() {
         let n = net();
-        let msg = PayoutConfirmation {
-            vaultId: VAULT,
-            claimIdsHash: claim_ids_hash(&[B256::repeat_byte(1)]),
-        };
+        let msg = payout_confirmation(VAULT, B256::repeat_byte(0xaa), &[B256::repeat_byte(1)]);
         let answers: Vec<_> = (1..=5u16)
             .map(|i| {
                 let signature = sign_typed(&n.keys[usize::from(i) - 1], &n.domain, &msg).unwrap();
@@ -120,10 +117,7 @@ mod tests {
     #[test]
     fn high_s_is_not_registry_compatible() {
         let n = net();
-        let msg = PayoutConfirmation {
-            vaultId: VAULT,
-            claimIdsHash: claim_ids_hash(&[B256::repeat_byte(1)]),
-        };
+        let msg = payout_confirmation(VAULT, B256::repeat_byte(0xaa), &[B256::repeat_byte(1)]);
         let sig = sign_typed(&n.keys[0], &n.domain, &msg).unwrap();
         assert!(registry_encoding_ok(&sig));
         // (r, n - s, v ^ 1) is the same signature in its high-s form.
@@ -138,10 +132,7 @@ mod tests {
     #[test]
     fn confirmations_are_checked_per_node() {
         let n = net();
-        let msg = PayoutConfirmation {
-            vaultId: VAULT,
-            claimIdsHash: claim_ids_hash(&[B256::repeat_byte(1), B256::repeat_byte(2)]),
-        };
+        let msg = payout_confirmation(VAULT, B256::repeat_byte(0xaa), &[B256::repeat_byte(1), B256::repeat_byte(2)]);
         let answer = |index: u16, signer: usize| {
             (
                 index,
@@ -158,10 +149,7 @@ mod tests {
         let bad = vec![answer(1, 0), answer(2, 4), answer(3, 2)];
         assert!(confirmation(&n.nodes, &n.domain, &msg, &bad, 3).is_none());
         // A signature over other claims never counts.
-        let other = PayoutConfirmation {
-            vaultId: VAULT,
-            claimIdsHash: claim_ids_hash(&[B256::repeat_byte(1)]),
-        };
+        let other = payout_confirmation(VAULT, B256::repeat_byte(0xaa), &[B256::repeat_byte(1)]);
         let wrong: Vec<_> = (1..=3u16)
             .map(|i| {
                 let signature = sign_typed(&n.keys[usize::from(i) - 1], &n.domain, &other).unwrap();
@@ -169,5 +157,14 @@ mod tests {
             })
             .collect();
         assert!(confirmation(&n.nodes, &n.domain, &msg, &wrong, 3).is_none());
+        // R-1: nor a signature of the same claims for another payout (a replay after a reopening).
+        let replay = payout_confirmation(VAULT, B256::repeat_byte(0xab), &[B256::repeat_byte(1), B256::repeat_byte(2)]);
+        let replayed: Vec<_> = (1..=3u16)
+            .map(|i| {
+                let signature = sign_typed(&n.keys[usize::from(i) - 1], &n.domain, &replay).unwrap();
+                (i, ConfirmResponse { index: i, signature })
+            })
+            .collect();
+        assert!(confirmation(&n.nodes, &n.domain, &msg, &replayed, 3).is_none());
     }
 }

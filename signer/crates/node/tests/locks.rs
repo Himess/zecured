@@ -63,6 +63,7 @@ fn vault() -> VaultRecord {
         confirmed: vec![],
         last_event: None,
         activated_tag: None,
+        reopened: vec![],
     }
 }
 
@@ -87,6 +88,7 @@ async fn a_hanging_light_wallet_server_does_not_lock_the_store() {
         commit_depth_secs: 120,
         local_fork: true,
         open_vault: Default::default(),
+        payout_lifetime_secs: None,
     };
     let id = Identity {
         index: 1,
