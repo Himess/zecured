@@ -2,7 +2,7 @@
 
 > **Borrow against shielded ZEC. Sell nothing. Reveal nothing.**
 
-Every way to use ZEC in DeFi today starts with unshielding it. Zecured doesn't.
+Using ZEC in DeFi today usually means taking it out of the shielded pool. Zecured doesn't.
 Holding ZEC shielded no longer means giving up liquidity: you can borrow dollars on Base without
 selling or unshielding it, and USDC lenders on Base gain a new market backed by Zcash collateral.
 
