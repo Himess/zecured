@@ -1,9 +1,11 @@
-# Reproducible build of the RISC Zero guests (review E4, docs/TIER2.md § 8.1), one pair per Zcash network: the
-# network is a build parameter of the statement (design notes T-09), so Testnet and Mainnet each have a deposit and a
-# violation guest with their own image ids (deposit-test, violation-test, deposit-main, violation-main). The Intake and
-# the slasher of a deployment pin its network's ids, and every prover runs the ELFs this job exports
-# (ZECURED_DEPOSIT_ELF, ZECURED_VIOLATION_ELF). Anyone with Docker gets the same ids with the commands in README.md
-# ("Reproducing the guest image ids").
+# Reproducible build of the RISC Zero guests (review E4, docs/TIER2.md § 8.1), one set per Zcash network: the
+# network is a build parameter of the statements (design notes T-09), so Testnet and Mainnet each have a deposit, a
+# violation and a payment guest (Zecured Swap) with their own image ids (deposit-test, violation-test, payment-test,
+# deposit-main, violation-main, payment-main). The Intake, the slasher and ZecuredSwap of a deployment pin its network's
+# ids (as versions of ZecuredVersions), and every prover runs the ELFs this job exports (ZECURED_DEPOSIT_ELF,
+# ZECURED_VIOLATION_ELF, ZECURED_PAYMENT_ELF). Anyone with Docker gets the same ids with the commands in README.md
+# ("Reproducing the guest image ids"). The deposit and violation guests are frozen: the job fails if their ids are not
+# the deployed ones.
 name: guests
 
 on:
@@ -13,6 +15,8 @@ on:
     paths:
       - "tier2/statement/**"
       - "tier2/k4/**"
+      - "tier2/payment-statement/**"
+      - "tier2/payment-k4/**"
       - "tier2/host/**"
       - "tier2/methods/**"
       - "tier2/vendor/**"
@@ -22,6 +26,8 @@ on:
     paths:
       - "tier2/statement/**"
       - "tier2/k4/**"
+      - "tier2/payment-statement/**"
+      - "tier2/payment-k4/**"
       - "tier2/host/**"
       - "tier2/methods/**"
       - "tier2/vendor/**"
@@ -56,9 +62,15 @@ jobs:
           "$HOME/.risc0/bin/rzup" install r0vm 3.0.6
           echo "$HOME/.risc0/bin" >> "$GITHUB_PATH"
 
-      # The host's `mainnet` feature sets both the native statement and the embedded guests (their
+      # The payment statement's native suite (its K4 catalog on both networks, the synthetic fixture rebuilt from the
+      # deposit fixture), on this network's build of the statement; it needs no RISC Zero toolchain.
+      - name: Payment statement, natively
+        working-directory: tier2
+        run: cargo test --locked -p zecured-payment-statement ${{ matrix.network == 'main' && '--features zecured-payment-statement/mainnet' || '' }}
+
+      # The host's `mainnet` feature sets both the native statements and the embedded guests (their
       # own `mainnet` feature): one switch, so the parity runs compare like with like.
-      - name: Host with both ${{ matrix.network }} guests built in RISC Zero's guest-builder image
+      - name: Host with the three ${{ matrix.network }} guests built in RISC Zero's guest-builder image
         working-directory: tier2
         env:
           ZECURED_DOCKER_GUESTS: "1"
@@ -74,10 +86,12 @@ jobs:
           mkdir -p ../guests
           $host export-elf "../guests/deposit-$NET.bin"
           $host violation export-elf "../guests/violation-$NET.bin"
+          $host payment export-elf "../guests/payment-$NET.bin"
           {
             echo "deposit-$NET   $($host image-id)"
             echo "violation-$NET $($host violation image-id)"
-            (cd ../guests && sha256sum "deposit-$NET.bin" "violation-$NET.bin")
+            echo "payment-$NET   $($host payment image-id)"
+            (cd ../guests && sha256sum "deposit-$NET.bin" "violation-$NET.bin" "payment-$NET.bin")
           } | tee "../guests/image-ids-$NET.txt"
           {
             echo "### Guest image ids, $NET network (reproducible build)"
@@ -86,17 +100,37 @@ jobs:
             echo '```'
           } >> "$GITHUB_STEP_SUMMARY"
 
-      # The Docker-built guests must behave exactly as the native statement: every single change of
-      # the TEST-ONLY deposit witness (K4, for this network) and of the F1 witness gives the same
-      # outcome in both. The fixtures are Testnet transactions; the Mainnet run proves the deposit
-      # under the Mainnet encoding of the vault's address and checks that the Testnet viewing key
-      # is refused alike.
-      - name: Parity of the pinned guests with the native statement
+      # Statement v2's deposit and violation guests are deployed (docs/TIER2.md § 8.1): nothing added next to them (the
+      # payment guest, its statement crates) may change their ids.
+      - name: The deposit and violation ids are still the deployed ones
+        working-directory: tier2
+        env:
+          NET: ${{ matrix.network }}
+        run: |
+          host=target/release/zecured-tier2-host
+          if [ "$NET" = test ]; then
+            want_deposit=0x406c6d268f29270226c775db1fe4bec04acf51ba919e250078125d71c10bff41
+            want_violation=0x65705f75c5482b2b0cf6fee12760b2364d48213bb2933f3882dc2d92f824866e
+          else
+            want_deposit=0x53f8f8e3664ce908c4ea072f239e18b6fa8b01d68c01fc162b4ae2e31b2cd5c5
+            want_violation=0x24edd49e52447665146009687b6b85e3f0b6184883cbf635a762048cd1a5ce33
+          fi
+          test "$($host image-id)" = "$want_deposit" || { echo "deposit-$NET changed"; exit 1; }
+          test "$($host violation image-id)" = "$want_violation" || { echo "violation-$NET changed"; exit 1; }
+
+      # The Docker-built guests must behave exactly as the native statements: every single change of
+      # the TEST-ONLY deposit witness (K4, for this network), of the F1 witness and of the synthetic
+      # swap payment witness (zecured-payment-k4) gives the same outcome in both. The fixtures are
+      # Testnet transactions; the Mainnet run proves the deposit under the Mainnet encoding of the
+      # vault's address and checks that the Testnet viewing key is refused alike, and proves the
+      # payment (NU7) alike.
+      - name: Parity of the pinned guests with the native statements
         working-directory: tier2
         run: |
           host=target/release/zecured-tier2-host
           $host parity statement/tests/fixtures/TEST-ONLY_vault9_witness.json
           $host violation parity statement/tests/fixtures/TEST-ONLY_vault9_f1_witness.json
+          $host payment parity payment-statement/tests/fixtures/TEST-ONLY_swap_payment_witness.json
 
       - uses: actions/upload-artifact@v4
         with:

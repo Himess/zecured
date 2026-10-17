@@ -6171,6 +6171,8 @@ dependencies = [
  "sha2 0.10.9",
  "zecured-deposit-k4",
  "zecured-deposit-statement",
+ "zecured-payment-k4",
+ "zecured-payment-statement",
  "zecured-tier2-methods",
 ]
 
