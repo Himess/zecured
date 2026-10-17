@@ -7456,6 +7456,7 @@ dependencies = [
  "zcash_primitives",
  "zcash_protocol",
  "zecured-deposit-statement",
+ "zecured-payment-statement",
  "zecured-zcash-ops",
 ]
 
@@ -7511,6 +7512,34 @@ dependencies = [
 ]
 
 [[package]]
+name = "zecured-payment-k4"
+version = "0.1.0"
+dependencies = [
+ "orchard",
+ "zcash_history",
+ "zcash_note_encryption",
+ "zcash_primitives",
+ "zcash_protocol",
+ "zecured-deposit-k4",
+ "zecured-deposit-statement",
+ "zecured-payment-statement",
+]
+
+[[package]]
+name = "zecured-payment-statement"
+version = "0.1.0"
+dependencies = [
+ "orchard",
+ "serde",
+ "serde_json",
+ "zcash_note_encryption",
+ "zcash_primitives",
+ "zcash_protocol",
+ "zecured-deposit-statement",
+ "zecured-payment-k4",
+]
+
+[[package]]
 name = "zecured-policy"
 version = "0.1.0"
 dependencies = [
@@ -7552,6 +7581,54 @@ dependencies = [
 ]
 
 [[package]]
+name = "zecured-swap"
+version = "0.1.0"
+dependencies = [
+ "alloy",
+ "anyhow",
+ "hex",
+ "orchard",
+ "pczt",
+ "rand 0.10.3",
+ "rand_core 0.6.4",
+ "serde",
+ "serde_json",
+ "tokio",
+ "zcash_note_encryption",
+ "zcash_primitives",
+ "zcash_protocol",
+ "zecured-base",
+ "zecured-deposit-statement",
+ "zecured-deposit-witness",
+ "zecured-payment-statement",
+ "zecured-zcash-ops",
+]
+
+[[package]]
+name = "zecured-swap-maker"
+version = "0.1.0"
+dependencies = [
+ "alloy",
+ "anyhow",
+ "axum",
+ "clap",
+ "hex",
+ "orchard",
+ "rand_core 0.6.4",
+ "serde",
+ "serde_json",
+ "tokio",
+ "tower",
+ "tracing",
+ "tracing-subscriber",
+ "zcash_protocol",
+ "zecured-base",
+ "zecured-deposit-witness",
+ "zecured-swap",
+ "zecured-zcash-ops",
+]
+
+[[package]]
 name = "zecured-threshold"
 version = "0.1.0"
 dependencies = [
@@ -7586,6 +7663,7 @@ dependencies = [
  "zecured-base",
  "zecured-deposit-witness",
  "zecured-policy",
+ "zecured-swap",
  "zecured-zcash-ops",
 ]
 

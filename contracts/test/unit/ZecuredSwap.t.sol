@@ -1029,6 +1029,35 @@ contract ZecuredSwapTest is SwapFixture {
         assertEq(usdcToken.balanceOf(fixedMaker), 1e6);
     }
 
+    /// The EIP-712 digest vector of swap/core (`quote::tests::the_digest_vector`, alloy's encoder): a Sell quote of maker
+    /// 0x2222..22 for taker 0x3333..33 on a ZecuredSwap at 0x1111..11 on chain 84532.
+    function test_eip712_digestVector() public {
+        vm.chainId(84_532);
+        address at = 0x1111111111111111111111111111111111111111;
+        vm.etch(
+            at, abi.encodePacked(type(ZecuredSwap).creationCode, abi.encode(_config(address(usdcToken), 0, address(0))))
+        );
+        (bool ok, bytes memory runtime) = at.call("");
+        assertTrue(ok);
+        vm.etch(at, runtime);
+        SwapQuote memory q = SwapQuote({
+            maker: 0x2222222222222222222222222222222222222222,
+            taker: 0x3333333333333333333333333333333333333333,
+            side: SIDE_SELL,
+            zatoshi: 50_000_000,
+            usdc: 19_800_000,
+            makerReceiverCommitment: bytes32(
+                uint256(0x4444444444444444444444444444444444444444444444444444444444444444)
+            ),
+            payWindow: 21_600,
+            quoteDeadline: 1_760_000_120,
+            nonce: 7
+        });
+        assertEq(ZecuredSwap(at).hashSwapQuote(q), EIP712_DIGEST_VECTOR);
+    }
+
+    bytes32 internal constant EIP712_DIGEST_VECTOR = 0xd3e594a519b8f06b57c3151ddf712e48edafdccf3d65f5079b0bdbbff4c89c00;
+
     function _slice(bytes memory b, uint256 from, uint256 len) internal pure returns (bytes memory out) {
         out = new bytes(len);
         for (uint256 i; i < len; ++i) {
