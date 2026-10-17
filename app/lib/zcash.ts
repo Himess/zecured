@@ -2,15 +2,17 @@
  * Zcash helpers: zatoshi ↔ ZEC, ZIP 321 payment URIs, a cheap unified-address sanity check.
  * Amounts are bigint zatoshi everywhere (1 ZEC = 1e8 zat; 1 zZEC wei = 1 zat).
  */
+import { DEPLOYMENT } from "./deployment";
 
 export const ZATS_PER_ZEC = 100_000_000n;
-/** Testnet ticker. */
-export const TICKER = "TAZ";
+/** "TAZ" on Zcash testnet (the judge deployment), "ZEC" on the mainnet beta (lib/deployment.ts). */
+export const TICKER = DEPLOYMENT.ticker;
 /**
- * Collateral denominations on testnet (D7): 0.01 and 0.05 TAZ, and 0.125 TAZ, what the Valar testnet faucet
- * pays, so that a vault can be funded straight from the faucet (S13). The backend's list wins when it is loaded.
+ * Collateral denominations before GET /config answers (the backend's list wins once loaded): on
+ * testnet (D7) 0.01 and 0.05 TAZ, and 0.125 TAZ, what the Valar testnet faucet pays, so that a vault
+ * can be funded straight from the faucet (S13); on the mainnet beta 0.05 and 0.1 ZEC.
  */
-export const DENOMINATIONS: readonly bigint[] = [1_000_000n, 5_000_000n, 12_500_000n];
+export const DENOMINATIONS: readonly bigint[] = DEPLOYMENT.defaultDenominations;
 /** NU7 target block spacing (ZIP 218 / docs/ref/FACTS.md), for time estimates only. */
 export const ZCASH_BLOCK_SECONDS = 25;
 const MAX_MONEY = 21_000_000n * ZATS_PER_ZEC;

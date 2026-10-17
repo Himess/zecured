@@ -15,13 +15,13 @@
 import { createClient, getAddress, http, HttpRequestError, type Address, type Hex, type PublicClient, type Transport } from "viem";
 import { createBundlerClient, createPaymasterClient } from "viem/account-abstraction";
 import { privateKeyToAccount } from "viem/accounts";
-import { baseSepolia } from "viem/chains";
 import { toSafeSmartAccount } from "permissionless/accounts";
 import { getUserOperationGasPrice } from "permissionless/actions/pimlico";
 import { api as defaultApi, type Api } from "./api";
 import { assertAllowlisted, pinnedTargets, type Call, type NamedTargets } from "./calls";
 import { ContractsNotDeployedError, isDeployedAt, publicClient, readLinks, type ChainDeps } from "./chain";
 import { config as defaultConfig, type AppConfig } from "./config";
+import { viemChain } from "./deployment";
 import { signCloseRequestAsSafe, type CloseRequestMessage } from "./eip712";
 import { predictAccountAddress, SAFE } from "./safe";
 
@@ -69,7 +69,7 @@ function proxyFailure(e: unknown): string {
 async function checkBundler(transport: Transport): Promise<void> {
   let entryPoints: readonly string[];
   try {
-    entryPoints = (await createClient({ chain: baseSepolia, transport }).request({
+    entryPoints = (await createClient({ chain: viemChain(), transport }).request({
       method: "eth_supportedEntryPoints",
     } as never)) as readonly string[];
   } catch (e) {
@@ -188,7 +188,7 @@ export function loanAccount(ownerKey: Hex, deps: AccountDeps = {}): LoanAccount 
           // RPC's fees. A failing proxy is reported as such, not hidden behind the fallback.
           async estimateFeesPerGas() {
             try {
-              return (await getUserOperationGasPrice(createClient({ chain: baseSepolia, transport: bundlerTransport }))).fast;
+              return (await getUserOperationGasPrice(createClient({ chain: viemChain(), transport: bundlerTransport }))).fast;
             } catch (e) {
               if (e instanceof HttpRequestError) throw new SponsorshipUnavailableError(`bundler: ${proxyFailure(e)}`);
               return client.estimateFeesPerGas();

@@ -1,6 +1,19 @@
 import { afterEach, describe, expect, it, vi } from "vitest";
 import { DRY_RUN_CONFIG, DRY_RUN_ENV } from "./__fixtures__/deployment";
-import { ApiError, createApi, describeError, parseMintingStatus, parseOpenVault, parseRemoteConfig, parseVault } from "./api";
+import {
+  ApiError,
+  apiErrorCode,
+  createApi,
+  describeError,
+  parseDemoStatus,
+  parseMintingStatus,
+  parseOpenVault,
+  parseRemoteConfig,
+  parseSignedSwapQuote,
+  parseStatusReport,
+  parseVault,
+  parseVaultStats,
+} from "./api";
 
 const BASE = "http://backend.test";
 const VAULT = `0x${"ab".repeat(32)}` as const;
@@ -393,6 +406,11 @@ describe("GET /config", () => {
         ZZEC: DRY_RUN_CONFIG.contracts.ZZEC,
         ZecuredRegistry: DRY_RUN_CONFIG.contracts.ZecuredRegistry,
         ZecuredIntake: DRY_RUN_CONFIG.contracts.ZecuredIntake,
+        // v4: no swap in this file; Circle's USDC, the DemoShockOracle over a MockZecOracle.
+        ZecuredSwap: null,
+        loanTokenIsMock: false,
+        oracleIsDemo: true,
+        baseOracleIsMock: true,
       },
       market: { ...DRY_RUN_CONFIG.market, lltv: 625_000_000_000_000_000n },
       signers: null,
@@ -593,5 +611,223 @@ describe("errors", () => {
     const p = api.getVault(VAULT).catch((x: unknown) => x);
     await vi.advanceTimersByTimeAsync(15_001);
     expect(await p).toMatchObject({ kind: "timeout" });
+  });
+
+  it("keeps the backend's fixed refusal code (L-2), and only a well-formed one", async () => {
+    const { api } = mockFetch(() => json({ error: "An invite code is required.", code: "invite_required" }, 403));
+    const e = await api.getVault(VAULT).catch((x: unknown) => x);
+    expect(apiErrorCode(e)).toBe("invite_required");
+    const odd = mockFetch(() => json({ error: "x", code: "<script>" }, 400));
+    expect(apiErrorCode(await odd.api.getVault(VAULT).catch((x: unknown) => x))).toBeNull();
+    expect(apiErrorCode(new Error("plain"))).toBeNull();
+  });
+});
+
+describe("v4 endpoints", () => {
+  const CLAIM = `0x${"c1".repeat(32)}` as const;
+  const ORDER = `0x${"0d".repeat(32)}` as const;
+
+  it("POST /vaults carries the mainnet beta's invite code when there is one", async () => {
+    const { api, calls } = mockFetch(() => json(OPENED));
+    const body = {
+      owner: "0x1111111111111111111111111111111111111111",
+      account: "0x2222222222222222222222222222222222222222",
+      amount: 1_000_000n,
+      requestId: `0x${"33".repeat(32)}`,
+      deadline: 1_800_000_000n,
+      signature: SIG,
+      stamp: 7n,
+    } as const;
+    await api.openVault({ ...body, invite: "ZEC-BETA-1234" });
+    expect((calls[0]!.body as Record<string, unknown>).invite).toBe("ZEC-BETA-1234");
+    await api.openVault(body);
+    expect(calls[1]!.body as Record<string, unknown>).not.toHaveProperty("invite");
+  });
+
+  it("R-5: POST /claims/:id/receipt gives the first valid receipt, or null while none exists", async () => {
+    const receipt = {
+      claimId: CLAIM,
+      commitment: `0x${"CD".repeat(32)}`,
+      receivedAt: "1800000000",
+      signer: "0x2d9e846e519c61b452ef3ad4be34b28b22a6f6f3",
+      signature: SIG,
+    };
+    const { api, calls } = mockFetch((url) => (url.includes(CLAIM) ? json(receipt) : json({ error: "No receipt yet.", code: "no_receipt" }, 404)));
+    expect(await api.getLivenessReceipt(CLAIM)).toEqual({
+      claimId: CLAIM,
+      commitment: `0x${"cd".repeat(32)}`,
+      receivedAt: 1_800_000_000n,
+      signer: "0x2D9E846e519c61b452ef3ad4Be34B28b22A6f6F3",
+      signature: SIG,
+    });
+    expect(calls[0]!.url).toBe(`${BASE}/claims/${CLAIM}/receipt`);
+    expect(calls[0]!.init.method).toBe("POST");
+    expect(await api.getLivenessReceipt(VAULT)).toBeNull();
+    const broken = mockFetch(() => json({ ...receipt, signature: "0x12" }));
+    await expect(broken.api.getLivenessReceipt(CLAIM)).rejects.toThrow(/receipt.signature/);
+  });
+
+  it("R-11: POST /vaults/:id/prove-refund is owner-signed and answers { queued: true }", async () => {
+    const { api, calls } = mockFetch(() => json({ queued: true }));
+    await api.proveRefund(VAULT, { nonce: 7n, deadline: 1_800_000_000n, signature: SIG });
+    expect(calls[0]!.url).toBe(`${BASE}/vaults/${VAULT}/prove-refund`);
+    expect(calls[0]!.body).toEqual({ nonce: "7", deadline: "1800000000", signature: SIG });
+    const refused = mockFetch(() => json({ error: "Nothing to refund.", code: "no_deposit" }, 409));
+    expect(apiErrorCode(await refused.api.proveRefund(VAULT, { nonce: 1n, deadline: 1n, signature: SIG }).catch((x: unknown) => x))).toBe(
+      "no_deposit",
+    );
+    const odd = mockFetch(() => json({ queued: false }));
+    await expect(odd.api.proveRefund(VAULT, { nonce: 1n, deadline: 1n, signature: SIG })).rejects.toThrow(/prove refund/);
+  });
+
+  it("P-7: the deleverage quote and the signed request, relayed to the market maker", async () => {
+    const quote = {
+      executor: "0x4444444444444444444444444444444444444444",
+      marginBps: 100,
+      repayAssets: "500000",
+      mmAmount: "1262500",
+      remaining: "3737500",
+      expiresAt: 1_800_000_600,
+    };
+    const { api, calls } = mockFetch((url) => (url.includes("/quotes/deleverage/") ? json(quote) : json({ txHash: `0x${"ab".repeat(32)}` })));
+    expect(await api.getDeleverageQuote(VAULT, 500_000n)).toEqual({
+      executor: "0x4444444444444444444444444444444444444444",
+      marginBps: 100,
+      repayAssets: 500_000n,
+      mmAmount: 1_262_500n,
+      remaining: 3_737_500n,
+      expiresAt: 1_800_000_600,
+    });
+    expect(calls[0]!.url).toBe(`${BASE}/quotes/deleverage/${VAULT}?repay=500000`);
+    const tx = await api.submitDeleverage(
+      {
+        vaultId: VAULT,
+        account: "0x3333333333333333333333333333333333333333",
+        executor: quote.executor as `0x${string}`,
+        marginBps: 100,
+        repayAssets: 500_000n,
+        maxCollateral: 1_275_125n,
+        nonce: 42n,
+        deadline: 1_800_000_600n,
+      },
+      SIG,
+    );
+    expect(tx).toBe(`0x${"ab".repeat(32)}`);
+    expect(calls[1]!.url).toBe(`${BASE}/deleverages`);
+    expect((calls[1]!.body as { request: Record<string, unknown> }).request).toMatchObject({
+      repayAssets: "500000",
+      maxCollateral: "1275125",
+      nonce: "42",
+      deadline: "1800000600",
+    });
+    await expect(api.getDeleverageQuote(VAULT, 0n)).rejects.toThrow(/positive/);
+  });
+
+  it("the swap: a quote relayed from the maker, the order's destination and the maker's status", async () => {
+    const signed = {
+      quote: {
+        maker: "0x6666666666666666666666666666666666666666",
+        taker: "0x0000000000000000000000000000000000000000",
+        side: 0,
+        zatoshi: "10000000",
+        usdc: "12000000",
+        makerReceiverCommitment: `0x${"00".repeat(32)}`,
+        payWindow: 21_600,
+        quoteDeadline: "1800000300",
+        nonce: "5",
+      },
+      signature: SIG,
+      swap: "0x7777777777777777777777777777777777777777",
+    };
+    const { api, calls } = mockFetch((url, init) =>
+      url.includes("/swap/quote") ? json(signed) : init.method === "POST" ? json({ accepted: true }) : json({ status: "paid" }),
+    );
+    const q = await api.getSwapQuote({ usdc: 12_000_000n, taker: "0x3333333333333333333333333333333333333333" });
+    expect(calls[0]!.url).toBe(`${BASE}/swap/quote?side=buy&usdc=12000000&taker=0x3333333333333333333333333333333333333333`);
+    expect(q.quote).toMatchObject({ side: 0, zatoshi: 10_000_000n, usdc: 12_000_000n, payWindow: 21_600, nonce: 5n });
+    expect(q.swap).toBe("0x7777777777777777777777777777777777777777");
+    await api.postSwapDestination(ORDER, "utest1receiver", `0x${"5a".repeat(32)}`);
+    expect(calls[1]!.url).toBe(`${BASE}/swap/orders/${ORDER}/destination`);
+    expect(calls[1]!.body).toEqual({ receiver: "utest1receiver", salt: `0x${"5a".repeat(32)}` });
+    expect(await api.getSwapOrder(ORDER)).toBe("paid");
+    // Strict about the quote's fields.
+    expect(() => parseSignedSwapQuote({ ...signed, quote: { ...signed.quote, side: 2 } })).toThrow(/quote.side/);
+    expect(() => parseSignedSwapQuote({ ...signed, quote: { ...signed.quote, zatoshi: "0" } })).toThrow(/quote.zatoshi/);
+    expect(() => parseSignedSwapQuote({ ...signed, swap: "0x12" })).toThrow(/quote.swap/);
+  });
+
+  it("P-1: the demo wallet's status and a demo payment (DEMO)", async () => {
+    expect(parseDemoStatus({ enabled: false })).toMatchObject({ enabled: false, returnAddress: null });
+    const status = { enabled: true, returnAddress: "utest1demo", dailyCapZat: "50000000", paidTodayZat: "1000000", lowBalance: true, stampBits: 20 };
+    expect(parseDemoStatus(status)).toEqual({
+      enabled: true,
+      returnAddress: "utest1demo",
+      dailyCapZat: 50_000_000n,
+      paidTodayZat: 1_000_000n,
+      lowBalance: true,
+      stampBits: 20,
+    });
+    expect(() => parseDemoStatus({ ...status, stampBits: 64 })).toThrow(/stampBits/);
+    const { api, calls } = mockFetch(() => json({ txid: "ab".repeat(32), amount: "1000000" }));
+    const paid = await api.demoPay(VAULT, {
+      owner: "0x1111111111111111111111111111111111111111",
+      account: "0x2222222222222222222222222222222222222222",
+      amount: 1_000_000n,
+      expiryHeight: 4_600_288,
+      address: "utest1vault",
+      tagKeyHash: `0x${"ee".repeat(32)}`,
+      signatures: OPENED.signatures as { index: number; signature: `0x${string}` }[],
+      stamp: 99n,
+    });
+    expect(paid).toEqual({ txid: "ab".repeat(32), amount: 1_000_000n });
+    expect(calls[0]!.url).toBe(`${BASE}/demo/vaults/${VAULT}/pay`);
+    expect(calls[0]!.body).toMatchObject({ amount: "1000000", expiryHeight: 4_600_288, stamp: "99", address: "utest1vault" });
+  });
+
+  it("P-2: GET /status in full, and the open vaults per denomination", async () => {
+    const report = parseStatusReport({
+      commit: "0123456789abcdef0123456789abcdef01234567",
+      treeClean: true,
+      startedAt: 1_800_000_000,
+      zcashTip: 4_600_000,
+      nodes: [{ index: 1, mode: "normal" }, { index: 2, mode: "weird" }],
+      depositProofs: { queued: 2, running: 1, concurrency: 1 },
+      minting: null,
+      versions: {
+        deposit: [
+          {
+            versionId: `0x${"01".repeat(32)}`,
+            selector: "0x73C457BA",
+            imageId: `0x${"11".repeat(32)}`,
+            branches: [2_000_000_000],
+            activeAt: 1_792_000_000,
+            active: true,
+            removed: false,
+          },
+        ],
+        swap: [],
+      },
+      deployment: { chainId: 84532, registry: "0x2849a4fa18c4bd42687bd9b8ebdc2f4d89ecfb2f", mintMode: "proof-only", verifierIsMock: false },
+    });
+    expect(report.nodes).toEqual([
+      { index: 1, mode: "normal" },
+      { index: 2, mode: "unreachable" },
+    ]);
+    expect(report.depositProofs).toEqual({ queued: 2, running: 1, concurrency: 1 });
+    expect(report.versions?.deposit?.[0]).toMatchObject({ selector: "0x73c457ba", active: true });
+    expect(report.versions?.swap).toEqual([]);
+    expect(report.deployment).toMatchObject({ chainId: 84532, registry: "0x2849a4FA18C4bD42687bD9B8eBDC2F4D89ECfB2F", intake: null });
+    expect(parseVaultStats({ byAmount: { "1000000": 3, "5000000": 0 }, total: 3, complete: true, readAt: 1_800_000_000 })).toEqual({
+      byAmount: new Map([
+        [1_000_000n, 3],
+        [5_000_000n, 0],
+      ]),
+      total: 3,
+      complete: true,
+      readAt: 1_800_000_000,
+    });
+    const { api } = mockFetch(() => json({ error: "Not configured on this backend.", code: "not_configured" }, 503));
+    expect(await api.getVaultStats()).toBeNull();
+    expect(await api.getEvidence()).toBeNull();
   });
 });

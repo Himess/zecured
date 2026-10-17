@@ -11,6 +11,7 @@ import type { Address, Hex } from "viem";
 import { api as defaultApi, type Api, type OpenVaultResult } from "./api";
 import { prepareDestination, decodeUnifiedAddress, isIronwoodOnly } from "./commitment";
 import { config as appConfig, type AppConfig } from "./config";
+import { DEPLOYMENT } from "./deployment";
 import { signerSet, storedVault, tagKeyHash, verifyVaultOpened, VaultProofError, type VaultCheck } from "./signers";
 import { solveStamp, STAMP_DEFAULT_BITS } from "./stamp";
 import {
@@ -67,15 +68,17 @@ export interface VaultAddressCheck {
 }
 
 /**
- * The vault must be an Ironwood-only testnet UA (D4: a single Orchard-protocol receiver), and
- * the payment request must be for exactly the loan's denomination.
+ * The vault must be an Ironwood-only UA of the deployment's Zcash network (D4: a single
+ * Orchard-protocol receiver), and the payment request must be for exactly the loan's denomination.
  */
 export function checkVaultAddress(address: string, amount: bigint, backendZip321?: string): VaultAddressCheck {
   const problems: string[] = [];
   let uri: string | null = null;
   try {
     const d = decodeUnifiedAddress(address);
-    if (d.network !== "test") problems.push("The vault address is not a testnet address.");
+    if (d.network !== DEPLOYMENT.zcashNetwork) {
+      problems.push(`The vault address is not a ${DEPLOYMENT.zcashNetwork === "test" ? "testnet" : "mainnet"} address.`);
+    }
     if (!isIronwoodOnly(d)) problems.push("The vault address is not Ironwood-only (it must have a single Orchard-protocol receiver).");
     if (d.expiryHeight !== undefined || d.expiryTime !== undefined) problems.push("The vault address carries an expiry.");
     uri = zip321Uri(address.trim(), amount);
@@ -147,7 +150,7 @@ export async function submitDestination(
 ): Promise<{ commitment: Hex; hasOtherReceivers: boolean }> {
   const a = ctx.api ?? defaultApi;
   const registry = signingRegistry(ctx);
-  const dest = prepareDestination(ua, "test");
+  const dest = prepareDestination(ua, DEPLOYMENT.zcashNetwork);
   const nonce = randomNonce64();
   const deadline = deadlineIn(REQUEST_TTL_SECONDS, ctx.now);
   const signature = await signWithOwnerKey(

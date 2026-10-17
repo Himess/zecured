@@ -25,10 +25,14 @@
  * module-evaluation time.
  */
 import { encodeAbiParameters, getAddress, isAddress, isHex, keccak256, type Address, type Hex } from "viem";
-import { DENOMINATIONS } from "./zcash";
+import { DEPLOYMENT, deploymentProfile, type DeploymentKind } from "./deployment";
 
-/** Base Sepolia. Every EIP-712 domain uses this chain id (docs/INTERFACES.md § 2.1). */
-export const CHAIN_ID = 84532 as const;
+/**
+ * Base Sepolia (84532) on the judge deployment, Base (8453) on the mainnet beta
+ * (`NEXT_PUBLIC_ZECURED_DEPLOYMENT`, lib/deployment.ts). Every EIP-712 domain uses this chain id
+ * (docs/INTERFACES.md § 2.1).
+ */
+export const CHAIN_ID: number = DEPLOYMENT.chainId;
 
 /**
  * Placeholder for the Registry and the Adapter while they are not configured. It matches the
@@ -82,6 +86,10 @@ export interface V3Params {
 }
 
 export interface AppConfig {
+  /** The deployment this build serves (`NEXT_PUBLIC_ZECURED_DEPLOYMENT`): the judge testnets or the mainnet beta. */
+  deployment: DeploymentKind;
+  /** Its Base chain id (84532 or 8453). */
+  chainId: number;
   /** Our backend. Always from the build (`NEXT_PUBLIC_BACKEND_URL`): it serves `/config`. */
   backendUrl: string;
   registry: Address;
@@ -122,6 +130,18 @@ export interface AppConfig {
   openVaultStampBits: number | null;
   /** The deployment's public v3 parameters; null until the backend reports them. */
   v3: V3Params | null;
+  /**
+   * ZecuredSwap (the Buy shielded ZEC page): `NEXT_PUBLIC_SWAP`, a pin like the others (the user's
+   * own wallet sends `open` and `refund` to it); null when this build has no swap.
+   */
+  swap: Address | null;
+  /**
+   * P-1, the demo path ("Try with demo TAZ"): `NEXT_PUBLIC_DEMO_PATH=1` on the judge deployment's
+   * build; always false on the mainnet beta. The backend must also have a demo wallet (GET /demo/status).
+   */
+  demoPath: boolean;
+  /** What the deployment file says the market's tokens and oracle are (null until GET /config answers). */
+  marketLabels: MarketLabels | null;
   /** `GET /config`: not fetched yet, checked and applied, or unavailable (`remoteError` says why). */
   remote: "pending" | "loaded" | "unavailable";
   remoteError: string | null;
@@ -165,6 +185,26 @@ export interface RemoteContracts {
   ZecuredRegistry: Address;
   /** v3; null in a deployment file from before it. */
   ZecuredIntake: Address | null;
+  /** v4: the swap contract, when the deployment file names one. */
+  ZecuredSwap: Address | null;
+  /** The loan token is the deployment's own MockUSDC (MOCK, local fork). */
+  loanTokenIsMock: boolean;
+  /** The market's oracle is the deployment's DemoShockOracle (MOCK / DEMO, testnets). */
+  oracleIsDemo: boolean;
+  /** The price below it is the owner-set MockZecOracle (MOCK). */
+  baseOracleIsMock: boolean;
+}
+
+/** How the UI names the market's loan token and oracle, from the deployment file (section 9.3 of the v4 design). */
+export interface MarketLabels {
+  /** "USDC" or "MockUSDC". */
+  loanToken: string;
+  /** One phrase on what it is: "Circle's test USDC on Base Sepolia", "a MOCK token minted by the deployer". */
+  loanTokenNote: string;
+  loanTokenIsMock: boolean;
+  /** One phrase on the market's price: "DemoShockOracle (DEMO) over a MockZecOracle (MOCK)", "ZecuredPriceFeed". */
+  oracleNote: string;
+  oracleIsDemo: boolean;
 }
 
 export interface RemoteMarket {
@@ -183,6 +223,25 @@ export type RemoteConfigResult = RemoteConfig | { error: string };
 export type ConfigEnv = Record<string, string | undefined>;
 
 type PinField = "registry" | "adapter" | "intake" | "morpho" | "marketId" | "usdc" | "oracle" | "zzec" | "irm";
+
+/** The labels of the market's loan token and oracle, from the backend's deployment file. */
+export function marketLabelsOf(c: RemoteContracts, kind: DeploymentKind, circleUsdc: Address): MarketLabels {
+  const circle = same(c.LoanToken, circleUsdc);
+  const loanToken = c.loanTokenIsMock ? "MockUSDC" : "USDC";
+  const loanTokenNote = c.loanTokenIsMock
+    ? "a MOCK token minted by the deployer (local fork only)"
+    : circle
+      ? kind === "mainnet-beta"
+        ? "Circle's USDC on Base"
+        : "Circle's test USDC on Base Sepolia (testnet funds, no value)"
+      : "the market's loan token";
+  const oracleNote = c.oracleIsDemo
+    ? `DemoShockOracle (DEMO: an owner-set shock to show a liquidation) over ${c.baseOracleIsMock ? "a MockZecOracle (MOCK: an owner-set price)" : "a real ZEC/USD feed"}`
+    : kind === "mainnet-beta"
+      ? "ZecuredPriceFeed (Chainlink and API3 ZEC/USD)"
+      : "the market's oracle";
+  return { loanToken, loanTokenNote, loanTokenIsMock: c.loanTokenIsMock, oracleNote, oracleIsDemo: c.oracleIsDemo };
+}
 
 /** The build-time pin of each Base value. */
 const ENV_VAR: Record<PinField, string> = {
@@ -304,6 +363,10 @@ function backendReports(r: RemoteConfig): Record<PinField, { value: Hex; what: s
 export function buildConfig(env: ConfigEnv, remote?: RemoteConfigResult): AppConfig {
   const development = env.NODE_ENV === "development";
   const problems: string[] = [];
+  const { profile, valid: deploymentValid } = deploymentProfile(env.NEXT_PUBLIC_ZECURED_DEPLOYMENT);
+  if (!deploymentValid) {
+    problems.push("NEXT_PUBLIC_ZECURED_DEPLOYMENT is set but is neither testnet nor mainnet-beta.");
+  }
 
   const pins: Partial<Record<PinField, Hex>> = {};
   const malformed = new Set<PinField>();
@@ -318,11 +381,19 @@ export function buildConfig(env: ConfigEnv, remote?: RemoteConfigResult): AppCon
   }
   const signersPin = parseSigners(env.NEXT_PUBLIC_SIGNERS);
   if (signersPin === null) problems.push(`NEXT_PUBLIC_SIGNERS is set but is not ${SIGNER_COUNT} distinct addresses separated by commas.`);
+  // v4: the swap contract, an optional pin (the Buy shielded ZEC page needs it).
+  const swapRaw = env.NEXT_PUBLIC_SWAP?.trim();
+  let swap: Address | null = null;
+  if (swapRaw) {
+    if (isAddress(swapRaw, { strict: false })) swap = getAddress(swapRaw);
+    else problems.push("NEXT_PUBLIC_SWAP is set but is not a valid address.");
+  }
 
   let reports: Partial<Record<PinField, { value: Hex; what: string }[]>> = {};
   let backendSigners: Address[] | null = null;
   let sponsorship = false;
-  let denominations: readonly bigint[] = DENOMINATIONS;
+  let denominations: readonly bigint[] = profile.defaultDenominations;
+  let marketLabels: MarketLabels | null = null;
   let confirmations: number | null = null;
   let vaultExpiryBlocks: number | null = null;
   let openVaultStampBits: number | null = null;
@@ -340,12 +411,17 @@ export function buildConfig(env: ConfigEnv, remote?: RemoteConfigResult): AppCon
     vaultExpiryBlocks = remote.vaultExpiryBlocks;
     openVaultStampBits = remote.openVaultStampBits;
     v3 = remote.v3;
-    if (remote.chainId !== CHAIN_ID) {
-      problems.push(`The backend is configured for chain ${remote.chainId}, this app for Base Sepolia (${CHAIN_ID}).`);
+    if (remote.chainId !== profile.chainId) {
+      problems.push(`The backend is configured for chain ${remote.chainId}, this app for ${profile.chainName} (${profile.chainId}).`);
     } else {
       reports = backendReports(remote);
       backendSigners = remote.signers;
       sponsorship = remote.sponsorship;
+      if (remote.contracts) marketLabels = marketLabelsOf(remote.contracts, profile.kind, profile.circleUsdc);
+      const reportedSwap = remote.contracts?.ZecuredSwap ?? null;
+      if (swap && reportedSwap && !same(swap, reportedSwap)) {
+        problems.push(`This build pins NEXT_PUBLIC_SWAP to ${abbreviate(swap)}, but the backend's deployed ZecuredSwap is ${abbreviate(reportedSwap)}.`);
+      }
       const m = remote.market;
       if (m && m.lltv !== MARKET_LLTV) {
         problems.push(`The backend's market has an LLTV of ${Number((m.lltv * 1_000n) / 10n ** 18n) / 10} %; Zecured uses 62.5 %.`);
@@ -398,6 +474,8 @@ export function buildConfig(env: ConfigEnv, remote?: RemoteConfigResult): AppCon
     if (!same(id, v.marketId)) problems.push(MARKET_MISMATCH);
   }
   return {
+    deployment: profile.kind,
+    chainId: profile.chainId,
     backendUrl: url(env.NEXT_PUBLIC_BACKEND_URL, "http://127.0.0.1:8080"),
     registry: v.registry,
     adapter: v.adapter,
@@ -421,6 +499,9 @@ export function buildConfig(env: ConfigEnv, remote?: RemoteConfigResult): AppCon
     vaultExpiryBlocks,
     openVaultStampBits,
     v3,
+    swap,
+    demoPath: env.NEXT_PUBLIC_DEMO_PATH?.trim() === "1" && profile.demoAllowed,
+    marketLabels,
     remote: status,
     remoteError,
     problems,
@@ -441,6 +522,9 @@ const BUILD_ENV: ConfigEnv = {
   NEXT_PUBLIC_ZZEC: process.env.NEXT_PUBLIC_ZZEC,
   NEXT_PUBLIC_IRM: process.env.NEXT_PUBLIC_IRM,
   NEXT_PUBLIC_SIGNERS: process.env.NEXT_PUBLIC_SIGNERS,
+  NEXT_PUBLIC_SWAP: process.env.NEXT_PUBLIC_SWAP,
+  NEXT_PUBLIC_DEMO_PATH: process.env.NEXT_PUBLIC_DEMO_PATH,
+  NEXT_PUBLIC_ZECURED_DEPLOYMENT: process.env.NEXT_PUBLIC_ZECURED_DEPLOYMENT,
 };
 
 /** The app's configuration. Mutated in place by `loadRuntimeConfig()`; read it at call time. */

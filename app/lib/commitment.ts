@@ -9,6 +9,7 @@
  * the backend's decoding. Salts and addresses are never logged or stored by the app.
  */
 import { bytesToHex, concatBytes, keccak256, type Hex } from "viem";
+import { DEPLOYMENT } from "./deployment";
 import { decodeUnifiedAddress, UnifiedAddressError, type DecodedUa, type ZcashNetwork } from "./ua";
 
 export { decodeUnifiedAddress, isIronwoodOnly, UnifiedAddressError } from "./ua";
@@ -60,7 +61,7 @@ export interface PreparedDestination {
  */
 export function prepareDestination(
   ua: string,
-  network: ZcashNetwork = "test",
+  network: ZcashNetwork = DEPLOYMENT.zcashNetwork,
   salt: Uint8Array = randomSalt(),
 ): PreparedDestination {
   const trimmed = ua.trim();
@@ -81,7 +82,9 @@ export function prepareDestination(
     throw new UnifiedAddressError(
       network === "test"
         ? "this is not a testnet address (testnet unified addresses start with utest1)"
-        : `this address is for ${decoded.network}, not ${network}`,
+        : network === "main"
+          ? "this is not a mainnet address (mainnet unified addresses start with u1)"
+          : `this address is for ${decoded.network}, not ${network}`,
     );
   }
   if (!decoded.orchard) {

@@ -3,6 +3,7 @@
 import { useId, useState } from "react";
 import type { Hex } from "viem";
 import { prepareDestination, UnifiedAddressError } from "@/lib/commitment";
+import { DEPLOYMENT } from "@/lib/deployment";
 import { notifyLoansChanged, useAction } from "@/lib/hooks";
 import { loanStore, short, type StoredLoan } from "@/lib/keys";
 import { submitDestination } from "@/lib/owner";
@@ -12,7 +13,7 @@ import { Button, Mono, Notice } from "./ui";
 export function destinationError(ua: string): string | null {
   if (!ua.trim()) return null;
   try {
-    prepareDestination(ua, "test");
+    prepareDestination(ua, DEPLOYMENT.zcashNetwork);
     return null;
   } catch (e) {
     return e instanceof UnifiedAddressError ? `Not usable: ${e.message}.` : "Not a valid unified address.";
@@ -36,7 +37,7 @@ export function IronwoodAddressInput({
   let other = false;
   if (value.trim() && !error) {
     try {
-      other = prepareDestination(value, "test").hasOtherReceivers;
+      other = prepareDestination(value, DEPLOYMENT.zcashNetwork).hasOtherReceivers;
     } catch {
       other = false;
     }
@@ -55,7 +56,7 @@ export function IronwoodAddressInput({
         autoComplete="off"
         autoCorrect="off"
         autoCapitalize="off"
-        placeholder="utest1…"
+        placeholder={DEPLOYMENT.zcashNetwork === "test" ? "utest1…" : "u1…"}
         aria-invalid={error ? true : undefined}
         aria-describedby={`${id}-hint`}
         className="w-full rounded-lg border border-border bg-bg px-3 py-2 font-mono text-sm break-all text-text placeholder:text-faint focus:border-accent"
