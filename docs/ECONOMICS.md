@@ -79,6 +79,50 @@ to sign a new vault, made explicit and bounded.
 verifier version, which takes effect only after a public delay (*judge*: 10 minutes; mainnet 14 days
 for a deposit guest, 7 for a violation guest).
 
+## Pre-liquidation (opt-in)
+
+A borrower may agree, once and explicitly, to be deleveraged early instead of waiting for a full
+liquidation. Its smart account sets the terms on the SettlementAdapter (`setPreLiquidation`, and
+`clearPreLiquidation` to withdraw them): a pre-liquidation LTV `preLltv` below the market's LLTV, a
+close factor and an incentive that both grow linearly from their low ends at `preLltv`
+(`preLcf1`, `preLif1`) to their high ends at the LLTV (`preLcf2`, `preLif2`), and an expiry. While
+the position's LTV is above `preLltv` and at most the LLTV, anyone may repay up to the close factor
+of its debt and receives the repaid value times the incentive in ZEC, as a Liquidation claim paid on
+Zcash like any other. Above the LLTV, only Morpho's own liquidation applies. The terms are checked
+when set: `preLltv` below the LLTV, both incentives between 1 and Morpho's incentive at the LLTV,
+both close factors above 0 and at most 1, an expiry in the future.
+
+The app's preset, against the judge market (LLTV 62.5 %, Morpho's incentive about 12.7 %):
+
+| LTV | Who may act | Largest share of the debt repaid at once | The borrower pays, per USDC repaid |
+|---|---|---|---|
+| up to 55 % | nobody | none | nothing |
+| 55 % to 62.5 % | anyone, under the borrower's terms | 10 %, rising to 50 % | 2 %, rising to 5 % |
+| above 62.5 % | any liquidator, through Morpho | all of it | about 12.7 % |
+
+The pre-liquidator is paid in ZEC on Zcash, after the signers' next payout of the vault, so it
+carries the price for that wait and the payout's Zcash fee; its bot logs a profitability estimate
+and acts regardless. Lenders gain from positions brought back before they reach the LLTV.
+
+## Zecured Swap
+
+The second product needs no signer in a trade and no bond: USDC escrowed in `ZecuredSwap` on Base
+is released by a zero-knowledge proof of a shielded ZEC payment, made by whoever paid. The signers'
+only part is the list of verifier versions it accepts (`ZecuredVersions`, the Swap kind: added by all
+five after a public delay, removed by three at once).
+
+| Party | Puts up | Gets | Risk |
+|---|---|---|---|
+| Taker buying ZEC | USDC, locked when it opens the order | ZEC at its own Ironwood address, paid by the maker | time only: if the maker never pays, the USDC comes back once the order's pay window has passed (*judge* 6 hours, *beta* 24 hours) |
+| Maker (Buy) | the ZEC, paid first, and the payment's proof | the taker's USDC, once the proof has finalized | the ZEC paid, if its proof cannot land before the deadline (the verifier's emergency stop, a stalled relay): the order then refunds the taker |
+| Taker selling ZEC (CLI) | the ZEC paid to the maker, and its proof | the maker's locked USDC | likewise: the payer proves before the deadline |
+
+The maker quotes from a price feed plus a spread, within its inventory and the per-order caps
+(`maxOrderUsdc`: *judge* 200, *beta* 250 USDC). Neither the judge deployment nor the beta charges a
+protocol fee (`feeBps` 0). A settlement costs the payer one zkVM proof and two Base transactions
+(prove, then finalize once the anchor is deep and old enough). On mainnet a maker stake would put
+a price on an unpaid order (docs/MAINNET.md § 4).
+
 ## Mainnet signer economics (design)
 
 With the mainnet template (docs/MAINNET.md § 2): five bonds of 50,000 USDC (250,000 USDC in all),

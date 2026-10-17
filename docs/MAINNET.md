@@ -118,6 +118,13 @@ name a public-good address instead of burning what no victim needs.
   liquidated on prices users could not react to. While the feed is stale the market keeps the last
   good price: Morpho goes on lending against it, new minting stops at the cap and the bonds pay no
   liveness claim. A haircut that grows with staleness is an option to evaluate during the beta.
+- **Swap: a maker stake and a verifiable delivery of the destination.** On the judge deployment a
+  maker that never pays costs its taker only time: the USDC comes back after the pay window. A
+  mainnet maker would stake USDC, slashable for an order it did not pay although it had received the
+  order's destination. That needs the delivery to be provable without putting the receiver on
+  Base: either the maker signs a receipt when it gets the salt and receiver (as the signers do for
+  liveness), or the taker posts them encrypted to the maker's key with a proof that they open the
+  order's commitment.
 - **Share refresh and repair through the nodes.** The threshold library refreshes every share of
   a vault and repairs a lost one, but no node runs either yet (docs/TIER3.md § 5). Mainnet needs
   both as node rounds, their private messages sealed node to node as in the DKG, and a runbook: a
@@ -143,6 +150,9 @@ app: "Mainnet beta — unaudited — invite only — small caps".
   the judging period.
 - **Guests:** deposit-main and violation-main v2 with real seals before the beta; payment-main
   before the swap opens on mainnet.
+- **Swap:** a 24-hour pay window, finalization after 1,800 seconds and 6 headers, the Intake's
+  mainnet work tiers, the NU6.3 and NU7 branch ids, `maxOrderUsdc` 250, no fee, and a 14-day delay
+  for a new Swap version.
 - **Operations:** a second stack with its own data directories and units, two independent
   Mainnet light wallet servers, the watchdog on both stacks, one prover and queue for both.
 
