@@ -209,6 +209,29 @@ pub async fn dispute(wallet: &Path, vault: &B256, claim: B256, reopen: bool, rpc
     Ok(())
 }
 
+/// R-5: arms the claim's liveness clock on the bond with a signer's receipt (checked by the
+/// caller). `armLiveness` is permissionless; here the owner EOA pays the gas (the app sends it
+/// gaslessly from the account).
+pub async fn arm_liveness(
+    wallet: &Path,
+    vault: &B256,
+    bond: Address,
+    claim: B256,
+    received_at: u64,
+    signature: Bytes,
+    rpc: &str,
+) -> Result<()> {
+    let key = owner(wallet, vault)?;
+    let p = ProviderBuilder::new().wallet(EthereumWallet::from(key)).connect_http(rpc.parse()?);
+    let bond = zecured_base::events::ISignerBond::new(bond, &p);
+    let call = bond.armLiveness(claim, received_at, signature);
+    let gas = gas_with_headroom(call.estimate_gas().await.map_err(|e| anyhow!("armLiveness: {e}"))?);
+    let r = call.gas(gas).send().await?.get_receipt().await?;
+    ensure!(r.status(), "armLiveness reverted");
+    println!("liveness clock armed (tx {})", r.transaction_hash);
+    Ok(())
+}
+
 /// Releases withdraw collateral through the account's Morpho authorization of the Registry.
 async fn ensure_registry_authorized<P: alloy::providers::Provider>(
     morpho: &IMorpho::IMorphoInstance<P>,

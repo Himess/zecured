@@ -108,7 +108,9 @@ against Foundry's EIP-712 implementation) and `zecured-base` `spend_commit_golde
 - at least 3 sorted signatures of distinct signers (I6);
 - `payoutRef` never committed;
 - `inputTag` a lineage note of the vault;
-- 1 to 8 distinct claims, each of the vault, `Pending` and bound to no other input;
+- 1 to 8 distinct claims, each of the vault, `Pending` and bound to no other input; a new commitment
+  of an input also names its claims once confirmed or disputed (D57): every commitment of an input
+  carries the same claims, so while that input is unspent none of its payouts landed;
 - unused claim refs, one per claim;
 - distinct output indexes, one per claim (E1), and distinct recipient commitments (a payout never
   names two claims of one commitment, so `claimRefOf` is unambiguous);
@@ -213,8 +215,18 @@ a witness RPC (set by default outside the local fork).
   with the same claim list (RT-4), which may name the list's confirmed claims again (D57): while the
   input is unspent, no payout of it landed. A node that confirmed the payout itself keeps it paid,
   since it saw its value leave. The coordinator plans with the same functions
-  (`ledger::next_vault_payout`); it does not yet plan such a payout again with the confirmed claims
-  (a confirmed payout undone by a reorganization), which the contracts allow.
+  (`ledger::next_vault_payout`).
+- Planner rules (v4, O-4), applied by every node and the coordinator alike:
+  1. A reopened claim whose liveness is overdue is not committed again: its claimant takes the bonds'
+     payment, and the claim's ZEC then reimburses the bonds.
+  2. No claim is committed within one payout lifetime of its `livenessDue`, read on every provider,
+     which must agree (an unarmed claim, or an unreadable due time, reads 0, so payouts never stop).
+     The lifetime is `(120 + 10 + confirmations) x 25 s + 300 s`, about an hour; the deploy script
+     requires `commitGrace` of at least twice a payout's 136 blocks (R-10).
+  3. When a vault's books do not add up (I10), a confirmed claim that is not final and whose input is
+     still an unspent lineage note counts as unpaid again: a new commitment of that input names it
+     (D57), it is paid, and the payout is proven. A final claim (proven, or a confirmation that
+     expired undisputed, R-3) is never planned again.
 - Liveness (T-05): every node and the coordinator warn when a payable claim is older than half the
   bonds' `livenessPeriod`, at most every half hour per vault, naming the vault by its id prefix only.
 
@@ -231,6 +243,16 @@ EOA as the account; the app sends the same call by UserOp).
 **Off-chain refunds (P5)** need no commitment, and exist only for deposits that no guest of the
 deployment can land on Base (I30, docs/TIER2.md § 5): those never become lineage notes, so no zZEC
 rests on them (§ 10). Every other non-conforming deposit lands as a Refund claim and is paid as above.
+
+**Share refresh and repair (C04).** Both keep a vault's group key, hence its address and viewing
+keys. A refresh gives every signer a new share, so that a share stolen before it is useless after it;
+a repair rebuilds one signer's lost share from three others, none of whom learns it.
+
+| Level | State |
+|---|---|
+| Library (`zecured-threshold`) | Built and tested: `refresh_part1`, `refresh_part2` and `refresh_finish` (refused unless the group key is unchanged and the new share matches the public key package), `repair_deltas`, `repair_sigma` and `repair_finish`. Tests refresh all five shares, sign with the new ones and show that an old share no longer combines with new ones, and rebuild a lost share from three helpers (two are not enough) |
+| Node API | Not built: no node endpoint runs a refresh or a repair round, and nothing carries their sealed messages between nodes |
+| Operations | Not built: no runbook, never run on a live vault. A share lost today leaves four, still above the threshold of three; with three lost, the vault's claims can only be paid by the bonds (§ 7) |
 
 ## 6. The violation statements: one guest, one entry point (T3-3)
 
@@ -348,6 +370,16 @@ F1, F2 and F3 proofs are made on the prover's own machine, because their witness
 F4 and `Included` witnesses hold only K, which links the vault's notes and payouts but shows no amount
 or recipient.
 
+**Per kind, in short (C05).** Every slash pays the prover its bounty and the rest to the victims (§ 7).
+
+| Kind | What it shows | Bonds slashed | Who can prove it | The witness holds |
+|---|---|---|---|---|
+| F1 Uncommitted | a lineage note spent by a transaction Base has no commitment for | all five (FROST hides which three signed) | any holder of the vault's viewing key: the borrower, a watcher it chose, any signer | the viewing key |
+| F2 WithheldChange | a committed payout without the change its record names | the record's signers | any holder of the vault's viewing key | the viewing key |
+| F3 Misdirected | a claim's committed output paying less than the claim expects | the record's signers | the claimant: the borrower, a liquidator or a market maker | the claimant's salt, receiver and incoming viewing key |
+| F4 WrongClaimRef | a commitment naming a claim under a reference that hides the payout from its claimant | the record's signers | holders of K and the claim's salt: the borrower for its own claims, any signer for every claim | K, the claim's salt and receiver |
+| `Included` (not a violation) | a committed payout is in a Zcash block | none | holders of K: the coordinator, any signer, the borrower | K |
+
 ## 7. Bonds: `SignerBondV2` (S5, S6; D43 to D47)
 
 - **Deposit.** Each of the five signers bonds USDC (100 USDC each on the judge deployment, which
@@ -365,7 +397,12 @@ or recipient.
   vaults" are all vaults); a partial exit keeps `minBond` and the coverage cap.
 - **Liveness** (T-05). A claim left unpaid `livenessPeriod` after it became payable (deferred by a
   payout committed in flight for `commitGrace` at most) can be paid to its claimant from the bonds;
-  its ZEC then reimburses the bonds (D47).
+  its ZEC then reimburses the bonds (D47). It became payable only once a signer acknowledged its
+  destination: a node signs a receipt (`DestinationReceived`) when it holds the salt and receiver
+  and has checked them against the claim's commitment, and anyone arms the claim with it
+  (`armLiveness`, R-5). A claimant that never hands over its destination gets no liveness, and
+  one honest signer's receipt is enough. No liveness for a claim the compensator owes (R-7), nor
+  at a stale price (R-9).
 - **Consortium bond.** FROST hides who signed, so an uncommitted spend slashes all five, while a false
   record slashes exactly its signers. Any three colluders lose at least 3/5 of the effective bond.
 
@@ -379,7 +416,7 @@ or recipient.
 | `slashConfirmationWork` | ≥ 100 normal Testnet blocks of work (~3.8 × 10^7), the anchor rechecked at the end of the window | same |
 | Challenge window | 24 hours | 2 minutes (labelled DEMO) |
 | Bond per signer (`minBond`) | 100 USDC | 10 USDC |
-| Liveness period / commit grace | 24 hours / 2 hours | 10 minutes / 2 minutes |
+| Liveness period / commit grace | 24 hours / 2 hours | 10 minutes / 2 hours (a payout's lifetime, R-10) |
 | Dispute window / inclusion window | 24 hours / 6 hours | 10 minutes / 20 minutes |
 | Build | the judge build: no compromise mode beyond D18 | `demo-tier3` feature, its own Registry, bond and slasher, five demo keys, same relay |
 

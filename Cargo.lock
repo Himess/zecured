@@ -7462,6 +7462,25 @@ dependencies = [
  "zcash_primitives",
  "zcash_protocol",
  "zecured-deposit-statement",
+ "zecured-payment-statement",
+ "zecured-zcash-ops",
+]
+
+[[package]]
+name = "zecured-leak-scan"
+version = "0.1.0"
+dependencies = [
+ "anyhow",
+ "clap",
+ "flate2",
+ "hex",
+ "orchard",
+ "reqwest 0.12.28",
+ "serde_json",
+ "tokio",
+ "zcash_keys",
+ "zcash_protocol",
+ "zecured-policy",
  "zecured-zcash-ops",
 ]
 
@@ -7496,6 +7515,49 @@ dependencies = [
  "zecured-policy",
  "zecured-threshold",
  "zecured-zcash-ops",
+]
+
+[[package]]
+name = "zecured-ops"
+version = "0.1.0"
+dependencies = [
+ "alloy",
+ "anyhow",
+ "axum",
+ "clap",
+ "hex",
+ "serde",
+ "serde_json",
+ "tokio",
+ "zecured-base",
+]
+
+[[package]]
+name = "zecured-payment-k4"
+version = "0.1.0"
+dependencies = [
+ "orchard",
+ "zcash_history",
+ "zcash_note_encryption",
+ "zcash_primitives",
+ "zcash_protocol",
+ "zecured-deposit-k4",
+ "zecured-deposit-statement",
+ "zecured-payment-statement",
+]
+
+[[package]]
+name = "zecured-payment-statement"
+version = "0.1.0"
+dependencies = [
+ "orchard",
+ "serde",
+ "serde_json",
+ "zcash_note_encryption",
+ "zcash_primitives",
+ "zcash_protocol",
+ "zecured-deposit-statement",
+ "zecured-payment-k4",
 ]
 
 [[package]]
@@ -7540,6 +7602,54 @@ dependencies = [
 ]
 
 [[package]]
+name = "zecured-swap"
+version = "0.1.0"
+dependencies = [
+ "alloy",
+ "anyhow",
+ "hex",
+ "orchard",
+ "pczt",
+ "rand 0.10.3",
+ "rand_core 0.6.4",
+ "serde",
+ "serde_json",
+ "tokio",
+ "zcash_note_encryption",
+ "zcash_primitives",
+ "zcash_protocol",
+ "zecured-base",
+ "zecured-deposit-statement",
+ "zecured-deposit-witness",
+ "zecured-payment-statement",
+ "zecured-zcash-ops",
+]
+
+[[package]]
+name = "zecured-swap-maker"
+version = "0.1.0"
+dependencies = [
+ "alloy",
+ "anyhow",
+ "axum",
+ "clap",
+ "hex",
+ "orchard",
+ "rand_core 0.6.4",
+ "serde",
+ "serde_json",
+ "tokio",
+ "tower",
+ "tracing",
+ "tracing-subscriber",
+ "zcash_protocol",
+ "zecured-base",
+ "zecured-deposit-witness",
+ "zecured-swap",
+ "zecured-zcash-ops",
+]
+
+[[package]]
 name = "zecured-threshold"
 version = "0.1.0"
 dependencies = [
@@ -7574,6 +7684,7 @@ dependencies = [
  "zecured-base",
  "zecured-deposit-witness",
  "zecured-policy",
+ "zecured-swap",
  "zecured-zcash-ops",
 ]
 

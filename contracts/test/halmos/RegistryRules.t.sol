@@ -94,8 +94,8 @@ contract SpendLogicWiringStub {
 }
 
 /// @notice Test harness: the real Registry, with its internal I6 check callable. Every entry point that takes signer
-///         signatures calls it: confirmPayout, setReimburseDestination and (through the spend logic) commitSpend with 3;
-///         the Intake checks `VaultOpened` with all 5 the same way.
+///         signatures calls it: setReimburseDestination with all 5 (v4, R-6), and (through the spend logic) commitSpend
+///         and confirmPayout with 3; the Intake checks `VaultOpened` with all 5 the same way.
 contract RegistryHarness is ZecuredRegistry {
     constructor(RegistryConfig memory c) ZecuredRegistry(c) {}
 
@@ -167,7 +167,7 @@ contract RegistryRulesCheck is Test {
             })
         );
         vm.etch(token, address(new ZZEC(address(registry), ADAPTER, address(morpho))).code);
-        vm.etch(logic, address(new ZecuredSpendLogic(address(registry), signers, 1 days, 6 hours)).code);
+        vm.etch(logic, address(new ZecuredSpendLogic(address(registry), signers, 1 days, 6 hours, 2 days)).code);
         zzec = ZZEC(token);
         // The smart account's setup batch authorizes the Registry and the Adapter on Morpho.
         vm.startPrank(ACCOUNT);
@@ -223,14 +223,15 @@ contract RegistryRulesCheck is Test {
         assert(abi.decode(ret, (uint8)) == signed);
     }
 
-    /// R1 at an entry point: setReimburseDestination takes 3 of 5, like confirmPayout and commitSpend.
-    function check_I6_reimburseDestinationNeedsThreeDistinctSigners(
+    /// R1 at an entry point: setReimburseDestination takes all five signers (v4, R-6: every signer's bond paid the
+    ///    claimant, so three must not name where its ZEC reimburses them).
+    function check_I6_reimburseDestinationNeedsAllFiveSigners(
         uint8 count,
         bytes32 commitment,
         uint64 deadline,
-        bytes32[4] memory r,
-        bytes32[4] memory s,
-        uint8[4] memory v
+        bytes32[5] memory r,
+        bytes32[5] memory s,
+        uint8[5] memory v
     ) public {
         // A released vault whose claim the bonds paid (T-05): its destination is now the signers' to give.
         _activeVault(1_000_000, 0);
@@ -243,7 +244,8 @@ contract RegistryRulesCheck is Test {
         else if (count == 1) _checkReimburse(1, claimId, commitment, deadline, r, s, v);
         else if (count == 2) _checkReimburse(2, claimId, commitment, deadline, r, s, v);
         else if (count == 3) _checkReimburse(3, claimId, commitment, deadline, r, s, v);
-        else _checkReimburse(4, claimId, commitment, deadline, r, s, v);
+        else if (count == 4) _checkReimburse(4, claimId, commitment, deadline, r, s, v);
+        else _checkReimburse(5, claimId, commitment, deadline, r, s, v);
     }
 
     function _checkReimburse(
@@ -251,9 +253,9 @@ contract RegistryRulesCheck is Test {
         bytes32 claimId,
         bytes32 commitment,
         uint64 deadline,
-        bytes32[4] memory r,
-        bytes32[4] memory s,
-        uint8[4] memory v
+        bytes32[5] memory r,
+        bytes32[5] memory s,
+        uint8[5] memory v
     ) internal {
         bytes[] memory sigs = new bytes[](n);
         for (uint256 i; i < n; ++i) {
@@ -263,13 +265,14 @@ contract RegistryRulesCheck is Test {
         (bool ok,) = address(registry)
             .call(abi.encodeCall(IZecuredRegistry.setReimburseDestination, (claimId, commitment, deadline, sigs)));
         if (!ok) return;
-        assert(n >= 3);
+        assert(n == 5);
         uint256 signed;
         for (uint256 i; i < n; ++i) {
             uint256 index = _signerIndex(ecrecover(digest, v[i], r[i], s[i]));
             assert(index < 5 && signed & (1 << index) == 0);
             signed |= 1 << index;
         }
+        assert(signed == 0x1f); // every signer
         assert(commitment != bytes32(0) && block.timestamp <= deadline);
         (,,, bytes32 set, ClaimStatus status) = registry.claim(claimId);
         assert(set == commitment && status == ClaimStatus.Pending);
@@ -412,7 +415,7 @@ contract RegistryRulesCheck is Test {
         if (op == 0) data = abi.encodeCall(IZecuredRegistry.activate, (vaultId, account, x, tag));
         else if (op == 1) data = abi.encodeCall(IZecuredRegistry.releaseDeposit, (vaultId, account, tag));
         else if (op == 2) data = abi.encodeCall(IZecuredRegistry.convertToRefund, (vaultId, account, x, tag));
-        else if (op == 3) data = abi.encodeCall(IZecuredRegistry.openRefund, (vaultId, account, x, tag));
+        else if (op == 3) data = abi.encodeCall(IZecuredRegistry.reserveRefund, (vaultId, account, x, tag));
         else data = abi.encodeCall(IZecuredRegistry.reserveDeposit, (vaultId, account, x, tag));
         vm.prank(caller);
         (bool ok, bytes memory ret) = address(registry).call(data);
@@ -428,12 +431,14 @@ contract RegistryRulesCheck is Test {
             return;
         }
         assert(zzec.totalSupply() == supply);
-        if (op == 2 || op == 3) {
+        if (op == 2) {
             assert(registry.lockedZatoshi() == locked + x);
             assert(registry.claimCount(vaultId) == claims + 1);
             _assertClaim(abi.decode(ret, (bytes32)), vaultId, ClaimKind.Refund, x, bytes32(0));
         } else {
+            // R-12: a reserved refund opens no claim and locks nothing until the Intake opens it.
             assert(registry.lockedZatoshi() == locked);
+            assert(registry.claimCount(vaultId) == claims);
         }
     }
 

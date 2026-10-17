@@ -20,6 +20,8 @@ import {
     VaultDetails
 } from "./interfaces/v3/IZecuredRegistry.sol";
 import {IZecuredSpendCommits} from "./interfaces/v3/IZecuredSpendCommits.sol";
+import {IZecuredDisputes} from "./interfaces/v3/IZecuredDisputes.sol";
+import {IZecuredPayouts} from "./interfaces/v3/IZecuredPayouts.sol";
 import {IZecuredSlasher, ViolationKind} from "./interfaces/v3/IZecuredSlasher.sol";
 import {ISignerBond} from "./interfaces/v3/ISignerBond.sol";
 import {CompensationMath} from "./libraries/CompensationMath.sol";
@@ -31,16 +33,24 @@ import {CompensationMath} from "./libraries/CompensationMath.sol";
 ///         vault or one claim per call (EIP-7825).
 /// @dev How this implementation reads the interface, where its NatSpec leaves room or could not be followed literally:
 ///      - Claims. `tallyClaim` records a pending claim of a victim vault AND settles it in the Registry
-///        (`settleCompensatedClaim`) in the same call, rather than in `settleVault`: the claim can no longer be paid on
-///        Zcash anyway (the Registry refuses `commitSpend` and `confirmPayout` on a compromised vault), and the
-///        Registry's own `unpaidClaims` then counts exactly the claims left to tally, so `tallyVault` requires it to be
-///        zero and keeps no count of its own that could drift from it. Fee and bond-paid claims are settled too,
-///        without an entitlement (`ClaimTallied` with layer 0): they are the signers' own. `Victim.pendingClaims`
-///        counts the claims tallied with an entitlement, `Victim.talliedClaims` every claim settled. Once a vault is
-///        compromised, the Registry lets no claim become pending except through the Intake's `refundPending` of a
-///        Pending vault, or the end of a dispute opened before (`IZecuredDisputes`: a disputed claim counts as unpaid,
-///        and is upheld or reopened within the inclusion window), both of which `tallyVault` waits for; a claim
-///        pending after its incident was finalized could not be tallied any more and would keep its vault open.
+///        (`settleCompensatedClaim`) in the same call, rather than in `settleVault`: the Registry refuses
+///        `commitSpend` and `confirmPayout` on a compromised vault, and the Registry's own `unpaidClaims` then counts
+///        exactly the claims left to tally, so `tallyVault` requires it to be zero and keeps no count of its own that
+///        could drift from it. A committed claim's payout may have landed before or during the compromise (R-2): it is
+///        tallied only once `inclusionWindow` has passed since the compromise, and a proof of its payout meanwhile
+///        pays it for good instead. Fee and bond-paid claims are settled too, without an entitlement (`ClaimTallied`
+///        with layer 0): they are the signers' own. `Victim.pendingClaims` counts the claims tallied with an
+///        entitlement, `Victim.talliedClaims` every claim settled. Once a vault is compromised, the Registry lets no
+///        claim become pending except through the Intake's `refundPending` of a Pending vault, or the end of a dispute
+///        opened before (`IZecuredDisputes`: a disputed claim counts as unpaid, and is upheld or reopened within the
+///        inclusion window), both of which `tallyVault` waits for; a claim pending after its incident was finalized
+///        could not be tallied any more and would keep its vault open.
+///      - R-3: a claim three signers confirmed within the dispute window before the vault froze is tallied like a
+///        pending one (the signers' word, given shortly before a proven theft, counts for nothing) unless a proof of its
+///        payout comes first; `tallyVault` waits until the vault has no confirmation left that is neither proven,
+///        expired (`IZecuredPayouts.expireConfirmation`, for one older than that) nor tallied. R-21: an abandoned
+///        refund is tallied on request until the incident is finalized (it does not hold up `tallyVault`: its account
+///        gave up on it).
 ///      - Layer 3 counts each authorized victim's debt at tally time plus a 1 % interest allowance
 ///        (`CompensationMath.INTEREST_ALLOWANCE_BPS`), and layer 4 its collateral value less that. The allowance only
 ///        pays interest the account's own equity cannot: the account never keeps more than its equity without it, and
@@ -60,6 +70,15 @@ import {CompensationMath} from "./libraries/CompensationMath.sol";
 ///        never retired and stays open as well.
 ///      - The freeze does not stop anyone repaying the vault's debt directly on Morpho; that only lowers what the vault
 ///        needs, and what the account repaid itself comes back to it with its equity.
+///      - R-19: a vault's collateral is burned down to the LLTV as soon as it is compromised (`burnCollateral`, which
+///        the slasher calls), so the account cannot borrow more against unbacked zZEC; `tallyVault` adds what was burned
+///        before it back to the outstanding it records, so the vault's equity is that of what it held when compromised,
+///        and `settleVault` retires the outstanding left at that time. Between a theft case's proof and its execution
+///        (the challenge window) the vault is frozen but Morpho still lends against its collateral: that exposure is
+///        bounded by the LLTV and paid like any debt (layer 3).
+///      - R-20: a vault still active after `settleVault` (its debt only partly covered, or its account no longer
+///        authorizing the Registry) is marked settled in the Registry, which then counts it neither as open nor as
+///        locked; anyone burns its collateral again later, down to the LLTV, or retires it once its debt is gone.
 contract ZecuredCompensator is IZecuredCompensator, ReentrancyGuardTransient {
     using SafeERC20 for IERC20;
     using SharesMathLib for uint256;
@@ -70,6 +89,11 @@ contract ZecuredCompensator is IZecuredCompensator, ReentrancyGuardTransient {
     /// @notice Most victims one `finalizeIncident` call prices: about 8,500 gas each from cold storage, so a full batch
     ///         takes about 2.2 million gas, far below EIP-7825's 2^24 per transaction.
     uint256 public constant FINALIZE_BATCH = 256;
+    /// @notice Gas an F3 case's execution must leave `onCase` (R-7): the registration of the shortfall reads the claim
+    ///         under a `try`, and the claim is then closed in the Registry, also under a `try` (about 175,000 gas in
+    ///         all from cold storage); an executor who starved them could leave the claimant without its shortfall, or
+    ///         the claim open to the bonds as well, so a starved execution reverts instead.
+    uint256 public constant F3_GAS = 300_000;
 
     /// @inheritdoc IZecuredCompensator
     address public immutable registry;
@@ -117,6 +141,9 @@ contract ZecuredCompensator is IZecuredCompensator, ReentrancyGuardTransient {
     mapping(uint256 id => mapping(uint256 index => bytes32 vaultId)) private _victimAt;
     mapping(bytes32 vaultId => Victim) private _victims;
     mapping(bytes32 claimId => Entitlement) private _entitlements;
+    /// @dev R-19: zatoshi of a victim's collateral burned before its tally (counted in the outstanding `tallyVault`
+    ///      records, so the equity is that of what the vault held when compromised).
+    mapping(bytes32 vaultId => uint64) private _burnedBeforeTally;
 
     /// @notice `finalizeIncident` of an incident that was never opened.
     error UnknownIncident(uint256 incident);
@@ -188,7 +215,8 @@ contract ZecuredCompensator is IZecuredCompensator, ReentrancyGuardTransient {
     /// @dev Called inside `executeSlash`, so it never reverts on what it is told: F1 and F2 register the vault in the
     ///      current incident (once: a vault already registered, in any incident, is left as it is), F3 registers the
     ///      claim's shortfall in the claim's layer (nothing for a Fee, Retired or bond-paid claim, or one without a
-    ///      claimant), F4 registers nothing.
+    ///      claimant) and closes the claim in the Registry (R-7: its payout landed, short; the shortfall is owed here
+    ///      and nowhere else), F4 registers nothing.
     function onCase(bytes32 caseId, ViolationKind kind, bytes32 vaultId, bytes32 claimId, uint64 shortfallZat)
         external
         nonReentrant
@@ -204,7 +232,9 @@ contract ZecuredCompensator is IZecuredCompensator, ReentrancyGuardTransient {
             inc.victims = index + 1;
             emit VictimRegistered(id, vaultId, caseId);
         } else if (kind == ViolationKind.Misdirected) {
+            if (gasleft() < F3_GAS) revert InsufficientGasForCase();
             _registerShortfall(claimId, shortfallZat);
+            try IZecuredPayouts(registry).closeMisdirectedClaim(claimId) {} catch {}
         }
     }
 
@@ -212,17 +242,22 @@ contract ZecuredCompensator is IZecuredCompensator, ReentrancyGuardTransient {
 
     /// @inheritdoc IZecuredCompensator
     /// @dev Also marks the claim Compensated in the Registry (see the contract's notes). A Fee or bond-paid claim, or one
-    ///      an F3 shortfall already covers, is settled without a new entitlement (`ClaimTallied(claimId, 0, 0)`).
+    ///      an F3 shortfall already covers, is settled without a new entitlement (`ClaimTallied(claimId, 0, 0)`). Takes
+    ///      a pending claim, a confirmation by signatures made within the dispute window before the vault froze (R-3)
+    ///      and an abandoned refund (R-21); a committed claim only once `inclusionWindow` has passed since the vault was
+    ///      compromised (R-2: until then a proof of its payout pays it for good instead).
     function tallyClaim(bytes32 claimId) external nonReentrant {
         ClaimDetails memory c = IZecuredRegistry(registry).claimDetails(claimId);
         Victim storage v = _victims[c.vaultId];
         uint256 id = v.incident;
         if (id == 0) revert NotVictimClaim(claimId);
-        if (c.status != ClaimStatus.Pending) {
-            if (c.status == ClaimStatus.Compensated) revert AlreadyTallied(claimId);
-            revert NotVictimClaim(claimId);
-        }
+        if (c.status == ClaimStatus.Compensated) revert AlreadyTallied(claimId);
+        if (!_tallyable(claimId, c)) revert NotVictimClaim(claimId);
         if (_incidents[id].finalized) revert AlreadyFinalized(id);
+        if (IZecuredSpendCommits(registry).claimInput(claimId) != bytes32(0)) {
+            uint64 at = IZecuredSlasher(slasher).compromisedAt(c.vaultId) + IZecuredDisputes(registry).inclusionWindow();
+            if (block.timestamp < at) revert ProofWindowOpen(claimId, at);
+        }
 
         v.talliedClaims += 1;
         uint8 layer = _layerOf(c.kind);
@@ -235,11 +270,13 @@ contract ZecuredCompensator is IZecuredCompensator, ReentrancyGuardTransient {
             _addZat(id, layer, c.amount);
             emit ClaimTallied(claimId, layer, c.amount);
         }
-        IZecuredRegistry(registry).settleCompensatedClaim(claimId);
+        IZecuredPayouts(registry).settleCompensatedClaim(claimId);
     }
 
     /// @inheritdoc IZecuredCompensator
-    /// @dev Requires the Registry's `unpaidClaims` of the vault to be zero: every claim went through `tallyClaim`.
+    /// @dev Requires the Registry's `unpaidClaims` of the vault to be zero (every claim went through `tallyClaim`) and,
+    ///      R-3, no confirmation by signatures left open (`unprovenConfirmations`). R-19: the outstanding it records
+    ///      adds back what `burnCollateral` burned before, so the equity is that of what the vault held.
     function tallyVault(bytes32 vaultId) external nonReentrant {
         Victim storage v = _victims[vaultId];
         uint256 id = v.incident;
@@ -248,15 +285,18 @@ contract ZecuredCompensator is IZecuredCompensator, ReentrancyGuardTransient {
         VaultDetails memory d = IZecuredRegistry(registry).vaultDetails(vaultId);
         if (d.status == VaultStatus.Pending) revert VaultStillPending(vaultId);
         if (d.unpaidClaims != 0) revert ClaimsNotTallied(vaultId, d.unpaidClaims);
+        uint256 unproven = IZecuredPayouts(registry).unprovenConfirmations(vaultId);
+        if (unproven != 0) revert ConfirmationsUnsettled(vaultId, unproven);
 
         (uint256 debt, bool authorized) = _snapshot(d.account);
+        uint64 outstanding = d.outstanding + _burnedBeforeTally[vaultId];
         v.tallied = true;
         v.authorized = authorized;
-        v.outstanding = d.outstanding;
+        v.outstanding = outstanding;
         v.debt = debt;
         _incidents[id].talliedVictims += 1;
         if (authorized) _totals[id].lenders += CompensationMath.lendersOf(debt);
-        emit VaultTallied(vaultId, d.outstanding, debt, authorized);
+        emit VaultTallied(vaultId, outstanding, debt, authorized);
     }
 
     /// @inheritdoc IZecuredCompensator
@@ -332,6 +372,26 @@ contract ZecuredCompensator is IZecuredCompensator, ReentrancyGuardTransient {
 
         (uint256 repaid, uint64 retired, uint256 equity) = _settle(vaultId, v, inc);
         emit VaultSettled(vaultId, repaid, retired, equity);
+        // R-20: a vault left active (partly covered, or unauthorized) no longer holds the bonds in or the cap up.
+        (,, VaultStatus status) = IZecuredRegistry(registry).vault(vaultId);
+        if (status == VaultStatus.Active) IZecuredPayouts(registry).markVaultCompensated(vaultId);
+    }
+
+    /// @inheritdoc IZecuredCompensator
+    /// @dev R-19 at the compromise (the slasher calls it) and any time after, R-20 after the settlement: with debt, down
+    ///      to the LLTV (`_burnToLltv`); without, all of it, which retires the vault.
+    function burnCollateral(bytes32 vaultId) external nonReentrant returns (uint64 retired) {
+        Victim storage v = _victims[vaultId];
+        (address account, uint64 outstanding, VaultStatus status) = IZecuredRegistry(registry).vault(vaultId);
+        if (v.incident == 0 || status != VaultStatus.Active) revert NotBurnable(vaultId);
+        if (_morpho.position(_marketId, account).borrowShares == 0) {
+            retired = IZecuredRegistry(registry).retireVault(vaultId, outstanding);
+        } else {
+            retired = _burnToLltv(vaultId, account);
+        }
+        if (retired == 0) return 0;
+        if (!v.tallied) _burnedBeforeTally[vaultId] += retired;
+        emit CollateralBurned(vaultId, retired);
     }
 
     /// @inheritdoc IZecuredCompensator
@@ -473,7 +533,7 @@ contract ZecuredCompensator is IZecuredCompensator, ReentrancyGuardTransient {
     {
         if (!v.authorized) return (0, 0, 0);
         (uint256 share, uint256 cap) = CompensationMath.shareOf(v.outstanding, v.debt, inc.price, inc.r3, inc.r4);
-        (address account,, VaultStatus status) = IZecuredRegistry(registry).vault(vaultId);
+        (address account, uint64 outstanding, VaultStatus status) = IZecuredRegistry(registry).vault(vaultId);
         bool active = status == VaultStatus.Active;
         // Without the authorization the Registry cannot withdraw the collateral, so a repayment could be borrowed
         // again and the vault never retired.
@@ -491,8 +551,9 @@ contract ZecuredCompensator is IZecuredCompensator, ReentrancyGuardTransient {
         }
 
         equity = _keepEquity(vaultId, share - repaid, Math.saturatingSub(cap, debtNow));
-        // Debt is zero now: the Registry withdraws the collateral with the account's authorization and burns it.
-        if (active) retired = IZecuredRegistry(registry).retireVault(vaultId, v.outstanding);
+        // Debt is zero now: the Registry withdraws the collateral with the account's authorization and burns it (what is
+        // left of it: `burnCollateral` may have burned part already, R-19).
+        if (active) retired = IZecuredRegistry(registry).retireVault(vaultId, outstanding);
     }
 
     /// @dev Retires the collateral beyond the least that keeps `account`'s position healthy at the market price (Morpho:
@@ -576,6 +637,18 @@ contract ZecuredCompensator is IZecuredCompensator, ReentrancyGuardTransient {
         return MarketParams({
             loanToken: address(usdc), collateralToken: _collateralToken, oracle: _oracle, irm: _irm, lltv: _lltv
         });
+    }
+
+    /// @dev The claims of a victim vault `tallyClaim` takes: pending ones; R-21 abandoned refunds; R-3 confirmations by
+    ///      signatures made within the dispute window before the vault froze, which no proof made final since.
+    function _tallyable(bytes32 claimId, ClaimDetails memory c) private view returns (bool) {
+        ClaimStatus status = c.status;
+        if (status == ClaimStatus.Pending) return true;
+        if (status == ClaimStatus.WrittenOff) return c.kind == ClaimKind.Refund;
+        if (status != ClaimStatus.Paid) return false;
+        (uint64 paidAt,) = IZecuredDisputes(registry).payoutDispute(claimId);
+        return paidAt != 0
+            && paidAt + IZecuredDisputes(registry).disputeWindow() > IZecuredSlasher(slasher).frozenSince(c.vaultId);
     }
 
     /// @dev Layer 2: claims a third party paid for. Layer 4: the owner's own. 0: the signers' own, or bookkeeping.

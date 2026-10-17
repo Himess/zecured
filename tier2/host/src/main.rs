@@ -1,7 +1,9 @@
 //! Runs the Tier 2 deposit guest on a witness built by `build-witness`, or with `violation`
-//! first, the Tier 3 violation guest on a witness built by `build-violation`.
+//! first, the Tier 3 violation guest on a witness built by `build-violation`, or with `payment`
+//! first, Zecured Swap's payment guest on a witness built by `build-payment-witness` (or the
+//! maker bot and `zecured-wallet swap sell`).
 //!
-//!   zecured-tier2-host [violation] execute <witness.json>    # zkVM executor: cycles and journal
+//!   zecured-tier2-host [violation|payment] execute <witness.json>    # zkVM executor: cycles and journal
 //!   zecured-tier2-host prove <witness.json> <receipt.bin>    # succinct (STARK) receipt (segments: ZECURED_SEGMENT_PO2)
 //!   zecured-tier2-host groth16 <receipt.bin> <seal.json>     # Groth16 seal for Base (x86: Docker, or --features cuda)
 //!   zecured-tier2-host p254 <receipt.bin> <p254.bin>         # with --features cuda: groth16's first half
@@ -16,12 +18,14 @@
 //! which is how the coordinator passes it on a platform without `/dev/stdin` (H-12).
 //!
 //! `seal.json` is `{ imageId, journal, seal }`, what the Intake's `attestDepositWithProof` (or, for
-//! a violation, `ZecuredSlasher.proveViolation`) takes. The violation guest is pinned the same
-//! way, with `ZECURED_VIOLATION_ELF`.
+//! a violation, `ZecuredSlasher.proveViolation`; for a payment, `ZecuredSwap.proveSettlement`)
+//! takes. The violation and payment guests are pinned the same way, with `ZECURED_VIOLATION_ELF`
+//! and `ZECURED_PAYMENT_ELF`.
 //!
 //! One build proves on one Zcash network (design notes T-09): Testnet by default, Mainnet with the
-//! `mainnet` feature, which sets both the native statement and the embedded guests (image ids
-//! deposit-test and violation-test, or deposit-main and violation-main).
+//! `mainnet` feature, which sets both the native statements and the embedded guests (image ids
+//! deposit-test, violation-test and payment-test, or deposit-main, violation-main and
+//! payment-main).
 //!
 //! The guest's image id depends on where it was built (panic messages carry the source paths
 //! of its dependencies), and the Registry pins one image id for good. So the guest is built
@@ -41,17 +45,21 @@ use zecured_deposit_statement::{
     NETWORK, NU6_3_BRANCH_ID, Witness, tag_key, verify,
     violation::{ViolationWitness, verify_violation},
 };
-use zecured_tier2_methods::{DEPOSIT_ELF, DEPOSIT_ID, GUEST_NETWORK, VIOLATION_ELF, VIOLATION_ID};
+use zecured_payment_statement::{PaymentWitness, verify as verify_payment};
+use zecured_tier2_methods::{
+    DEPOSIT_ELF, DEPOSIT_ID, GUEST_NETWORK, PAYMENT_ELF, PAYMENT_ID, VIOLATION_ELF, VIOLATION_ID,
+};
 
 /// Which statement a command proves.
 #[derive(Clone, Copy, PartialEq, Eq)]
 enum Statement {
     Deposit,
     Violation,
+    Payment,
 }
 
 /// The guest every command runs: the pinned file named by `ZECURED_DEPOSIT_ELF` (or
-/// `ZECURED_VIOLATION_ELF`), or the one embedded in this binary.
+/// `ZECURED_VIOLATION_ELF`, `ZECURED_PAYMENT_ELF`), or the one embedded in this binary.
 struct Guest {
     elf: Vec<u8>,
     id: Digest,
@@ -62,6 +70,7 @@ impl Guest {
         let (var, elf, id) = match statement {
             Statement::Deposit => ("ZECURED_DEPOSIT_ELF", DEPOSIT_ELF, DEPOSIT_ID),
             Statement::Violation => ("ZECURED_VIOLATION_ELF", VIOLATION_ELF, VIOLATION_ID),
+            Statement::Payment => ("ZECURED_PAYMENT_ELF", PAYMENT_ELF, PAYMENT_ID),
         };
         match std::env::var_os(var) {
             Some(path) => {
@@ -104,6 +113,11 @@ fn load_witness(statement: Statement, path: &str) -> Result<(Vec<u8>, Vec<u8>)> 
         Statement::Violation => {
             let witness: ViolationWitness = serde_json::from_slice(&bytes)?;
             let journal = verify_violation(&witness).map_err(|e| refused(&e))?.abi_encode();
+            Ok((bincode::serialize(&witness)?, journal))
+        }
+        Statement::Payment => {
+            let witness: PaymentWitness = serde_json::from_slice(&bytes)?;
+            let journal = verify_payment(&witness).map_err(|e| refused(&e))?.abi_encode();
             Ok((bincode::serialize(&witness)?, journal))
         }
     }
@@ -255,14 +269,60 @@ fn violation_parity(guest: &Guest, input: &str) -> Result<()> {
     Ok(())
 }
 
+/// Zecured Swap: every change of the payment catalog (zecured-payment-k4) of the payment fixture
+/// (`TEST-ONLY_swap_payment_witness.json`, synthetic) has its outcome natively and the same outcome
+/// in the executor: the guest panics with the statement's own error, or commits the same journal.
+/// The fixture is a Testnet payment in the NU7 epoch, which a Mainnet build proves alike.
+fn payment_parity(guest: &Guest, input: &str) -> Result<()> {
+    let base: PaymentWitness = serde_json::from_slice(&std::fs::read(input)?)?;
+    let real = verify_payment(&base).map_err(|e| anyhow::anyhow!("the base witness does not prove: {e:?}"))?;
+    let started = std::time::Instant::now();
+    let session = default_executor().execute(env_for_frame(&bincode::serialize(&base)?, None)?, &guest.elf)?;
+    ensure!(session.journal.bytes == real.abi_encode(), "the unchanged witness's journal differs in the zkVM");
+    println!(
+        "unchanged witness ({} network): proves, {} cycles in {:.1?}",
+        NETWORK.name,
+        session.cycles(),
+        started.elapsed()
+    );
+    let mut failures = 0;
+    for m in zecured_payment_k4::mutations(&NETWORK) {
+        let mut w = base.clone();
+        (m.apply)(&mut w);
+        let native = verify_payment(&w);
+        let started = std::time::Instant::now();
+        let executed = default_executor().execute(env_for_frame(&bincode::serialize(&w)?, None)?, &guest.elf);
+        let elapsed = started.elapsed();
+        let as_expected = zecured_payment_k4::as_expected(m.expected, &real, &native);
+        let same_zkvm = match (&native, &executed) {
+            (Err(e), Err(x)) => format!("{x:#}").contains(&format!("not a valid payment: {e:?}")),
+            (Ok(j), Ok(session)) => session.journal.bytes == j.abi_encode(),
+            _ => false,
+        };
+        println!(
+            "{:<66} {:<34} native {} zkVM {} ({elapsed:.1?})",
+            m.name,
+            format!("{:?}", m.expected),
+            if as_expected { "ok" } else { "DIFFERS" },
+            if same_zkvm { "ok" } else { "DIFFERS" },
+        );
+        failures += usize::from(!(as_expected && same_zkvm));
+    }
+    ensure!(failures == 0, "{failures} changes did not have the same outcome natively and in the zkVM");
+    println!("every change has its outcome natively and the same in the zkVM");
+    Ok(())
+}
+
 fn main() -> Result<()> {
     let mut args: Vec<String> = std::env::args().collect();
-    let statement = if args.get(1).map(String::as_str) == Some("violation") {
-        args.remove(1);
-        Statement::Violation
-    } else {
-        Statement::Deposit
+    let statement = match args.get(1).map(String::as_str) {
+        Some("violation") => Statement::Violation,
+        Some("payment") => Statement::Payment,
+        _ => Statement::Deposit,
     };
+    if statement != Statement::Deposit {
+        args.remove(1);
+    }
     let cmd = args.get(1).context(
         "command: execute | prove | groth16 | p254 | shrink-wrap | mock-seal | image-id | network | export-elf | parity",
     )?;
@@ -390,6 +450,7 @@ fn main() -> Result<()> {
             println!("MOCK seal for {} cycles written to {out}", session.cycles());
         }
         "parity" if statement == Statement::Violation => violation_parity(&guest, input)?,
+        "parity" if statement == Statement::Payment => payment_parity(&guest, input)?,
         "parity" => {
             // K4: every change of the catalog has its outcome natively (refused with its error,
             // accepted, or accepted with a `VaultOpened` nobody signed) and the same outcome in the

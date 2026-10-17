@@ -64,7 +64,9 @@ struct DeleverageRequest {
 /// @param vaultId The paying vault.
 /// @param inputTag `noteTag` of the lineage note the payout spends: the activated deposit, or the change of the
 ///        vault's previous committed payout. A payout spends exactly one lineage note.
-/// @param claimIds The claims the payout pays (at least one, all Pending), in plan order; `claimIds[0]` bears the fee.
+/// @param claimIds The claims the payout pays (at least one), in plan order; `claimIds[0]` bears the fee. Each is
+///        Pending, or, in a new commitment of the claim's own input, already confirmed or disputed (D57: while that
+///        input is unspent, no payout of it landed, so the payout is made again with the input's whole claim list).
 /// @param claimRefs `keccak256(salt_i || txid)` of `claimIds[i]` (`salt_i` from its recipient commitment, txid in
 ///        internal byte order): lets the claimant, who knows `salt_i` but not the vault's key, find the payout.
 /// @param claimOutputs The index, among the payout's Ironwood actions, of the output that pays `claimIds[i]`; distinct
@@ -112,10 +114,12 @@ library ZecuredEIP712 {
     bytes32 internal constant DEPOSIT_ATTESTATION_TYPEHASH =
         keccak256("DepositAttestation(bytes32 vaultId,address account,uint64 amount,bytes32 depositTag)");
 
-    /// @dev keccak256("PayoutConfirmation(bytes32 vaultId,bytes32 claimIdsHash)").
+    /// @dev keccak256("PayoutConfirmation(bytes32 vaultId,bytes32 payoutRef,bytes32 claimIdsHash)"). v4 (R-1): the
+    ///      confirmation names the committed payout it confirms, and the Registry records each payout's confirmation
+    ///      once, so no signature can be replayed after a dispute reopened a claim.
     ///      `claimIdsHash = keccak256(abi.encodePacked(claimIds))`, i.e. the hash of the concatenated 32-byte ids.
     bytes32 internal constant PAYOUT_CONFIRMATION_TYPEHASH =
-        keccak256("PayoutConfirmation(bytes32 vaultId,bytes32 claimIdsHash)");
+        keccak256("PayoutConfirmation(bytes32 vaultId,bytes32 payoutRef,bytes32 claimIdsHash)");
 
     /// @dev keccak256("VaultOpened(bytes32 vaultId,address owner,address account,uint64 amount,uint32 expiryHeight,
     ///      bytes32 addressHash,bytes32 tagKeyHash)") (one line, no spaces). v2 (guest round, design notes T-09). Signed by
@@ -153,7 +157,8 @@ library ZecuredEIP712 {
 
     // ------------------------------------------------------------------ v3 (design notes T-03, T-05, T-07)
 
-    /// @dev Registry domain (T-05): three signers point a claim the bonds paid at the destination that reimburses them.
+    /// @dev Registry domain (T-05): all five signers (v4, R-6: the bonds of all five pay a liveness claim) point a claim
+    ///      the bonds paid at the destination that reimburses them.
     bytes32 internal constant REIMBURSE_DESTINATION_TYPEHASH =
         keccak256("ReimburseDestination(bytes32 claimId,bytes32 commitment,uint64 deadline)");
 
@@ -228,9 +233,14 @@ library ZecuredEIP712 {
         return keccak256(abi.encodePacked(claimIds));
     }
 
-    /// @notice EIP-712 struct hash of a PayoutConfirmation for `vaultId` and the ordered `claimIds`.
-    function hashPayoutConfirmation(bytes32 vaultId, bytes32[] memory claimIds) internal pure returns (bytes32) {
-        return keccak256(abi.encode(PAYOUT_CONFIRMATION_TYPEHASH, vaultId, claimIdsHash(claimIds)));
+    /// @notice EIP-712 struct hash of a PayoutConfirmation of the committed payout `payoutRef` of `vaultId`, for the
+    ///         ordered `claimIds`.
+    function hashPayoutConfirmation(bytes32 vaultId, bytes32 payoutRef, bytes32[] memory claimIds)
+        internal
+        pure
+        returns (bytes32)
+    {
+        return keccak256(abi.encode(PAYOUT_CONFIRMATION_TYPEHASH, vaultId, payoutRef, claimIdsHash(claimIds)));
     }
 
     /// @notice EIP-712 struct hash of a SpendCommit. Arrays are encoded as EIP-712 requires: the keccak256 of their

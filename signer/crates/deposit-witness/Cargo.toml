@@ -11,6 +11,8 @@ publish = false
 zecured-zcash-ops = { path = "../zcash-ops" }
 # The statement the zkVM guest proves (tier2/ workspace); checked natively here.
 zecured-deposit-statement = { path = "../../../tier2/statement" }
+# Zecured Swap's payment statement (tier2/ workspace); checked natively here.
+zecured-payment-statement = { path = "../../../tier2/payment-statement" }
 zcash_keys.workspace = true
 zcash_note_encryption.workspace = true
 zcash_history = "0.6"
@@ -48,6 +50,10 @@ path = "src/bin/dump_tx.rs"
 [[bin]]
 name = "build-witness"
 path = "src/bin/build_witness.rs"
+
+[[bin]]
+name = "build-payment-witness"
+path = "src/bin/build_payment_witness.rs"
 
 [[bin]]
 name = "update-headers"

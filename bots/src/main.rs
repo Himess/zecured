@@ -6,6 +6,8 @@
 //! its claims with `zecured-wallet watch-claims` (Tier 3, F3).
 
 mod chain;
+#[cfg(test)]
+mod fork_tests;
 mod relayer;
 
 use std::{collections::BTreeMap, net::SocketAddr, path::PathBuf, sync::Arc, time::Duration};
@@ -72,7 +74,8 @@ struct Cli {
 
 #[derive(Subcommand)]
 enum Cmd {
-    /// Liquidate unhealthy Zecured positions through the SettlementAdapter.
+    /// Liquidate unhealthy Zecured positions through the SettlementAdapter, and pre-liquidate the
+    /// positions of accounts that opted in once their LTV is in their band below the LLTV.
     Liquidator {
         #[arg(long, env = "BOT_LIQUIDATOR_PRIVATE_KEY", hide_env_values = true)]
         key: String,
@@ -81,6 +84,19 @@ enum Cmd {
         zcash_address: String,
         #[arg(long, default_value_t = 15)]
         every_secs: u64,
+        /// Skip the pre-liquidation round.
+        #[arg(long)]
+        no_pre_liquidation: bool,
+        /// ETH price in dollars, only to log a pre-liquidation's gas in USDC (the round logs its
+        /// economics and never refuses for them).
+        #[arg(long, default_value_t = 3_000)]
+        eth_usd: u64,
+        /// Hours until the signers pay the seized ZEC on Zcash, for the logged price risk.
+        #[arg(long, default_value_t = 1)]
+        payout_wait_hours: u64,
+        /// ZEC price risk per hour of that wait, in basis points of the seized value, for the log.
+        #[arg(long, default_value_t = 20)]
+        zec_risk_bps_per_hour: u64,
     },
     /// Keep the Zcash header relay fed from Testnet peers (K3; run two, independently).
     Relayer {
@@ -158,7 +174,19 @@ async fn main() -> Result<()> {
             key,
             zcash_address,
             every_secs,
-        } => liquidator(&cli.rpc, &cli.backend, d, key.parse()?, &zcash_address, every_secs).await,
+            no_pre_liquidation,
+            eth_usd,
+            payout_wait_hours,
+            zec_risk_bps_per_hour,
+        } => {
+            let pre = PreLiquidationRound {
+                enabled: !no_pre_liquidation,
+                eth_usd,
+                payout_wait_hours,
+                zec_risk_bps_per_hour,
+            };
+            liquidator(&cli.rpc, &cli.backend, d, key.parse()?, &zcash_address, every_secs, pre).await
+        }
         Cmd::MarketMaker {
             key,
             zcash_address,
@@ -171,6 +199,26 @@ async fn main() -> Result<()> {
 
 // ------------------------------------------------------------------------- liquidator
 
+/// The liquidator's pre-liquidation round: whether it runs, and what its economics log assumes.
+#[derive(Clone, Copy, Debug)]
+struct PreLiquidationRound {
+    enabled: bool,
+    eth_usd: u64,
+    payout_wait_hours: u64,
+    zec_risk_bps_per_hour: u64,
+}
+
+/// What the liquidator watches with: its signer's provider, the deployment, its Zcash recipient and
+/// the pre-liquidation round's settings.
+struct Watcher<'a, P> {
+    p: &'a P,
+    backend: &'a str,
+    d: &'a Deployment,
+    zaddr: &'a str,
+    receiver: &'a [u8; 43],
+    pre: PreLiquidationRound,
+}
+
 async fn liquidator(
     rpc: &str,
     backend: &str,
@@ -178,6 +226,7 @@ async fn liquidator(
     key: PrivateKeySigner,
     zaddr: &str,
     every: u64,
+    pre: PreLiquidationRound,
 ) -> Result<()> {
     let me = key.address();
     let receiver = chain::ironwood_receiver(zaddr)?;
@@ -185,9 +234,17 @@ async fn liquidator(
     chain::ensure_allowance(&provider, d.usdc, me, d.adapter).await?;
     let mut accounts: BTreeMap<B256, Address> = BTreeMap::new();
     let mut cursor = d.block;
-    info!("liquidator running");
+    info!(pre_liquidation = pre.enabled, "liquidator running");
+    let w = Watcher {
+        p: &provider,
+        backend,
+        d: &d,
+        zaddr,
+        receiver: &receiver,
+        pre,
+    };
     loop {
-        if let Err(e) = liquidation_pass(&provider, backend, &d, zaddr, &receiver, &mut accounts, &mut cursor).await {
+        if let Err(e) = liquidation_pass(&w, &mut accounts, &mut cursor).await {
             warn!("liquidation pass failed: {e:#}");
         }
         tokio::time::sleep(Duration::from_secs(every)).await;
@@ -238,25 +295,23 @@ where
 const RECEIPT_TIMEOUT: Duration = Duration::from_secs(120);
 
 async fn liquidation_pass<P: Provider>(
-    p: &P,
-    backend: &str,
-    d: &Deployment,
-    zaddr: &str,
-    receiver: &[u8; 43],
+    w: &Watcher<'_, P>,
     accounts: &mut BTreeMap<B256, Address>,
     cursor: &mut u64,
 ) -> Result<()> {
-    let head = p.get_block_number().await?;
-    scan_activations(cursor, head, EVENT_SCAN_BUDGET, accounts, |from, to| events::fetch(p, d.registry, from, to))
+    let head = w.p.get_block_number().await?;
+    scan_activations(cursor, head, EVENT_SCAN_BUDGET, accounts, |from, to| events::fetch(w.p, w.d.registry, from, to))
         .await?;
     if accounts.is_empty() {
         return Ok(());
     }
-    let market = chain::market_state(p, d).await?;
+    // R-24: the debt with the interest accrued since the market's last update, read once per pass.
+    let market = chain::market_state(w.p, w.d).await?;
+    debug!(block = market.block, time = market.timestamp, "market state with the interest accrued");
     for (vault_id, account) in accounts.clone() {
         // One vault's failure (a flaky RPC answer, a refused commitment) must not starve the
         // vaults after it.
-        match watch_vault(p, backend, d, zaddr, receiver, &market, vault_id, account).await {
+        match watch_vault(w, &market, vault_id, account).await {
             Ok(Watch::Keep) => {}
             Ok(Watch::Closed) => {
                 accounts.remove(&vault_id);
@@ -274,20 +329,17 @@ enum Watch {
     Closed,
 }
 
-/// H-04: checks one vault and liquidates its position if it is unhealthy. A vault leaves the watch
-/// list only once the Registry reports it closed, never because it was liquidated: a partial
-/// liquidation leaves collateral, and the borrower may borrow against it again.
-#[allow(clippy::too_many_arguments)]
+/// H-04: checks one vault and liquidates its position if it is unhealthy, or, when it is healthy
+/// and its account opted in, pre-liquidates it in its band. A vault leaves the watch list only once
+/// the Registry reports it closed, never because it was liquidated: a partial liquidation leaves
+/// collateral, and the borrower may borrow against it again.
 async fn watch_vault<P: Provider>(
-    p: &P,
-    backend: &str,
-    d: &Deployment,
-    zaddr: &str,
-    receiver: &[u8; 43],
+    w: &Watcher<'_, P>,
     market: &chain::MarketState,
     vault_id: B256,
     account: Address,
 ) -> Result<Watch> {
+    let (p, d) = (w.p, w.d);
     let v = IRegistryView::new(d.registry, p).vault(vault_id).call().await?;
     match v.status {
         chain::VAULT_CLOSED => return Ok(Watch::Closed),
@@ -296,8 +348,12 @@ async fn watch_vault<P: Provider>(
     }
     let pos = chain::position_in(p, d, market, account).await?;
     let Some(plan) = chain::plan_liquidation(&pos, v.outstanding) else {
+        if w.pre.enabled {
+            pre_liquidate_vault(w, market, vault_id, account, &pos, v.outstanding).await?;
+        }
         return Ok(Watch::Keep);
     };
+    let (backend, zaddr, receiver) = (w.backend, w.zaddr, w.receiver);
     let short = hex::encode(&vault_id[..4]);
     info!(vault = %short, underwater = matches!(plan, Liquidation::SeizeAll(_)), "unhealthy position: liquidating");
     let adapter = ISettlementAdapter::new(d.adapter, p);
@@ -329,6 +385,86 @@ async fn watch_vault<P: Provider>(
     info!(vault = %short, tx = %receipt.transaction_hash, "liquidated");
     // Kept: the next pass reads the vault again and drops it only once it is closed.
     Ok(Watch::Keep)
+}
+
+/// The pre-liquidation round for a healthy position: if its account's terms are in force and its
+/// LTV (on the debt with interest, R-24) is in their band, the largest pre-liquidation the Adapter
+/// accepts, simulated first; its economics are logged (never a reason to skip it); a recipient is
+/// revealed only for a pre-liquidation that goes through.
+async fn pre_liquidate_vault<P: Provider>(
+    w: &Watcher<'_, P>,
+    market: &chain::MarketState,
+    vault_id: B256,
+    account: Address,
+    pos: &chain::Position,
+    outstanding: u64,
+) -> Result<()> {
+    if pos.borrow_shares == 0 {
+        return Ok(());
+    }
+    let adapter = ISettlementAdapter::new(w.d.adapter, w.p);
+    let Some(terms) = chain::PreTerms::from_abi(&adapter.preLiquidationTerms(account).call().await?) else {
+        return Ok(());
+    };
+    if !terms.in_force(market.timestamp) {
+        return Ok(());
+    }
+    let floor = u64::try_from(adapter.minSeize(outstanding).call().await?).map_err(|_| anyhow!("floor overflow"))?;
+    let Some(plan) = chain::plan_pre_liquidation(pos, market, &terms, outstanding, floor) else {
+        return Ok(());
+    };
+    let short = hex::encode(&vault_id[..4]);
+    info!(vault = %short, ltv = %plan.ltv, "position in its pre-liquidation band: pre-liquidating");
+    let mut passing = None;
+    for shares in chain::pre_liquidation_attempts(&plan, market, floor) {
+        match adapter.preLiquidate(account, U256::from(shares), PROBE_COMMITMENT).call().await {
+            Ok(sim) => {
+                passing = Some((shares, sim.repaidAssets, sim.seized));
+                break;
+            }
+            Err(e) => debug!(vault = %short, "pre-liquidation of {shares} shares would revert: {e}"),
+        }
+    }
+    let Some((shares, repaid, seized)) = passing else {
+        warn!(vault = %short, "every pre-liquidation of this position would revert");
+        return Ok(());
+    };
+    // The profitability filter only logs: the incentive at the oracle price against the gas and
+    // the wait for the signers' payout of the ZEC.
+    let gas = adapter.preLiquidate(account, U256::from(shares), PROBE_COMMITMENT).estimate_gas().await?;
+    let gas_price = w.p.get_gas_price().await?;
+    let executed = chain::PreLiquidation {
+        repaid_shares: shares,
+        repaid_assets: u128::try_from(repaid).map_err(|_| anyhow!("repayment overflow"))?,
+        seized,
+        ..plan
+    };
+    let e = chain::pre_liquidation_economics(
+        &executed,
+        market.price,
+        u128::from(gas).saturating_mul(gas_price),
+        w.pre.eth_usd,
+        w.pre.payout_wait_hours,
+        w.pre.zec_risk_bps_per_hour,
+    );
+    info!(
+        vault = %short,
+        repay = executed.repaid_assets,
+        seize = seized,
+        incentive = e.incentive,
+        gas = e.gas,
+        wait_risk = e.wait_risk,
+        net = e.net,
+        profitable = e.net > 0,
+        "pre-liquidation economics in USDC units (logged, not enforced)"
+    );
+    let commitment = chain::fresh_commitment(w.backend, w.zaddr, w.receiver).await?;
+    let call = adapter.preLiquidate(account, U256::from(shares), commitment);
+    let gas = zecured_base::gas_with_headroom(call.estimate_gas().await?);
+    let receipt = call.gas(gas).send().await?.with_timeout(Some(RECEIPT_TIMEOUT)).get_receipt().await?;
+    ensure!(receipt.status(), "pre-liquidation reverted");
+    info!(vault = %short, tx = %receipt.transaction_hash, "pre-liquidated");
+    Ok(())
 }
 
 /// A non-zero commitment for simulations only; never sent.

@@ -259,10 +259,11 @@ pub fn check_release(current: Option<&Inflight>, prior: Option<[u8; 32]>, txid: 
     Ok(())
 }
 
-/// H-1, confirmation: the claims and the transaction must be exactly the payout this node
-/// signed (`txid` in internal byte order).
+/// H-1, confirmation: the transaction must be exactly the payout this node signed (`txid` in
+/// internal byte order), and the claims some or all of its claims, in its order (R-1: the
+/// coordinator confirms only those still pending on Base; the others are proven).
 pub fn check_confirmation(inflight: &Inflight, claim_ids: &[[u8; 32]], txid: &[u8; 32]) -> Result<()> {
-    ensure!(claim_ids == inflight.claim_ids, "claims differ from the payout we signed");
+    ensure!(crate::confirmable_subset(claim_ids, &inflight.claim_ids), "claims differ from the payout we signed");
     if let Some(signed) = inflight.txid {
         ensure!(signed == *txid, "not the transaction this node signed");
     }
@@ -290,11 +291,13 @@ pub fn main_lineage<'a>(
 }
 
 /// The plan and inputs this node expects for `kind`, from its own view: the vault's next payout,
-/// from its main lineage or from the note of a refunded deposit (I30). `bound`: the unpaid claims
-/// a commitment on Base already binds to the main lineage note (RT-3).
+/// from its main lineage or from the note of a refunded deposit (I30). `claims`: the vault's claims
+/// as the planner counts them (O-4, `Node::planning`); `bound`: the unpaid claims a commitment on
+/// Base already binds to the main lineage note (RT-3).
 pub fn expected_plan(
     store: &Store,
     vault: &VaultRecord,
+    claims: &[Claim],
     notes: &VaultNotes,
     kind: &SignKind,
     now: u64,
@@ -323,8 +326,8 @@ pub fn expected_plan(
     // H-2: a recipient that is one of the vault's own addresses is no recipient: the claim is set
     // aside rather than paid back into the vault outside its books.
     let recipient = |c: &Commitment| store.recipient(c).filter(|r| !owns_receiver(&fvk, &r.receiver));
-    let (main, i10) = main_lineage(vault.activated, vault.outstanding, &vault.claims, &notes.lineage, bound);
-    let next = ledger::next_vault_payout(&vault.claims, recipient, main, &notes.refund_values(), now)?;
+    let (main, i10) = main_lineage(vault.activated, vault.outstanding, claims, &notes.lineage, bound);
+    let next = ledger::next_vault_payout(claims, recipient, main, &notes.refund_values(), now)?;
     let wanted: Vec<[u8; 32]> = claim_ids.iter().map(|c| c.0).collect();
     let plan = match next {
         NextPayout::Pay(plan) if plan.claims == wanted => plan,
@@ -567,6 +570,21 @@ mod tests {
         // ... nor B, which this node's in-flight payout does not pay.
         assert!(check_confirmation(&s2, &[B], &TX1).is_err());
         check_confirmation(&s2, &[A], &TX2).unwrap();
+    }
+
+    /// R-1: a confirmation names some or all of the payout's claims, in the payout's order (those
+    /// still pending on Base), never another claim, a claim twice, or none.
+    #[test]
+    fn a_confirmation_names_part_of_the_payout_in_its_order() {
+        const C: [u8; 32] = [3; 32];
+        let s = signed(&[A, B, C], TX1);
+        check_confirmation(&s, &[A, B, C], &TX1).unwrap();
+        check_confirmation(&s, &[A, C], &TX1).unwrap();
+        check_confirmation(&s, &[B], &TX1).unwrap();
+        assert!(check_confirmation(&s, &[C, A], &TX1).is_err(), "another order");
+        assert!(check_confirmation(&s, &[A, A], &TX1).is_err(), "a claim twice");
+        assert!(check_confirmation(&s, &[], &TX1).is_err(), "nothing");
+        assert!(check_confirmation(&s, &[A, [4; 32]], &TX1).is_err(), "another claim");
     }
 
     #[test]

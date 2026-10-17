@@ -21,9 +21,13 @@ import {
     ClaimStatus,
     ClaimDetails
 } from "../../src/interfaces/v3/IZecuredRegistry.sol";
-import {IZecuredIntake, PendingActivation} from "../../src/interfaces/v3/IZecuredIntake.sol";
-import {IZecuredDisputes} from "../../src/interfaces/v3/IZecuredDisputes.sol";
+import {IZecuredIntake, PendingActivation, PendingRefund} from "../../src/interfaces/v3/IZecuredIntake.sol";
+import {IZecuredDisputes, IZecuredDisputesEvents} from "../../src/interfaces/v3/IZecuredDisputes.sol";
+import {IZecuredPayouts} from "../../src/interfaces/v3/IZecuredPayouts.sol";
+import {IZecuredRefunds} from "../../src/interfaces/v3/IZecuredRefunds.sol";
+import {IZecuredSpendCommitsEvents} from "../../src/interfaces/v3/IZecuredSpendCommits.sol";
 import {CloseRequest, SpendCommit, DeleverageRequest} from "../../src/libraries/ZecuredEIP712.sol";
+import {PreLiquidationTerms} from "../../src/interfaces/ISettlementAdapter.sol";
 import {MockHeaderRelay} from "../mocks/MockHeaderRelay.sol";
 import {MockSignerBond} from "../mocks/MockSignerBond.sol";
 import {MockCapPrice} from "../mocks/MockCapPrice.sol";
@@ -94,6 +98,8 @@ contract ZecuredHandler is Test {
     uint8 public constant TAG_ACTIVATED = 2;
     uint8 public constant TAG_REFUND = 3;
     uint8 public constant TAG_DROPPED = 4;
+    /// R-12: a refund whose proof waits for the relay; its claim is not open yet.
+    uint8 public constant TAG_REFUND_PENDING = 5;
 
     /// Every vault a deposit landed on (reserved, activated or refunded).
     bytes32[] public vaultIds;
@@ -110,11 +116,19 @@ contract ZecuredHandler is Test {
     mapping(bytes32 claimId => bytes32) public refundNoteOf;
     /// Claims reopened after a dispute: a later proof of their payout still upholds them (D57).
     mapping(bytes32 claimId => bool) public reopened;
+    /// The vault's latest committed payout (v4: confirmations name it).
+    mapping(bytes32 vaultId => bytes32) public lastPayoutRef;
     /// Every tag the Intake accepted, and what it is now.
     bytes32[] public tags;
     mapping(bytes32 tag => uint8) public tagState;
     mapping(bytes32 tag => bytes32) public tagVault;
     bytes32[] public pendingIds;
+    /// R-12: the tags of the pending refunds.
+    bytes32[] public pendingRefundTags;
+    /// R-12: the sum of a vault's pending refunds.
+    mapping(bytes32 vaultId => uint64) public pendingRefundOf;
+    /// R-11: Refund claims marked dormant and still so.
+    mapping(bytes32 claimId => bool) public dormant;
     Deposit[] internal dropped;
     uint256 internal vaultNonce;
     uint256 internal tagNonce;
@@ -163,6 +177,10 @@ contract ZecuredHandler is Test {
 
     function pendingCount() external view returns (uint256) {
         return pendingIds.length;
+    }
+
+    function pendingRefundCount() external view returns (uint256) {
+        return pendingRefundTags.length;
     }
 
     function liveNotesOf(bytes32 vaultId) external view returns (bytes32[] memory) {
@@ -251,6 +269,11 @@ contract ZecuredHandler is Test {
         pendingIds.pop();
     }
 
+    function _removePendingRefund(uint256 i) internal {
+        pendingRefundTags[i] = pendingRefundTags[pendingRefundTags.length - 1];
+        pendingRefundTags.pop();
+    }
+
     function _removeNote(bytes32 vaultId, bytes32 tag) internal {
         bytes32[] storage n = liveNotes[vaultId];
         for (uint256 i; i < n.length; ++i) {
@@ -278,8 +301,16 @@ contract ZecuredHandler is Test {
         // Mostly new vaults with a fresh cap price: second deposits and stale prices are the exception. Decisions use
         // a hash of the seed: the fuzzer favours values like 0, which would make every exception frequent.
         seed = _mix(seed);
-        second = second && seed % 3 == 0;
-        keepPrice = keepPrice && seed % 4 == 0;
+        _prove(seed, second && seed % 3 == 0, keepPrice && seed % 4 == 0);
+    }
+
+    /// R-12: another note to a vault Base knows, which lands as a pending refund (the refund lifecycle's traffic).
+    function proveSecond(uint256 seed) external {
+        if (vaultIds.length == 0) return;
+        _prove(_mix(seed), true, false);
+    }
+
+    function _prove(uint256 seed, bool second, bool keepPrice) internal {
         (Deposit memory d, bool fromDropped) = _nextDeposit(seed, second);
         if (!keepPrice) capPrice.set(oracle.price());
         bool stale = block.timestamp > capPrice.updatedAt() + intake.capPriceMaxAge();
@@ -287,8 +318,10 @@ contract ZecuredHandler is Test {
         string memory expected = _expectedLanding(d, capHeld);
         uint256 supply = zzec.totalSupply();
         (bytes memory journal, bytes memory seal, bytes[] memory sigs) = _proof(d);
+        bool capWait = keccak256(bytes(expected)) == keccak256("prove: cap full (waits)");
         try intake.attestDepositWithProof(journal, seal, imageId, sigs) {
             if (zzec.totalSupply() != supply) _flag("a deposit proof minted");
+            if (capWait) _flag("R-11: a new vault's proof landed past the coverage cap");
             _recordLanding(d, capHeld, expected);
         } catch (bytes memory reason) {
             bytes4 selector = bytes4(reason);
@@ -296,6 +329,8 @@ contract ZecuredHandler is Test {
                 calls["prove (stale cap price)"]++;
             } else if (selector == IZecuredRegistry.VaultCompromised.selector && gates.isCompromised(d.vaultId)) {
                 calls["prove (compromised vault)"]++;
+            } else if (capWait && selector == IZecuredIntake.CapExceeded.selector) {
+                calls[expected]++; // R-11: the vault stays new, the proof is sent again later
             } else {
                 _flag("a deposit proof reverted");
             }
@@ -350,7 +385,7 @@ contract ZecuredHandler is Test {
     /// T-01, computed independently: locked and pending zatoshi with `amount` within the absolute cap and, valued at
     /// the cap price (rounded up), within `coverageBps` of the effective bond.
     function _capHolds(uint64 amount) internal view returns (bool) {
-        uint256 locked = registry.lockedZatoshi() + intake.pendingTotal() + amount;
+        uint256 locked = registry.lockedZatoshi() + intake.pendingTotal() + intake.pendingRefundTotal() + amount;
         if (locked > intake.maxTotalZat()) return false;
         uint256 value = Math.mulDiv(locked, capPrice.price(), ORACLE_PRICE_SCALE, Math.Rounding.Ceil);
         return value * 10_000 <= gates.effectiveBond() * intake.coverageBps();
@@ -362,7 +397,7 @@ contract ZecuredHandler is Test {
         if (_status(d.vaultId) != VaultStatus.None) return "prove: refund (known vault)";
         if (registry.vaultOf(accounts[d.accountIndex]) != bytes32(0)) return "prove: refund (account bound)";
         if (gates.halted()) return "prove: refund (halted)";
-        if (!capHeld) return "prove: refund (cap)";
+        if (!capHeld) return "prove: cap full (waits)";
         return "prove: pending";
     }
 
@@ -384,9 +419,11 @@ contract ZecuredHandler is Test {
             pendingIds.push(d.vaultId);
         } else {
             if (expectPending) _flag("T-02: a deposit that should have been reserved was refunded");
-            _markTag(d.tag, d.vaultId, TAG_REFUND);
-            refunded[d.vaultId] += d.amount;
-            refundNoteOf[registry.claimIdOf(d.vaultId, registry.claimCount(d.vaultId) - 1)] = d.tag;
+            // R-12: a refund waits for the relay like an activation; no claim opens in the proof's transaction.
+            if (intake.pendingRefund(d.tag).vaultId != d.vaultId) _flag("R-12: a refund landed without pending");
+            _markTag(d.tag, d.vaultId, TAG_REFUND_PENDING);
+            pendingRefundTags.push(d.tag);
+            pendingRefundOf[d.vaultId] += d.amount;
         }
     }
 
@@ -400,8 +437,8 @@ contract ZecuredHandler is Test {
         if (block.timestamp < p.readyTime) vm.warp(p.readyTime);
         // Half the time the finalizer waits a pause out.
         if (seed % 2 == 0 && block.timestamp < intake.pausedUntil()) vm.warp(intake.pausedUntil());
-        bool closed =
-            gates.halted() || !gates.fullyBonded() || intake.mintingPaused() || gates.openCasesOf(vaultId) != 0;
+        bool closed = gates.halted() || !gates.fullyBonded() || intake.mintingPaused()
+            || gates.openCasesOf(vaultId) != 0 || !relay.isInBestChain(p.anchor);
         uint256 supply = zzec.totalSupply();
         try intake.finalizeActivation(vaultId) {
             if (closed) _flag("I23: minted through a closed gate");
@@ -425,7 +462,9 @@ contract ZecuredHandler is Test {
         bytes32 vaultId = pendingIds[i];
         PendingActivation memory p = intake.pendingActivation(vaultId);
         relay.setBlock(p.anchor, false, 0);
+        bool caseOpen = gates.openCasesOf(vaultId) != 0;
         try intake.dropPendingActivation(vaultId) {
+            if (caseOpen) _flag("R-17: a pending activation dropped while a case was open");
             _removePending(i);
             _removeNote(vaultId, p.depositTag);
             _markTag(p.depositTag, vaultId, TAG_DROPPED);
@@ -434,7 +473,8 @@ contract ZecuredHandler is Test {
             );
             calls["drop"]++;
         } catch {
-            _flag("a reservation off the best chain was not dropped");
+            if (!caseOpen) _flag("a reservation off the best chain was not dropped");
+            calls["drop (case open)"]++;
         }
     }
 
@@ -445,10 +485,18 @@ contract ZecuredHandler is Test {
         uint256 i = seed % pendingIds.length;
         bytes32 vaultId = pendingIds[i];
         PendingActivation memory p = intake.pendingActivation(vaultId);
-        bool allowed = gates.halted()
-            || (byAccount
-                && block.timestamp < intake.pausedUntil()
-                && block.timestamp >= uint256(intake.pausedSince()) + intake.pendingRefundDelay());
+        // Mostly ready (K3): the relay moved on and the delay passed; half of those wait out the account's delay too.
+        if (seed % 4 != 0) {
+            if (relay.tipHeight() < p.readyHeight) relay.setTipHeight(p.readyHeight);
+            if (block.timestamp < p.readyTime) vm.warp(p.readyTime);
+            if (seed % 2 == 0 && block.timestamp < p.readyTime + intake.pendingRefundDelay()) {
+                vm.warp(p.readyTime + intake.pendingRefundDelay());
+            }
+        }
+        bool ready =
+            relay.tipHeight() >= p.readyHeight && block.timestamp >= p.readyTime && relay.isInBestChain(p.anchor);
+        bool allowed =
+            ready && (gates.halted() || (byAccount && block.timestamp >= p.readyTime + intake.pendingRefundDelay()));
         vm.prank(byAccount ? p.account : stranger);
         try intake.refundPending(vaultId) returns (bytes32 claimId) {
             if (!allowed) _flag("a pending activation refunded without a halt or a long pause");
@@ -513,21 +561,24 @@ contract ZecuredHandler is Test {
 
     // ------------------------------------------------------------------ refunds (T-02)
 
-    /// A Refund claim without a destination (pending or abandoned) and not bound to a payout, of a vault picked by
-    /// `seed`.
+    /// A Refund claim without a destination (pending or abandoned) and not bound to a payout: the first of the vaults
+    /// from the one `seed` picks on.
     function _refundWithoutDestination(uint256 seed) internal view returns (bool, bytes32 vaultId, bytes32 claimId) {
-        if (vaultIds.length == 0) return (false, bytes32(0), bytes32(0));
-        vaultId = vaultIds[seed % vaultIds.length];
-        uint64 count = registry.claimCount(vaultId);
-        for (uint64 j; j < count; ++j) {
-            claimId = registry.claimIdOf(vaultId, j);
-            ClaimDetails memory c = registry.claimDetails(claimId);
-            if (
-                c.kind == ClaimKind.Refund && c.commitment == bytes32(0) && registry.claimInput(claimId) == bytes32(0)
-                    && (c.status == ClaimStatus.Pending || c.status == ClaimStatus.WrittenOff)
-            ) return (true, vaultId, claimId);
+        uint256 n = vaultIds.length;
+        for (uint256 k; k < n; ++k) {
+            vaultId = vaultIds[(seed % n + k) % n];
+            uint64 count = registry.claimCount(vaultId);
+            for (uint64 j; j < count; ++j) {
+                claimId = registry.claimIdOf(vaultId, j);
+                ClaimDetails memory c = registry.claimDetails(claimId);
+                if (
+                    c.kind == ClaimKind.Refund && c.commitment == bytes32(0)
+                        && registry.claimInput(claimId) == bytes32(0)
+                        && (c.status == ClaimStatus.Pending || c.status == ClaimStatus.WrittenOff)
+                ) return (true, vaultId, claimId);
+            }
         }
-        return (false, vaultId, bytes32(0));
+        return (false, bytes32(0), bytes32(0));
     }
 
     /// The vault's account names where its refund goes (reviving it if it was abandoned).
@@ -539,6 +590,7 @@ contract ZecuredHandler is Test {
         if (status == ClaimStatus.WrittenOff && gates.isCompromised(vaultId)) return;
         vm.prank(accountOf(vaultId));
         registry.setRefundDestination(claimId, keccak256(abi.encode("zecured.inv.refundDest", claimId)));
+        dormant[claimId] = false;
         calls["refund destination"]++;
     }
 
@@ -552,7 +604,106 @@ contract ZecuredHandler is Test {
         if (block.timestamp < at) vm.warp(at);
         vm.prank(stranger);
         registry.abandonRefund(claimId);
+        dormant[claimId] = false;
         calls["abandon"]++;
+    }
+
+    /// R-11: a refund nobody gave a destination leaves `lockedZatoshi` after `refundDormancy`, by anyone.
+    function markDormant(uint256 seed) external {
+        (bool found,, bytes32 claimId) = _refundWithoutDestination(seed);
+        if (!found) return;
+        ClaimDetails memory c = registry.claimDetails(claimId);
+        IZecuredRefunds refunds = IZecuredRefunds(address(registry));
+        if (c.status != ClaimStatus.Pending || c.bondPaid || refunds.isRefundDormant(claimId)) return;
+        uint256 at = uint256(c.createdAt) + refunds.refundDormancy();
+        if (block.timestamp < at) vm.warp(at);
+        uint256 locked = registry.lockedZatoshi();
+        vm.prank(stranger);
+        try refunds.markRefundDormant(claimId) {
+            dormant[claimId] = true;
+            if (registry.lockedZatoshi() != locked - c.amount) _flag("R-11: a dormant refund still counts");
+            calls["mark dormant"]++;
+        } catch {
+            _flag("R-11: a refund without a destination could not be marked dormant");
+        }
+    }
+
+    // ------------------------------------------------------------------ pending refunds (R-8, R-12)
+
+    /// R-12: the relay moves on, the delay passes, and anyone opens the refund's claim; it waits while the vault's
+    /// activation pends (R-8), and never opens on a compromised vault.
+    function finalizeRefund(uint256 seed) external {
+        if (pendingRefundTags.length == 0) return;
+        uint256 i = seed % pendingRefundTags.length;
+        bytes32 tag = pendingRefundTags[i];
+        PendingRefund memory p = intake.pendingRefund(tag);
+        if (relay.tipHeight() < p.readyHeight) relay.setTipHeight(p.readyHeight);
+        if (block.timestamp < p.readyTime) vm.warp(p.readyTime);
+        bool vaultPending = _status(p.vaultId) == VaultStatus.Pending;
+        bool compromised = gates.isCompromised(p.vaultId);
+        bool anchorGone = !relay.isInBestChain(p.anchor); // a drop R-17 refused
+        try intake.finalizeRefund(tag) returns (bytes32 claimId) {
+            if (anchorGone) _flag("R-12: a refund opened off the best chain");
+            if (vaultPending) _flag("R-8: a refund opened on a pending vault");
+            if (compromised) _flag("a refund opened on a compromised vault");
+            _removePendingRefund(i);
+            pendingRefundOf[p.vaultId] -= p.amount;
+            _markTag(tag, p.vaultId, TAG_REFUND);
+            refunded[p.vaultId] += p.amount;
+            refundNoteOf[claimId] = tag;
+            calls["finalize refund"]++;
+        } catch (bytes memory reason) {
+            bytes4 selector = bytes4(reason);
+            if (anchorGone && selector == IZecuredIntake.AnchorNotConfirmed.selector) {
+                calls["finalize refund (anchor gone)"]++;
+            } else if (vaultPending && selector == IZecuredSpendCommitsEvents.VaultPending.selector) {
+                calls["finalize refund (vault pending)"]++;
+            } else if (compromised && selector == IZecuredRegistry.VaultCompromised.selector) {
+                calls["finalize refund (compromised)"]++;
+            } else {
+                _flag("a ready refund could not be opened");
+            }
+        }
+    }
+
+    /// R-12: a reorganisation takes a pending refund's anchor off the best chain; anyone drops it (not while a case is
+    /// open on the vault, R-17), and the note may be proven again.
+    function dropRefund(uint256 seed) external {
+        if (pendingRefundTags.length == 0) return;
+        uint256 i = seed % pendingRefundTags.length;
+        bytes32 tag = pendingRefundTags[i];
+        PendingRefund memory p = intake.pendingRefund(tag);
+        relay.setBlock(p.anchor, false, 0);
+        bool caseOpen = gates.openCasesOf(p.vaultId) != 0;
+        try intake.dropPendingRefund(tag) {
+            if (caseOpen) _flag("R-17: a pending refund dropped while a case was open");
+            _removePendingRefund(i);
+            pendingRefundOf[p.vaultId] -= p.amount;
+            _removeNote(p.vaultId, tag);
+            _markTag(tag, p.vaultId, TAG_DROPPED);
+            dropped.push(
+                Deposit({vaultId: p.vaultId, accountIndex: accountIndexOf[p.vaultId], amount: p.amount, tag: tag})
+            );
+            calls["drop refund"]++;
+        } catch {
+            if (!caseOpen) _flag("a pending refund off the best chain was not dropped");
+            calls["drop refund (case open)"]++;
+        }
+    }
+
+    /// R-12: no payout spends a pending refund's note, even with valid signatures. Must always fail.
+    function attackSpendPendingRefund(uint256 seed) external {
+        if (pendingRefundTags.length == 0) return;
+        bytes32 tag = pendingRefundTags[seed % pendingRefundTags.length];
+        bytes32 vaultId = tagVault[tag];
+        (bool found, bytes32 claimId) = _payableClaim(vaultId, false);
+        if (!found) return;
+        (bool possible, SpendCommit memory c) = _reuseCommit(vaultId, tag, claimId);
+        if (!possible) return;
+        try registry.commitSpend(c, _threeSigs(registry.hashSpendCommit(c), seed)) {
+            attackSucceeded = true;
+        } catch {}
+        calls["attack: spend pending refund"]++;
     }
 
     /// RT-8: a closed vault's claim too small for any payout's fee is written off, by anyone.
@@ -894,25 +1045,145 @@ contract ZecuredHandler is Test {
     }
 
     /// The signers pay one of the vault's claims (with its Fee claim at index 1 when `withFee` and one is due): commit,
-    /// then confirm. I22: neither step reverts for any gate.
+    /// then confirm the payout, naming it, with every claim of it still pending (v4, R-1: each payout is confirmed once;
+    /// a reopened claim only by a proof). I22: neither step reverts for any gate; R-3: the confirmation, and only it, is
+    /// refused while the vault is frozen (its claims are then proven instead).
     function confirm(uint256 vaultSeed, uint256 signerSeed, bool withFee) external {
         (bool found, bytes32 vaultId,) = _vault(vaultSeed);
         if (!found || !_payable(vaultId)) return;
         bytes32[] memory ids;
         (bool committed, bytes32 claimId) = _payableClaim(vaultId, true);
         if (committed) {
-            ids = _one(claimId); // committed (and mined) earlier: only confirmed now
+            // Committed (and mined) earlier: only confirmed now, unless its confirmation was recorded already.
+            if (_payouts().payoutConfirmed(_payoutRefOf(claimId))) return;
+            ids = _pendingClaimsOfInput(vaultId, registry.claimInput(claimId));
         } else {
             (bool ok, bytes32 next) = _payableClaim(vaultId, false);
             if (!ok) return;
             ids = _withFee(vaultId, next, withFee);
             if (!_commit(vaultId, ids, signerSeed)) return;
         }
-        bytes[] memory sigs = _threeSigs(registry.hashPayoutConfirmation(vaultId, ids), signerSeed);
-        try registry.confirmPayout(vaultId, ids, sigs) {
+        bytes32 payoutRef = _payoutRefOf(ids[0]);
+        bool frozen = gates.vaultFrozen(vaultId);
+        bytes[] memory sigs = _threeSigs(_payouts().hashPayoutConfirmation(vaultId, payoutRef, ids), signerSeed);
+        try _payouts().confirmPayout(vaultId, payoutRef, ids, sigs) {
+            if (frozen) _flag("R-3: a frozen vault's payout was confirmed by signatures");
             calls["confirm"]++;
         } catch {
-            _flag("I22: a committed payout could not be confirmed");
+            if (!frozen) _flag("I22: a committed payout could not be confirmed");
+            calls["confirm (frozen)"]++;
+        }
+    }
+
+    function _payouts() internal view returns (IZecuredPayouts) {
+        return IZecuredPayouts(address(registry));
+    }
+
+    /// The handler's payout of a claim's input (`_commit` derives its reference from the input).
+    function _payoutRefOf(bytes32 claimId) internal view returns (bytes32) {
+        return keccak256(abi.encode("zecured.inv.payoutRef", registry.claimInput(claimId)));
+    }
+
+    /// The vault's claims bound to `input` that are pending and were never reopened: what a confirmation names.
+    function _pendingClaimsOfInput(bytes32 vaultId, bytes32 input) internal view returns (bytes32[] memory ids) {
+        uint64 count = registry.claimCount(vaultId);
+        bytes32[] memory found = new bytes32[](count);
+        uint256 n;
+        for (uint64 j; j < count; ++j) {
+            bytes32 id = registry.claimIdOf(vaultId, j);
+            (,,,, ClaimStatus status) = registry.claim(id);
+            if (status == ClaimStatus.Pending && !reopened[id] && registry.claimInput(id) == input) found[n++] = id;
+        }
+        ids = new bytes32[](n);
+        for (uint256 i; i < n; ++i) {
+            ids[i] = found[i];
+        }
+    }
+
+    /// Proven delivery (v4): an inclusion proof of a claim's committed payout (the MOCK slasher stands in for a verified
+    /// `Included` proof) makes its payment final from any state before the compensator: committed and pending (also on
+    /// a frozen vault), or confirmed by signatures. Never reverts for such a claim; afterwards `paidAt == 0`.
+    function provePayout(uint256 vaultSeed, uint256 howSeed) external {
+        if (vaultIds.length == 0) return;
+        bool confirmedOnly = _mix(howSeed) % 2 == 0;
+        // Goal-directed: the first provable claim of any vault, starting from the seeded one ...
+        for (uint256 k; k < vaultIds.length; ++k) {
+            bytes32 vaultId = vaultIds[(vaultSeed % vaultIds.length + k) % vaultIds.length];
+            uint64 count = registry.claimCount(vaultId);
+            for (uint64 j; j < count; ++j) {
+                bytes32 claimId = registry.claimIdOf(vaultId, j);
+                if (!_provable(claimId, confirmedOnly)) continue;
+                _prove(vaultId, claimId, confirmedOnly);
+                return;
+            }
+        }
+        // ... else a payout committed now, then proven before anyone confirms it.
+        bytes32 v = vaultIds[vaultSeed % vaultIds.length];
+        if (confirmedOnly || !_payable(v)) return;
+        (bool ok, bytes32 next) = _payableClaim(v, false);
+        if (!ok) return;
+        bytes32[] memory ids = _withFee(v, next, howSeed % 3 == 0);
+        if (_commit(v, ids, howSeed)) _prove(v, ids[0], false);
+    }
+
+    function _provable(bytes32 claimId, bool confirmedOnly) internal view returns (bool) {
+        if (registry.claimInput(claimId) == bytes32(0)) return false;
+        (,,,, ClaimStatus status) = registry.claim(claimId);
+        (uint64 paidAt,) = IZecuredDisputes(address(registry)).payoutDispute(claimId);
+        return confirmedOnly ? status == ClaimStatus.Paid && paidAt != 0 : status == ClaimStatus.Pending;
+    }
+
+    function _prove(bytes32 vaultId, bytes32 claimId, bool confirmedOnly) internal {
+        IZecuredDisputes disputes = IZecuredDisputes(address(registry));
+        uint256 unproven = _payouts().unprovenConfirmations(vaultId);
+        bytes32 payoutRef = _payoutRefOf(claimId); // before the prank: it reads the Registry
+        vm.prank(address(gates));
+        try disputes.upholdPayout(claimId, payoutRef) {
+            (,,,, ClaimStatus afterwards) = registry.claim(claimId);
+            (uint64 paidAfter, uint64 dueAfter) = disputes.payoutDispute(claimId);
+            if (afterwards != ClaimStatus.Paid || paidAfter != 0 || dueAfter != 0) {
+                _flag("a proven payout did not leave its claim paid for good");
+            }
+            if (confirmedOnly && _payouts().unprovenConfirmations(vaultId) != unproven - 1) {
+                _flag("R-3: a proven confirmation still counted as unproven");
+            }
+            calls[confirmedOnly ? "prove confirmed" : "prove pending"]++;
+        } catch {
+            _flag("a committed payout's proof was refused");
+        }
+    }
+
+    /// R-3: anyone makes a confirmation final once its dispute window is over, unless the vault froze within that
+    /// window (then only a proof or the compensator settles it).
+    function expireConfirmation(uint256 vaultSeed) external {
+        if (vaultIds.length == 0) return;
+        // Goal-directed: the first confirmation still open, of any vault, starting from the seeded one.
+        for (uint256 k; k < vaultIds.length; ++k) {
+            bytes32 vaultId = vaultIds[(vaultSeed % vaultIds.length + k) % vaultIds.length];
+            uint64 count = registry.claimCount(vaultId);
+            for (uint64 j; j < count; ++j) {
+                bytes32 claimId = registry.claimIdOf(vaultId, j);
+                (,,,, ClaimStatus status) = registry.claim(claimId);
+                (uint64 paidAt,) = IZecuredDisputes(address(registry)).payoutDispute(claimId);
+                if (status != ClaimStatus.Paid || paidAt == 0) continue;
+                _expire(vaultId, claimId, paidAt);
+                return;
+            }
+        }
+    }
+
+    function _expire(bytes32 vaultId, bytes32 claimId, uint64 paidAt) internal {
+        uint64 window = IZecuredDisputes(address(registry)).disputeWindow();
+        if (block.timestamp <= uint256(paidAt) + window) vm.warp(uint256(paidAt) + window + 1);
+        uint64 frozenSince = gates.frozenSince(vaultId);
+        bool suspect = frozenSince != 0 && paidAt + window > frozenSince;
+        vm.prank(stranger);
+        try _payouts().expireConfirmation(claimId) {
+            if (suspect) _flag("R-3: a confirmation made just before a freeze expired");
+            calls["expire"]++;
+        } catch {
+            if (!suspect) _flag("an old confirmation could not expire");
+            calls["expire (suspect)"]++;
         }
     }
 
@@ -937,12 +1208,17 @@ contract ZecuredHandler is Test {
     function _noteFor(bytes32 vaultId, uint64 amount, bytes32 preferred) internal view returns (bool, uint256) {
         bytes32[] storage n = liveNotes[vaultId];
         for (uint256 i; i < n.length; ++i) {
-            if (n[i] == preferred && registry.lineageOf(n[i]).value >= amount) return (true, i);
+            if (n[i] == preferred && registry.lineageOf(n[i]).value >= amount && _spendable(n[i])) return (true, i);
         }
         for (uint256 i; i < n.length; ++i) {
-            if (registry.lineageOf(n[i]).value >= amount) return (true, i);
+            if (registry.lineageOf(n[i]).value >= amount && _spendable(n[i])) return (true, i);
         }
         return (false, 0);
+    }
+
+    /// R-12: a pending refund's note is spent by no payout until its claim opens.
+    function _spendable(bytes32 tag) internal view returns (bool) {
+        return tagState[tag] != TAG_REFUND_PENDING;
     }
 
     /// Tier 3: the signers commit the payout of `ids` from a lineage note of the vault before they sign it; the rest
@@ -975,6 +1251,7 @@ contract ZecuredHandler is Test {
             // The input is spent; its change, if any, is the vault's new note.
             if (change == 0) _removeNote(vaultId, input);
             else liveNotes[vaultId][n] = c.changeTag;
+            lastPayoutRef[vaultId] = c.payoutRef;
             calls["commit"]++;
             return true;
         } catch {
@@ -1088,21 +1365,67 @@ contract ZecuredHandler is Test {
         possible = true;
     }
 
-    /// Tier 3: a claim is never confirmed paid without a committed payout. Must always fail.
+    /// Tier 3: a claim is never confirmed paid without a payout committed for it, even under the reference of another
+    /// payout of its vault (R-1). Must always fail.
     function attackUncommittedConfirm(uint256 vaultSeed, uint256 signerSeed) external {
         (bool found, bytes32 vaultId,) = _vault(vaultSeed);
         if (!found) return;
+        bytes32 payoutRef = lastPayoutRef[vaultId];
+        if (payoutRef == bytes32(0)) payoutRef = keccak256(abi.encode("zecured.inv.noPayout", vaultId));
         uint64 count = registry.claimCount(vaultId);
         for (uint64 i; i < count; ++i) {
             bytes32 claimId = registry.claimIdOf(vaultId, i);
             (,,,, ClaimStatus status) = registry.claim(claimId);
             if (status != ClaimStatus.Pending || registry.claimInput(claimId) != bytes32(0)) continue;
             bytes32[] memory ids = _one(claimId);
-            bytes[] memory sigs = _threeSigs(registry.hashPayoutConfirmation(vaultId, ids), signerSeed);
-            try registry.confirmPayout(vaultId, ids, sigs) {
+            bytes[] memory sigs = _threeSigs(_payouts().hashPayoutConfirmation(vaultId, payoutRef, ids), signerSeed);
+            try _payouts().confirmPayout(vaultId, payoutRef, ids, sigs) {
                 attackSucceeded = true;
             } catch {}
             calls["attack: uncommitted confirm"]++;
+            return;
+        }
+    }
+
+    /// R-1: a confirmation is never replayed: the same signatures again, or a reopened claim confirmed under its old
+    /// payout. A final claim is never proven, disputed or confirmed again. Must always fail.
+    function attackReplayOrFinal(uint256 vaultSeed, uint256 signerSeed) external {
+        (bool found, bytes32 vaultId,) = _vault(vaultSeed);
+        if (!found) return;
+        IZecuredDisputes disputes = IZecuredDisputes(address(registry));
+        uint64 count = registry.claimCount(vaultId);
+        for (uint64 i; i < count; ++i) {
+            bytes32 claimId = registry.claimIdOf(vaultId, i);
+            ClaimDetails memory c = registry.claimDetails(claimId);
+            (uint64 paidAt,) = disputes.payoutDispute(claimId);
+            bytes32 input = registry.claimInput(claimId);
+            if (input == bytes32(0)) continue;
+            bytes32 payoutRef = _payoutRefOf(claimId);
+            bool reopenedPending = c.status == ClaimStatus.Pending && reopened[claimId];
+            bool finalPaid = c.status == ClaimStatus.Paid && paidAt == 0;
+            if (!reopenedPending && !finalPaid && !(c.status == ClaimStatus.Paid && paidAt != 0)) continue;
+            bytes[] memory sigs =
+                _threeSigs(_payouts().hashPayoutConfirmation(vaultId, payoutRef, _one(claimId)), signerSeed);
+            try _payouts().confirmPayout(vaultId, payoutRef, _one(claimId), sigs) {
+                attackSucceeded = true;
+            } catch {}
+            if (finalPaid) {
+                vm.prank(address(gates));
+                try disputes.upholdPayout(claimId, payoutRef) {
+                    attackSucceeded = true;
+                } catch (bytes memory reason) {
+                    if (bytes4(reason) != IZecuredDisputesEvents.AlreadyFinal.selector) {
+                        _flag("a final claim's second proof failed for another reason");
+                    }
+                }
+                if (c.claimant != address(0)) {
+                    vm.prank(c.claimant);
+                    try disputes.disputePayout(claimId) {
+                        attackSucceeded = true;
+                    } catch {}
+                }
+            }
+            calls["attack: replay or final"]++;
             return;
         }
     }
@@ -1306,5 +1629,185 @@ contract ZecuredHandler is Test {
             attackSucceeded = true;
         } catch {}
         calls["attack: close request"]++;
+    }
+
+    // ------------------------------------------------------------------ pre-liquidation (v4)
+
+    /// Terms within the bounds, drawn from `seed`: preLltv 45 % to 60 %, close factors from 1 % up to 100 %, incentive
+    /// factors from 1 up to Morpho's 1.1268 at this LLTV, for 1 to 60 days.
+    function _drawTerms(uint256 seed) internal view returns (PreLiquidationTerms memory t) {
+        seed = _mix(seed);
+        uint256 lif = 1_126_760_563_380_281_690; // min(1.15, 1 / (1 - 0.3 * (1 - 0.625)))
+        t.preLltv = bound(seed % 1e6, 450_000, 600_000) * 1e12;
+        t.preLcf1 = bound((seed >> 32) % 1e6, 10_000, 500_000) * 1e12;
+        t.preLcf2 = bound((seed >> 64) % 1e6, t.preLcf1 / 1e12, 1_000_000) * 1e12;
+        t.preLif1 = 1e18 + bound((seed >> 96) % 1e6, 0, 50_000) * 1e12;
+        t.preLif2 = bound(t.preLif1 + ((seed >> 128) % 1e17), t.preLif1, lif);
+        t.expiry = uint64(block.timestamp + bound((seed >> 192) % 1e9, 1 days, 60 days));
+    }
+
+    /// The account of an active vault opts into pre-liquidation (or, now and then, withdraws its terms).
+    function setPreLiquidationTerms(uint256 vaultSeed, uint256 termsSeed) external {
+        (bool found, bytes32 vaultId, address account) = _vault(vaultSeed);
+        if (!found) return;
+        (bool active,) = _active(vaultId);
+        if (!active) return;
+        if (_mix(termsSeed) % 8 == 0) {
+            vm.prank(account);
+            adapter.clearPreLiquidation();
+            calls["preLiquidation terms cleared"]++;
+            return;
+        }
+        PreLiquidationTerms memory t = _drawTerms(termsSeed);
+        vm.prank(account);
+        try adapter.setPreLiquidation(t) {
+            calls["preLiquidation terms set"]++;
+        } catch {
+            _flag("an account could not set valid pre-liquidation terms");
+        }
+    }
+
+    /// Morpho's state after interest about `account`, restated independently: whether the position is in its terms'
+    /// band, the most shares one pre-liquidation may repay, and the collateral `repaidShares` buy (Morpho's
+    /// PreLiquidation arithmetic, every step rounded down but the LTV).
+    struct PreQuote {
+        bool inBand;
+        uint256 repayable;
+        uint256 seized;
+        uint256 ltv;
+        // the state it is computed from
+        uint256 totalBorrowAssets;
+        uint256 totalBorrowShares;
+        uint256 shares;
+        uint256 price;
+        uint256 value;
+        uint256 borrowed;
+        uint256 q;
+        uint256 preLif;
+    }
+
+    function _preQuote(address account, PreLiquidationTerms memory t, uint256 repaidShares)
+        internal
+        view
+        returns (PreQuote memory r)
+    {
+        (,, r.totalBorrowAssets, r.totalBorrowShares) = morpho.expectedMarketBalances(params);
+        r.shares = morpho.position(marketId, account).borrowShares;
+        r.price = oracle.price();
+        r.value = uint256(morpho.position(marketId, account).collateral) * r.price / ORACLE_PRICE_SCALE;
+        r.borrowed =
+            (r.shares * (r.totalBorrowAssets + 1) + (r.totalBorrowShares + 1e6) - 1) / (r.totalBorrowShares + 1e6);
+        if (r.value == 0 || r.shares == 0) return r;
+        r.inBand = r.borrowed <= r.value * params.lltv / 1e18 && r.borrowed > r.value * t.preLltv / 1e18;
+        if (!r.inBand) return r;
+        r.ltv = (r.borrowed * 1e18 + r.value - 1) / r.value;
+        r.q = (r.ltv - t.preLltv) * 1e18 / (params.lltv - t.preLltv);
+        r.repayable = r.shares * (t.preLcf1 + r.q * (t.preLcf2 - t.preLcf1) / 1e18) / 1e18;
+        r.preLif = t.preLif1 + r.q * (t.preLif2 - t.preLif1) / 1e18;
+        uint256 assets = repaidShares * (r.totalBorrowAssets + 1) / (r.totalBorrowShares + 1e6);
+        r.seized = (assets * r.preLif / 1e18) * ORACLE_PRICE_SCALE / r.price;
+    }
+
+    /// Goal-directed: makes sure the vault has a loan and terms in force, moves the price so that its LTV is around the
+    /// band (mostly inside, sometimes just outside), then the liquidator pre-liquidates up to the close factor's cap
+    /// (sometimes past it). Whatever the outcome, it must be the one the terms and the floors say.
+    function preLiquidate(uint256 vaultSeed, uint256 ltvSeed, uint256 sharesSeed) external {
+        (bool found, bytes32 vaultId, address account) = _vault(vaultSeed);
+        if (!found) return;
+        (bool active, uint64 outstandingBefore) = _active(vaultId);
+        if (!active || !_ensureDebt(account, outstandingBefore, 5_000)) return;
+        _authorize(account);
+        PreLiquidationTerms memory t = adapter.preLiquidationTerms(account);
+        if (block.timestamp >= t.expiry) {
+            t = _drawTerms(ltvSeed);
+            vm.prank(account);
+            adapter.setPreLiquidation(t);
+        }
+        uint256 debt = morpho.expectedBorrowAssets(params, account);
+        // An LTV from preLltv - 1 % to LLTV + 1 %.
+        uint256 ltv = bound(_mix(ltvSeed) % 1e9, t.preLltv / 1e10 - 1e6, 63_500_000) * 1e10;
+        uint256 price = debt * 1e18 * ORACLE_PRICE_SCALE / (ltv * outstandingBefore);
+        if (price == 0) return;
+        oracle.setPrice(price);
+        PreQuote memory r = _preQuote(account, t, 0);
+        // Mostly the cap (what a pre-liquidator takes), else anything up to an eighth past it.
+        uint256 repaidShares =
+            _mix(sharesSeed) % 4 == 0 ? bound(sharesSeed, 1, r.repayable + r.repayable / 8 + 1) : r.repayable;
+        if (repaidShares == 0) repaidShares = 1;
+        r = _preQuote(account, t, repaidShares);
+        _fund(liquidator, address(adapter), debt + 1e6);
+        _tryPreLiquidate(vaultId, account, outstandingBefore, repaidShares, r);
+    }
+
+    function _tryPreLiquidate(
+        bytes32 vaultId,
+        address account,
+        uint64 outstandingBefore,
+        uint256 repaidShares,
+        PreQuote memory r
+    ) internal {
+        uint256 floor = adapter.minSeize(outstandingBefore);
+        bool frozen = gates.vaultFrozen(vaultId);
+        bool allowed = r.inBand && repaidShares <= r.repayable && r.seized >= floor
+            && r.seized + floor <= outstandingBefore && !frozen;
+        uint64 claimsBefore = registry.claimCount(vaultId);
+        vm.prank(liquidator);
+        try adapter.preLiquidate(account, repaidShares, keccak256("zecured.inv.preLiquidator")) returns (
+            uint256, uint64 seized
+        ) {
+            if (!allowed) _flag("a pre-liquidation outside the terms, the floors or a freeze went through");
+            calls["preLiquidate"]++;
+            _checkPreLiquidation(vaultId, account, claimsBefore, outstandingBefore, seized, r);
+        } catch {
+            if (allowed) _flag("an honest pre-liquidation reverted");
+            calls["preLiquidate (refused)"]++;
+        }
+    }
+
+    /// I9 and D11 at the moment of a pre-liquidation: one Liquidation claim of exactly what left the vault, the
+    /// restated amount, the liquidator its claimant, the vault still open with at least the floor; the LTV fell.
+    function _checkPreLiquidation(
+        bytes32 vaultId,
+        address account,
+        uint64 claimsBefore,
+        uint64 outstandingBefore,
+        uint64 seized,
+        PreQuote memory r
+    ) internal {
+        (bool stillActive, uint64 outstandingAfter) = _active(vaultId);
+        ClaimDetails memory c = registry.claimDetails(registry.claimIdOf(vaultId, claimsBefore));
+        if (
+            !stillActive || seized != r.seized || uint256(seized) + outstandingAfter != outstandingBefore
+                || c.amount != seized || c.kind != ClaimKind.Liquidation || c.claimant != liquidator
+                || outstandingAfter < adapter.minSeize(outstandingBefore)
+                || registry.claimCount(vaultId) != claimsBefore + 1
+        ) i9Violated = true;
+        uint256 value = uint256(outstandingAfter) * oracle.price() / ORACLE_PRICE_SCALE;
+        if (value != 0 && morpho.expectedBorrowAssets(params, account) * 1e18 / value >= r.ltv) {
+            _flag("a pre-liquidation did not lower the LTV");
+        }
+    }
+
+    /// Pre-liquidation without consent: an account without terms in force, or a position below its terms' band, is
+    /// never pre-liquidated. Must always fail.
+    function attackPreLiquidation(uint256 vaultSeed, uint256 seed) external {
+        (bool found, bytes32 vaultId, address account) = _vault(vaultSeed);
+        if (!found) return;
+        (bool active, uint64 outstanding) = _active(vaultId);
+        if (!active || !_ensureDebt(account, outstanding, 5_000)) return;
+        PreLiquidationTerms memory t = adapter.preLiquidationTerms(account);
+        if (block.timestamp < t.expiry) {
+            // Terms in force: the LTV 0.5 % to 5 % below the band.
+            uint256 debt = morpho.expectedBorrowAssets(params, account);
+            uint256 ltv = t.preLltv - bound(_mix(seed) % 1e9, 5e15, 5e16);
+            oracle.setPrice(debt * 1e18 * ORACLE_PRICE_SCALE / (ltv * outstanding) + 1);
+        }
+        uint256 shares = bound(seed, 1, morpho.position(marketId, account).borrowShares);
+        _fund(stranger, address(adapter), 100 * 1e6);
+        vm.prank(stranger);
+        try adapter.preLiquidate(account, shares, keccak256("zecured.inv.x")) {
+            attackSucceeded = true;
+        } catch {}
+        calls["attack: pre-liquidation"]++;
     }
 }

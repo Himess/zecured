@@ -171,7 +171,25 @@ not applied yet; they refused, and its next pass, about 80 seconds later, went t
   Vaults appear in logs only as an 8-hex-digit prefix of the vault id.
 - Error messages returned or logged by the signers never embed receivers, viewing keys or salts.
 - Base events and calldata carry only salted receiver commitments, never a Zcash address,
-  txid or note commitment (enforced by the contract interfaces).
+  txid or note commitment (enforced by the contract interfaces, checked on each deployment by
+  the leak scanner below).
+- **Leak scanner** (`tools/leak-scan`). It gathers, in memory only, the identifiers of our own
+  runs: for every note of the test wallets and of the coordinator's vaults, the transaction id
+  and the spending transaction's id (both byte orders), the note commitment, the nullifier and
+  the raw receiver; for every vault, its viewing key, tag key and address. It then searches
+  every event and every calldata of the deployment's contracts since their deployment block
+  and, on a local fork, every storage word (`anvil_dumpState`, in slot order so that a value
+  written over two slots stays contiguous). It prints counts only: a match is named by its kind
+  and where it was found, never by its value, and fails the run.
+
+  ```bash
+  cargo run -p zecured-leak-scan -- --deployment contracts/deployments/anvil.json       --rpc http://127.0.0.1:8545 --wallet data/wallet/wallet.json       --coordinator signer/data/coordinator --blocks --anvil-state
+  ```
+
+  Self-check on a local anvil (2026-10-17): a probe contract's event, its creation and a call
+  to it were read (1 event, 2 calldata, 1 storage word); one of our own Testnet vaults'
+  address, sent to the probe as calldata, was reported as "vault address in the calldata of
+  transaction …" with exit status 1, and the value itself was not printed.
 - Payout transactions are ordinary Ironwood transactions: the txids above show nothing but
   shielded actions on a block explorer.
 

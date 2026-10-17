@@ -14,10 +14,12 @@ import {
     RefundReason,
     DepositJournal,
     PendingActivation,
+    PendingRefund,
     WorkTier,
     IntakeConfig
 } from "./interfaces/v3/IZecuredIntake.sol";
 import {IZecuredRegistry, VaultStatus} from "./interfaces/v3/IZecuredRegistry.sol";
+import {IZecuredRefunds} from "./interfaces/v3/IZecuredRefunds.sol";
 import {ISignerBond} from "./interfaces/v3/ISignerBond.sol";
 import {IZecuredSlasher} from "./interfaces/v3/IZecuredSlasher.sol";
 import {IZecuredCapPrice} from "./interfaces/v3/IZecuredPriceFeed.sol";
@@ -26,11 +28,18 @@ import {ZecuredEIP712} from "./libraries/ZecuredEIP712.sol";
 
 /// @title ZecuredIntake
 /// @notice Everything before a vault is active (docs/TIER2.md; design notes T-01, T-02, T-03, T-07a, T-08, T-09):
-///         deposit proofs (from an active verifier version), pending activations (K3), and the gates of minting (the
-///         halt, the bonds, the coverage cap, the pause). Minting needs no signer: a proof lands without one; the signers' only say is the five `VaultOpened`
-///         signatures given when the vault opened. Every proven deposit lands, as a pending activation or as a refund:
-///         from then on its note is a lineage note, so taking it without a commitment is provable (F1).
-/// @dev The Registry trusts this contract for its deposit hooks and re-checks its own invariants in each (I4, I5,
+///         deposit proofs (from an active verifier version), pending activations and pending refunds (K3), and the
+///         gates of minting (the halt, the bonds, the coverage cap, the pause). Minting needs no signer: a proof lands
+///         without one; the signers' only say is the five `VaultOpened` signatures given when the vault opened. Every
+///         proven deposit lands, as a pending activation or as a pending refund: from then on its note is a lineage
+///         note, so taking it without a commitment is provable (F1).
+/// @dev v4 (review items R-11 to R-14, R-17, R-18): a refund waits like an activation before its claim opens, and
+///      opens only once its vault is not pending (R-8, R-12); a full coverage cap makes a new vault's proof revert
+///      rather than cancel the vault (R-11); a pending activation's account can take its deposit back
+///      `pendingRefundDelay` after it was ready, whatever gate holds it (R-13); both kinds of pending proof remember
+///      their deposit version, which must still be active when they finalize or convert, and anyone may drop them once
+///      it is not (R-14); nothing pending is dropped while a violation case is open on its vault (R-17).
+///      The Registry trusts this contract for its deposit hooks and re-checks its own invariants in each (I4, I5,
 ///      unique lineage tags). No owner, no upgrade path. Signer-attested minting (Tier 1) does not exist here: tests
 ///      use a harness that calls the hooks directly.
 contract ZecuredIntake is IZecuredIntake, EIP712 {
@@ -97,6 +106,9 @@ contract ZecuredIntake is IZecuredIntake, EIP712 {
     uint64 public pausedSince;
     /// @inheritdoc IZecuredIntake
     uint256 public guardNonce;
+    mapping(bytes32 depositTag => PendingRefund) private _pendingRefunds;
+    /// @inheritdoc IZecuredIntake
+    uint64 public pendingRefundTotal;
 
     /// @param c See `IntakeConfig`. The Registry must already be deployed and name this contract its intake.
     constructor(IntakeConfig memory c) EIP712(ZecuredEIP712.INTAKE_DOMAIN_NAME, ZecuredEIP712.DOMAIN_VERSION) {
@@ -106,9 +118,10 @@ contract ZecuredIntake is IZecuredIntake, EIP712 {
         ) revert ZeroAddress();
         IZecuredRegistry registry_ = IZecuredRegistry(c.registry);
         if (registry_.intake() != address(this)) revert InvalidConfig();
+        // R-18: a pending proof always waits for the relay and for time (K3), and a converted one for its delay.
         if (
-            c.finalizeDepth == 0 || c.maxPause == 0 || c.minRefundZat <= registry_.DUST_LIMIT()
-                || c.workTiers.length == 0 || c.workTiers.length > MAX_TIERS
+            c.finalizeDepth == 0 || c.finalizeDelay == 0 || c.pendingRefundDelay == 0 || c.maxPause == 0
+                || c.minRefundZat <= registry_.DUST_LIMIT() || c.workTiers.length == 0 || c.workTiers.length > MAX_TIERS
         ) revert InvalidConfig();
         // The coverage cap needs bonds and a price; without bonds (tests) it is off.
         if (
@@ -118,11 +131,16 @@ contract ZecuredIntake is IZecuredIntake, EIP712 {
                     || c.capPriceMaxAge == 0
                     || c.maxTotalZat == 0)
         ) revert InvalidConfig();
-        uint64 previous;
+        // Tiers ascend in amount and, R-18, never ask less work for a larger amount.
+        uint64 previousAmount;
+        uint256 previousWork;
         for (uint256 i; i < c.workTiers.length; ++i) {
             WorkTier memory t = c.workTiers[i];
-            if (t.maxAmountZat <= previous || t.minWork == 0) revert InvalidConfig();
-            previous = t.maxAmountZat;
+            if (t.maxAmountZat <= previousAmount || t.minWork == 0 || t.minWork < previousWork) {
+                revert InvalidConfig();
+            }
+            previousAmount = t.maxAmountZat;
+            previousWork = t.minWork;
             _tiers.push(t);
         }
 
@@ -159,7 +177,8 @@ contract ZecuredIntake is IZecuredIntake, EIP712 {
     ///      version allows; the anchor header is on the relay's best chain with enough work on top for the amount (so
     ///      is the deposit's block, which precedes it); all five signers described the vault in the `VaultOpened`
     ///      whose struct hash the proof computed (which binds the note, and with VaultOpened v2 its tag key, to this
-    ///      vault and account without anything about Zcash reaching Base); the tag is unused. Then the deposit lands.
+    ///      vault and account without anything about Zcash reaching Base); the tag is unused. Then the deposit lands,
+    ///      pending until the relay moves on (K3), with the version that proved it (R-14).
     function attestDepositWithProof(
         bytes calldata journal,
         bytes calldata seal,
@@ -167,9 +186,7 @@ contract ZecuredIntake is IZecuredIntake, EIP712 {
         bytes[] calldata openedSigs
     ) external {
         DepositJournal memory j = _decodeJournal(journal);
-        bytes4 selector = seal.length >= 4 ? bytes4(seal[:4]) : bytes4(0);
-        Version memory version = IZecuredVersions(versions).activeVersion(VersionKind.Deposit, selector, imageId);
-        if (journalV2 && !_branchAllowed(version.branches, j.branchId)) revert BranchNotAllowed(j.branchId);
+        bytes32 versionId = _checkVersionOf(j, seal, imageId);
         _checkAnchor(j.tipHash, minConfirmationWorkFor(j.amount));
         // All five: the DKG needs every signer, so all five always sign, and one honest signer suffices to refuse a
         // vault key it did not help create.
@@ -180,24 +197,21 @@ contract ZecuredIntake is IZecuredIntake, EIP712 {
         if (_registry.depositTagUsed(j.depositTag)) revert DepositTagUsed(j.depositTag);
 
         (bool refund, RefundReason reason) = _refundReason(j);
-        if (refund) _refund(j, reason);
-        else _pend(j);
+        if (refund) _pendRefund(j, reason, versionId);
+        else _pend(j, versionId);
     }
 
     /// @inheritdoc IZecuredIntake
     function finalizeActivation(bytes32 vaultId) external {
         PendingActivation memory p = _pending[vaultId];
         if (p.account == address(0)) revert NoPendingActivation(vaultId);
-        (, uint256 height,) = relay.bestChainTip();
-        if (height < p.readyHeight || block.timestamp < p.readyTime) {
-            revert ActivationNotReady(vaultId, p.readyHeight, p.readyTime);
-        }
+        if (!_isReady(p.readyHeight, p.readyTime)) revert ActivationNotReady(vaultId, p.readyHeight, p.readyTime);
         // Still on the best chain, and confirmation work only grows while it stays there.
         _checkAnchor(p.anchor, minConfirmationWorkFor(p.amount));
+        // R-14: a version removed meanwhile (a broken guest) proves nothing any more.
+        _checkVersionActive(p.versionId);
         // E2: not while a violation case about this vault (its deposit spent during the wait) is open.
-        if (slasher != address(0) && IZecuredSlasher(slasher).openCasesOf(vaultId) != 0) {
-            revert ViolationCaseOpen(vaultId);
-        }
+        if (_caseOpen(vaultId)) revert ViolationCaseOpen(vaultId);
         if (_halted()) revert MintingHalted();
         if (signerBond != address(0) && !ISignerBond(signerBond).fullyBonded()) revert SignersNotBonded();
         if (mintingPaused()) revert MintingIsPaused();
@@ -210,10 +224,13 @@ contract ZecuredIntake is IZecuredIntake, EIP712 {
     function dropPendingActivation(bytes32 vaultId) external {
         PendingActivation memory p = _pending[vaultId];
         if (p.account == address(0)) revert NoPendingActivation(vaultId);
-        if (relay.isInBestChain(p.anchor)) revert AnchorStillOnBestChain(vaultId);
+        // R-17: a case may be about this very note (spent while pending): dropping it would make the note no lineage
+        // note and dismiss the case.
+        if (_caseOpen(vaultId)) revert ViolationCaseOpen(vaultId);
+        if (relay.isInBestChain(p.anchor) && _versionActive(p.versionId)) revert AnchorStillOnBestChain(vaultId);
         delete _pending[vaultId];
         pendingTotal -= p.amount;
-        // Nothing was minted: the note may be proven again against the chain that won.
+        // Nothing was minted: the note may be proven again against the chain that won, or with a working version.
         _registry.releaseDeposit(vaultId, p.account, p.depositTag);
         emit PendingActivationDropped(vaultId);
     }
@@ -222,19 +239,46 @@ contract ZecuredIntake is IZecuredIntake, EIP712 {
     function refundPending(bytes32 vaultId) external returns (bytes32 claimId) {
         PendingActivation memory p = _pending[vaultId];
         if (p.account == address(0)) revert NoPendingActivation(vaultId);
-        // A reorged-out deposit may not exist: drop it instead.
-        if (!relay.isInBestChain(p.anchor)) revert NotRefundableYet(vaultId);
+        // R-12: K3 holds in both branches: a deposit a reorganisation may still remove is dropped, not refunded.
+        if (!_isReady(p.readyHeight, p.readyTime)) revert ActivationNotReady(vaultId, p.readyHeight, p.readyTime);
+        _checkAnchor(p.anchor, minConfirmationWorkFor(p.amount));
+        _checkVersionActive(p.versionId);
         if (!_halted()) {
-            // Only the vault's account, once a pause by signatures has lasted `pendingRefundDelay`.
+            // R-13: only the vault's account, once the activation has waited `pendingRefundDelay` past its ready time,
+            // whatever holds it (a pause, a missing bond, an open case): no gate can keep a deposit for good.
             if (msg.sender != p.account) revert NotPendingAccount(vaultId, msg.sender);
-            if (block.timestamp >= pausedUntil || block.timestamp < uint256(pausedSince) + pendingRefundDelay) {
-                revert NotRefundableYet(vaultId);
-            }
+            if (block.timestamp < p.readyTime + pendingRefundDelay) revert NotRefundableYet(vaultId);
         }
         delete _pending[vaultId];
         pendingTotal -= p.amount;
         claimId = _registry.convertToRefund(vaultId, p.account, p.amount, p.depositTag);
         emit DepositRefunded(vaultId, claimId, RefundReason.PendingConverted);
+    }
+
+    /// @inheritdoc IZecuredIntake
+    function finalizeRefund(bytes32 depositTag) external returns (bytes32 claimId) {
+        PendingRefund memory p = _pendingRefunds[depositTag];
+        if (p.account == address(0)) revert NoPendingRefund(depositTag);
+        if (!_isReady(p.readyHeight, p.readyTime)) revert RefundNotReady(depositTag, p.readyHeight, p.readyTime);
+        _checkAnchor(p.anchor, minConfirmationWorkFor(p.amount));
+        _checkVersionActive(p.versionId);
+        delete _pendingRefunds[depositTag];
+        pendingRefundTotal -= p.amount;
+        // The Registry refuses a pending vault (R-8: the refund waits for it) and a compromised one.
+        claimId = IZecuredRefunds(address(_registry)).openReservedRefund(p.vaultId, depositTag);
+        emit DepositRefunded(p.vaultId, claimId, p.reason);
+    }
+
+    /// @inheritdoc IZecuredIntake
+    function dropPendingRefund(bytes32 depositTag) external {
+        PendingRefund memory p = _pendingRefunds[depositTag];
+        if (p.account == address(0)) revert NoPendingRefund(depositTag);
+        if (_caseOpen(p.vaultId)) revert ViolationCaseOpen(p.vaultId); // as R-17
+        if (relay.isInBestChain(p.anchor) && _versionActive(p.versionId)) revert RefundStillValid(depositTag);
+        delete _pendingRefunds[depositTag];
+        pendingRefundTotal -= p.amount;
+        IZecuredRefunds(address(_registry)).releaseRefund(p.vaultId, depositTag);
+        emit PendingRefundDropped(p.vaultId, depositTag);
     }
 
     // ------------------------------------------------------------------ T-03: pause
@@ -285,7 +329,7 @@ contract ZecuredIntake is IZecuredIntake, EIP712 {
     function capRoom() external view returns (uint256 zatoshi) {
         // Without the coverage cap (tests) nothing is capped, as in `_capRoom`.
         if (coverageBps == 0) return type(uint256).max;
-        uint256 locked = _registry.lockedZatoshi() + pendingTotal;
+        uint256 locked = _locked();
         uint256 byTotal = locked >= maxTotalZat ? 0 : maxTotalZat - locked;
         (uint256 price, uint256 updatedAt) = IZecuredCapPrice(capOracle).priceHigh();
         if (price == 0 || block.timestamp > updatedAt + capPriceMaxAge) return 0;
@@ -298,7 +342,7 @@ contract ZecuredIntake is IZecuredIntake, EIP712 {
     /// @inheritdoc IZecuredIntake
     function coverageHoldsWith(uint256 effectiveBond) external view returns (bool) {
         if (coverageBps == 0) return true;
-        uint256 locked = _registry.lockedZatoshi() + pendingTotal;
+        uint256 locked = _locked();
         (uint256 price, uint256 updatedAt) = IZecuredCapPrice(capOracle).priceHigh();
         // A stale price never frees a bond.
         if (block.timestamp > updatedAt + capPriceMaxAge) return false;
@@ -324,6 +368,11 @@ contract ZecuredIntake is IZecuredIntake, EIP712 {
     /// @inheritdoc IZecuredIntake
     function pendingActivation(bytes32 vaultId) external view returns (PendingActivation memory) {
         return _pending[vaultId];
+    }
+
+    /// @inheritdoc IZecuredIntake
+    function pendingRefund(bytes32 depositTag) external view returns (PendingRefund memory) {
+        return _pendingRefunds[depositTag];
     }
 
     /// @inheritdoc IZecuredIntake
@@ -363,6 +412,19 @@ contract ZecuredIntake is IZecuredIntake, EIP712 {
         }
     }
 
+    /// @dev T-07a: the seal's router selector and `imageId` are an active Deposit version, and a v2 journal names one of
+    ///      its branch ids (D54: the version lists them). Returns the version's id (R-14).
+    function _checkVersionOf(DepositJournal memory j, bytes calldata seal, bytes32 imageId)
+        internal
+        view
+        returns (bytes32)
+    {
+        bytes4 selector = seal.length >= 4 ? bytes4(seal[:4]) : bytes4(0);
+        Version memory version = IZecuredVersions(versions).activeVersion(VersionKind.Deposit, selector, imageId);
+        if (journalV2 && !_branchAllowed(version.branches, j.branchId)) revert BranchNotAllowed(j.branchId);
+        return IZecuredVersions(versions).versionIdOf(VersionKind.Deposit, selector, imageId);
+    }
+
     /// @dev A non-zero branch id among the version's.
     function _branchAllowed(uint32[4] memory branches, uint32 b) internal pure returns (bool) {
         return b != 0 && (b == branches[0] || b == branches[1] || b == branches[2] || b == branches[3]);
@@ -375,28 +437,77 @@ contract ZecuredIntake is IZecuredIntake, EIP712 {
         if (!relay.isInBestChain(tipHash) || work < minWork) revert AnchorNotConfirmed(tipHash, work);
     }
 
+    /// @dev K3: the relay's best chain reached `readyHeight` and `readyTime` passed (height alone could be fed by an
+    ///      attacker, time alone could pass with no feeder running).
+    function _isReady(uint256 readyHeight, uint256 readyTime) internal view returns (bool) {
+        (, uint256 height,) = relay.bestChainTip();
+        return height >= readyHeight && block.timestamp >= readyTime;
+    }
+
+    /// @dev When a proof landing now is ready (K3).
+    function _readyAt() internal view returns (uint256 readyHeight, uint256 readyTime) {
+        (, uint256 height,) = relay.bestChainTip();
+        readyHeight = height + finalizeDepth;
+        readyTime = block.timestamp + finalizeDelay;
+    }
+
+    function _versionActive(bytes32 versionId) internal view returns (bool) {
+        return IZecuredVersions(versions).isActive(versionId);
+    }
+
+    /// @dev R-14.
+    function _checkVersionActive(bytes32 versionId) internal view {
+        if (!_versionActive(versionId)) revert VersionNotActive(versionId);
+    }
+
+    /// @dev An open violation case about the vault (E2, R-17).
+    function _caseOpen(bytes32 vaultId) internal view returns (bool) {
+        return slasher != address(0) && IZecuredSlasher(slasher).openCasesOf(vaultId) != 0;
+    }
+
     /// @dev K3: reserves the vault, its tag and its account until `finalizeActivation`, `dropPendingActivation` or
     ///      `refundPending`.
-    function _pend(DepositJournal memory j) internal {
+    function _pend(DepositJournal memory j, bytes32 versionId) internal {
         _registry.reserveDeposit(j.vaultId, j.account, j.amount, j.depositTag);
         pendingTotal += j.amount;
-        (, uint256 height,) = relay.bestChainTip();
-        uint256 readyHeight = height + finalizeDepth;
-        uint256 readyTime = block.timestamp + finalizeDelay;
+        (uint256 readyHeight, uint256 readyTime) = _readyAt();
         _pending[j.vaultId] = PendingActivation({
             account: j.account,
             amount: j.amount,
             depositTag: j.depositTag,
             anchor: j.tipHash,
             readyHeight: readyHeight,
-            readyTime: readyTime
+            readyTime: readyTime,
+            versionId: versionId
         });
         emit ActivationPending(j.vaultId, j.account, j.amount, j.depositTag, readyHeight, readyTime);
     }
 
+    /// @dev T-02, R-12: the deposit will land as a Refund claim of the vault's account; until `finalizeRefund` (or
+    ///      `dropPendingRefund`) its tag and lineage note are reserved.
+    function _pendRefund(DepositJournal memory j, RefundReason reason, bytes32 versionId) internal {
+        if (j.amount < minRefundZat) revert RefundTooSmall(j.amount, minRefundZat);
+        _registry.reserveRefund(j.vaultId, j.account, j.amount, j.depositTag);
+        pendingRefundTotal += j.amount;
+        (uint256 readyHeight, uint256 readyTime) = _readyAt();
+        _pendingRefunds[j.depositTag] = PendingRefund({
+            vaultId: j.vaultId,
+            account: j.account,
+            amount: j.amount,
+            reason: reason,
+            anchor: j.tipHash,
+            readyHeight: readyHeight,
+            readyTime: readyTime,
+            versionId: versionId
+        });
+        emit RefundPending(j.vaultId, j.depositTag, uint8(reason), readyHeight, readyTime);
+    }
+
     /// @dev T-02: whether a proven deposit lands as a refund, and why. Decided without reading the price whenever the
-    ///      deposit cannot activate the vault anyway; the cap counts pending activations, so a paused or underbonded
-    ///      network still checks it (I18), and its price must be fresh (`CapPriceStale` otherwise).
+    ///      deposit cannot activate the vault anyway; the cap counts pending activations and refunds, so a paused or
+    ///      underbonded network still checks it (I18), and its price must be fresh (`CapPriceStale` otherwise). R-11: a
+    ///      new vault the cap has no room for is no longer refunded (that cancelled the vault for good): the proof
+    ///      reverts and is sent again later, or the note is proven in Refund mode.
     function _refundReason(DepositJournal memory j) internal view returns (bool, RefundReason) {
         if (j.mode == MODE_REFUND) return (true, RefundReason.ModeRefund);
         (,, VaultStatus status) = _registry.vault(j.vaultId);
@@ -404,26 +515,25 @@ contract ZecuredIntake is IZecuredIntake, EIP712 {
         if (status != VaultStatus.None) return (true, RefundReason.VaultNotNew);
         if (_registry.vaultOf(j.account) != bytes32(0)) return (true, RefundReason.AccountHasVault);
         if (_halted()) return (true, RefundReason.Halted);
-        if (!_capRoom(j.amount)) return (true, RefundReason.CapExceeded);
+        if (!_capRoom(j.amount)) revert CapExceeded(j.amount);
         return (false, RefundReason.ModeRefund);
-    }
-
-    /// @dev T-02: the deposit lands as a Refund claim of the vault's account.
-    function _refund(DepositJournal memory j, RefundReason reason) internal {
-        if (j.amount < minRefundZat) revert RefundTooSmall(j.amount, minRefundZat);
-        bytes32 claimId = _registry.openRefund(j.vaultId, j.account, j.amount, j.depositTag);
-        emit DepositRefunded(j.vaultId, claimId, reason);
     }
 
     function _halted() internal view returns (bool) {
         return signerBond != address(0) && ISignerBond(signerBond).halted();
     }
 
+    /// @dev T-01: what the vaults hold for Base (the zZEC supply and every pending claim but dormant refunds) plus what
+    ///      is pending here.
+    function _locked() internal view returns (uint256) {
+        return _registry.lockedZatoshi() + pendingTotal + pendingRefundTotal;
+    }
+
     /// @dev T-01: locked and pending zatoshi plus `amount` stay within the absolute cap and, valued at the high price,
     ///      within `coverageBps` of the effective bond. A stale price reverts: the proof is sent again later.
     function _capRoom(uint64 amount) internal view returns (bool) {
         if (coverageBps == 0) return true;
-        uint256 locked = _registry.lockedZatoshi() + pendingTotal + amount;
+        uint256 locked = _locked() + amount;
         if (locked > maxTotalZat) return false;
         (uint256 price, uint256 updatedAt) = IZecuredCapPrice(capOracle).priceHigh();
         if (block.timestamp > updatedAt + capPriceMaxAge) revert CapPriceStale(updatedAt);

@@ -2,7 +2,7 @@
 
 > **Borrow against shielded ZEC. Sell nothing. Reveal nothing.**
 
-Every way to use ZEC in DeFi today starts with unshielding it. Zecured doesn't.
+Using ZEC in DeFi today usually means taking it out of the shielded pool. Zecured doesn't.
 Holding ZEC shielded no longer means giving up liquidity: you can borrow dollars on Base without
 selling or unshielding it, and USDC lenders on Base gain a new market backed by Zcash collateral.
 
@@ -71,7 +71,7 @@ txids) and how to reproduce every run: [docs/TESTING.md](docs/TESTING.md).
 | ZZEC, ZecuredRegistry and ZecuredSpendLogic, ZecuredIntake, SettlementAdapter, SignerBondV2 (USDC bonds), ZecuredSlasher, ZecuredCompensator, ZecuredVersions; ZecuredPriceFeed for mainnet (tested against the live Chainlink and API3 feeds on a Base mainnet fork) | |
 | Liquidation, close from collateral, refunds of non-conforming deposits | |
 | Own RPC / bundler / paymaster proxy with a sponsorship allowlist | |
-| Tier 2 deposit statement on real Testnet data, run in the RISC Zero zkVM; Zcash header relay with on-chain Equihash | RISC Zero verifier on the local fork (`MockRiscZeroVerifier`, accepts unproven journals; it also plays the router and its emergency stop for the version registry) for the demo's own proofs, and `mock-host` (MOCK, TEST ONLY), which seals journals of the native statement for it where RISC Zero does not run (Windows); real Groth16 seals of a real deposit and a real F1 spend pass RISC Zero's verifier router on Base Sepolia and on a Base mainnet fork (`RealGroth16Seal.t.sol`) |
+| Tier 2 deposit statement on real Testnet data, run in the RISC Zero zkVM; Zcash header relay with on-chain Equihash | RISC Zero verifier on the local fork (`MockRiscZeroVerifier`, accepts unproven journals; it also plays the router and its emergency stop for the version registry) for the demo's own proofs, and `mock-host` (MOCK, TEST ONLY), which seals journals of the native deposit and payment statements for it where RISC Zero does not run (Windows); real Groth16 seals of a real deposit and a real F1 spend pass RISC Zero's verifier router on Base Sepolia and on a Base mainnet fork (`RealGroth16Seal.t.sol`) |
 | Tier 3 ([docs/TIER3.md](docs/TIER3.md)): every payout committed on Base before it is signed; bonds, slashing, compensation, the liveness penalty and disputes of a confirmation; the violation statement proven on a real Testnet vault spend and run in the zkVM; the `watch --tier3` watchtower | The theft demonstration runs on its own deployment with a 2-minute challenge window (labelled DEMO), never on the judge deployment |
 
 ## Repository layout
@@ -86,12 +86,15 @@ txids) and how to reproduce every run: [docs/TESTING.md](docs/TESTING.md).
 | `signer/crates/coordinator` | Keyless orchestrator: DKG relay, attestations, payouts, confirmations |
 | `signer/crates/base-client` | EIP-712 (cross-checked with Solidity), Registry events |
 | `signer/crates/deposit-witness` | Tier 2: the ZIP 221 history tree (V3, Ironwood) from public chain data, and the witness of a deposit proof |
-| `tier2/` | Tier 2 and 3: the deposit and violation statements (`statement/`), the two RISC Zero guests and the host (separate Cargo workspace) |
+| `tier2/` | Tier 2 and 3 and the swap: the deposit and violation statements (`statement/`), the payment statement (`payment-statement/`), their RISC Zero guests and the host (separate Cargo workspace) |
+| `ops/` | `zecured-ops`: prepares, signs, collects and submits the signers' operator messages ([docs/OPERATIONS.md](docs/OPERATIONS.md) § 8) |
+| `swap/` | Zecured Swap: the shared swap crate and the market maker bot (`zecured-swap-maker`) ([docs/SWAP.md](docs/SWAP.md)) |
+| `tools/leak-scan` | Searches a deployment's events, calldata and storage for the Zcash identifiers of our own runs ([docs/TESTING.md](docs/TESTING.md) § 4) |
 | `backend/` | Public API + privacy proxy (RPC, bundler, paymaster allowlist) |
 | `bots/` | Liquidator and market maker |
 | `cli/` | `zecured-wallet`: Ironwood CLI wallet and borrower actions |
 | `app/` | Next.js app (in progress) |
-| `docs/` | [Architecture](docs/ARCHITECTURE.md), [Interfaces](docs/INTERFACES.md), [Threat model](docs/THREAT_MODEL.md), [Decisions](docs/DECISIONS.md), [Invariants](docs/INVARIANTS.md), [Economics](docs/ECONOMICS.md), [Mainnet](docs/MAINNET.md), [Testing and evidence](docs/TESTING.md), [Security review](docs/SECURITY_REVIEW.md), [Tier 2 design](docs/TIER2.md), [Tier 3 design](docs/TIER3.md), [Operators](docs/OPERATORS.md), [Jury FAQ](docs/JURY_FAQ.md), spikes |
+| `docs/` | [Architecture](docs/ARCHITECTURE.md), [Interfaces](docs/INTERFACES.md), [Threat model](docs/THREAT_MODEL.md), [Decisions](docs/DECISIONS.md), [Invariants](docs/INVARIANTS.md), [Economics](docs/ECONOMICS.md), [Mainnet](docs/MAINNET.md), [Swap](docs/SWAP.md), [Testing and evidence](docs/TESTING.md), [Security review](docs/SECURITY_REVIEW.md), [Tier 2 design](docs/TIER2.md), [Tier 3 design](docs/TIER3.md), [Operators](docs/OPERATORS.md), [Jury FAQ](docs/JURY_FAQ.md), spikes |
 
 ## Running it
 
@@ -177,6 +180,8 @@ passing ([docs/TIER2.md](docs/TIER2.md) § 8.1 lists the ELFs' hashes):
 | violation-test | `0x65705f75c5482b2b0cf6fee12760b2364d48213bb2933f3882dc2d92f824866e` |
 | deposit-main | `0x53f8f8e3664ce908c4ea072f239e18b6fa8b01d68c01fc162b4ae2e31b2cd5c5` |
 | violation-main | `0x24edd49e52447665146009687b6b85e3f0b6184883cbf635a762048cd1a5ce33` |
+| payment-test (swap, 2026-10-17) | `0x199bf772d0780413a07081b4889f0473c8ae558c6d8c4dca96eef49b5e486134` |
+| payment-main (swap, 2026-10-17) | `0x1c2def3eb121bd3240700ca554ab455e03420981856fda3f580b930f731038b2` |
 
 The ids of a deployment's network must equal the deployed ones (`deployments/base-sepolia.json` for
 Testnet). A build without

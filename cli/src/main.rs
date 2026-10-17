@@ -24,8 +24,8 @@ use serde::{Deserialize, Serialize};
 use serde_json::json;
 use zcash_protocol::consensus::{BlockHeight, Network};
 use zecured_base::{
-    Destination, OpenVault, RefundRequest, VaultOpened, ViewKeyRequest, check_signed_by_all, registry_domain,
-    sign_typed, tag_key_hash, text_hash,
+    Destination, OpenVault, ProveRefund, RefundRequest, VaultOpened, ViewKeyRequest, check_signed_by_all,
+    registry_domain, sign_typed, tag_key_hash, text_hash,
 };
 use zecured_zcash_ops::{
     keys::{encode_ironwood_ua, ironwood_receiver},
@@ -37,6 +37,7 @@ use zecured_zcash_ops::{
 mod base_test;
 mod claims;
 mod prove;
+mod swap;
 mod watch;
 
 const NETWORK: Network = Network::TestNetwork;
@@ -131,6 +132,9 @@ enum Cmd {
     },
     #[command(subcommand)]
     Loan(LoanCmd),
+    /// Zecured Swap: sell shielded ZEC for USDC with no custodian (cli/src/swap.rs).
+    #[command(subcommand)]
+    Swap(swap::SwapCmd),
 }
 
 #[derive(Subcommand)]
@@ -203,6 +207,22 @@ enum LoanCmd {
         #[arg(long, env = "BASE_SEPOLIA_RPC_URL", default_value = "https://sepolia.base.org")]
         rpc: String,
     },
+    /// R-5 (v4): arm the liveness clock of one of the loan's claims for its current destination.
+    /// The backend serves the earliest receipt a signer gave for it; the receipt is checked here
+    /// against the claim's commitment on Base and the network config's signers, then
+    /// `SignerBondV2.armLiveness` is sent. TEST ONLY: the owner EOA pays the gas (the call is
+    /// permissionless; the app sends it gaslessly from the account).
+    Arm {
+        vault: B256,
+        #[arg(long)]
+        claim: B256,
+        #[arg(long, env = "BASE_SEPOLIA_RPC_URL", default_value = "https://sepolia.base.org")]
+        rpc: String,
+    },
+    /// R-11.1 (v4): ask for the deposit back when the coverage cap leaves no room for the vault's
+    /// activation: the coordinator proves the deposit as a refund, which lands as a Refund claim
+    /// of the vault's account (then `refund-destination`).
+    ProveRefund { vault: B256 },
     /// Fetch the vault's viewing key (UFVK) to verify it independently; refused unless it is
     /// the key the signers signed when the vault opened.
     ViewingKey { vault: B256 },
@@ -814,6 +834,7 @@ async fn main() -> Result<()> {
             }
         }
         Cmd::Loan(cmd) => loan(&cli.wallet, &cli.lwd, &cli.backend, cmd).await?,
+        Cmd::Swap(cmd) => swap::run(&cli.wallet, &cli.lwd, cmd).await?,
     }
     Ok(())
 }
@@ -979,6 +1000,41 @@ async fn loan(wallet: &Path, lwd_url: &str, backend: &str, cmd: LoanCmd) -> Resu
                 );
             }
             base_test::dispute(wallet, &vault, claim, reopen, &rpc).await?;
+        }
+        LoanCmd::Arm { vault, claim, rpc } => {
+            let net = network_params()?;
+            ensure!(
+                net.nodes.len() == SIGNERS,
+                "the network config must list the {SIGNERS} signer nodes (index and eth address) to check the receipt"
+            );
+            let on_base = claims::vault_claims(net.registry, vault, &rpc).await?;
+            let c = on_base.iter().find(|c| c.id == claim).context("no such claim of this vault on Base")?;
+            claims::arming_allowed(c)?;
+            let receipt = claims::parse_receipt(&post(backend, &format!("/claims/{claim}/receipt"), json!({})).await?)?;
+            let bond = claims::signer_bond(net.registry, &rpc).await?;
+            let signers: Vec<Address> = net.nodes.iter().map(|n| n.eth).collect();
+            claims::check_receipt(net.chain_id, bond, &signers, c, &receipt)?;
+            base_test::arm_liveness(wallet, &vault, bond, claim, receipt.received_at, receipt.signature, &rpc).await?;
+        }
+        LoanCmd::ProveRefund { vault } => {
+            let (mut l, owner, _) = owner_ctx(wallet, &vault, Some(String::new()))?;
+            let nonce = l.next_nonce;
+            let deadline = now() + REQUEST_TTL_SECS;
+            let msg = ProveRefund {
+                vaultId: vault,
+                nonce,
+                deadline,
+            };
+            let sig = sign_typed(&owner, &registry_domain(l.chain_id, l.registry), &msg)?;
+            let r = post(
+                backend,
+                &format!("/vaults/{vault}/prove-refund"),
+                json!({ "nonce": nonce.to_string(), "deadline": deadline.to_string(), "signature": sig }),
+            )
+            .await?;
+            l.next_nonce += 1;
+            write_json(&loan_path(wallet, &vault), &l)?;
+            println!("{}", serde_json::to_string_pretty(&r)?);
         }
         LoanCmd::ViewingKey { vault } => {
             let (ufvk, checked) = viewing_key(wallet, backend, &vault).await?;

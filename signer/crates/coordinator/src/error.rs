@@ -32,6 +32,27 @@ pub enum PublicError {
     SignersUnavailable,
     /// The Zcash light wallet server or the Base RPC failed.
     ChainUnavailable,
+    /// Mainnet beta (section 6): openings are invite-only and the request has no valid code.
+    InviteRequired,
+    /// Mainnet beta: the invite code's uses are all taken.
+    InviteUsed,
+    /// Mainnet beta: the operator closed vault openings (exits and payouts go on).
+    OpeningsClosed,
+    /// R-11.1: the vault's activation is not blocked (the coverage cap has room): nothing to refund.
+    NotBlocked,
+    /// R-11.1: no deposit of the vault's amount has been seen with its confirmations yet.
+    NoDeposit,
+    /// R-11.1: the deposit is on Base already (or the vault no longer waits for it).
+    AlreadyLanded,
+    /// R-11.1: this deployment's guest has no Refund mode (journal v1).
+    RefundUnavailable,
+    /// The coordinator is not set up for this (e.g. it makes no proofs, or the deployment has no
+    /// bonds).
+    NotConfigured,
+    /// R-5: no signer gave a valid liveness receipt for the claim.
+    NoReceipt,
+    /// R-11.1: the coverage cap has no room for this vault's activation now.
+    CapFull,
     Internal,
 }
 
@@ -53,6 +74,16 @@ impl PublicError {
             Self::SignersRefused => "signers_refused",
             Self::SignersUnavailable => "signers_unavailable",
             Self::ChainUnavailable => "chain_unavailable",
+            Self::InviteRequired => "invite_required",
+            Self::InviteUsed => "invite_used",
+            Self::OpeningsClosed => "openings_closed",
+            Self::NotBlocked => "not_blocked",
+            Self::NoDeposit => "no_deposit",
+            Self::AlreadyLanded => "already_landed",
+            Self::RefundUnavailable => "refund_unavailable",
+            Self::NotConfigured => "not_configured",
+            Self::NoReceipt => "no_receipt",
+            Self::CapFull => "cap_full",
             Self::Internal => "internal",
         }
     }
@@ -76,6 +107,18 @@ impl PublicError {
             Self::SignersRefused => "The signers refused the request.",
             Self::SignersUnavailable => "Not enough signers are available. Try again later.",
             Self::ChainUnavailable => "A blockchain service is unavailable. Try again later.",
+            Self::InviteRequired => "Opening a vault needs a valid invite code.",
+            Self::InviteUsed => "This invite code has been used.",
+            Self::OpeningsClosed => "New vaults cannot be opened right now. Existing vaults are not affected.",
+            Self::NotBlocked => "The deposit can still activate the vault: there is nothing to refund.",
+            Self::NoDeposit => "No confirmed deposit of the vault's amount has been seen yet.",
+            Self::AlreadyLanded => "The deposit is already on Base.",
+            Self::RefundUnavailable => "This deployment cannot prove a deposit as a refund.",
+            Self::NotConfigured => "Not configured on this backend.",
+            Self::NoReceipt => "No signer holds a validated destination for this claim yet.",
+            Self::CapFull => {
+                "The coverage cap has no room for this vault now: try again later, or ask for the deposit back."
+            }
             Self::Internal => "Internal error.",
         }
     }
@@ -84,14 +127,23 @@ impl PublicError {
     pub fn status(self) -> u16 {
         match self {
             Self::BadRequest => 400,
-            Self::NotOwner => 403,
-            Self::UnknownVault => 404,
-            Self::AlreadyBound | Self::NonceUsed | Self::RefundOnBase => 409,
-            Self::NotDenomination | Self::InvalidReceiver | Self::Expired | Self::SignersRefused => 422,
+            Self::NotOwner | Self::InviteRequired | Self::OpeningsClosed => 403,
+            Self::UnknownVault | Self::NoReceipt => 404,
+            Self::AlreadyBound
+            | Self::NonceUsed
+            | Self::RefundOnBase
+            | Self::InviteUsed
+            | Self::NotBlocked
+            | Self::AlreadyLanded
+            | Self::RefundUnavailable
+            | Self::CapFull => 409,
+            Self::NotDenomination | Self::InvalidReceiver | Self::Expired | Self::SignersRefused | Self::NoDeposit => {
+                422
+            }
             Self::BadStamp => 422,
             Self::Busy => 429,
             Self::Internal => 500,
-            Self::SignersUnavailable | Self::ChainUnavailable => 503,
+            Self::SignersUnavailable | Self::ChainUnavailable | Self::NotConfigured => 503,
         }
     }
 }

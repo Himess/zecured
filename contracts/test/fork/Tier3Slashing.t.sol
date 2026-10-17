@@ -203,6 +203,7 @@ contract Tier3SlashingTest is ZecuredFixture {
         uint256 supply = zzec.totalSupply();
         _mockProof(_vaultIdFor(late), late, VAULT_001, _depositTagFor(late), keccak256("zecured.tier3.lateAnchor"));
         assertEq(zzec.totalSupply(), supply, "nothing minted after the slash");
+        _finalizeRefund(_depositTagFor(late)); // R-12: it waits for the relay, then opens
         assertEq(uint8(_status(_vaultIdFor(late))), uint8(VaultStatus.Cancelled));
         vm.prank(watcher);
         bond.claimBounty();
@@ -485,10 +486,7 @@ contract Tier3SlashingTest is ZecuredFixture {
         MORPHO.setAuthorization(address(registry), true);
         bytes32 claimId = registry.requestRelease(vaultId, RELEASE_COMMITMENT);
         vm.stopPrank();
-        _commitNext(vaultId, _one(claimId));
-        registry.confirmPayout(
-            vaultId, _one(claimId), _threeSigs(registry.hashPayoutConfirmation(vaultId, _one(claimId)))
-        );
+        _confirmPayout(vaultId, _commitNext(vaultId, _one(claimId)).payoutRef, _one(claimId));
         (,,,, ClaimStatus status) = registry.claim(claimId);
         assertEq(uint8(status), uint8(ClaimStatus.Paid));
         uint64 unlocksAt = uint64(block.timestamp) + WINDOW;
@@ -560,10 +558,7 @@ contract Tier3SlashingTest is ZecuredFixture {
         MORPHO.setAuthorization(address(registry), true);
         bytes32 claimId = registry.requestRelease(vaultId, RELEASE_COMMITMENT);
         vm.stopPrank();
-        _commitNext(vaultId, _one(claimId));
-        registry.confirmPayout(
-            vaultId, _one(claimId), _threeSigs(registry.hashPayoutConfirmation(vaultId, _one(claimId)))
-        );
+        _confirmPayout(vaultId, _commitNext(vaultId, _one(claimId)).payoutRef, _one(claimId));
         // The vault's deposit tag is still a lineage note: a (false or true) F1 case can be opened.
         bytes32 caseId = _prove(_journal(ViolationKind.Uncommitted, THEFT_REF, depositTag, 0, bytes32(0)));
         vm.warp(block.timestamp + WINDOW);

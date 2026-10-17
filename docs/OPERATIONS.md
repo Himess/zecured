@@ -19,6 +19,7 @@ This page lists what that takes (reviews G1–G7). The server setup is in
 | `eth_getLogs` range | `ZECURED_LOG_RANGE` (default 2,000; a refused range is halved automatically); the nodes, the coordinator and the liquidator also step through Base by it, so a keyed RPC that allows larger ranges speeds them all up (H-11) |
 | Base depth before a payout's shares are released | `network.json`: the commitment must be under Base's `safe` head or, while that lags, `commit_depth_secs` old (default 120, at most 180, so that a signing session outlives the wait); `commit_depth_blocks` (default 3) stays a minimum. Seconds, not blocks, so nothing changes with Denim's 200 ms blocks (H-11) |
 | Bot intervals, relayer batch and standby | `--every-secs`, `--batch`, `RELAYER_STANDBY_LAG` |
+| The liquidator's pre-liquidation round | on by default, `--no-pre-liquidation` turns it off; its profitability estimate, only logged, uses `--eth-usd` (3,000), `--payout-wait-hours` (1) and `--zec-risk-bps-per-hour` (20) |
 | Cost and capacity of vault openings (H-01) | `network.json` `open_vault`: `stamp_bits` (zero bits of the hashcash stamp every `POST /vaults` carries; 20 by default, at most 32; each bit doubles the work in the user's browser), `pending_slot_secs` (a vault without a seen deposit stops counting against the cap this long after it opened; 1,800 by default, at least 60) and `max_pending` (most vaults waiting for their deposit at once; 512 by default). Missing fields take their defaults; the backend reads them at startup, and the app and the CLI read the stamp's bits from `GET /config` and from `network.json` |
 | Deposit proofs run at once (H-12) | `DEPOSIT_PROOF_CONCURRENCY` in `backend.env` (1 by default, 2 at most); the others wait in a first-in-first-out queue, one job per vault, and `GET /status` shows `depositProofs: { queued, running, concurrency }` |
 | Alarm thresholds and channel | `watchdog.env` |
@@ -67,6 +68,7 @@ These are measured costs at Base Sepolia's usual 0.006 gwei. A higher gas price 
 | Public Base RPC limits (200-block logs, rate limits) | any time | slower event sync | adaptive log ranges; a keyed RPC for the backend; a witness RPC per node |
 | Faucets (TAZ, USDC) for judges | any time | a judge cannot fund a vault | pre-funded demo wallets; DEMO.md fallback |
 | Gas price spikes on Base Sepolia | any time | the relay costs more | watchdog balance alarms; treasury reserve |
+| RISC Zero's emergency stop of a verifier | any time | proofs under its router selector revert: deposits wait, slashing and inclusion proofs fail | keep two working violation versions, on different router selectors where RISC Zero offers them (a working one can then go only while the other works, R-22); schedule a replacement, which takes `estopDelay` while every violation verifier is stopped; drop the pending items of a removed version and prove them again |
 | Server billing, disk and logs | monthly | the server stops | prepay through 23 Nov; journald size limit |
 
 ## 5. The running code is the submitted code (G5)
@@ -104,3 +106,56 @@ watchdog on and nothing restarted by hand. We record:
 - the balance burn rate against § 3;
 - the relay lag;
 - every alarm.
+
+## 8. Operator messages: `zecured-ops` (v4)
+
+One tool prepares, signs, collects and submits every EIP-712 message the signers sign as operators
+(`ops/`, D74). The signing layer is the one the nodes' liveness receipts use.
+
+| Message | Contract | Signatures |
+|---|---|---|
+| `PauseMinting`, `UnpauseMinting` | Intake | 3 of 5 |
+| `ScheduleVersion` (Deposit, Violation or Swap) | ZecuredVersions | 5 of 5 |
+| `RemoveVersion` | ZecuredVersions | 3; all 5 for the last working deposit version; never the last working violation version; 3 for a version that is not working |
+| `ReimburseDestination` | Registry | 5 of 5 |
+
+1. `zecured-ops prepare <message> … --out req.json` (`--ttl`, default 6 hours): reads the contract and
+   the nonce through the Registry of the network config, and refuses unless the contract's own hash
+   view gives the same digest.
+2. Each signer: `zecured-ops sign req.json --identity signer/data/node-<i>/identity.json --out
+   sig.<i>.json` shows what it signs and signs with `--yes` (`--key-env VAR` reads the key from an
+   environment variable instead). Keys are never printed.
+3. `zecured-ops collect req.json sig.*.json --out bundle.json` (a bundle can be collected again to add
+   signatures).
+4. `zecured-ops submit bundle.json --dry-run`, then for real with `--sender-key-env VAR` or
+   `--sender-identity <file>`. Before sending it checks the chain, the deployment's contract, the
+   contract's hash view, the current nonce, the Registry's signers and how many signatures the
+   message needs now (for a removal, through `isWorking`).
+
+`zecured-ops versions` lists the deployment's versions and which of them work. Options: `--config` or
+`ZECURED_NETWORK_CONFIG`, `--rpc` or `ZECURED_OPS_RPC` (scrubbed from every error).
+
+**The drill** (`scripts/ops-drill.sh`) runs dry by default; `--send`, on a local fork only, sends the
+pause and the unpause and keeps the version stages as dry runs (`DEPLOYER_PRIVATE_KEY` pays;
+optional `DRILL_REIMBURSE_CLAIM` and `DRILL_REIMBURSE_COMMITMENT` for a bond-paid claim,
+`DRILL_SELECTOR`).
+
+## 9. Invites (the mainnet beta)
+
+`--invites` (or `ZECURED_INVITES`) names the operator's invite file; unset, openings are open to all
+(the judge deployment). Its format: `{"openings":true,"inviteOnly":true,"codes":[{"hash":"0x<keccak256
+of the code>","uses":1}]}`; hash a code with `cast keccak "<code>"` (surrounding whitespace is trimmed).
+The file is read again on every opening and every `/config`, so it changes without a restart; a
+broken file is refused at startup, and one that becomes unreadable later closes openings. Uses are
+counted in the coordinator's data directory (`invites-used.json`, hashes only). `openings: false`
+closes new vaults for everyone; exits, payouts, refunds and proofs never stop. The market maker has
+its own invite list for quotes (docs/SWAP.md).
+
+## 10. Watchdog settings (v4)
+
+Besides the v3 checks: Base mainnet ETH and USDC (`MAINNET_RPC_URL`, `WATCH_ETH_MAINNET`,
+`MIN_ETH_MAINNET[_<NAME>]`, `MAINNET_USDC`, `WATCH_USDC_MAINNET`, `MIN_USDC_MAINNET_<NAME>`); the
+demo wallet's TAZ (`WATCH_DEMO_TAZ=1`, `DEMO_STATUS_URL`, from the backend's demo status); balances
+only a service reports (`WATCH_JSON=name|url|field|floor`, for the market maker's inventory); and the
+coverage cap's fill (`REGISTRY`, `INTAKE`, `CAP_FILL_ALARM`, an alarm at 70 % by default, R-11). No
+alarm names an address, a key or a URL.

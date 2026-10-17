@@ -117,11 +117,13 @@ abstract contract Tier3Base is ZecuredFixture {
         (r[0], r[1]) = (a, b);
     }
 
+    /// v4 (R-1): confirms the latest payout the helpers committed from the first claim's input.
     function _confirm(bytes32 vaultId, bytes32[] memory claimIds) internal {
-        registry.confirmPayout(vaultId, claimIds, _threeSigs(registry.hashPayoutConfirmation(vaultId, claimIds)));
+        _confirmPaid(vaultId, claimIds);
     }
 
     function _send(SpendCommit memory c) internal {
         registry.commitSpend(c, _threeSigs(registry.hashSpendCommit(c)));
+        payoutRefOfInput[c.inputTag] = c.payoutRef;
     }
 }

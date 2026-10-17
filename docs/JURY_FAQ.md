@@ -36,11 +36,12 @@ It reveals a recent Zcash header (the anchor, not the deposit's block), the vaul
 account, the denomination, a keyed tag and a hash that also depends on the vault's viewing key.
 The deposit's block, transaction, note and address stay inside the proof.
 
-**Isn't zZEC just wrapped ZEC like renZEC?**
-No. No account ever holds zZEC: it is minted straight into one Morpho position and can only
-move between Morpho, our registry and the settlement adapter (enforced per transfer with a
-one-shot transient expectation). Each position's zZEC equals exactly what its own vault holds,
-and the ZEC never leaves the shielded pool.
+**Is zZEC a wrapped ZEC?**
+No. Here zZEC is Zecured's non-transferable collateral receipt, minted only into Morpho; it is
+not a tradable wrapped ZEC. No account ever holds it: it can only move between Morpho, our
+registry and the settlement adapter (enforced per transfer with a one-shot transient
+expectation). Each position's zZEC equals exactly what its own vault holds, and the ZEC never
+leaves the shielded pool.
 
 **What happens after a partial liquidation?**
 The vault tracks an outstanding amount. The liquidator gets only the seized ZEC; the rest stays
@@ -50,10 +51,6 @@ yours, and you take it back by repaying or closing from collateral.
 No. The ZEC never leaves Zcash's shielded Ironwood pool, and nothing is sold. Holding ZEC shielded
 no longer means giving up liquidity: you can borrow dollars on Base without selling or unshielding
 it, and USDC lenders on Base gain a new market backed by Zcash collateral.
-
-**Why not NEAR Intents?**
-Today's Zcash-origin bridge routes typically require a transparent sender. That's exactly the
-unshielding step we avoid.
 
 **Do you cross pools?**
 No. Deposits must be Ironwood → Ironwood (no transparent, Sapling or Orchard-pool parts — the

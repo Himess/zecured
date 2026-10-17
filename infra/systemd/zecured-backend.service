@@ -20,6 +20,8 @@ ProtectSystem=strict
 ProtectHome=yes
 PrivateTmp=yes
 ReadWritePaths=/var/lib/zecured
+# The prover's lock when two stacks share one prover (infra/prover-lock.sh); ignored where it does not exist.
+ReadWritePaths=-/var/lib/zecured-prover
 
 [Install]
 WantedBy=multi-user.target

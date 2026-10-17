@@ -39,6 +39,9 @@ jobs:
       - name: Build and contract sizes
         run: python3 script/check_sizes.py 1024
 
+      - name: Registry and spend logic share one storage layout
+        run: python3 script/check_storage_layout.py
+
       - name: Tests that need no RPC (unit, relay, deployment configs)
         run: forge test --match-path "test/{unit,relay,script}/**"
 
