@@ -37,6 +37,7 @@ use zecured_zcash_ops::{
 mod base_test;
 mod claims;
 mod prove;
+mod swap;
 mod watch;
 
 const NETWORK: Network = Network::TestNetwork;
@@ -131,6 +132,9 @@ enum Cmd {
     },
     #[command(subcommand)]
     Loan(LoanCmd),
+    /// Zecured Swap: sell shielded ZEC for USDC with no custodian (cli/src/swap.rs).
+    #[command(subcommand)]
+    Swap(swap::SwapCmd),
 }
 
 #[derive(Subcommand)]
@@ -814,6 +818,7 @@ async fn main() -> Result<()> {
             }
         }
         Cmd::Loan(cmd) => loan(&cli.wallet, &cli.lwd, &cli.backend, cmd).await?,
+        Cmd::Swap(cmd) => swap::run(&cli.wallet, &cli.lwd, cmd).await?,
     }
     Ok(())
 }

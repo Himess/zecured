@@ -7645,6 +7645,7 @@ dependencies = [
  "zecured-base",
  "zecured-deposit-witness",
  "zecured-policy",
+ "zecured-swap",
  "zecured-zcash-ops",
 ]
 
