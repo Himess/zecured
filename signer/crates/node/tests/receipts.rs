@@ -38,10 +38,15 @@ impl Drop for TempDir {
 }
 
 fn node() -> (Node, TempDir) {
+    node_at("http://127.0.0.1:9")
+}
+
+/// A node whose Base RPC is `rpc`.
+fn node_at(rpc: &str) -> (Node, TempDir) {
     let dir = TempDir(std::env::temp_dir().join(format!("zecured-receipts-{}", OsRng.next_u64())));
     let cfg = NetworkConfig {
         lightwalletd_url: "http://127.0.0.1:9".into(),
-        base_rpc_url: "http://127.0.0.1:9".into(),
+        base_rpc_url: rpc.into(),
         chain_id: CHAIN_ID,
         registry: Address::repeat_byte(0xaa),
         adapter: Address::repeat_byte(0xbb),
@@ -191,6 +196,69 @@ async fn a_receipt_needs_the_claims_destination_held_and_valid() {
     ] {
         let e = node.issue_receipt(&mut store, B256::repeat_byte(id), BOND).unwrap_err();
         assert!(format!("{e:#}").contains(why), "claim {id}: {e:#}");
+    }
+}
+
+/// A Base RPC stub: the Registry names `BOND`, whose `domainSeparator()` is `separator`.
+async fn base_stub(separator: B256) -> String {
+    use alloy::sol_types::SolCall;
+    use axum::{Json, Router, routing::post};
+    use zecured_base::events::{ISignerBond, IZecuredRegistry};
+    let app = Router::new().route(
+        "/",
+        post(move |Json(req): Json<serde_json::Value>| async move {
+            let result = match req["method"].as_str() {
+                Some("eth_call") => {
+                    let call = &req["params"][0];
+                    let data = call["input"].as_str().or(call["data"].as_str()).unwrap_or_default();
+                    let selector = hex::decode(data.trim_start_matches("0x").get(..8).unwrap_or_default()).unwrap();
+                    if selector == IZecuredRegistry::signerBondCall::SELECTOR {
+                        let mut word = vec![0u8; 12];
+                        word.extend_from_slice(BOND.as_slice());
+                        serde_json::json!(format!("0x{}", hex::encode(word)))
+                    } else if selector == ISignerBond::domainSeparatorCall::SELECTOR {
+                        serde_json::json!(separator)
+                    } else {
+                        return Json(serde_json::json!({ "jsonrpc": "2.0", "id": req["id"],
+                            "error": { "code": 3, "message": "execution reverted" } }));
+                    }
+                }
+                _ => serde_json::json!("0x14a34"),
+            };
+            Json(serde_json::json!({ "jsonrpc": "2.0", "id": req["id"], "result": result }))
+        }),
+    );
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let addr = listener.local_addr().unwrap();
+    tokio::spawn(async move { axum::serve(listener, app).await.unwrap() });
+    format!("http://{addr}")
+}
+
+/// R-5: a node serves receipts only while the bond's own EIP-712 domain is the receipts' (a bond
+/// with another domain would never take them).
+#[tokio::test]
+async fn receipts_need_the_bonds_own_domain() {
+    for (separator, served) in [
+        (bond_domain(CHAIN_ID, BOND).separator(), true),
+        (B256::repeat_byte(9), false),
+    ] {
+        let rpc = base_stub(separator).await;
+        let (node, _dir) = node_at(&rpc);
+        let held = Recipient {
+            receiver: stranger().to_raw_address_bytes(),
+            salt: [5; 32],
+        };
+        let (record, _) = vault(vec![claim(1, ClaimKind::Liquidation, held.commitment())]);
+        {
+            let mut store = node.store.lock().await;
+            store.save_vault(record).unwrap();
+            store.add_recipient(held).unwrap();
+        }
+        let r = node.receipt(B256::repeat_byte(1)).await;
+        assert_eq!(r.is_ok(), served, "{:?}", r.as_ref().err());
+        if let Err(e) = r {
+            assert!(format!("{e:#}").contains("domain"), "{e:#}");
+        }
     }
 }
 

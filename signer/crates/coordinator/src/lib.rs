@@ -611,8 +611,9 @@ fn apply_event(v: &mut CoordVault, ev: &VaultEvent) {
                     // T-05 (a): Base's state; a claim this coordinator saw paid stays paid in its
                     // books ([`CoordVault::books`]), and it proves that payout's inclusion.
                     ClaimChange::Disputed { .. } => claim.state = ClaimState::Disputed,
-                    // Section 3: final.
-                    ClaimChange::Upheld { .. } | ClaimChange::Proven { .. } => {
+                    // Section 3: final; R-3: so is a confirmation nobody disputed in time (no proof
+                    // of its payout is needed any more).
+                    ClaimChange::Upheld { .. } | ClaimChange::Proven { .. } | ClaimChange::Expired => {
                         claim.state = ClaimState::Paid;
                         claim.proven = true;
                     }
@@ -2175,6 +2176,18 @@ impl Coordinator {
                 B256::from(payout_ref(&v.ufvk, txid.as_ref()))
             }
         };
+        // R-1: each payout is confirmed once; a confirmation already on Base (its receipt lost, its
+        // event not at the safe head yet) is not asked for again. Unreadable: asked for.
+        let reader = ProviderBuilder::new().connect_http(self.cfg.base_rpc_url.parse()?);
+        if IZecuredRegistry::new(self.cfg.registry, &reader)
+            .payoutConfirmed(reference)
+            .call()
+            .await
+            .unwrap_or(false)
+        {
+            info!(vault = %short(id), "the payout's confirmation is on Base already");
+            return Ok(());
+        }
         let answers = self.nodes.post_many::<_, ConfirmResponse>(&self.nodes.indices(), &path, &body).await;
         let (answers, failed) = split(answers);
         let msg = payout_confirmation(*id, reference, claims);
@@ -2592,6 +2605,14 @@ mod tests {
         };
         apply_event(&mut v, &ev(12, confirmed));
         assert_eq!((v.claims[0].state, v.claims[0].confirmed_at), (ClaimState::Paid, 24));
+        // R-3: a confirmation nobody disputed in time is final as well: nothing left to prove.
+        let mut expired = v.clone();
+        let expiry = RegistryEvent::ClaimChanged {
+            claim_id: B256::repeat_byte(1),
+            change: ClaimChange::Expired,
+        };
+        apply_event(&mut expired, &ev(13, expiry));
+        assert!(expired.claims[0].is_final() && expired.to_prove().is_empty());
         let proven = RegistryEvent::ClaimChanged {
             claim_id: B256::repeat_byte(1),
             change: ClaimChange::Proven {

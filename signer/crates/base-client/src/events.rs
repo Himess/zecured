@@ -100,6 +100,7 @@ sol! {
         event CloseRelease(bytes32 indexed vaultId, bytes32 userClaimId, bytes32 mmClaimId, uint64 userAmount, uint64 mmAmount, bytes32 userCommitment, bytes32 mmCommitment);
         event PayoutConfirmed(bytes32 indexed vaultId, bytes32 indexed payoutRef, bytes32[] claimIds);
         event PayoutProven(bytes32 indexed vaultId, bytes32 indexed claimId, bytes32 payoutRef);
+        event ConfirmationExpired(bytes32 indexed vaultId, bytes32 indexed claimId);
         event RefundDormant(bytes32 indexed vaultId, bytes32 indexed claimId);
         event ChangeTagOverridden(bytes32 indexed tag, bytes32 indexed oldVaultId);
         event DustWrittenOff(bytes32 indexed vaultId, bytes32 indexed claimId, uint64 amount);
@@ -116,6 +117,7 @@ sol! {
         function setRefundDestination(bytes32 claimId, bytes32 destCommitment) external;
         function confirmPayout(bytes32 vaultId, bytes32 payoutRef, bytes32[] claimIds, bytes[] sigs) external;
         function hashPayoutConfirmation(bytes32 vaultId, bytes32 payoutRef, bytes32[] claimIds) external view returns (bytes32);
+        function payoutConfirmed(bytes32 payoutRef) external view returns (bool);
         function setReimburseDestination(bytes32 claimId, bytes32 commitment, uint64 deadline, bytes[] sigs) external;
         function hashReimburseDestination(bytes32 claimId, bytes32 commitment, uint64 deadline) external view returns (bytes32);
         function markRefundDormant(bytes32 claimId) external;
@@ -157,6 +159,8 @@ sol! {
     /// version registry (design notes T-07a).
     #[sol(rpc)]
     interface IZecuredIntake {
+        /// `versionId` (v4, R-14): the deposit version whose seal proved it; once that version is
+        /// no longer active the activation can only be dropped.
         #[derive(Debug, PartialEq, Eq)]
         struct PendingActivation {
             address account;
@@ -165,6 +169,20 @@ sol! {
             bytes32 anchor;
             uint256 readyHeight;
             uint256 readyTime;
+            bytes32 versionId;
+        }
+        /// v4 (R-12): a proven deposit landing as a refund, waiting like an activation; keyed by
+        /// its deposit tag. `reason` is the Intake's `RefundReason`.
+        #[derive(Debug, PartialEq, Eq)]
+        struct PendingRefund {
+            bytes32 vaultId;
+            address account;
+            uint64 amount;
+            uint8 reason;
+            bytes32 anchor;
+            uint256 readyHeight;
+            uint256 readyTime;
+            bytes32 versionId;
         }
         #[derive(Debug, PartialEq, Eq)]
         struct WorkTier {
@@ -179,11 +197,13 @@ sol! {
         function finalizeActivation(bytes32 vaultId) external;
         function dropPendingActivation(bytes32 vaultId) external;
         function refundPending(bytes32 vaultId) external returns (bytes32 claimId);
-        function finalizeRefund(bytes32 depositTag) external;
+        function finalizeRefund(bytes32 depositTag) external returns (bytes32 claimId);
         function dropPendingRefund(bytes32 depositTag) external;
         function pauseMinting(uint64 until, uint256 nonce, uint64 deadline, bytes[] sigs) external;
         function unpauseMinting(uint256 nonce, uint64 deadline, bytes[] sigs) external;
         function pendingActivation(bytes32 vaultId) external view returns (PendingActivation memory);
+        function pendingRefund(bytes32 depositTag) external view returns (PendingRefund memory);
+        function pendingRefundTotal() external view returns (uint64);
         function journalV2() external view returns (bool);
         function minRefundZat() external view returns (uint64);
         function minConfirmationWorkFor(uint64 amount) external view returns (uint256);
@@ -229,6 +249,8 @@ sol! {
         function armLiveness(bytes32 claimId, uint64 receivedAt, bytes signature) external;
         function hashDestinationReceived(bytes32 claimId, bytes32 commitment, uint64 receivedAt) external view returns (bytes32);
         function livenessDue(bytes32 claimId) external view returns (uint64 dueAt, uint256 amount);
+        function livenessArming(bytes32 claimId) external view returns (bytes32 commitment, uint64 payableAt);
+        function domainSeparator() external view returns (bytes32);
         function livenessPeriod() external view returns (uint64);
         function commitGrace() external view returns (uint64);
         function halted() external view returns (bool);
@@ -258,6 +280,8 @@ sol! {
         function versionIds(uint8 kind) external view returns (bytes32[] memory);
         function version(bytes32 versionId) external view returns (Version memory);
         function isActive(bytes32 versionId) external view returns (bool);
+        /// v4 (R-22): active, and the router still verifies its selector's seals.
+        function isWorking(bytes32 versionId) external view returns (bool);
         function branchAllowed(bytes32 versionId, uint32 branchId) external view returns (bool);
         function nonce() external view returns (uint256);
         function hashScheduleVersion(uint8 kind, bytes4 selector, bytes32 imageId, uint32[4] branches, uint256 nonce, uint64 deadline) external view returns (bytes32);
@@ -344,6 +368,9 @@ pub enum ClaimChange {
     /// v4 `PayoutProven` (proven delivery): a committed payout of its input (`payout_ref`) was
     /// proven mined, outside a dispute: paid and final (`paidAt == 0`), never disputable again.
     Proven { payout_ref: B256 },
+    /// v4 `ConfirmationExpired` (R-3): nobody disputed the claim's confirmation within its window:
+    /// paid and final (`paidAt == 0`), like a proven claim, though no payout was proven.
+    Expired,
     /// v4 `RefundDormant` (R-11): a Refund claim without a destination for `refundDormancy` left the
     /// coverage cap until its account gives one. Nothing changes in the books.
     Dormant,
@@ -934,6 +961,7 @@ pub fn decode(log: &Log, created_at: u64) -> Result<Option<VaultEvent>> {
                 },
             ),
         ),
+        E::ConfirmationExpired(e) => (e.vaultId, changed(e.claimId, ClaimChange::Expired)),
         E::RefundDormant(e) => (e.vaultId, changed(e.claimId, ClaimChange::Dormant)),
         E::PayoutConfirmed(e) => (
             e.vaultId,

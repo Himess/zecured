@@ -306,7 +306,7 @@ fn shows(change: &ClaimChange, now: &ClaimRecord, at: At) -> bool {
         ClaimChange::Compensated => now.status == CLAIM_COMPENSATED,
         ClaimChange::Disputed { .. } => now.status == CLAIM_DISPUTED,
         // Final from then on (`paidAt == 0`), checked with the payout's record (`proven`).
-        ClaimChange::Upheld { .. } | ClaimChange::Proven { .. } => now.status == CLAIM_PAID,
+        ClaimChange::Upheld { .. } | ClaimChange::Proven { .. } | ClaimChange::Expired => now.status == CLAIM_PAID,
         ClaimChange::Reopened => now.status == CLAIM_PENDING,
         // A refund still without a destination (one given since makes it stale).
         ClaimChange::Dormant => {
@@ -330,6 +330,8 @@ fn starts_from(change: &ClaimChange, prev: &ClaimRecord) -> bool {
         ClaimChange::Reopened => prev.status == CLAIM_DISPUTED,
         // Proven delivery: a committed pending claim, or one confirmed paid (not yet final).
         ClaimChange::Proven { .. } => prev.status == CLAIM_PENDING || prev.status == CLAIM_PAID,
+        // R-3: only a confirmation (paid, not yet final) expires.
+        ClaimChange::Expired => prev.status == CLAIM_PAID,
         ClaimChange::Dormant => {
             prev.kind == kind_code(ClaimKind::Refund)
                 && prev.status == CLAIM_PENDING
@@ -487,6 +489,13 @@ pub async fn check_event<R: RegistryReader>(reader: &R, ev: &VaultEvent, at: At)
                 }
                 if input == B256::ZERO || payout.vault_id != ev.vault_id || payout.input_tag != input {
                     problems.push("the proven payout is no committed payout of the claim's input".into());
+                }
+            } else if *change == ClaimChange::Expired {
+                // R-3: final from then on, like a proven claim.
+                let paid_at = reader.paid_at(*claim_id, after).await?;
+                evidence.paid_at.push(paid_at);
+                if paid_at != 0 {
+                    problems.push("the claim is not final in the Registry".into());
                 }
             }
             if let Some(b) = before {
@@ -1147,6 +1156,26 @@ mod tests {
         // At a later block the final claim still shows it.
         chain.pruned_below = 500;
         assert!(matches!(verdict(&chain, None, &proven(300, PAYOUT)).await.unwrap(), Verdict::Proven(_)));
+    }
+
+    /// R-3: a confirmation nobody disputed in time expires: the claim is final. One the Registry
+    /// still holds disputable, or a claim that was never confirmed, is refused.
+    #[tokio::test]
+    async fn an_expired_confirmation_is_final() {
+        let expired = |block: u64| {
+            event(
+                block,
+                RegistryEvent::ClaimChanged {
+                    claim_id: CLAIM,
+                    change: ClaimChange::Expired,
+                },
+            )
+        };
+        let mut chain = honest();
+        chain.paid_at = vec![(200, 400), (500, 0)];
+        assert!(matches!(verdict(&chain, None, &expired(500)).await.unwrap(), Verdict::Proven(_)));
+        assert!(forged(verdict(&honest(), None, &expired(500)).await.unwrap()), "still disputable");
+        assert!(forged(verdict(&chain, None, &expired(150)).await.unwrap()), "never confirmed");
     }
 
     /// R-11: a dormant refund has no destination (one given since makes the event stale); R-16: an

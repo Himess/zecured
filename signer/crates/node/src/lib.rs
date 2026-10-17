@@ -176,6 +176,8 @@ pub struct Node {
     landing: OnceCell<Landing>,
     /// R-5: the Registry's bond contract (`signerBond()`, immutable), read once; zero without bonds.
     bond: OnceCell<Address>,
+    /// R-5: the bond's own EIP-712 domain was found to be the receipts' (checked once).
+    bond_domain_checked: OnceCell<()>,
 }
 
 /// What a node plans a vault's payout from (O-4): the vault's claims as the planner counts them, the
@@ -415,6 +417,7 @@ impl Node {
             liveness_warned: Mutex::new(HashMap::new()),
             landing: OnceCell::new(),
             bond: OnceCell::new(),
+            bond_domain_checked: OnceCell::new(),
         })
     }
 
@@ -1017,8 +1020,27 @@ impl Node {
     pub async fn receipt(&self, claim_id: B256) -> Result<ReceiptOut> {
         let bond = self.bond().await?;
         ensure!(bond != Address::ZERO, "this deployment has no bonds: no liveness, no receipt");
+        self.check_bond_domain(bond).await?;
         let mut store = self.store.lock().await;
         self.issue_receipt(&mut store, claim_id, bond)
+    }
+
+    /// R-5: the bond's own EIP-712 domain (`domainSeparator()`) must be the one receipts are signed
+    /// under (`ZecuredSignerBond` `1`, this chain, the bond's address), or no receipt would arm a
+    /// clock. Compared once the bond answers (a bond without the view, before v4, never does).
+    async fn check_bond_domain(&self, bond: Address) -> Result<()> {
+        if self.bond_domain_checked.initialized() {
+            return Ok(());
+        }
+        let provider = chain::base_provider(&self.cfg.base_rpc_url)?;
+        if let Ok(theirs) = ISignerBond::new(bond, &provider).domainSeparator().call().await {
+            ensure!(
+                theirs == bond_domain(self.cfg.chain_id, bond).separator(),
+                "the bond's EIP-712 domain is not the receipts' (ZecuredSignerBond 1 on this chain)"
+            );
+            let _ = self.bond_domain_checked.set(());
+        }
+        Ok(())
     }
 
     /// [`Node::receipt`] once the bond's address is known.

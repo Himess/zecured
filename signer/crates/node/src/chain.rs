@@ -666,8 +666,10 @@ pub fn apply(store: &mut Store, ev: &VaultEvent) -> Result<bool> {
                         claim.state = ClaimState::Disputed;
                     }
                 }
-                // Section 3: a proof makes the claim paid and final, whatever this node saw.
-                ClaimChange::Upheld { .. } | ClaimChange::Proven { .. } => {
+                // Section 3: a proof makes the claim paid and final, whatever this node saw; so does
+                // a confirmation nobody disputed in time (R-3): the Registry never takes the claim
+                // into a commitment again, so O-4's rule 3 must never plan it again.
+                ClaimChange::Upheld { .. } | ClaimChange::Proven { .. } | ClaimChange::Expired => {
                     claim.state = ClaimState::Paid;
                     claim.proven = true;
                 }
@@ -1159,6 +1161,20 @@ mod tests {
         };
         apply_all(&mut store, &[proven(40, 7), proven(41, 8)]);
         assert!(claim(&store, 7).is_final() && claim(&store, 8).is_final());
+        // R-3: a confirmation nobody disputed in time is final too: O-4's rule 3 never takes it back.
+        apply_all(&mut store, &[liquidation(42, 10, 50_000)]);
+        let confirmed = event(
+            43,
+            0,
+            RegistryEvent::PayoutConfirmed {
+                payout_ref: B256::repeat_byte(0xab),
+                claims: vec![B256::repeat_byte(10)],
+            },
+        );
+        apply_all(&mut store, &[confirmed, change(44, 10, ClaimChange::Expired)]);
+        assert!(claim(&store, 10).is_final());
+        let mut claims = store.vaults[&VAULT].claims.clone();
+        assert!(ledger::revert_unlanded(&mut claims, &[[10; 32]]).is_empty());
         // A reopened claim is remembered; a dormant refund or an overridden tag changes nothing.
         apply_all(&mut store, &[liquidation(50, 9, 100_000)]);
         apply_all(

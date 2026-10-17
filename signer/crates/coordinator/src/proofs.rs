@@ -691,9 +691,10 @@ impl Coordinator {
 
     /// K3, as a keyless keeper (anyone may do each, the Intake checks everything): activates a
     /// vault whose deposit proof is pending once the Intake allows it; drops the pending
-    /// activation instead if its anchor left the relay's best chain (the deposit is proven again
-    /// against the chain that won); after a halt, when it can never activate, converts it into a
-    /// refund (T-02, T-03). While minting is paused it waits.
+    /// activation instead if its anchor left the relay's best chain, or its deposit version is no
+    /// longer active (R-14), so that the deposit is proven again (never while a case is open on the
+    /// vault, R-17: it waits); after a halt, when it can never activate, converts it into a refund
+    /// (T-02, T-03). While minting is paused it waits.
     pub(crate) async fn finalize_pending(&self, id: &B256) -> Result<()> {
         let provider = ProviderBuilder::new()
             .wallet(EthereumWallet::from(self.gas.clone()))
@@ -706,8 +707,19 @@ impl Coordinator {
             return self.follow_vault_status(id).await;
         }
         let relay = IZcashHeaderRelay::new(intake.relay().call().await.context("Intake.relay")?, &provider);
-        if !relay.isInBestChain(pending.anchor).call().await.context("relay.isInBestChain")? {
+        let anchor_gone = !relay.isInBestChain(pending.anchor).call().await.context("relay.isInBestChain")?;
+        let version_gone = pending.versionId != B256::ZERO
+            && !IZecuredVersions::new(intake.versions().call().await.context("Intake.versions")?, &provider)
+                .isActive(pending.versionId)
+                .call()
+                .await
+                .context("versions.isActive")?;
+        if anchor_gone || version_gone {
             let call = intake.dropPendingActivation(*id);
+            if call.call().await.is_err() {
+                info!(vault = %short(id), "the pending activation cannot be dropped yet (an open case on the vault, R-17): it waits");
+                return Ok(());
+            }
             let gas =
                 zecured_base::gas_with_headroom(call.estimate_gas().await.context("estimate dropPendingActivation")?);
             let receipt = call
@@ -720,7 +732,11 @@ impl Coordinator {
                 .await
                 .context("dropPendingActivation receipt")?;
             ensure!(receipt.status(), "dropPendingActivation reverted");
-            warn!(vault = %short(id), "pending activation dropped: its anchor left the relay's best chain");
+            if anchor_gone {
+                warn!(vault = %short(id), "pending activation dropped: its anchor left the relay's best chain");
+            } else {
+                warn!(vault = %short(id), "pending activation dropped: its deposit version was removed (R-14)");
+            }
             return self
                 .update_vault(id, |cur| {
                     if cur.status == VaultStatus::DepositSeen {
