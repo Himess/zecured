@@ -7460,6 +7460,24 @@ dependencies = [
 ]
 
 [[package]]
+name = "zecured-leak-scan"
+version = "0.1.0"
+dependencies = [
+ "anyhow",
+ "clap",
+ "flate2",
+ "hex",
+ "orchard",
+ "reqwest 0.12.28",
+ "serde_json",
+ "tokio",
+ "zcash_keys",
+ "zcash_protocol",
+ "zecured-policy",
+ "zecured-zcash-ops",
+]
+
+[[package]]
 name = "zecured-node"
 version = "0.1.0"
 dependencies = [
