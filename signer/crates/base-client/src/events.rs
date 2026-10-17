@@ -232,7 +232,7 @@ sol! {
         function vaultFrozen(bytes32 vaultId) external view returns (bool);
         function compromisedAt(bytes32 vaultId) external view returns (uint64);
         function proveInclusion(bytes journal, bytes seal, bytes32 imageId, bytes32 claimId) external;
-        function proveInclusionBatch(bytes journal, bytes seal, bytes32 imageId, bytes32[] claimIds) external;
+        function proveInclusionBatch(bytes journal, bytes seal, bytes32 imageId, bytes32[] claimIds) external returns (uint256 upheld);
         function slashConfirmationWork() external view returns (uint256);
         function relay() external view returns (address);
         function versions() external view returns (address);
