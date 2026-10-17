@@ -3,14 +3,17 @@
 //! Both roles are permissionless; anyone can run them. Each liquidation or close uses a
 //! fresh salt, so the bot's commitments on Base cannot be linked to each other. The salts are
 //! kept (`--destinations`, 0600) so that the bot's operator can check and prove each payment of
-//! its claims with `zecured-wallet watch-claims` (Tier 3, F3).
+//! its claims with `zecured-wallet watch-claims` (Tier 3, F3). Each claim of the bot is armed for
+//! the bonds' liveness payment with a signer's receipt (R-5, `liveness`), the claims being armed
+//! kept in `--claims` (0600).
 
 mod chain;
 #[cfg(test)]
 mod fork_tests;
+mod liveness;
 mod relayer;
 
-use std::{collections::BTreeMap, net::SocketAddr, path::PathBuf, sync::Arc, time::Duration};
+use std::{collections::BTreeMap, future::IntoFuture, net::SocketAddr, path::PathBuf, sync::Arc, time::Duration};
 
 use alloy::{
     network::EthereumWallet,
@@ -68,6 +71,10 @@ struct Cli {
     /// `zecured-wallet watch-claims`. Default: data/bots/<role>-destinations.json.
     #[arg(long, env = "BOT_DESTINATIONS_FILE", global = true)]
     destinations: Option<PathBuf>,
+    /// R-5: where the bot keeps the claims whose liveness it arms with a signer's receipt (0600),
+    /// so that a restart resumes them. Default: data/bots/<role>-claims.json.
+    #[arg(long, env = "BOT_CLAIMS_FILE", global = true)]
+    claims: Option<PathBuf>,
     #[command(subcommand)]
     cmd: Cmd,
 }
@@ -169,6 +176,7 @@ async fn main() -> Result<()> {
             .clone()
             .unwrap_or_else(|| PathBuf::from(format!("data/bots/{role}-destinations.json"))),
     );
+    let claims_file = cli.claims.clone().unwrap_or_else(|| PathBuf::from(format!("data/bots/{role}-claims.json")));
     match cli.cmd {
         Cmd::Liquidator {
             key,
@@ -185,14 +193,14 @@ async fn main() -> Result<()> {
                 payout_wait_hours,
                 zec_risk_bps_per_hour,
             };
-            liquidator(&cli.rpc, &cli.backend, d, key.parse()?, &zcash_address, every_secs, pre).await
+            liquidator(&cli.rpc, &cli.backend, d, key.parse()?, &zcash_address, every_secs, pre, claims_file).await
         }
         Cmd::MarketMaker {
             key,
             zcash_address,
             bind,
             margin_bps,
-        } => market_maker(cli.rpc, cli.backend, d, key.parse()?, zcash_address, bind, margin_bps).await,
+        } => market_maker(cli.rpc, cli.backend, d, key.parse()?, zcash_address, bind, margin_bps, claims_file).await,
         Cmd::Relayer { .. } => unreachable!("handled above"),
     }
 }
@@ -219,6 +227,7 @@ struct Watcher<'a, P> {
     pre: PreLiquidationRound,
 }
 
+#[allow(clippy::too_many_arguments)]
 async fn liquidator(
     rpc: &str,
     backend: &str,
@@ -227,11 +236,13 @@ async fn liquidator(
     zaddr: &str,
     every: u64,
     pre: PreLiquidationRound,
+    claims_file: PathBuf,
 ) -> Result<()> {
     let me = key.address();
     let receiver = chain::ironwood_receiver(zaddr)?;
     let provider = ProviderBuilder::new().wallet(EthereumWallet::from(key)).connect_http(rpc.parse()?);
     chain::ensure_allowance(&provider, d.usdc, me, d.adapter).await?;
+    let mut armer = claim_armer(&provider, &d, backend, claims_file).await?;
     let mut accounts: BTreeMap<B256, Address> = BTreeMap::new();
     let mut cursor = d.block;
     info!(pre_liquidation = pre.enabled, "liquidator running");
@@ -244,8 +255,12 @@ async fn liquidator(
         pre,
     };
     loop {
-        if let Err(e) = liquidation_pass(&w, &mut accounts, &mut cursor).await {
+        let mut new_claims = vec![];
+        if let Err(e) = liquidation_pass(&w, &mut accounts, &mut cursor, &mut new_claims).await {
             warn!("liquidation pass failed: {e:#}");
+        }
+        if let Some(armer) = armer.as_mut() {
+            arm_pass(armer, new_claims).await;
         }
         tokio::time::sleep(Duration::from_secs(every)).await;
     }
@@ -294,10 +309,50 @@ where
 /// A liquidation's receipt is waited for at most this long (alloy's default is forever).
 const RECEIPT_TIMEOUT: Duration = Duration::from_secs(120);
 
+/// R-5: what arms the bot's claims, or none on a deployment without signer bonds (there is no
+/// liveness payment to arm for).
+async fn claim_armer<'a, P: Provider>(
+    p: &'a P,
+    d: &Deployment,
+    backend: &str,
+    claims_file: PathBuf,
+) -> Result<Option<liveness::Armer<liveness::ProviderChain<'a, P>, liveness::BackendReceipts>>> {
+    let bond = events::IZecuredRegistry::new(d.registry, p)
+        .signerBond()
+        .call()
+        .await
+        .context("Registry.signerBond")?;
+    if bond == Address::ZERO {
+        info!("no signer bonds on this deployment: the bot's claims are not armed");
+        return Ok(None);
+    }
+    let chain = liveness::ProviderChain {
+        p,
+        registry: d.registry,
+        bond,
+    };
+    Ok(Some(liveness::Armer::new(chain, liveness::BackendReceipts::new(backend)?, Some(claims_file))?))
+}
+
+/// R-5: tracks the bot's new claims, then arms whichever are due.
+async fn arm_pass<C: liveness::ArmingChain + Sync, R: liveness::ReceiptSource + Sync>(
+    armer: &mut liveness::Armer<C, R>,
+    new_claims: Vec<B256>,
+) {
+    for id in new_claims {
+        if let Err(e) = armer.track(id) {
+            warn!(claim = %hex::encode(&id[..4]), "keeping the claim failed: {e:#}");
+        }
+    }
+    let report = armer.pass(zecured_now()).await;
+    debug!(?report, "liveness arming pass");
+}
+
 async fn liquidation_pass<P: Provider>(
     w: &Watcher<'_, P>,
     accounts: &mut BTreeMap<B256, Address>,
     cursor: &mut u64,
+    new_claims: &mut Vec<B256>,
 ) -> Result<()> {
     let head = w.p.get_block_number().await?;
     scan_activations(cursor, head, EVENT_SCAN_BUDGET, accounts, |from, to| events::fetch(w.p, w.d.registry, from, to))
@@ -311,7 +366,7 @@ async fn liquidation_pass<P: Provider>(
     for (vault_id, account) in accounts.clone() {
         // One vault's failure (a flaky RPC answer, a refused commitment) must not starve the
         // vaults after it.
-        match watch_vault(w, &market, vault_id, account).await {
+        match watch_vault(w, &market, vault_id, account, new_claims).await {
             Ok(Watch::Keep) => {}
             Ok(Watch::Closed) => {
                 accounts.remove(&vault_id);
@@ -332,12 +387,14 @@ enum Watch {
 /// H-04: checks one vault and liquidates its position if it is unhealthy, or, when it is healthy
 /// and its account opted in, pre-liquidates it in its band. A vault leaves the watch list only once
 /// the Registry reports it closed, never because it was liquidated: a partial liquidation leaves
-/// collateral, and the borrower may borrow against it again.
+/// collateral, and the borrower may borrow against it again. The claims the bot gets go to
+/// `new_claims` (R-5: their liveness is armed next).
 async fn watch_vault<P: Provider>(
     w: &Watcher<'_, P>,
     market: &chain::MarketState,
     vault_id: B256,
     account: Address,
+    new_claims: &mut Vec<B256>,
 ) -> Result<Watch> {
     let (p, d) = (w.p, w.d);
     let v = IRegistryView::new(d.registry, p).vault(vault_id).call().await?;
@@ -349,7 +406,7 @@ async fn watch_vault<P: Provider>(
     let pos = chain::position_in(p, d, market, account).await?;
     let Some(plan) = chain::plan_liquidation(&pos, v.outstanding) else {
         if w.pre.enabled {
-            pre_liquidate_vault(w, market, vault_id, account, &pos, v.outstanding).await?;
+            pre_liquidate_vault(w, market, vault_id, account, &pos, v.outstanding, new_claims).await?;
         }
         return Ok(Watch::Keep);
     };
@@ -383,6 +440,7 @@ async fn watch_vault<P: Provider>(
     let receipt = call.gas(gas).send().await?.with_timeout(Some(RECEIPT_TIMEOUT)).get_receipt().await?;
     ensure!(receipt.status(), "liquidation reverted");
     info!(vault = %short, tx = %receipt.transaction_hash, "liquidated");
+    new_claims.extend(liveness::own_claims(receipt.logs().iter().map(|l| &l.inner), d.registry));
     // Kept: the next pass reads the vault again and drops it only once it is closed.
     Ok(Watch::Keep)
 }
@@ -391,6 +449,7 @@ async fn watch_vault<P: Provider>(
 /// LTV (on the debt with interest, R-24) is in their band, the largest pre-liquidation the Adapter
 /// accepts, simulated first; its economics are logged (never a reason to skip it); a recipient is
 /// revealed only for a pre-liquidation that goes through.
+#[allow(clippy::too_many_arguments)]
 async fn pre_liquidate_vault<P: Provider>(
     w: &Watcher<'_, P>,
     market: &chain::MarketState,
@@ -398,6 +457,7 @@ async fn pre_liquidate_vault<P: Provider>(
     account: Address,
     pos: &chain::Position,
     outstanding: u64,
+    new_claims: &mut Vec<B256>,
 ) -> Result<()> {
     if pos.borrow_shares == 0 {
         return Ok(());
@@ -464,6 +524,7 @@ async fn pre_liquidate_vault<P: Provider>(
     let receipt = call.gas(gas).send().await?.with_timeout(Some(RECEIPT_TIMEOUT)).get_receipt().await?;
     ensure!(receipt.status(), "pre-liquidation reverted");
     info!(vault = %short, tx = %receipt.transaction_hash, "pre-liquidated");
+    new_claims.extend(liveness::own_claims(receipt.logs().iter().map(|l| &l.inner), w.d.registry));
     Ok(())
 }
 
@@ -487,6 +548,8 @@ struct Mm {
     quotes: std::sync::Mutex<std::collections::HashMap<B256, Quote>>,
     /// S18: deleverage quotes given, by vault.
     deleverage_quotes: std::sync::Mutex<std::collections::HashMap<B256, Quote>>,
+    /// R-5: the market maker's claims of its closes and deleverages, for the arming loop.
+    claims: tokio::sync::mpsc::UnboundedSender<B256>,
 }
 
 #[derive(Clone, Copy, Debug)]
@@ -578,6 +641,7 @@ impl From<anyhow::Error> for ApiError {
     }
 }
 
+#[allow(clippy::too_many_arguments)]
 async fn market_maker(
     rpc: String,
     backend: String,
@@ -586,10 +650,13 @@ async fn market_maker(
     zaddr: String,
     bind: SocketAddr,
     margin_bps: u16,
+    claims_file: PathBuf,
 ) -> Result<()> {
     let receiver = chain::ironwood_receiver(&zaddr)?;
     let provider = ProviderBuilder::new().wallet(EthereumWallet::from(key.clone())).connect_http(rpc.parse()?);
     chain::ensure_allowance(&provider, d.usdc, key.address(), d.adapter).await?;
+    let armer = claim_armer(&provider, &d, &backend, claims_file).await?;
+    let (claims, new_claims) = tokio::sync::mpsc::unbounded_channel();
     let mm = Arc::new(Mm {
         d,
         rpc,
@@ -600,6 +667,7 @@ async fn market_maker(
         margin_bps,
         quotes: Default::default(),
         deleverage_quotes: Default::default(),
+        claims,
     });
     let app = Router::new()
         .route("/quote/{vault_id}", get(quote))
@@ -608,8 +676,41 @@ async fn market_maker(
         .route("/deleverage", post(deleverage))
         .with_state(mm);
     info!(%bind, "market maker listening");
-    axum::serve(tokio::net::TcpListener::bind(bind).await?, app).await?;
+    let server = axum::serve(tokio::net::TcpListener::bind(bind).await?, app).into_future();
+    tokio::select! {
+        served = server => served?,
+        () = arm_claims(armer, new_claims) => {}
+    }
     Ok(())
+}
+
+/// How often the market maker's arming loop runs (R-5).
+const ARM_EVERY: Duration = Duration::from_secs(15);
+
+/// R-5: the market maker's arming loop: tracks the claims its closes and deleverages got, and arms
+/// whichever are due. Never returns.
+async fn arm_claims<C: liveness::ArmingChain + Sync, R: liveness::ReceiptSource + Sync>(
+    mut armer: Option<liveness::Armer<C, R>>,
+    mut claims: tokio::sync::mpsc::UnboundedReceiver<B256>,
+) {
+    loop {
+        tokio::time::sleep(ARM_EVERY).await;
+        let mut new_claims = vec![];
+        while let Ok(id) = claims.try_recv() {
+            new_claims.push(id);
+        }
+        if let Some(armer) = armer.as_mut() {
+            arm_pass(armer, new_claims).await;
+        }
+    }
+}
+
+/// R-5: hands the market maker's claim of a close or deleverage (its `CloseRelease`'s executor
+/// claim, its `LiquidationRelease`) to the arming loop.
+fn track_claims(mm: &Mm, receipt: &alloy::rpc::types::TransactionReceipt) {
+    for id in liveness::own_claims(receipt.logs().iter().map(|l| &l.inner), mm.d.registry) {
+        let _ = mm.claims.send(id); // the loop only ends with the process
+    }
 }
 
 /// `ceil(a * b / d)` over 256 bits.
@@ -806,6 +907,7 @@ async fn deleverage(
         return Err(ApiError::CLOSE_REJECTED);
     }
     info!(tx = %receipt.transaction_hash, "deleveraged from collateral");
+    track_claims(&mm, &receipt);
     Ok(Json(json!({ "txHash": receipt.transaction_hash })))
 }
 
@@ -910,6 +1012,7 @@ async fn close(
         return Err(ApiError::CLOSE_REJECTED);
     }
     info!(tx = %receipt.transaction_hash, "closed from collateral");
+    track_claims(&mm, &receipt);
     Ok(Json(json!({ "txHash": receipt.transaction_hash })))
 }
 

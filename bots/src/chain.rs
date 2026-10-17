@@ -662,7 +662,7 @@ fn keep_destination(commitment: B256, salt: &[u8; 32], receiver: &[u8; 43]) -> R
 }
 
 /// Writes `data` to `path` atomically, readable by its owner only.
-fn write_private(path: &Path, data: &[u8]) -> Result<()> {
+pub(crate) fn write_private(path: &Path, data: &[u8]) -> Result<()> {
     if let Some(dir) = path.parent().filter(|d| !d.as_os_str().is_empty()) {
         let mut builder = fs::DirBuilder::new();
         builder.recursive(true);
