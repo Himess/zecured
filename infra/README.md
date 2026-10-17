@@ -11,7 +11,7 @@ alarm channel.
 |---|---|
 | `/opt/zecured/bin/` | release binaries: `zecured-node`, `zecured-backend` (built with `--features zecured-node/demo` only for the node, D18), `zecured-bots`, `zecured-tier2-host` |
 | `/opt/zecured/src/` | a checkout of the submitted tag: scripts, the watchdog, `tools/local-aa` for the bundler, `contracts/deployments/` |
-| `/etc/zecured/` | `network.json` and one `.env` file per service, owned by root, group `zecured`, mode 0640 |
+| `/etc/zecured/` | `network.json` and one `.env` file per service, owned by root, group `zecured`, mode 0640; `app.env` holds the `NEXT_PUBLIC_*` variables the app is built with |
 | `/var/lib/zecured/` | state: `node-1` .. `node-5`, `coordinator`, `tier2/` (header file and summaries), the watchdog's state |
 
 ## Services (`infra/systemd/`)
@@ -49,3 +49,36 @@ sudo systemctl enable --now zecured-node@{1..5} zecured-backend zecured-relayer@
 - **A watchdog pass by hand:** `sudo -u zecured env $(cat /etc/zecured/watchdog.env | xargs) python3 -I
   /opt/zecured/src/infra/watchdog/watchdog.py` prints every check.
 - **Changing an endpoint, key or threshold:** edit the `.env` file, then `systemctl restart` the unit.
+
+## Onion service
+
+The app and its API are also served as one Tor onion service, so that a user can reach them without
+showing an IP address to anyone, us included. Tor hands connections to an nginx site on
+127.0.0.1:8081 (`infra/onion/`), which serves a second build of the app at `/` and the backend at
+`/api/`. Every visitor reaches nginx from 127.0.0.1, and its access log is off. The backend's rate
+limits count requests per route and per sender, never per address, so Tor users are limited no
+differently.
+
+```bash
+sudo apt install tor nginx
+sudo install -d /etc/tor/torrc.d
+grep -q '^%include /etc/tor/torrc.d' /etc/tor/torrc || echo '%include /etc/tor/torrc.d/*.conf' | sudo tee -a /etc/tor/torrc
+sudo cp infra/onion/zecured.torrc /etc/tor/torrc.d/zecured.conf
+sudo systemctl restart tor
+ONION=$(sudo cat /var/lib/tor/zecured/hostname)       # the address to publish in README.md
+
+sudo cp infra/onion/zecured-onion.nginx.conf /etc/nginx/sites-enabled/zecured-onion
+sudo nginx -t && sudo systemctl reload nginx
+
+# The onion build: the app's build variables (app.env), with only the backend URL changed.
+sudo -u zecured cp -r /opt/zecured/src/app /opt/zecured/app-onion
+cd /opt/zecured/app-onion
+sudo -u zecured env $(cat /etc/zecured/app.env | xargs) NEXT_PUBLIC_BACKEND_URL="http://$ONION/api" \
+  sh -c 'pnpm install --frozen-lockfile && pnpm build'
+sudo cp /opt/zecured/src/infra/systemd/zecured-app-onion.service /etc/systemd/system/
+sudo systemctl daemon-reload && sudo systemctl enable --now zecured-app-onion
+```
+
+Then add `http://$ONION` to the backend's `APP_ORIGINS` (`/etc/zecured/backend.env`) and restart
+`zecured-backend`. Where the public app is served over TLS, the header
+`Onion-Location: http://<onion address>$request_uri` makes Tor Browser offer the onion address.

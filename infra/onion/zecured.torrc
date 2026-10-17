@@ -1,0 +1,5 @@
+# The onion service of the app and its API: one address, port 80, handed to the nginx site in
+# zecured-onion.nginx.conf, which serves the app at / and the backend at /api/. Install as
+# /etc/tor/torrc.d/zecured.conf (see infra/README.md, "Onion service").
+HiddenServiceDir /var/lib/tor/zecured/
+HiddenServicePort 80 127.0.0.1:8081
