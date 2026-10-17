@@ -82,3 +82,30 @@ sudo systemctl daemon-reload && sudo systemctl enable --now zecured-app-onion
 Then add `http://$ONION` to the backend's `APP_ORIGINS` (`/etc/zecured/backend.env`) and restart
 `zecured-backend`. Where the public app is served over TLS, the header
 `Onion-Location: http://<onion address>$request_uri` makes Tor Browser offer the onion address.
+
+## A second stack (the mainnet beta)
+
+The mainnet beta (docs/MAINNET.md § 5) runs beside the judge deployment on the same host as a second,
+independent stack: its own units, configuration, state and keys, sharing only the binaries and the prover.
+
+```bash
+sudo infra/stack.sh mainnet 920       # zecured-mainnet-* units: /etc/zecured-mainnet/, /var/lib/zecured-mainnet/,
+                                      # nodes on 127.0.0.1:9201..9205
+sudo install -d -o zecured -g zecured -m 0700 /var/lib/zecured-mainnet
+sudo install -d -o root -g zecured -m 0750 /etc/zecured-mainnet
+sudo systemctl daemon-reload
+```
+
+Its environment files differ from the public stack's in every endpoint and key: Base mainnet and two independent Zcash
+Mainnet light wallet servers, its own coordinator, relayer and bot keys, its own `BACKEND_BIND`, bundler and market
+maker ports, and a `network.json` for Zcash Mainnet. Its watchdog (`zecured-mainnet-watchdog.timer`) watches it as the
+first one watches the public stack.
+
+**One prover for both.** Set each stack's prover (the backend's `DEPOSIT_PROOF_HOST`, and the maker's) to
+`/opt/zecured/src/infra/prover-lock.sh`, with `ZECURED_PROVER_HOST` naming that network's `zecured-tier2-host` build
+(the Mainnet one is built with `--features mainnet`). The wrapper holds one lock for each whole proof, so the stacks
+take turns on the GPU; each coordinator keeps its own queue.
+
+```bash
+sudo install -d -o zecured -g zecured -m 0700 /var/lib/zecured-prover
+```
