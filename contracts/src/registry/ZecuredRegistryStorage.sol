@@ -69,6 +69,17 @@ abstract contract ZecuredRegistryStorage is EIP712, IZecuredSignerErrors {
     /// @dev T-05 (a), D57: claims reopened after a dispute; a late inclusion proof still upholds them.
     mapping(bytes32 claimId => bool) internal _reopened;
 
+    // v4 (appended; never reorder the items above).
+    /// @dev R-1: payouts whose confirmation by signatures was recorded (each payout reference at most once).
+    mapping(bytes32 payoutRef => bool) internal _payoutConfirmed;
+    /// @dev R-3: per vault, its claims confirmed by signatures (Paid, `paidAt != 0`) that no proof, dispute, expiry or
+    ///      compensation has resolved yet. The compensator tallies a compromised vault only once it is zero.
+    mapping(bytes32 vaultId => uint256) internal _unproven;
+    /// @dev R-20: compromised vaults the compensator settled while they stayed active (no longer counted as open).
+    mapping(bytes32 vaultId => bool) internal _compensatedVault;
+    /// @dev R-20: the outstanding of those vaults, which `lockedZatoshi` leaves out.
+    uint256 internal _compensatedZat;
+
     constructor(address[5] memory signers_) EIP712(ZecuredEIP712.REGISTRY_DOMAIN_NAME, ZecuredEIP712.DOMAIN_VERSION) {
         address previous = address(0);
         for (uint256 i; i < SIGNER_SET_SIZE; ++i) {

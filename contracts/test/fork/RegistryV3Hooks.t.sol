@@ -9,6 +9,7 @@ import {
     ClaimDetails
 } from "../../src/interfaces/v3/IZecuredRegistry.sol";
 import {IZecuredSpendCommitsEvents} from "../../src/interfaces/v3/IZecuredSpendCommits.sol";
+import {IZecuredDisputes} from "../../src/interfaces/v3/IZecuredDisputes.sol";
 import {IZecuredSignerErrors} from "../../src/interfaces/v3/IZecuredSignerErrors.sol";
 import {SpendCommit, CloseRequest} from "../../src/libraries/ZecuredEIP712.sol";
 import {MockSignerBond} from "../mocks/MockSignerBond.sol";
@@ -74,7 +75,7 @@ contract RegistryV3HooksTest is ZecuredFixture {
     {
         c = _spendCommit(vaultId, inputTag, ids, salt);
         registry.commitSpend(c, _threeSigs(registry.hashSpendCommit(c)));
-        registry.confirmPayout(vaultId, ids, _threeSigs(registry.hashPayoutConfirmation(vaultId, ids)));
+        _confirmPayout(vaultId, c.payoutRef, ids);
     }
 
     // ================================================================== T-06: the opening fee
@@ -163,12 +164,13 @@ contract RegistryV3HooksTest is ZecuredFixture {
         registry.markBondPaid(unknown);
     }
 
-    function test_bondPaidClaim_isReimbursedThroughThreeSigners() public {
+    /// R-6: the bonds of all five signers paid the claimant, so all five name where the claim's ZEC reimburses them.
+    function test_bondPaidClaim_isReimbursedThroughAllFiveSigners() public {
         (bytes32 vaultId, bytes32 releaseId) = _released(VAULT_001);
         vm.prank(address(gates));
         registry.markBondPaid(releaseId);
 
-        // No payout before three signers name the Reimburse destination.
+        // No payout before the signers name the Reimburse destination.
         SpendCommit memory c = _spendCommit(vaultId, _depositTagFor(account), _ids(releaseId), "zecured.hooks.early");
         bytes[] memory commitSigs = _threeSigs(registry.hashSpendCommit(c));
         vm.expectRevert(abi.encodeWithSelector(IZecuredSpendCommitsEvents.ClaimDestinationUnset.selector, releaseId));
@@ -176,7 +178,18 @@ contract RegistryV3HooksTest is ZecuredFixture {
 
         bytes32 dest = keccak256("zecured.hooks.reimburse");
         uint64 deadline = uint64(block.timestamp + 1 hours);
-        bytes[] memory sigs = _threeSigs(registry.hashReimburseDestination(releaseId, dest, deadline));
+        bytes32 digest = registry.hashReimburseDestination(releaseId, dest, deadline);
+        // Three signers, or four, are not enough any more (R-6: they could point the bonds' money at themselves).
+        bytes[] memory three = _threeSigs(digest);
+        vm.expectRevert(abi.encodeWithSelector(IZecuredSignerErrors.InsufficientSignatures.selector, 3));
+        registry.setReimburseDestination(releaseId, dest, deadline, three);
+        uint256[] memory four = new uint256[](4);
+        (four[0], four[1], four[2], four[3]) = (0, 1, 3, 4);
+        bytes[] memory fourSigs = _signerSigs(digest, four);
+        vm.expectRevert(abi.encodeWithSelector(IZecuredSignerErrors.InsufficientSignatures.selector, 4));
+        registry.setReimburseDestination(releaseId, dest, deadline, fourSigs);
+
+        bytes[] memory sigs = _fiveSigs(digest);
         vm.expectEmit(address(registry));
         emit IZecuredRegistry.ReimburseDestinationSet(vaultId, releaseId, dest);
         vm.prank(stranger); // anyone relays
@@ -196,7 +209,7 @@ contract RegistryV3HooksTest is ZecuredFixture {
         (, bytes32 releaseId) = _released(VAULT_001);
         bytes32 dest = keccak256("zecured.hooks.dest");
         uint64 deadline = uint64(block.timestamp + 1 hours);
-        bytes[] memory sigs = _threeSigs(registry.hashReimburseDestination(releaseId, dest, deadline));
+        bytes[] memory sigs = _fiveSigs(registry.hashReimburseDestination(releaseId, dest, deadline));
         vm.expectRevert(abi.encodeWithSelector(IZecuredRegistry.NotBondPaid.selector, releaseId));
         registry.setReimburseDestination(releaseId, dest, deadline, sigs);
 
@@ -207,7 +220,7 @@ contract RegistryV3HooksTest is ZecuredFixture {
         registry.setReimburseDestination(releaseId, dest, deadline, sigs);
 
         deadline = uint64(block.timestamp + 1 hours);
-        bytes[] memory zeroSigs = _threeSigs(registry.hashReimburseDestination(releaseId, bytes32(0), deadline));
+        bytes[] memory zeroSigs = _fiveSigs(registry.hashReimburseDestination(releaseId, bytes32(0), deadline));
         vm.expectRevert(IZecuredRegistry.ZeroCommitment.selector);
         registry.setReimburseDestination(releaseId, bytes32(0), deadline, zeroSigs);
 
@@ -216,7 +229,7 @@ contract RegistryV3HooksTest is ZecuredFixture {
         vm.expectRevert(abi.encodeWithSelector(IZecuredSignerErrors.InsufficientSignatures.selector, 2));
         registry.setReimburseDestination(releaseId, dest, deadline, two);
         bytes[] memory other =
-            _threeSigs(registry.hashReimburseDestination(releaseId, keccak256("zecured.hooks.other"), deadline));
+            _fiveSigs(registry.hashReimburseDestination(releaseId, keccak256("zecured.hooks.other"), deadline));
         vm.expectPartialRevert(IZecuredSignerErrors.UnknownSigner.selector);
         registry.setReimburseDestination(releaseId, dest, deadline, other);
     }
@@ -268,15 +281,24 @@ contract RegistryV3HooksTest is ZecuredFixture {
         vm.expectRevert(abi.encodeWithSelector(IZecuredRegistry.VaultFrozen.selector, vaultId));
         adapter.closeWithCollateral(req, sig, MM_COMMITMENT, type(uint256).max, 0);
 
-        // The claims it already has are paid as usual.
-        _commitAndConfirm(
-            vaultId,
-            _depositTagFor(account),
-            _ids(partialId, registry.claimIdOf(vaultId, 0)),
-            "zecured.hooks.frozenPayout"
-        );
+        // The claims it already has are still paid: their payout is committed as usual, but the signers' word no longer
+        // confirms it (R-3); a proof of the payout's inclusion does (here the MOCK slasher stands in for a verified one).
+        bytes32 feeId = registry.claimIdOf(vaultId, 0);
+        SpendCommit memory c =
+            _spendCommit(vaultId, _depositTagFor(account), _ids(partialId, feeId), "zecured.hooks.frozenPayout");
+        registry.commitSpend(c, _threeSigs(registry.hashSpendCommit(c)));
+        bytes[] memory confirmSigs =
+            _threeSigs(_payouts().hashPayoutConfirmation(vaultId, c.payoutRef, _ids(partialId, feeId)));
+        vm.expectRevert(abi.encodeWithSelector(IZecuredRegistry.VaultFrozen.selector, vaultId));
+        _payouts().confirmPayout(vaultId, c.payoutRef, _ids(partialId, feeId), confirmSigs);
+        vm.startPrank(address(gates));
+        IZecuredDisputes(address(registry)).upholdPayout(partialId, c.payoutRef);
+        IZecuredDisputes(address(registry)).upholdPayout(feeId, c.payoutRef);
+        vm.stopPrank();
         (,,,, ClaimStatus status) = registry.claim(partialId);
         assertEq(uint8(status), uint8(ClaimStatus.Paid));
+        (uint64 paidAt,) = IZecuredDisputes(address(registry)).payoutDispute(partialId);
+        assertEq(paidAt, 0, "paid for good");
 
         // Unfrozen (the case was rejected), the liquidation goes through.
         gates.setFrozen(vaultId, false);
@@ -305,9 +327,9 @@ contract RegistryV3HooksTest is ZecuredFixture {
         bytes[] memory sigs = _threeSigs(registry.hashSpendCommit(c));
         vm.expectRevert(abi.encodeWithSelector(IZecuredRegistry.VaultCompromised.selector, vaultId));
         registry.commitSpend(c, sigs);
-        bytes[] memory confirmSigs = _threeSigs(registry.hashPayoutConfirmation(vaultId, _ids(withDest)));
-        vm.expectRevert(abi.encodeWithSelector(IZecuredRegistry.VaultCompromised.selector, vaultId));
-        registry.confirmPayout(vaultId, _ids(withDest), confirmSigs);
+        bytes[] memory confirmSigs = _threeSigs(_payouts().hashPayoutConfirmation(vaultId, c.payoutRef, _ids(withDest)));
+        vm.expectRevert(abi.encodeWithSelector(IZecuredRegistry.VaultFrozen.selector, vaultId));
+        _payouts().confirmPayout(vaultId, c.payoutRef, _ids(withDest), confirmSigs);
 
         vm.expectRevert(abi.encodeWithSelector(IZecuredRegistry.VaultCompromised.selector, vaultId));
         intake.harnessRefund(vaultId, account, VAULT_001, keccak256("zecured.hooks.r4"));
@@ -362,7 +384,7 @@ contract RegistryV3HooksTest is ZecuredFixture {
         assertEq(registry.openVaultCount(), 1, "the fee claim keeps it open");
 
         vm.prank(compensatorRole);
-        registry.settleCompensatedClaim(feeId);
+        _payouts().settleCompensatedClaim(feeId);
         assertEq(registry.openVaultCount(), 0);
         assertEq(registry.lockedZatoshi(), 0);
         vm.prank(compensatorRole);
@@ -417,22 +439,22 @@ contract RegistryV3HooksTest is ZecuredFixture {
         (bytes32 vaultId, bytes32 releaseId) = _released(VAULT_001);
         vm.prank(compensatorRole);
         vm.expectRevert(abi.encodeWithSelector(IZecuredRegistry.NotCompensable.selector, releaseId));
-        registry.settleCompensatedClaim(releaseId); // not compromised
+        _payouts().settleCompensatedClaim(releaseId); // not compromised
 
         gates.setCompromised(vaultId, true);
         vm.prank(stranger);
         vm.expectRevert(abi.encodeWithSelector(IZecuredRegistry.OnlyCompensator.selector, stranger));
-        registry.settleCompensatedClaim(releaseId);
+        _payouts().settleCompensatedClaim(releaseId);
         vm.expectEmit(address(registry));
         emit IZecuredRegistry.ClaimCompensated(vaultId, releaseId);
         vm.prank(compensatorRole);
-        registry.settleCompensatedClaim(releaseId);
+        _payouts().settleCompensatedClaim(releaseId);
         _assertClaim(releaseId, vaultId, ClaimKind.Release, VAULT_001, RELEASE_COMMITMENT, ClaimStatus.Compensated);
         assertEq(registry.openVaultCount(), 0, "its last claim settled");
         assertEq(registry.lockedZatoshi(), 0);
         vm.prank(compensatorRole);
         vm.expectRevert(abi.encodeWithSelector(IZecuredRegistry.NotCompensable.selector, releaseId));
-        registry.settleCompensatedClaim(releaseId);
+        _payouts().settleCompensatedClaim(releaseId);
     }
 
     // ================================================================== K3: nothing is paid from a pending vault

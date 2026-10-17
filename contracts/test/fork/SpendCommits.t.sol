@@ -115,9 +115,7 @@ contract SpendCommitsTest is ZecuredFixture {
         assertEq(registry.claimInput(claimId), depositTag);
 
         // The payout lands; the claim is confirmed paid.
-        registry.confirmPayout(
-            vaultId, _one(claimId), _threeSigs(registry.hashPayoutConfirmation(vaultId, _one(claimId)))
-        );
+        _confirmPayout(vaultId, c.payoutRef, _one(claimId));
         (,,,, ClaimStatus status) = registry.claim(claimId);
         assertEq(uint8(status), uint8(ClaimStatus.Paid));
     }
@@ -134,8 +132,7 @@ contract SpendCommitsTest is ZecuredFixture {
         assertEq(registry.lineageOf(c.changeTag).value, VAULT_005 - 2_500_000);
 
         // A payout that empties the vault: one output, still two actions' fee, and no change note.
-        bytes32[] memory both = _two(a, b);
-        registry.confirmPayout(vaultId, both, _threeSigs(registry.hashPayoutConfirmation(vaultId, both)));
+        _confirmPayout(vaultId, c.payoutRef, _two(a, b));
         vm.prank(account);
         bytes32 rest = registry.requestRelease(vaultId, RELEASE_COMMITMENT);
         SpendCommit memory last = _spendCommit(vaultId, c.changeTag, _one(rest), "last");
@@ -275,7 +272,7 @@ contract SpendCommitsTest is ZecuredFixture {
         );
 
         // A claim already confirmed paid, named again from the paying payout's change.
-        registry.confirmPayout(vaultId, _one(a), _threeSigs(registry.hashPayoutConfirmation(vaultId, _one(a))));
+        _confirmPayout(vaultId, paid.payoutRef, _one(a));
         c = _spendCommit(vaultId, paid.changeTag, _one(b), "claims");
         c.claimIds = _two(b, a);
         c.claimRefs = _two(keccak256("ref b"), keccak256("ref a"));
@@ -377,23 +374,18 @@ contract SpendCommitsTest is ZecuredFixture {
         vm.prank(account);
         bytes32 claimId = registry.requestRelease(vaultId, RELEASE_COMMITMENT);
         assertEq(registry.openVaultCount(), 1, "closed on Base, but its ZEC is still in the vault");
-        _commitNext(vaultId, _one(claimId));
+        bytes32 payoutRef = _commitNext(vaultId, _one(claimId)).payoutRef;
         assertEq(registry.openVaultCount(), 1, "committed, not yet paid");
 
         vm.warp(block.timestamp + 1 hours);
-        registry.confirmPayout(
-            vaultId, _one(claimId), _threeSigs(registry.hashPayoutConfirmation(vaultId, _one(claimId)))
-        );
+        _confirmPayout(vaultId, payoutRef, _one(claimId));
         assertEq(registry.openVaultCount(), 0);
         assertEq(registry.lastVaultSettledAt(), block.timestamp);
     }
 
     function test_openVaultCount_aPartialPayoutKeepsTheVaultOpen() public {
         bytes32 claimId = _partial(1_000_000);
-        _commitNext(vaultId, _one(claimId));
-        registry.confirmPayout(
-            vaultId, _one(claimId), _threeSigs(registry.hashPayoutConfirmation(vaultId, _one(claimId)))
-        );
+        _confirmPayout(vaultId, _commitNext(vaultId, _one(claimId)).payoutRef, _one(claimId));
         assertEq(registry.openVaultCount(), 1, "still active");
         assertEq(registry.lastVaultSettledAt(), 0);
     }
@@ -429,9 +421,7 @@ contract SpendCommitsTest is ZecuredFixture {
             changeValue: 0
         });
         registry.commitSpend(c, _threeSigs(registry.hashSpendCommit(c)));
-        registry.confirmPayout(
-            vaultA, _one(releaseId), _threeSigs(registry.hashPayoutConfirmation(vaultA, _one(releaseId)))
-        );
+        _confirmPayout(vaultA, c.payoutRef, _one(releaseId));
         (,,,, ClaimStatus status) = registry.claim(releaseId);
         assertEq(uint8(status), uint8(ClaimStatus.Paid));
     }

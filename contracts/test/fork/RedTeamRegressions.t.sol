@@ -6,6 +6,7 @@ import {ViolationKind, ViolationJournal, IZecuredSlasher} from "../../src/interf
 import {IZecuredSpendCommitsEvents} from "../../src/interfaces/v3/IZecuredSpendCommits.sol";
 import {IZecuredRegistry, VaultStatus, ClaimStatus} from "../../src/interfaces/v3/IZecuredRegistry.sol";
 import {IZecuredIntake} from "../../src/interfaces/v3/IZecuredIntake.sol";
+import {IZecuredCompensator} from "../../src/interfaces/v3/IZecuredCompensator.sol";
 import {SpendCommit, CloseRequest} from "../../src/libraries/ZecuredEIP712.sol";
 import {MorphoBalancesLib} from "morpho-blue/src/libraries/periphery/MorphoBalancesLib.sol";
 import {ORACLE_PRICE_SCALE} from "morpho-blue/src/libraries/ConstantsLib.sol";
@@ -272,16 +273,24 @@ contract RedTeamRegressionsTest is Tier3Base {
         assertTrue(bond.halted());
 
         // T-04: the slash compromised the bad vault. Its signers can no longer confirm or pay its claims, nor can its
-        // account leave; the compensator takes it over with the slashed bonds of signers 1, 3 and 4.
-        bytes[] memory confirmSigs = _threeSigs(registry.hashPayoutConfirmation(badVault, _one(claimId)));
-        vm.expectRevert(abi.encodeWithSelector(IZecuredRegistry.VaultCompromised.selector, badVault));
-        registry.confirmPayout(badVault, _one(claimId), confirmSigs);
-        vm.prank(thief);
+        // account leave (R-19: having no debt, its unbacked zZEC was even retired as the case executed); the
+        // compensator takes it over with the slashed bonds of signers 1, 3 and 4.
+        bytes[] memory confirmSigs = _threeSigs(_payouts().hashPayoutConfirmation(badVault, c.payoutRef, _one(claimId)));
         vm.expectRevert(abi.encodeWithSelector(IZecuredRegistry.VaultFrozen.selector, badVault));
+        _payouts().confirmPayout(badVault, c.payoutRef, _one(claimId), confirmSigs);
+        assertEq(uint8(_status(badVault)), uint8(VaultStatus.Closed));
+        vm.prank(thief);
+        vm.expectRevert(abi.encodeWithSelector(IZecuredRegistry.VaultNotActive.selector, badVault));
         registry.requestRelease(badVault, keccak256("rt6.dest2"));
         uint256 slashed = 3 * MIN_BOND;
         assertEq(compensator.funds(), slashed - slashed * BOUNTY_BPS / 10_000, "the slashed bonds less the bounty");
 
+        // R-2: the claim's payout was committed and may have landed (here F2 even shows it did, with the change
+        // withheld): its proof gets the inclusion window from the compromise before the compensator owes the claim.
+        uint64 provableUntil = slasher.compromisedAt(badVault) + INCLUSION_WINDOW;
+        vm.expectRevert(abi.encodeWithSelector(IZecuredCompensator.ProofWindowOpen.selector, claimId, provableUntil));
+        compensator.tallyClaim(claimId);
+        vm.warp(provableUntil);
         compensator.tallyClaim(claimId); // the claim leaves the Registry's books: the compensator owes it now
         compensator.tallyVault(badVault);
         vm.warp(block.timestamp + INCIDENT_WINDOW);
@@ -411,9 +420,13 @@ contract RedTeamRegressionsTest is Tier3Base {
         registry.writeOffDust(big);
     }
 
-    // ================================================================== RT-16: one lineage note per tag
+    // ================================================================== RT-16, R-16: one lineage note per tag
 
-    function test_RT16_aDepositTagAlreadyALineageNoteIsRefused() public {
+    /// A commitment recorded as its change the tag another vault's deposit carries: no real change note can (another
+    /// note has another cmx, another vault another tag key), so the record was false, and refusing the deposit for it
+    /// would let three signers block any deposit they see on Zcash (R-16). The deposit takes the tag over; the tag is
+    /// then used, so it never lands twice.
+    function test_RT16_R16_aDepositOverridesAChangeRecordUnderItsTag() public {
         address account = makeAddr("rt16.account");
         bytes32 vaultId = _attest(account, VAULT_005);
         vm.startPrank(account);
@@ -421,15 +434,32 @@ contract RedTeamRegressionsTest is Tier3Base {
         bytes32 claimId = registry.requestPartialRelease(vaultId, 1_000_000, keccak256("rt16.dest"));
         vm.stopPrank();
         SpendCommit memory c = _spendCommit(vaultId, _depositTagFor(account), _one(claimId), "rt16");
-        // A change tag that another vault's deposit will (absurdly) carry.
         address other = makeAddr("rt16.other");
-        c.changeTag = _depositTagFor(other);
-        _send(c);
-        // Neither as an activation nor as a refund: the Registry refuses a tag that is already a lineage note.
         bytes32 tag = _depositTagFor(other);
-        vm.expectRevert(abi.encodeWithSelector(IZecuredRegistry.DepositTagUsed.selector, tag));
+        c.changeTag = tag;
+        _send(c);
+        assertEq(registry.lineageOf(tag).vaultId, vaultId, "the false change record");
+
+        vm.expectEmit(address(registry));
+        emit IZecuredRegistry.ChangeTagOverridden(tag, vaultId);
         intake.harnessActivate(_vaultIdFor(other), other, VAULT_001, tag);
+        assertEq(registry.lineageOf(tag).vaultId, _vaultIdFor(other), "the deposit's vault");
+        assertEq(registry.lineageOf(tag).value, VAULT_001);
+        assertTrue(registry.depositTagUsed(tag));
+        // A deposit's tag stays one note: neither another activation nor a refund lands under it.
+        address third = makeAddr("rt16.third");
+        vm.expectRevert(abi.encodeWithSelector(IZecuredRegistry.DepositTagUsed.selector, tag));
+        intake.harnessActivate(_vaultIdFor(third), third, VAULT_001, tag);
         vm.expectRevert(abi.encodeWithSelector(IZecuredRegistry.DepositTagUsed.selector, tag));
         intake.harnessRefund(_vaultIdFor(other), other, VAULT_001, tag);
+        // And the vault that recorded the false change can no longer spend it.
+        bytes32 rest = registry.claimIdOf(vaultId, registry.claimCount(vaultId));
+        vm.prank(account);
+        registry.requestPartialRelease(vaultId, 1_000_000, keccak256("rt16.dest2"));
+        SpendCommit memory fromTag = _spendCommit(_vaultIdFor(other), tag, _one(rest), "rt16.fromTag");
+        fromTag.vaultId = vaultId;
+        bytes[] memory sigs = _threeSigs(registry.hashSpendCommit(fromTag));
+        vm.expectRevert(abi.encodeWithSelector(IZecuredSpendCommitsEvents.NotALineageNote.selector, vaultId, tag));
+        registry.commitSpend(fromTag, sigs);
     }
 }

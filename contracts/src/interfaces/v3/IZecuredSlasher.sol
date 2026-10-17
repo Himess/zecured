@@ -52,6 +52,20 @@ struct ViolationCase {
 ///        F4: nothing to compensate (the call is still made, for the record).
 ///      - Disputes (design notes T-05 (a)): `proveInclusion` takes the same guest's `Included` journal (kind 5, which
 ///        is not a `ViolationKind`) and upholds a disputed payout confirmation in the Registry (`IZecuredDisputes`).
+///      Changes in v4 (proven delivery, R-2, R-3, R-19):
+///      - an inclusion proof makes any committed claim's payment final, not only a disputed one's; `proveInclusionBatch`
+///        verifies one proof for every claim of a payout and skips the claims someone else proved first;
+///        `proveInclusionByCase` uses an executed F2 or F4 case, whose journal proved its payout in a block, the same
+///        way;
+///      - `frozenSince` records when a vault's current freeze began (its first open F1/F2 case), `compromisedAt` when an
+///        executed case compromised it: the compensator counts a confirmation by signatures made within the dispute
+///        window before the freeze as unpaid unless proven (R-3), and waits `inclusionWindow` after the compromise for
+///        the proofs of committed claims (R-2);
+///      - executing a case that compromises a vault asks the compensator to burn the vault's collateral down to the LLTV
+///        at once (R-19), with `BURN_GAS` of gas (the call itself may fail, e.g. for an account that revoked the
+///        Registry's Morpho authorization; anyone retries with `ZecuredCompensator.burnCollateral`);
+///      - F1's condition reads the commitment of the note's own vault (R-16: a change record a deposit overrode never
+///        covers that deposit's spend).
 interface IZecuredSlasher {
     event ViolationProven(
         bytes32 indexed caseId,
@@ -81,8 +95,15 @@ interface IZecuredSlasher {
     error ChallengeWindowOpen(bytes32 caseId, uint64 executableAt);
     error CaseAlreadyExecuted(bytes32 caseId);
     error NotAnInclusion();
+    /// @notice v4: not an executed F2 or F4 case (`proveInclusionByCase`).
+    error NotAnInclusionCase(bytes32 caseId);
+    /// @notice v4 (R-19): `executeSlash` of a case that compromises a vault needs at least `BURN_GAS` (and the 1/64
+    ///         Ethereum keeps back) to hand to the compensator's burn, so that nobody skips the burn by starving it.
+    error InsufficientGasForBurn();
 
     function JOURNAL_LENGTH() external view returns (uint256);
+    /// @notice Gas `executeSlash` hands the compensator to burn a vault's collateral when it compromises it (R-19).
+    function BURN_GAS() external view returns (uint256);
     /// @notice Anyone. `imageId` and the seal's router selector must be an active Violation version of `versions`
     ///         (T-07a).
     function proveViolation(ViolationKind kind, bytes calldata journal, bytes calldata seal, bytes32 imageId)
@@ -93,9 +114,32 @@ interface IZecuredSlasher {
     /// @notice Anyone (the signers' coordinator, in practice). Verifies a proof of the violation guest's `Included`
     ///         kind: the journal is `(5, anchor, 0, payoutRef, 0, 0, 0, 0)`, the seal is from an active Violation version
     ///         (`imageId`), and the anchor is on the relay's best chain under `slashConfirmationWork`, as for a slash.
-    ///         Then upholds the disputed `claimId` in the Registry, which checks that `payoutRef` is a committed payout
-    ///         of its input.
+    ///         Then proves `claimId`'s payment in the Registry (`IZecuredDisputes.upholdPayout`), which checks that
+    ///         `payoutRef` is a committed payout of its input; reverts with the Registry's reason.
     function proveInclusion(bytes calldata journal, bytes calldata seal, bytes32 imageId, bytes32 claimId) external;
+
+    /// @notice v4: as `proveInclusion`, one verification for every claim of the payout. A claim already final or no
+    ///         longer upholdable (proven by someone else first, compensated) is skipped, never a revert.
+    /// @return upheld How many of `claimIds` the proof upheld.
+    function proveInclusionBatch(
+        bytes calldata journal,
+        bytes calldata seal,
+        bytes32 imageId,
+        bytes32[] calldata claimIds
+    ) external returns (uint256 upheld);
+
+    /// @notice v4 (R-2): an executed F2 or F4 case proved that its committed payout `ref` is in a block (its anchor
+    ///         rechecked under `slashConfirmationWork` at execution), so it proves the payment of that payout's claims
+    ///         like an `Included` proof; skips as `proveInclusionBatch`. F3's reference is a claim's, not the payout's,
+    ///         and F1's spend was never committed: neither counts.
+    function proveInclusionByCase(bytes32 caseId, bytes32[] calldata claimIds) external returns (uint256 upheld);
+
+    /// @notice R-2: when an executed F1/F2 case compromised the vault (zero if never).
+    function compromisedAt(bytes32 vaultId) external view returns (uint64);
+
+    /// @notice R-3: when the vault's current freeze began (its first open F1/F2 case; zero while not frozen). Kept once
+    ///         the vault is compromised.
+    function frozenSince(bytes32 vaultId) external view returns (uint64);
 
     function caseOf(bytes32 caseId) external view returns (ViolationCase memory);
     function caseIdOf(ViolationKind kind, bytes32 ref, bytes32 noteTag) external pure returns (bytes32);

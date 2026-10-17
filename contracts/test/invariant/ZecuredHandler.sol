@@ -22,7 +22,8 @@ import {
     ClaimDetails
 } from "../../src/interfaces/v3/IZecuredRegistry.sol";
 import {IZecuredIntake, PendingActivation} from "../../src/interfaces/v3/IZecuredIntake.sol";
-import {IZecuredDisputes} from "../../src/interfaces/v3/IZecuredDisputes.sol";
+import {IZecuredDisputes, IZecuredDisputesEvents} from "../../src/interfaces/v3/IZecuredDisputes.sol";
+import {IZecuredPayouts} from "../../src/interfaces/v3/IZecuredPayouts.sol";
 import {CloseRequest, SpendCommit, DeleverageRequest} from "../../src/libraries/ZecuredEIP712.sol";
 import {MockHeaderRelay} from "../mocks/MockHeaderRelay.sol";
 import {MockSignerBond} from "../mocks/MockSignerBond.sol";
@@ -110,6 +111,8 @@ contract ZecuredHandler is Test {
     mapping(bytes32 claimId => bytes32) public refundNoteOf;
     /// Claims reopened after a dispute: a later proof of their payout still upholds them (D57).
     mapping(bytes32 claimId => bool) public reopened;
+    /// The vault's latest committed payout (v4: confirmations name it).
+    mapping(bytes32 vaultId => bytes32) public lastPayoutRef;
     /// Every tag the Intake accepted, and what it is now.
     bytes32[] public tags;
     mapping(bytes32 tag => uint8) public tagState;
@@ -894,25 +897,129 @@ contract ZecuredHandler is Test {
     }
 
     /// The signers pay one of the vault's claims (with its Fee claim at index 1 when `withFee` and one is due): commit,
-    /// then confirm. I22: neither step reverts for any gate.
+    /// then confirm the payout, naming it, with every claim of it still pending (v4, R-1: each payout is confirmed once;
+    /// a reopened claim only by a proof). I22: neither step reverts for any gate; R-3: the confirmation, and only it, is
+    /// refused while the vault is frozen (its claims are then proven instead).
     function confirm(uint256 vaultSeed, uint256 signerSeed, bool withFee) external {
         (bool found, bytes32 vaultId,) = _vault(vaultSeed);
         if (!found || !_payable(vaultId)) return;
         bytes32[] memory ids;
         (bool committed, bytes32 claimId) = _payableClaim(vaultId, true);
         if (committed) {
-            ids = _one(claimId); // committed (and mined) earlier: only confirmed now
+            // Committed (and mined) earlier: only confirmed now, unless its confirmation was recorded already.
+            if (_payouts().payoutConfirmed(_payoutRefOf(claimId))) return;
+            ids = _pendingClaimsOfInput(vaultId, registry.claimInput(claimId));
         } else {
             (bool ok, bytes32 next) = _payableClaim(vaultId, false);
             if (!ok) return;
             ids = _withFee(vaultId, next, withFee);
             if (!_commit(vaultId, ids, signerSeed)) return;
         }
-        bytes[] memory sigs = _threeSigs(registry.hashPayoutConfirmation(vaultId, ids), signerSeed);
-        try registry.confirmPayout(vaultId, ids, sigs) {
+        bytes32 payoutRef = _payoutRefOf(ids[0]);
+        bool frozen = gates.vaultFrozen(vaultId);
+        bytes[] memory sigs = _threeSigs(_payouts().hashPayoutConfirmation(vaultId, payoutRef, ids), signerSeed);
+        try _payouts().confirmPayout(vaultId, payoutRef, ids, sigs) {
+            if (frozen) _flag("R-3: a frozen vault's payout was confirmed by signatures");
             calls["confirm"]++;
         } catch {
-            _flag("I22: a committed payout could not be confirmed");
+            if (!frozen) _flag("I22: a committed payout could not be confirmed");
+            calls["confirm (frozen)"]++;
+        }
+    }
+
+    function _payouts() internal view returns (IZecuredPayouts) {
+        return IZecuredPayouts(address(registry));
+    }
+
+    /// The handler's payout of a claim's input (`_commit` derives its reference from the input).
+    function _payoutRefOf(bytes32 claimId) internal view returns (bytes32) {
+        return keccak256(abi.encode("zecured.inv.payoutRef", registry.claimInput(claimId)));
+    }
+
+    /// The vault's claims bound to `input` that are pending and were never reopened: what a confirmation names.
+    function _pendingClaimsOfInput(bytes32 vaultId, bytes32 input) internal view returns (bytes32[] memory ids) {
+        uint64 count = registry.claimCount(vaultId);
+        bytes32[] memory found = new bytes32[](count);
+        uint256 n;
+        for (uint64 j; j < count; ++j) {
+            bytes32 id = registry.claimIdOf(vaultId, j);
+            (,,,, ClaimStatus status) = registry.claim(id);
+            if (status == ClaimStatus.Pending && !reopened[id] && registry.claimInput(id) == input) found[n++] = id;
+        }
+        ids = new bytes32[](n);
+        for (uint256 i; i < n; ++i) {
+            ids[i] = found[i];
+        }
+    }
+
+    /// Proven delivery (v4): an inclusion proof of a claim's committed payout (the MOCK slasher stands in for a verified
+    /// `Included` proof) makes its payment final from any state before the compensator: committed and pending (also on
+    /// a frozen vault), or confirmed by signatures. Never reverts for such a claim; afterwards `paidAt == 0`.
+    function provePayout(uint256 vaultSeed, uint256 howSeed) external {
+        (bool found, bytes32 vaultId,) = _vault(vaultSeed);
+        if (!found) return;
+        bool confirmedOnly = _mix(howSeed) % 2 == 0;
+        uint64 count = registry.claimCount(vaultId);
+        for (uint64 j; j < count; ++j) {
+            bytes32 claimId = registry.claimIdOf(vaultId, j);
+            if (!_provable(claimId, confirmedOnly)) continue;
+            _prove(vaultId, claimId, confirmedOnly);
+            return;
+        }
+    }
+
+    function _provable(bytes32 claimId, bool confirmedOnly) internal view returns (bool) {
+        if (registry.claimInput(claimId) == bytes32(0)) return false;
+        (,,,, ClaimStatus status) = registry.claim(claimId);
+        (uint64 paidAt,) = IZecuredDisputes(address(registry)).payoutDispute(claimId);
+        return confirmedOnly ? status == ClaimStatus.Paid && paidAt != 0 : status == ClaimStatus.Pending;
+    }
+
+    function _prove(bytes32 vaultId, bytes32 claimId, bool confirmedOnly) internal {
+        IZecuredDisputes disputes = IZecuredDisputes(address(registry));
+        uint256 unproven = _payouts().unprovenConfirmations(vaultId);
+        bytes32 payoutRef = _payoutRefOf(claimId); // before the prank: it reads the Registry
+        vm.prank(address(gates));
+        try disputes.upholdPayout(claimId, payoutRef) {
+            (,,,, ClaimStatus afterwards) = registry.claim(claimId);
+            (uint64 paidAfter, uint64 dueAfter) = disputes.payoutDispute(claimId);
+            if (afterwards != ClaimStatus.Paid || paidAfter != 0 || dueAfter != 0) {
+                _flag("a proven payout did not leave its claim paid for good");
+            }
+            if (confirmedOnly && _payouts().unprovenConfirmations(vaultId) != unproven - 1) {
+                _flag("R-3: a proven confirmation still counted as unproven");
+            }
+            calls[confirmedOnly ? "prove confirmed" : "prove pending"]++;
+        } catch {
+            _flag("a committed payout's proof was refused");
+        }
+    }
+
+    /// R-3: anyone makes a confirmation final once its dispute window is over, unless the vault froze within that
+    /// window (then only a proof or the compensator settles it).
+    function expireConfirmation(uint256 vaultSeed) external {
+        (bool found, bytes32 vaultId,) = _vault(vaultSeed);
+        if (!found) return;
+        IZecuredDisputes disputes = IZecuredDisputes(address(registry));
+        uint64 window = disputes.disputeWindow();
+        uint64 count = registry.claimCount(vaultId);
+        for (uint64 j; j < count; ++j) {
+            bytes32 claimId = registry.claimIdOf(vaultId, j);
+            (,,,, ClaimStatus status) = registry.claim(claimId);
+            (uint64 paidAt,) = disputes.payoutDispute(claimId);
+            if (status != ClaimStatus.Paid || paidAt == 0) continue;
+            if (block.timestamp <= uint256(paidAt) + window) vm.warp(uint256(paidAt) + window + 1);
+            uint64 frozenSince = gates.frozenSince(vaultId);
+            bool suspect = frozenSince != 0 && paidAt + window > frozenSince;
+            vm.prank(stranger);
+            try _payouts().expireConfirmation(claimId) {
+                if (suspect) _flag("R-3: a confirmation made just before a freeze expired");
+                calls["expire"]++;
+            } catch {
+                if (!suspect) _flag("an old confirmation could not expire");
+                calls["expire (suspect)"]++;
+            }
+            return;
         }
     }
 
@@ -975,6 +1082,7 @@ contract ZecuredHandler is Test {
             // The input is spent; its change, if any, is the vault's new note.
             if (change == 0) _removeNote(vaultId, input);
             else liveNotes[vaultId][n] = c.changeTag;
+            lastPayoutRef[vaultId] = c.payoutRef;
             calls["commit"]++;
             return true;
         } catch {
@@ -1088,21 +1196,67 @@ contract ZecuredHandler is Test {
         possible = true;
     }
 
-    /// Tier 3: a claim is never confirmed paid without a committed payout. Must always fail.
+    /// Tier 3: a claim is never confirmed paid without a payout committed for it, even under the reference of another
+    /// payout of its vault (R-1). Must always fail.
     function attackUncommittedConfirm(uint256 vaultSeed, uint256 signerSeed) external {
         (bool found, bytes32 vaultId,) = _vault(vaultSeed);
         if (!found) return;
+        bytes32 payoutRef = lastPayoutRef[vaultId];
+        if (payoutRef == bytes32(0)) payoutRef = keccak256(abi.encode("zecured.inv.noPayout", vaultId));
         uint64 count = registry.claimCount(vaultId);
         for (uint64 i; i < count; ++i) {
             bytes32 claimId = registry.claimIdOf(vaultId, i);
             (,,,, ClaimStatus status) = registry.claim(claimId);
             if (status != ClaimStatus.Pending || registry.claimInput(claimId) != bytes32(0)) continue;
             bytes32[] memory ids = _one(claimId);
-            bytes[] memory sigs = _threeSigs(registry.hashPayoutConfirmation(vaultId, ids), signerSeed);
-            try registry.confirmPayout(vaultId, ids, sigs) {
+            bytes[] memory sigs = _threeSigs(_payouts().hashPayoutConfirmation(vaultId, payoutRef, ids), signerSeed);
+            try _payouts().confirmPayout(vaultId, payoutRef, ids, sigs) {
                 attackSucceeded = true;
             } catch {}
             calls["attack: uncommitted confirm"]++;
+            return;
+        }
+    }
+
+    /// R-1: a confirmation is never replayed: the same signatures again, or a reopened claim confirmed under its old
+    /// payout. A final claim is never proven, disputed or confirmed again. Must always fail.
+    function attackReplayOrFinal(uint256 vaultSeed, uint256 signerSeed) external {
+        (bool found, bytes32 vaultId,) = _vault(vaultSeed);
+        if (!found) return;
+        IZecuredDisputes disputes = IZecuredDisputes(address(registry));
+        uint64 count = registry.claimCount(vaultId);
+        for (uint64 i; i < count; ++i) {
+            bytes32 claimId = registry.claimIdOf(vaultId, i);
+            ClaimDetails memory c = registry.claimDetails(claimId);
+            (uint64 paidAt,) = disputes.payoutDispute(claimId);
+            bytes32 input = registry.claimInput(claimId);
+            if (input == bytes32(0)) continue;
+            bytes32 payoutRef = _payoutRefOf(claimId);
+            bool reopenedPending = c.status == ClaimStatus.Pending && reopened[claimId];
+            bool finalPaid = c.status == ClaimStatus.Paid && paidAt == 0;
+            if (!reopenedPending && !finalPaid && !(c.status == ClaimStatus.Paid && paidAt != 0)) continue;
+            bytes[] memory sigs =
+                _threeSigs(_payouts().hashPayoutConfirmation(vaultId, payoutRef, _one(claimId)), signerSeed);
+            try _payouts().confirmPayout(vaultId, payoutRef, _one(claimId), sigs) {
+                attackSucceeded = true;
+            } catch {}
+            if (finalPaid) {
+                vm.prank(address(gates));
+                try disputes.upholdPayout(claimId, payoutRef) {
+                    attackSucceeded = true;
+                } catch (bytes memory reason) {
+                    if (bytes4(reason) != IZecuredDisputesEvents.AlreadyFinal.selector) {
+                        _flag("a final claim's second proof failed for another reason");
+                    }
+                }
+                if (c.claimant != address(0)) {
+                    vm.prank(c.claimant);
+                    try disputes.disputePayout(claimId) {
+                        attackSucceeded = true;
+                    } catch {}
+                }
+            }
+            calls["attack: replay or final"]++;
             return;
         }
     }

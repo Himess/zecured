@@ -7,6 +7,7 @@ import {VaultStatus, ClaimKind, ClaimStatus} from "../../src/interfaces/v3/IZecu
 import {LineageNote} from "../../src/interfaces/v3/IZecuredSpendCommits.sol";
 import {PendingActivation} from "../../src/interfaces/v3/IZecuredIntake.sol";
 import {IZecuredDisputes} from "../../src/interfaces/v3/IZecuredDisputes.sol";
+import {IZecuredPayouts} from "../../src/interfaces/v3/IZecuredPayouts.sol";
 import {ZecuredFixture} from "../utils/ZecuredFixture.sol";
 import {MockHeaderRelay} from "../mocks/MockHeaderRelay.sol";
 import {MockSignerBond} from "../mocks/MockSignerBond.sol";
@@ -69,7 +70,7 @@ contract ZecuredInvariantsTest is ZecuredFixture {
         usdc.transferOwnership(address(handler)); // MOCK mint for the handler's actors
         oracle.transferOwnership(address(handler)); // MOCK price moves
 
-        bytes4[] memory selectors = new bytes4[](44);
+        bytes4[] memory selectors = new bytes4[](48);
         selectors[0] = ZecuredHandler.prove.selector;
         selectors[1] = ZecuredHandler.prove.selector; // weighted: deposits first
         selectors[2] = ZecuredHandler.prove.selector;
@@ -114,6 +115,11 @@ contract ZecuredInvariantsTest is ZecuredFixture {
         selectors[41] = ZecuredHandler.resolveDispute.selector;
         selectors[42] = ZecuredHandler.dispute.selector; // weighted: a dispute needs a confirmed claim first
         selectors[43] = ZecuredHandler.resolveDispute.selector;
+        // v4: proven delivery, expired confirmations (R-3), replays and final claims (R-1).
+        selectors[44] = ZecuredHandler.provePayout.selector;
+        selectors[45] = ZecuredHandler.provePayout.selector;
+        selectors[46] = ZecuredHandler.expireConfirmation.selector;
+        selectors[47] = ZecuredHandler.attackReplayOrFinal.selector;
         targetSelector(FuzzSelector({addr: address(handler), selectors: selectors}));
         targetContract(address(handler));
         // The handler pranks its own actors, so the caller does not matter. A fixed caller matters on a fork: every
@@ -364,6 +370,24 @@ contract ZecuredInvariantsTest is ZecuredFixture {
         assertEq(registry.lockedZatoshi(), zzec.totalSupply() + unpaid, "lockedZatoshi");
     }
 
+    /// v4 (R-3, proven delivery): a vault's `unprovenConfirmations` counts exactly its claims confirmed by signatures
+    /// and not yet final (Paid with `paidAt != 0`); a final claim (`paidAt == 0`) is never counted.
+    function invariant_unprovenConfirmations() public view {
+        IZecuredDisputes disputes = IZecuredDisputes(address(registry));
+        for (uint256 i; i < handler.vaultCount(); ++i) {
+            bytes32 vaultId = handler.vaultIds(i);
+            uint256 open;
+            uint64 count = registry.claimCount(vaultId);
+            for (uint64 j; j < count; ++j) {
+                bytes32 claimId = registry.claimIdOf(vaultId, j);
+                (,,,, ClaimStatus s) = registry.claim(claimId);
+                (uint64 paidAt,) = disputes.payoutDispute(claimId);
+                if (s == ClaimStatus.Paid && paidAt != 0) ++open;
+            }
+            assertEq(IZecuredPayouts(address(registry)).unprovenConfirmations(vaultId), open, "unproven confirmations");
+        }
+    }
+
     // ------------------------------------------------------------------ violations caught while acting
 
     /// D14: every partial release left the position at <= 50 % LTV and at least MIN_RELEASE in the vault, kept the
@@ -394,7 +418,7 @@ contract ZecuredInvariantsTest is ZecuredFixture {
     }
 
     function afterInvariant() external view {
-        string[52] memory names = [
+        string[58] memory names = [
             "prove: pending",
             "prove: refund (known vault)",
             "prove: refund (account bound)",
@@ -430,6 +454,11 @@ contract ZecuredInvariantsTest is ZecuredFixture {
             "commit",
             "commit only",
             "confirm",
+            "confirm (frozen)",
+            "prove pending",
+            "prove confirmed",
+            "expire",
+            "expire (suspect)",
             "dispute",
             "uphold",
             "uphold late",
@@ -446,7 +475,8 @@ contract ZecuredInvariantsTest is ZecuredFixture {
             "attack: partial release",
             "attack: flash loan",
             "attack: deleverage",
-            "attack: close request"
+            "attack: close request",
+            "attack: replay or final"
         ];
         for (uint256 i; i < names.length; ++i) {
             console.log(names[i], handler.calls(names[i]));

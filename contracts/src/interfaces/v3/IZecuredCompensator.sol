@@ -72,6 +72,20 @@ struct Entitlement {
 ///      debt directly on Morpho, which only lowers what the vault needs.
 ///      Leftover: kept for later incidents while any vault is open; then `sweepLeftover` sends it to `leftoverSink`
 ///      (a burn address on testnet; a public-good address is a mainnet option). It never goes back to the signers.
+///      Changes in v4:
+///      - R-19: the collateral of a compromised vault is burned down to the LLTV for its debt at once (the slasher asks
+///        when it executes the case; anyone retries with `burnCollateral`), so the owner cannot borrow against the
+///        stolen collateral; the vault's equity is still computed on what it held when compromised.
+///      - R-2: a committed claim is tallied only `inclusionWindow` after the compromise, so that a payout that did land
+///        is proven (and paid for good) rather than compensated as well. R-3: a claim confirmed by signatures within
+///        the dispute window before the vault froze is tallied too, unless proven meanwhile; `tallyVault` waits until
+///        the vault has no such confirmation left (`IZecuredPayouts.unprovenConfirmations`). R-21: an abandoned refund
+///        of the vault is tallied on request, until the incident is finalized.
+///      - R-7: an executed F3 case closes its claim in the Registry, so the claim is compensated once, never also paid
+///        by the bonds; the bonds read `entitlement(claimId)`.
+///      - R-20: a vault that stays active after `settleVault` (partly covered, or unauthorized) leaves the Registry's
+///        open vaults and locked zatoshi; anyone burns its collateral again later (`burnCollateral`), and retires it
+///        once its debt is gone.
 interface IZecuredCompensator {
     event FundsReceived(bytes32 indexed caseId, uint256 amount);
     event IncidentOpened(uint256 indexed incident, uint64 closesAt);
@@ -92,6 +106,9 @@ interface IZecuredCompensator {
     event VaultSettled(bytes32 indexed vaultId, uint256 repaid, uint64 retired, uint256 equity);
     event EntitlementPaid(bytes32 indexed id, address indexed to, uint256 amount);
     event LeftoverSwept(address indexed sink, uint256 amount);
+    /// @notice R-19, R-20: `retired` zatoshi of the compromised vault's collateral were burned (down to the LLTV for its
+    ///         debt, or all of it once the debt is gone).
+    event CollateralBurned(bytes32 indexed vaultId, uint64 retired);
 
     error ZeroAddress();
     error InvalidConfig();
@@ -110,6 +127,12 @@ interface IZecuredCompensator {
     error NotSettled(bytes32 vaultId);
     error NothingOwed(bytes32 id);
     error LeftoverLocked();
+    /// @notice R-2: a committed claim's payout may still be proven until `at` (the compromise plus `inclusionWindow`).
+    error ProofWindowOpen(bytes32 claimId, uint64 at);
+    /// @notice R-3: the vault still has confirmations by signatures that were neither proven, expired nor tallied.
+    error ConfirmationsUnsettled(bytes32 vaultId, uint256 left);
+    /// @notice R-19, R-20: the vault is not an active victim vault.
+    error NotBurnable(bytes32 vaultId);
 
     function onFunds(bytes32 caseId, uint256 amount) external;
     function onCase(bytes32 caseId, ViolationKind kind, bytes32 vaultId, bytes32 claimId, uint64 shortfallZat) external;
@@ -121,6 +144,11 @@ interface IZecuredCompensator {
     function withdrawEntitlement(bytes32 claimId) external returns (uint256 amount);
     function withdrawEquity(bytes32 vaultId) external returns (uint256 amount);
     function sweepLeftover() external returns (uint256 amount);
+
+    /// @notice R-19, R-20: anyone, for an active victim vault, before or after it was settled: burns its collateral down
+    ///         to the least that keeps its debt healthy at the LLTV, or all of it (retiring the vault) once it has no
+    ///         debt. Needs the account's Morpho authorization of the Registry.
+    function burnCollateral(bytes32 vaultId) external returns (uint64 retired);
 
     function incident(uint256 id) external view returns (Incident memory);
     function victim(bytes32 vaultId) external view returns (Victim memory);

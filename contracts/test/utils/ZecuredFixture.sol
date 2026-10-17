@@ -23,6 +23,7 @@ import {Version, VersionKind} from "../../src/interfaces/v3/IZecuredVersions.sol
 import {BondConfig} from "../../src/interfaces/v3/ISignerBond.sol";
 import {CloseRequest, SpendCommit} from "../../src/libraries/ZecuredEIP712.sol";
 import {VaultStatus, ClaimKind, ClaimStatus, RegistryConfig} from "../../src/interfaces/v3/IZecuredRegistry.sol";
+import {IZecuredPayouts} from "../../src/interfaces/v3/IZecuredPayouts.sol";
 import {IntakeConfig, WorkTier} from "../../src/interfaces/v3/IZecuredIntake.sol";
 import {IRiscZeroVerifier} from "../../src/interfaces/IRiscZeroVerifier.sol";
 import {IZcashHeaderRelay} from "../../src/relay/IZcashHeaderRelay.sol";
@@ -475,6 +476,13 @@ abstract contract ZecuredFixture is Test {
         return _signerSigs(digest, _idx(0, 2, 4));
     }
 
+    /// All five signers, in order (v4, R-6: a Reimburse destination takes all five).
+    function _fiveSigs(bytes32 digest) internal view returns (bytes[] memory) {
+        uint256[] memory all = new uint256[](5);
+        (all[0], all[1], all[2], all[3], all[4]) = (0, 1, 2, 3, 4);
+        return _signerSigs(digest, all);
+    }
+
     // ------------------------------------------------------------------ vaults
 
     function _vaultIdFor(address account) internal pure returns (bytes32) {
@@ -542,6 +550,33 @@ abstract contract ZecuredFixture is Test {
     {
         c = _spendCommit(vaultId, inputTag, claimIds, keccak256(abi.encode(vaultId, inputTag, claimIds)));
         registry.commitSpend(c, _threeSigs(registry.hashSpendCommit(c)));
+        payoutRefOfInput[inputTag] = c.payoutRef;
+    }
+
+    // ------------------------------------------------------------------ payout confirmations (v4: IZecuredPayouts)
+
+    /// The latest payout the tests' helpers committed from each lineage note (`_commit`, Tier3Base `_send`).
+    mapping(bytes32 inputTag => bytes32 payoutRef) internal payoutRefOfInput;
+
+    /// The payout confirmations and the compensator's claim hooks, served at the Registry's address.
+    function _payouts() internal view returns (IZecuredPayouts) {
+        return IZecuredPayouts(address(registry));
+    }
+
+    /// Three signers (0, 2, 4) confirm that the committed payout `payoutRef` paid `claimIds`.
+    function _confirmPayout(bytes32 vaultId, bytes32 payoutRef, bytes32[] memory claimIds) internal {
+        _payouts()
+            .confirmPayout(
+                vaultId,
+                payoutRef,
+                claimIds,
+                _threeSigs(_payouts().hashPayoutConfirmation(vaultId, payoutRef, claimIds))
+            );
+    }
+
+    /// As `_confirmPayout`, for the latest payout the helpers committed from the first claim's input.
+    function _confirmPaid(bytes32 vaultId, bytes32[] memory claimIds) internal {
+        _confirmPayout(vaultId, payoutRefOfInput[registry.claimInput(claimIds[0])], claimIds);
     }
 
     /// The vault's current lineage note, as the tests' payouts moved it (zero: still the deposit).

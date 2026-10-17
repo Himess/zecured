@@ -161,8 +161,7 @@ contract IntakeGatesTest is ZecuredFixture {
         assertEq(intake.capRoom(), 10_000_000 - BIG);
         bytes32[] memory ids = new bytes32[](1);
         ids[0] = claimId;
-        _commitNext(a, ids);
-        registry.confirmPayout(a, ids, _threeSigs(registry.hashPayoutConfirmation(a, ids)));
+        _confirmPayout(a, _commitNext(a, ids).payoutRef, ids);
         assertEq(registry.lockedZatoshi(), 0);
         assertEq(intake.capRoom(), 10_000_000);
     }
