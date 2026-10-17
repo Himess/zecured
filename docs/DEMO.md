@@ -52,6 +52,28 @@ Setup, once:
 | Prove | `build-violation uncommitted ... --out f1.json`, then `zecured-tier2-host violation prove f1.json f1.receipt` and `... violation groth16 f1.receipt f1.seal.json` | The journal: an anchor header, a tag, a reference; no Zcash transaction, note or address |
 | Slash | `cast send <ZecuredSlasher> "proveViolation(uint8,bytes,bytes,bytes32)" 1 <journal> <seal> <violation image id>`; two minutes later `cast send <ZecuredSlasher> "executeSlash(bytes32)" <caseId>` | All five bonds slashed, the bounty owed to the prover, `halted()` true: no new vault can be activated |
 
+## Try with demo TAZ (P-1, DEMO)
+
+On the judge deployment the deposit step offers "Try with demo TAZ" to a judge without testnet ZEC:
+the operators' demo wallet pays the vault its exact amount from its own Ironwood notes. It is a real
+Zcash testnet payment, proven on Base like any deposit. Each vault gets one demo payment, within a
+daily budget, after a second of proof of work in the browser. When the loan is closed its ZEC goes
+back to the demo wallet, unless the judge gives an Ironwood address of their own (the destination
+form offers the demo wallet's address).
+
+Operators: run `zecured-wallet --wallet data/demo/wallet.json init`, fund the address it prints with
+TAZ, then set `DEMO_WALLET_SPENDING_KEY` (the file's `spending_key`: secret, never logged) and
+`DEMO_WALLET_BIRTHDAY` (the file's `birthday`), optionally `DEMO_DAILY_CAP_ZAT`,
+`DEMO_LOW_BALANCE_ZAT` and `DEMO_ALARM_WEBHOOK`. Restart the backend, build the app with
+`NEXT_PUBLIC_DEMO_PATH=1`, and check that `GET /demo/status` says `enabled`. The demo path never
+runs on Base mainnet, and the mainnet-beta app never shows it.
+
+**Public pages.** `/status`: the signers, the relay, the proof queue, the minting gates, the cap's
+fill, the bonds (ΣB, B_eff), the anonymity sets, the proof versions and the running commit.
+`/evidence`: the deployment's manifest and real transactions, from `ZECURED_EVIDENCE`. `/market`: the
+market's size and rates, the collateral, the bonds, the compensation order, and optional lending.
+`/buy`: the swap's Buy side.
+
 ## Two-minute video
 
 | Time | Scene | Narration |
