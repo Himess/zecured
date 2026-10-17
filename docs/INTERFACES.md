@@ -326,10 +326,22 @@ function invalidateNonce(uint256 nonce) external;                 // msg.sender 
 function nonceUsed(address account, uint256 nonce) external view returns (bool);
 function minSeize(uint64 outstanding) external view returns (uint256);   // max(MIN_SEIZE, outstanding * minSeizeBps / 10,000)
 
+// v4, opt-in pre-liquidation (values in WAD)
+struct PreLiquidationTerms { uint256 preLltv; uint256 preLcf1; uint256 preLcf2; uint256 preLif1; uint256 preLif2; uint64 expiry; }
+function setPreLiquidation(PreLiquidationTerms calldata t) external;     // msg.sender = the account of an Active vault
+function clearPreLiquidation() external;                                 // msg.sender = account; never reverts
+function preLiquidate(address account, uint256 repaidShares, bytes32 mmCommitment)
+    external returns (uint256 repaidAssets, uint64 seized);
+function preLiquidationTerms(address account) external view returns (PreLiquidationTerms memory);
+
 function onMorphoLiquidate(uint256 repaidAssets, bytes calldata data) external;   // Morpho only
 function onMorphoRepay(uint256 repaidAssets, bytes calldata data) external;       // Morpho only
 
 event NonceInvalidated(address indexed account, uint256 nonce);
+event PreLiquidationSet(address indexed account, PreLiquidationTerms terms);
+event PreLiquidationCleared(address indexed account);
+event PreLiquidated(bytes32 indexed vaultId, address indexed account, address indexed liquidator, uint256 repaidAssets,
+    uint64 seized);
 ```
 
 - `liquidate`: exactly one of `seizedAssets`/`repaidShares` non-zero (`repaidShares` capped at
@@ -349,6 +361,16 @@ event NonceInvalidated(address indexed account, uint256 nonce);
   `minSeize` taken and left (taking the rest is a close) and `mmAmount >= minMmAmount`; withdraws
   `mmAmount` and calls `Registry.recordLiquidation` with the executor as the claimant. The vault
   stays Active.
+- `setPreLiquidation` (v4): `preLltv < LLTV`, `0 < preLcf1 <= preLcf2 <= 1`, `1 <= preLif1 <= preLif2 <=
+  LIF(LLTV)` (Morpho's liquidation incentive factor at the market's LLTV, held as an immutable),
+  `expiry > now`. `preLiquidate`, by anyone: the terms in force (`now < expiry`), the vault Active
+  and not frozen; Morpho accrues interest; `value * preLltv < debt <= value * LLTV` with Morpho's
+  rounding (debt rounded up; the upper bound is Morpho's health check, so a liquidatable position
+  is never pre-liquidated); `q = (ltv - preLltv) / (LLTV - preLltv)` with `ltv` rounded up and `q`
+  down; the close factor and the incentive linear in `q`; `repaidShares <= borrowShares * preLcf`;
+  `seized = assets(repaidShares, rounded down) * preLif / price`, rounded down, at least
+  `minSeize(outstanding)` taken and left; the caller's USDC repays through `onMorphoRepay`, the
+  collateral comes to the Adapter and `Registry.recordLiquidation` names the caller as claimant.
 
 ### 3.5 Tier 3: `SignerBondV2`, `ZecuredSlasher`, `ZecuredCompensator`
 

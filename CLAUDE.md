@@ -47,7 +47,8 @@ I5  A depositTag and a vaultId are each used at most once
 I6  Fewer than 3 DISTINCT signer signatures are always rejected
 I7  CloseRelease: mmAmount + userAmount == burned zZEC == outstanding before close
 I8  SettlementAdapter never withdraws collateral without a valid, unexpired,
-    non-cancelled signed request whose executor is msg.sender
+    non-cancelled signed request whose executor is msg.sender, or within
+    pre-liquidation terms the account itself set (in force, the LTV in their band)
 I9  Seized or withdrawn zZEC never exceeds the vault's outstanding
 I10 (signer, off-chain) vault notes == outstanding + unpaid claims + unrefunded non-conforming notes
 

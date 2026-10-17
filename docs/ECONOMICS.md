@@ -100,9 +100,18 @@ The app's preset, against the judge market (LLTV 62.5 %, Morpho's incentive abou
 | 55 % to 62.5 % | anyone, under the borrower's terms | 10 %, rising to 50 % | 2 %, rising to 5 % |
 | above 62.5 % | any liquidator, through Morpho | all of it | about 12.7 % |
 
+On a fork of the judge market with the real Morpho Blue, a position borrowed to 50 % LTV at $40
+enters the band at $36 (LTV 55.6 %): one pre-liquidation there repays about 13 % of the debt for
+about a 2.2 % incentive and brings the LTV back under 55 %; if the price then falls past the LLTV,
+the borrower who opted in keeps more collateral after the liquidation than one who did not. Each
+pre-liquidation must seize, and leave, at least the dust floor (0.001 ZEC on the judge
+deployment): with the preset, a 0.01 ZEC vault can be pre-liquidated only from about 56.4 % LTV,
+and a vault below about 0.003 ZEC never; liquidation is unaffected.
+
 The pre-liquidator is paid in ZEC on Zcash, after the signers' next payout of the vault, so it
 carries the price for that wait and the payout's Zcash fee; its bot logs a profitability estimate
-and acts regardless. Lenders gain from positions brought back before they reach the LLTV.
+and acts regardless. Its claim is an ordinary Liquidation claim, covered by the bonds like any
+third party's. Lenders gain from positions brought back before they reach the LLTV.
 
 ## Zecured Swap
 
