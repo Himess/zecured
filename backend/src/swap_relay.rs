@@ -435,9 +435,10 @@ mod tests {
         assert_eq!(r.0["swap"], "0x7777777777777777777777777777777777777777");
         let mut invited = HeaderMap::new();
         invited.insert(INVITE_HEADER, "beta-7f3k".parse().unwrap());
-        quote(axum::Extension(m.clone()), invited, Ok(Query(q("buy", Some("1"), None, None))))
+        let r = quote(axum::Extension(m.clone()), invited, Ok(Query(q("buy", Some("1"), None, None))))
             .await
             .unwrap();
+        assert_eq!(r.0["signature"], "0x12");
         let body = DestinationBody {
             receiver: TESTNET_UA.into(),
             salt: format!("0x{}", "5a".repeat(32)),
