@@ -76,7 +76,7 @@ export function RefundView() {
       {others.length > 0 ? (
         <Notice tone="warn" title="Other payments to this vault">
           <p>
-            The signers saw {others.length} other payment(s) to this vault ({others.map((n) => formatTaz(n.amount)).join(", ")})
+            The signers' scan found {others.length} other payment(s) to this vault ({others.map((n) => formatTaz(n.amount)).join(", ")})
             that cannot back the loan. Such a payment comes back only as a Refund claim proven on Base; it then appears above.
           </p>
         </Notice>

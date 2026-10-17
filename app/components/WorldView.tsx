@@ -12,6 +12,8 @@ import { config } from "@/lib/config";
 import { useLoans, useVault } from "@/lib/hooks";
 import { short, type StoredLoan } from "@/lib/keys";
 import { formatUsdc, formatUsdPrice, type MarketState } from "@/lib/morpho";
+import { priceSourceName } from "@/lib/labels";
+import { SWAP_PRIVACY_SENTENCE } from "@/lib/v4";
 import { formatTaz } from "@/lib/zcash";
 
 interface PublicData {
@@ -94,6 +96,7 @@ export function WorldView() {
               "Base: a fresh smart account with no history and no ETH (gas is sponsored).",
               "A standard-size zZEC position, the USDC borrowed, interest, closes and liquidations.",
               "Recipients only as salted commitments keccak256(salt ‖ receiver).",
+              SWAP_PRIVACY_SENTENCE,
             ]}
             hidden={[
               "Who owns the account.",
@@ -116,7 +119,7 @@ export function WorldView() {
                   <dd className="text-right tabular-nums">{base.market ? `${formatUsdc(base.market.totalSupplyAssets)} USDC` : "—"}</dd>
                   <dt className="text-muted">Borrowed</dt>
                   <dd className="text-right tabular-nums">{base.market ? `${formatUsdc(base.market.totalBorrowAssets)} USDC` : "—"}</dd>
-                  <dt className="text-muted">ZEC price (mock)</dt>
+                  <dt className="text-muted">ZEC price ({priceSourceName()})</dt>
                   <dd className="text-right tabular-nums">{base.price ? formatUsdPrice(base.price) : "—"}</dd>
                 </dl>
                 <p className="text-sm font-medium">Recent Zecured events</p>
