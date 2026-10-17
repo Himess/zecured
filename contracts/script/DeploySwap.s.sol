@@ -253,8 +253,7 @@ contract DeploySwap is Script {
         vm.serializeUint(k, "feeBps", c.feeBps);
         vm.serializeAddress(k, "feeRecipient", c.feeRecipient);
         string memory json = vm.serializeAddress(k, "deployer", d.deployer);
-        string memory file =
-            string.concat(OUT_DIR, "/", c.name, d.dryRun ? ".swap.dry-run.json" : ".swap.json");
+        string memory file = string.concat(OUT_DIR, "/", c.name, d.dryRun ? ".swap.dry-run.json" : ".swap.json");
         vm.writeJson(json, file);
         console.log("written", file);
     }
