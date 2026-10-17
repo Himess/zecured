@@ -1,0 +1,7 @@
+# The guest image ids the deployments pin, with the SHA-256 of each exported ELF (docs/TIER2.md § 8.1).
+# The guests workflow fails when a build gives another id for a pinned guest; a guest not listed here is
+# reported, not checked. Change a line only together with the guest and the deployments that pin it.
+deposit-test    0x406c6d268f29270226c775db1fe4bec04acf51ba919e250078125d71c10bff41  1a0a418af08e5ae63b2444a16d9902ed8106effa44829a6793c9a0a1dee0f430
+violation-test  0x65705f75c5482b2b0cf6fee12760b2364d48213bb2933f3882dc2d92f824866e  45205f4e390e5d017213ffd399c9231d0300a227d46db7e2f711f0abdc33dd38
+deposit-main    0x53f8f8e3664ce908c4ea072f239e18b6fa8b01d68c01fc162b4ae2e31b2cd5c5  b85d9d21f4bad6d7998506cb09431d5057a334a06732ebdfa3a4472fe811c461
+violation-main  0x24edd49e52447665146009687b6b85e3f0b6184883cbf635a762048cd1a5ce33  dfc746ce0e6c6c2c1f6f5323ebe3c7ef371ab6bd4c3c8f6d08c656adbef3c789

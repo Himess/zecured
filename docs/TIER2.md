@@ -326,6 +326,9 @@ provers run:
 | deposit-main | `0x53f8f8e3664ce908c4ea072f239e18b6fa8b01d68c01fc162b4ae2e31b2cd5c5` | `b85d9d21f4bad6d7998506cb09431d5057a334a06732ebdfa3a4472fe811c461` |
 | violation-main | `0x24edd49e52447665146009687b6b85e3f0b6184883cbf635a762048cd1a5ce33` | `dfc746ce0e6c6c2c1f6f5323ebe3c7ef371ab6bd4c3c8f6d08c656adbef3c789` |
 
+These ids and ELF hashes are pinned in `tier2/pinned-image-ids.txt`: the workflow fails when a build gives a pinned
+guest another id or ELF, so shared code cannot move them unnoticed.
+
 The judge deployment and the theft demo take journal v2 with the Testnet pair and the NU7 epoch (branch id
 `0x77190AD9`, D56); the local fork takes journal v2 too, with its own build's ids and the MOCK verifier.
 

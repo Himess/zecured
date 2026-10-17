@@ -16,6 +16,7 @@ on:
       - "tier2/host/**"
       - "tier2/methods/**"
       - "tier2/vendor/**"
+      - "tier2/pinned-image-ids.txt"
       - ".github/workflows/guests.yml"
   # A pull request that changes the guests gets their image ids before it is merged (read-only job).
   pull_request:
@@ -25,6 +26,7 @@ on:
       - "tier2/host/**"
       - "tier2/methods/**"
       - "tier2/vendor/**"
+      - "tier2/pinned-image-ids.txt"
       - ".github/workflows/guests.yml"
 
 permissions:
@@ -85,6 +87,36 @@ jobs:
             cat "../guests/image-ids-$NET.txt"
             echo '```'
           } >> "$GITHUB_STEP_SUMMARY"
+
+      # A pinned guest must build to its pinned id and ELF, so that a change to shared code can never move the ids
+      # the deployments use without the pinned file changing in the same commit.
+      - name: The builds match the pinned ids (tier2/pinned-image-ids.txt)
+        working-directory: tier2
+        env:
+          NET: ${{ matrix.network }}
+        run: |
+          host=target/release/zecured-tier2-host
+          check() {
+            local name=$1 id=$2 elf=$3
+            local pinned_id pinned_elf
+            pinned_id=$(awk -v g="$name" '$1 == g { print $2 }' pinned-image-ids.txt)
+            pinned_elf=$(awk -v g="$name" '$1 == g { print $3 }' pinned-image-ids.txt)
+            if [ -z "$pinned_id" ]; then
+              echo "::notice::$name is not pinned: $id"
+              return 0
+            fi
+            if [ "$id" != "$pinned_id" ]; then
+              echo "::error::$name builds to $id, pinned $pinned_id"
+              return 1
+            fi
+            if [ "$(sha256sum "$elf" | cut -d' ' -f1)" != "$pinned_elf" ]; then
+              echo "::error::$name's ELF differs from the pinned one"
+              return 1
+            fi
+            echo "$name: pinned id and ELF"
+          }
+          check "deposit-$NET" "$($host image-id)" "../guests/deposit-$NET.bin"
+          check "violation-$NET" "$($host violation image-id)" "../guests/violation-$NET.bin"
 
       # The Docker-built guests must behave exactly as the native statement: every single change of
       # the TEST-ONLY deposit witness (K4, for this network) and of the F1 witness gives the same
