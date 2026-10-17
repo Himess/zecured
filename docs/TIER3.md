@@ -215,8 +215,18 @@ a witness RPC (set by default outside the local fork).
   with the same claim list (RT-4), which may name the list's confirmed claims again (D57): while the
   input is unspent, no payout of it landed. A node that confirmed the payout itself keeps it paid,
   since it saw its value leave. The coordinator plans with the same functions
-  (`ledger::next_vault_payout`); it does not yet plan such a payout again with the confirmed claims
-  (a confirmed payout undone by a reorganization), which the contracts allow.
+  (`ledger::next_vault_payout`).
+- Planner rules (v4, O-4), applied by every node and the coordinator alike:
+  1. A reopened claim whose liveness is overdue is not committed again: its claimant takes the bonds'
+     payment, and the claim's ZEC then reimburses the bonds.
+  2. No claim is committed within one payout lifetime of its `livenessDue`, read on every provider,
+     which must agree (an unarmed claim, or an unreadable due time, reads 0, so payouts never stop).
+     The lifetime is `(120 + 10 + confirmations) x 25 s + 300 s`, about an hour; the deploy script
+     requires `commitGrace` of at least twice a payout's 136 blocks (R-10).
+  3. When a vault's books do not add up (I10), a confirmed claim that is not final and whose input is
+     still an unspent lineage note counts as unpaid again: a new commitment of that input names it
+     (D57), it is paid, and the payout is proven. A final claim (proven, or a confirmation that
+     expired undisputed, R-3) is never planned again.
 - Liveness (T-05): every node and the coordinator warn when a payable claim is older than half the
   bonds' `livenessPeriod`, at most every half hour per vault, naming the vault by its id prefix only.
 

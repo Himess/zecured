@@ -106,3 +106,56 @@ watchdog on and nothing restarted by hand. We record:
 - the balance burn rate against § 3;
 - the relay lag;
 - every alarm.
+
+## 8. Operator messages: `zecured-ops` (v4)
+
+One tool prepares, signs, collects and submits every EIP-712 message the signers sign as operators
+(`ops/`, D74). The signing layer is the one the nodes' liveness receipts use.
+
+| Message | Contract | Signatures |
+|---|---|---|
+| `PauseMinting`, `UnpauseMinting` | Intake | 3 of 5 |
+| `ScheduleVersion` (Deposit, Violation or Swap) | ZecuredVersions | 5 of 5 |
+| `RemoveVersion` | ZecuredVersions | 3; all 5 for the last working deposit version; never the last working violation version; 3 for a version that is not working |
+| `ReimburseDestination` | Registry | 5 of 5 |
+
+1. `zecured-ops prepare <message> … --out req.json` (`--ttl`, default 6 hours): reads the contract and
+   the nonce through the Registry of the network config, and refuses unless the contract's own hash
+   view gives the same digest.
+2. Each signer: `zecured-ops sign req.json --identity signer/data/node-<i>/identity.json --out
+   sig.<i>.json` shows what it signs and signs with `--yes` (`--key-env VAR` reads the key from an
+   environment variable instead). Keys are never printed.
+3. `zecured-ops collect req.json sig.*.json --out bundle.json` (a bundle can be collected again to add
+   signatures).
+4. `zecured-ops submit bundle.json --dry-run`, then for real with `--sender-key-env VAR` or
+   `--sender-identity <file>`. Before sending it checks the chain, the deployment's contract, the
+   contract's hash view, the current nonce, the Registry's signers and how many signatures the
+   message needs now (for a removal, through `isWorking`).
+
+`zecured-ops versions` lists the deployment's versions and which of them work. Options: `--config` or
+`ZECURED_NETWORK_CONFIG`, `--rpc` or `ZECURED_OPS_RPC` (scrubbed from every error).
+
+**The drill** (`scripts/ops-drill.sh`) runs dry by default; `--send`, on a local fork only, sends the
+pause and the unpause and keeps the version stages as dry runs (`DEPLOYER_PRIVATE_KEY` pays;
+optional `DRILL_REIMBURSE_CLAIM` and `DRILL_REIMBURSE_COMMITMENT` for a bond-paid claim,
+`DRILL_SELECTOR`).
+
+## 9. Invites (the mainnet beta)
+
+`--invites` (or `ZECURED_INVITES`) names the operator's invite file; unset, openings are open to all
+(the judge deployment). Its format: `{"openings":true,"inviteOnly":true,"codes":[{"hash":"0x<keccak256
+of the code>","uses":1}]}`; hash a code with `cast keccak "<code>"` (surrounding whitespace is trimmed).
+The file is read again on every opening and every `/config`, so it changes without a restart; a
+broken file is refused at startup, and one that becomes unreadable later closes openings. Uses are
+counted in the coordinator's data directory (`invites-used.json`, hashes only). `openings: false`
+closes new vaults for everyone; exits, payouts, refunds and proofs never stop. The market maker has
+its own invite list for quotes (docs/SWAP.md).
+
+## 10. Watchdog settings (v4)
+
+Besides the v3 checks: Base mainnet ETH and USDC (`MAINNET_RPC_URL`, `WATCH_ETH_MAINNET`,
+`MIN_ETH_MAINNET[_<NAME>]`, `MAINNET_USDC`, `WATCH_USDC_MAINNET`, `MIN_USDC_MAINNET_<NAME>`); the
+demo wallet's TAZ (`WATCH_DEMO_TAZ=1`, `DEMO_STATUS_URL`, from the backend's demo status); balances
+only a service reports (`WATCH_JSON=name|url|field|floor`, for the market maker's inventory); and the
+coverage cap's fill (`REGISTRY`, `INTAKE`, `CAP_FILL_ALARM`, an alarm at 70 % by default, R-11). No
+alarm names an address, a key or a URL.

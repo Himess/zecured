@@ -87,6 +87,7 @@ txids) and how to reproduce every run: [docs/TESTING.md](docs/TESTING.md).
 | `signer/crates/base-client` | EIP-712 (cross-checked with Solidity), Registry events |
 | `signer/crates/deposit-witness` | Tier 2: the ZIP 221 history tree (V3, Ironwood) from public chain data, and the witness of a deposit proof |
 | `tier2/` | Tier 2 and 3 and the swap: the deposit and violation statements (`statement/`), the payment statement (`payment-statement/`), their RISC Zero guests and the host (separate Cargo workspace) |
+| `ops/` | `zecured-ops`: prepares, signs, collects and submits the signers' operator messages ([docs/OPERATIONS.md](docs/OPERATIONS.md) § 8) |
 | `swap/` | Zecured Swap: the shared swap crate and the market maker bot (`zecured-swap-maker`) ([docs/SWAP.md](docs/SWAP.md)) |
 | `tools/leak-scan` | Searches a deployment's events, calldata and storage for the Zcash identifiers of our own runs ([docs/TESTING.md](docs/TESTING.md) § 4) |
 | `backend/` | Public API + privacy proxy (RPC, bundler, paymaster allowlist) |
