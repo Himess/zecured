@@ -412,8 +412,8 @@ function fakeV3Chain(w: V3World): { client: PublicClient; calls: Map<string, num
         pausedSince: () => NOW - 90_000n,
         pendingActivation: () =>
           w.pending
-            ? { account: w.vault.account, depositTag: NONE32, anchor: ANCHOR, ...w.pending }
-            : { account: ZERO, amount: 0n, depositTag: NONE32, anchor: NONE32, readyHeight: 0n, readyTime: 0n },
+            ? { account: w.vault.account, depositTag: NONE32, anchor: ANCHOR, ...w.pending, versionId: `0x${"5e".repeat(32)}` }
+            : { account: ZERO, amount: 0n, depositTag: NONE32, anchor: NONE32, readyHeight: 0n, readyTime: 0n, versionId: NONE32 },
       },
     ],
     [RELAY, relayAbi as Abi, { bestChainTip: () => [NONE32, 4_500_000n, 1n], isInBestChain: ([a]) => a === ANCHOR }],

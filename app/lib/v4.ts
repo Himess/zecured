@@ -66,6 +66,29 @@ export interface Refusal {
   openingsClosed: boolean;
 }
 
+/**
+ * R-11.1: why the coordinator did not prove the deposit as a refund (`POST /vaults/:id/prove-refund`)
+ * or relay a deposit proof (`cap_full`), track OFF's fixed codes, in plain words; null for others.
+ */
+export function refundProofRefusal(code: string | null): string | null {
+  switch (code) {
+    case "not_blocked":
+      return "The coverage cap has room again: your deposit can still back the loan, so there is nothing to refund. It is proven and activated as usual.";
+    case "no_deposit":
+      return "The signers have not seen a confirmed deposit of the vault's amount yet. Wait for its confirmations, then try again.";
+    case "already_landed":
+      return "Your deposit is already on Base (proven, or waiting to be activated): it is no longer refunded this way.";
+    case "refund_unavailable":
+      return "This deployment cannot prove a deposit as a refund. Your deposit waits until there is room under the coverage cap.";
+    case "cap_full":
+      return "The coverage cap is full: the proof waits until there is room, or you ask for your deposit back instead.";
+    case "not_configured":
+      return "This backend does not make deposit proofs, so it cannot prove a refund either.";
+    default:
+      return null;
+  }
+}
+
 /** The backend's fixed refusal codes of `POST /vaults` (track OFF's), in plain words; null for others. */
 export function openRefusal(code: string | null): Refusal | null {
   switch (code) {

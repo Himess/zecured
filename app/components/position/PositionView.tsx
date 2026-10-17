@@ -7,6 +7,7 @@ import { CopyButton, MissingVaultId, useMounted } from "@/components/client";
 import { PayoutNotice } from "@/components/PayoutNotice";
 import { Badge, buttonClass, Card, KeyValue, Mono, Notice, Stat } from "@/components/ui";
 import type { Claim } from "@/lib/api";
+import { formatUtc } from "@/lib/calls";
 import { config } from "@/lib/config";
 import { useLoanByVault, usePosition, useUrlFragment, useVault, useVaultLedger } from "@/lib/hooks";
 import { priceSourceName } from "@/lib/labels";
@@ -41,6 +42,14 @@ const COORDINATOR_STATUS: Record<Claim["status"], { tone: "ok" | "warn" | "neutr
   compensated: { tone: "info", text: "Compensated" },
   disputed: { tone: "warn", text: "Disputed" },
 };
+
+/** The coordinator's word on a claim, shown while Base cannot be read: v4's delivery badges first. */
+function coordinatorBadge(c: Claim): { tone: "ok" | "warn" | "neutral" | "info"; text: string } {
+  // OFF's `proven`: final (its payout proven, or its confirmation undisputed through the window).
+  if (c.proven) return { tone: "ok", text: "Final on Base ✓" };
+  if (c.disputableUntil) return { tone: "info", text: `Signers confirmed — disputable until ${formatUtc(c.disputableUntil)}` };
+  return COORDINATOR_STATUS[c.status];
+}
 
 /** What Base says about the vault, as a badge, when it adds to the signers' status. */
 const BASE_STATUS: Partial<Record<string, { tone: "info" | "neutral" | "warn"; text: string }>> = {
@@ -223,7 +232,7 @@ export function PositionView() {
                 <span>{CLAIM_KIND_LABEL[c.kind]}</span>
                 <span className="flex items-center gap-3">
                   <span className="tabular-nums">{formatTaz(c.amount)}</span>
-                  <Badge tone={COORDINATOR_STATUS[c.status].tone}>{COORDINATOR_STATUS[c.status].text}</Badge>
+                  <Badge tone={coordinatorBadge(c).tone}>{coordinatorBadge(c).text}</Badge>
                 </span>
               </li>
             ))}

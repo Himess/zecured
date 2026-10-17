@@ -13,8 +13,10 @@ import {
   encodeEventTopics,
   encodeFunctionData,
   getAddress,
+  hashTypedData,
   keccak256,
   parseEventLogs,
+  recoverTypedDataAddress,
   zeroAddress,
   type Address,
   type Hex,
@@ -22,8 +24,77 @@ import {
 } from "viem";
 import { erc20Abi } from "./abi";
 import { swapAbi } from "./abi4";
-import { SWAP_SIDE, type MakerOrderStatus, type SignedSwapQuote } from "./api";
+import { SWAP_SIDE, type MakerOrderStatus, type SignedSwapQuote, type SwapQuote } from "./api";
+import { CHAIN_ID } from "./config";
 import type { KeyValueStorage } from "./keys";
+
+// ------------------------------------------------------------------ the maker's signature (docs/INTERFACES.md § 2.8)
+
+export const SWAP_DOMAIN_NAME = "ZecuredSwap";
+export const SWAP_DOMAIN_VERSION = "1";
+
+/** `SwapQuote`, as § 2.8 and ZecuredSwap define it. */
+export const SWAP_QUOTE_TYPES = {
+  SwapQuote: [
+    { name: "maker", type: "address" },
+    { name: "taker", type: "address" },
+    { name: "side", type: "uint8" },
+    { name: "zatoshi", type: "uint64" },
+    { name: "usdc", type: "uint256" },
+    { name: "makerReceiverCommitment", type: "bytes32" },
+    { name: "payWindow", type: "uint32" },
+    { name: "quoteDeadline", type: "uint64" },
+    { name: "nonce", type: "uint256" },
+  ],
+} as const;
+
+export function swapQuoteTypedData(swap: Address, quote: SwapQuote, chainId: number = CHAIN_ID) {
+  return {
+    domain: { name: SWAP_DOMAIN_NAME, version: SWAP_DOMAIN_VERSION, chainId, verifyingContract: swap },
+    types: SWAP_QUOTE_TYPES,
+    primaryType: "SwapQuote",
+    message: quote,
+  } as const;
+}
+
+const ERC1271_MAGIC = "0x1626ba7e";
+const erc1271Abi = [
+  {
+    type: "function",
+    name: "isValidSignature",
+    stateMutability: "view",
+    inputs: [
+      { name: "hash", type: "bytes32" },
+      { name: "signature", type: "bytes" },
+    ],
+    outputs: [{ name: "", type: "bytes4" }],
+  },
+] as const;
+
+/**
+ * Whether the quote's maker signed it, as ZecuredSwap checks before `open` (an EOA's ECDSA
+ * signature, or ERC-1271 for a maker that is a contract, asked through our proxy): a quote that
+ * fails is never shown, so the user's wallet is never asked to open an order that would revert.
+ */
+export async function quoteSignedByMaker(c: PublicClient, q: SignedSwapQuote, chainId: number = CHAIN_ID): Promise<boolean> {
+  const typed = swapQuoteTypedData(q.swap, q.quote, chainId);
+  try {
+    if (getAddress(await recoverTypedDataAddress({ ...typed, signature: q.signature })) === getAddress(q.quote.maker)) return true;
+  } catch {
+    // Not a recoverable ECDSA signature: perhaps a contract's.
+  }
+  try {
+    const magic = await c.readContract({
+      address: q.quote.maker,
+      abi: erc1271Abi,
+      functionName: "isValidSignature",
+      args: [hashTypedData(typed), q.signature],
+    });
+    return magic.toLowerCase() === ERC1271_MAGIC;
+  } catch {
+    return false;
+  }
+}
 
 /** ZecuredSwap's order id: `keccak256(abi.encode(block.chainid, address(this), maker, nonce))` (V4 freeze section 5). */
 export function orderIdOf(chainId: number, swap: Address, maker: Address, nonce: bigint): Hex {
@@ -195,6 +266,8 @@ export type SwapStatus =
   | { kind: "open"; payDeadline: number }
   /** The maker says it paid on Zcash; its proof is not on Base yet. */
   | { kind: "paid"; payDeadline: number }
+  /** The maker says it will not pay (or cannot prove in time): the USDC comes back after the deadline. */
+  | { kind: "abandoned"; payDeadline: number }
   /** The proof of the payment is on Base: the USDC goes to the maker once the Zcash header is deep enough. */
   | { kind: "proven" }
   | { kind: "settled" }
@@ -208,7 +281,9 @@ export function swapStatus(o: Pick<StoredSwapOrder, "proven" | "settled" | "refu
   if (o.settled) return { kind: "settled" };
   if (o.proven) return { kind: "proven" };
   if (nowSeconds > o.payDeadline) return { kind: "refundable" };
-  if (maker === "paid" || maker === "proving") return { kind: "paid", payDeadline: o.payDeadline };
+  // "proven" by the maker's word, while this browser has not seen the proof's event yet: still "paid".
+  if (maker === "paid" || maker === "proven") return { kind: "paid", payDeadline: o.payDeadline };
+  if (maker === "abandoned") return { kind: "abandoned", payDeadline: o.payDeadline };
   return { kind: "open", payDeadline: o.payDeadline };
 }
 

@@ -42,6 +42,13 @@ export interface Claim {
   /** zatoshi */
   amount: bigint;
   status: ClaimStatus;
+  // v4 (track OFF), absent from older backends:
+  /** Its payout's delivery is proven on Base: final. */
+  proven?: boolean;
+  /** Confirmed paid by the signers, disputable until then (Unix seconds). */
+  disputableUntil?: number;
+  /** R-5: its liveness clock is armed for its current destination. */
+  livenessArmed?: boolean;
 }
 
 /** A payment to the vault that cannot back the loan, as the signers saw it on Zcash. */
@@ -328,12 +335,17 @@ export function parseVault(raw: unknown): Vault {
     }),
     claims: claimsRaw.map((c) => {
       const o = obj(c, "claim");
-      return {
+      const claim: Claim = {
         claimId: hex32(o.claimId, "claimId"),
         kind: claimKind(o.kind),
         amount: big(o.amount, "claim amount"),
         status: claimStatus(o),
       };
+      if (o.proven === true) claim.proven = true;
+      const until = optional(o.disputableUntil, (x) => uint(x, "claim disputableUntil"));
+      if (until) claim.disputableUntil = until;
+      if (typeof o.livenessArmed === "boolean") claim.livenessArmed = o.livenessArmed;
+      return claim;
     }),
   };
   const confirmations = optional(r.confirmations, (x) => int(x, "confirmations"));
@@ -695,14 +707,21 @@ export function parseSignedSwapQuote(raw: unknown): SignedSwapQuote {
   };
 }
 
-/** What the maker says about an order it serves (its own view; the contract's events decide). */
+/** The header that carries the swap maker's invite code (swap/maker's `INVITE_HEADER`), relayed by the backend. */
+export const SWAP_INVITE_HEADER = "x-zecured-invite";
+
+/**
+ * What the maker says about an order it serves (its own view; the contract's events decide): the
+ * statuses of swap/maker's `MakerStatus` (`taker_pays` is the Sell side's; `abandoned`: the maker
+ * will not pay or cannot prove any more, and the order waits for its refund).
+ */
 export const MAKER_ORDER_STATUSES = [
   "awaiting_destination",
   "destination_received",
-  "paying",
   "paid",
-  "proving",
   "proven",
+  "taker_pays",
+  "abandoned",
   "settled",
   "refunded",
 ] as const;
@@ -1095,12 +1114,18 @@ export function createApi(options: ApiOptions = {}) {
      * contacts the maker). `usdc` (units to spend) or `zatoshi` (ZEC to buy); `taker` binds the
      * quote to that address so nobody else can take it first.
      */
-    async getSwapQuote(p: { usdc?: bigint; zatoshi?: bigint; taker?: Address }): Promise<SignedSwapQuote> {
+    /**
+     * Swap: GET /swap/quote, relayed to the maker. `invite`: the mainnet beta maker's invite code, sent
+     * as the `x-zecured-invite` header (never in the URL, which ends up in logs).
+     */
+    async getSwapQuote(p: { usdc?: bigint; zatoshi?: bigint; taker?: Address; invite?: string }): Promise<SignedSwapQuote> {
       const q = new URLSearchParams({ side: "buy" });
       if (p.usdc !== undefined) q.set("usdc", p.usdc.toString());
       if (p.zatoshi !== undefined) q.set("zatoshi", p.zatoshi.toString());
       if (p.taker) q.set("taker", getAddress(p.taker));
-      return parseSignedSwapQuote(await call("GET", `/swap/quote?${q.toString()}`));
+      const invite = p.invite?.trim();
+      const headers = invite ? { [SWAP_INVITE_HEADER]: invite } : undefined;
+      return parseSignedSwapQuote(await call("GET", `/swap/quote?${q.toString()}`, undefined, { headers }));
     },
 
     /**
@@ -1111,7 +1136,7 @@ export function createApi(options: ApiOptions = {}) {
       await call("POST", `/swap/orders/${segment(orderId)}/destination`, { receiver, salt }, { timeoutMs: TIMEOUT.owner });
     },
 
-    /** Swap: GET /swap/orders/:orderId — what the maker says it did (paying, paid, proving). */
+    /** Swap: GET /swap/orders/:orderId — what the maker says of the order (paid, proven, abandoned…). */
     async getSwapOrder(orderId: Hex): Promise<MakerOrderStatus> {
       return parseMakerOrder(await call("GET", `/swap/orders/${segment(orderId)}`));
     },

@@ -296,7 +296,9 @@ describe("delivery badges (section 3 of the v4 design) and dormant refunds (R-11
       text: `Signers confirmed — disputable until ${formatUtc(NOW - 60 + 86_400)}`,
     });
     expect(view({ status: "Paid", paidAt: NOW - 86_401 }).badge).toEqual({ tone: "ok", text: "Signers confirmed" });
-    expect(view({ status: "Paid", paidAt: 0 }).badge).toEqual({ tone: "ok", text: "Delivery proven on Base ✓" });
+    // paidAt 0: the payout's inclusion proven, or (R-3, expireConfirmation) a confirmation undisputed through its window.
+    expect(view({ status: "Paid", paidAt: 0 }).badge).toEqual({ tone: "ok", text: "Final on Base ✓" });
+    expect(view({ status: "Paid", paidAt: 0 }).detail).toMatch(/delivery was proven on Base .* or the signers' confirmation stood undisputed/);
     expect(view({ status: "Paid", paidAt: 0 }).detail).toMatch(/final/);
     // A Fee claim stays a bookkeeping line, committed or not.
     expect(view({ kind: "Fee", claimant: ZERO, committed: true }).badge).toEqual({ tone: "neutral", text: "Pending" });

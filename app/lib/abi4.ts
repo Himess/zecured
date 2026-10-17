@@ -6,6 +6,8 @@
  * compiled ABIs in contracts/abi once those contain it.
  */
 
+import { confirmationExpiredEvent, payoutConfirmedEvent, payoutProvenEvent, refundDormantEvent } from "./abi";
+
 const preLiquidationTermsTuple = {
   type: "tuple",
   name: "t",
@@ -178,35 +180,11 @@ export const refundsV4Abi = [
   },
 ] as const;
 
-/** The Registry's v4 events (served at its address; the spend logic emits them through its fallback). */
-export const registryV4EventsAbi = [
-  {
-    type: "event",
-    name: "PayoutProven",
-    inputs: [
-      { name: "vaultId", type: "bytes32", indexed: true },
-      { name: "claimId", type: "bytes32", indexed: true },
-      { name: "payoutRef", type: "bytes32", indexed: false },
-    ],
-  },
-  {
-    type: "event",
-    name: "PayoutConfirmed",
-    inputs: [
-      { name: "vaultId", type: "bytes32", indexed: true },
-      { name: "payoutRef", type: "bytes32", indexed: true },
-      { name: "claimIds", type: "bytes32[]", indexed: false },
-    ],
-  },
-  {
-    type: "event",
-    name: "RefundDormant",
-    inputs: [
-      { name: "vaultId", type: "bytes32", indexed: true },
-      { name: "claimId", type: "bytes32", indexed: true },
-    ],
-  },
-] as const;
+/**
+ * The Registry's v4 events (served at its address; the spend logic emits them through its fallback):
+ * the same fragments as lib/abi.ts's `registryEventsAbi` carries.
+ */
+export const registryV4EventsAbi = [payoutProvenEvent, payoutConfirmedEvent, confirmationExpiredEvent, refundDormantEvent] as const;
 
 /** R-12: a proof landed as a refund; its claim opens at `finalizeRefund` (`reason` is a `RefundReason`). */
 export const refundPendingEvent = {

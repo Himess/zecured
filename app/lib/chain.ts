@@ -43,7 +43,6 @@ import {
   intakeV4Abi,
   refundPendingEvent,
   refundsV4Abi,
-  registryV4EventsAbi,
   registryViewsAbi,
 } from "./abi4";
 import { api } from "./api";
@@ -224,7 +223,7 @@ export async function isNonceUsed(account: Address, nonce: bigint, d?: ChainDeps
 }
 
 export interface RegistryEvent {
-  name: (typeof registryEventsAbi)[number]["name"] | (typeof registryV4EventsAbi)[number]["name"];
+  name: (typeof registryEventsAbi)[number]["name"];
   blockNumber: bigint;
   transactionHash: Hex;
   vaultId: Hex;
@@ -252,7 +251,7 @@ export async function readRecentRegistryEvents(
     const fromBlock = toBlock >= LOG_CHUNK ? toBlock - LOG_CHUNK + 1n : 0n;
     let logs;
     try {
-      logs = await c.getLogs({ address: cfg.registry, events: [...registryEventsAbi, ...registryV4EventsAbi], fromBlock, toBlock });
+      logs = await c.getLogs({ address: cfg.registry, events: registryEventsAbi, fromBlock, toBlock });
     } catch (e) {
       if (i === 0) throw e;
       break;

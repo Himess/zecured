@@ -25,7 +25,7 @@ import { checkVaultAddress, openVault, requestRefundProof } from "@/lib/owner";
 import { vaultHref } from "@/lib/routes";
 import { vaultCheckUnavailable, VaultProofError, type VaultCheck } from "@/lib/signers";
 import { feeNotice, formatPeriod, openGate } from "@/lib/v3";
-import { capWait, openingsNotice, openRefusal } from "@/lib/v4";
+import { capWait, openingsNotice, openRefusal, refundProofRefusal } from "@/lib/v4";
 import { blocksToDuration, formatTaz } from "@/lib/zcash";
 import { DemoPayment } from "./DemoPayment";
 
@@ -416,7 +416,13 @@ function DepositStep({ loan, vault, vaultError }: { loan: StoredLoan; vault: Vau
     mintBlock: minting.data?.mintBlock.get(amount),
   });
   const refundInstead = useAction(async () => {
-    await requestRefundProof(loan, loan.vaultId!);
+    try {
+      await requestRefundProof(loan, loan.vaultId!);
+    } catch (e) {
+      const why = refundProofRefusal(apiErrorCode(e));
+      if (why) throw new Error(why);
+      throw e;
+    }
     return true;
   });
   // P-8: typical durations measured on the deployment (the evidence file), when published.

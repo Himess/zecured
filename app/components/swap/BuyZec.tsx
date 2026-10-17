@@ -20,6 +20,7 @@ import {
   followOrder,
   openedOrder,
   quoteProblem,
+  quoteSignedByMaker,
   refundCall,
   SWAP_STEPS,
   SwapStore,
@@ -49,6 +50,9 @@ async function receiptOf(hash: Hex) {
 export function BuyZec() {
   const mounted = useMounted();
   const amountId = useId();
+  const inviteId = useId();
+  // The mainnet beta's maker quotes invitees only (sent as a header, never kept by this page).
+  const [invite, setInvite] = useState("");
   const [input, setInput] = useState("");
   const [ua, setUa] = useState("");
   const [quote, setQuote] = useState<SignedSwapQuote | null>(null);
@@ -83,9 +87,11 @@ export function BuyZec() {
     return a;
   });
   const getQuote = useAction(async (amount: bigint) => {
-    const q = await api.getSwapQuote({ usdc: amount, taker: wallet ?? undefined });
+    const q = await api.getSwapQuote({ usdc: amount, taker: wallet ?? undefined, invite: DEPLOYMENT.invites ? invite : undefined });
     const problem = quoteProblem(q, { swap, taker: wallet, nowSeconds: nowSeconds() });
     if (problem) throw new Error(problem);
+    // The swap contract checks the maker's signature at `open`: a quote that fails it is not shown.
+    if (!(await quoteSignedByMaker(publicClient(), q))) throw new Error("The maker's signature on this quote does not check out: it is not used.");
     setQuote(q);
     setDest(null);
     return q;
@@ -211,6 +217,25 @@ export function BuyZec() {
               </div>
               {inputError ? <p className="text-sm text-danger">{inputError}</p> : null}
             </div>
+            {DEPLOYMENT.invites ? (
+              <div className="space-y-1">
+                <label htmlFor={inviteId} className="block text-sm font-medium">
+                  Invite code
+                </label>
+                <input
+                  id={inviteId}
+                  autoComplete="off"
+                  spellCheck={false}
+                  value={invite}
+                  onChange={(e) => {
+                    setInvite(e.target.value);
+                    setQuote(null);
+                  }}
+                  className="w-full max-w-xs rounded-lg border border-border bg-bg px-3 py-2 font-mono text-text focus:border-accent"
+                />
+                <p className="text-xs text-muted">The mainnet beta&apos;s maker quotes invitees only, and binds each quote to your wallet: connect it first.</p>
+              </div>
+            ) : null}
             {getQuote.error ? (
               <Notice tone="danger" title="No quote" live>
                 <p>{getQuote.error}</p>
@@ -294,6 +319,7 @@ export function BuyZec() {
 const STATUS_TEXT: Record<SwapStatus["kind"], { tone: "info" | "ok" | "warn" | "neutral"; text: string }> = {
   open: { tone: "info", text: "Open: waiting for the maker's payment" },
   paid: { tone: "info", text: "Paid on Zcash (the maker says): its proof is on its way to Base" },
+  abandoned: { tone: "warn", text: "The maker says it will not pay this order: take your USDC back once the deadline passes" },
   proven: { tone: "ok", text: "Proven on Base: the USDC goes to the maker once the Zcash header is deep enough" },
   settled: { tone: "ok", text: "Settled: you have the ZEC, the maker the USDC" },
   refundable: { tone: "warn", text: "The deadline passed without a proof: take your USDC back" },

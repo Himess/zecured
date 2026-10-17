@@ -16,7 +16,55 @@ const marketParamsTuple = {
   ],
 } as const;
 
-/** Public Registry events (docs/INTERFACES.md § 3.2). */
+/**
+ * v4 (R-1): the signers' confirmation of a payout names it (`payoutRef`), so a claimant can find the
+ * transaction (IZecuredPayouts, served at the Registry's address).
+ */
+export const payoutConfirmedEvent = {
+  type: "event",
+  name: "PayoutConfirmed",
+  inputs: [
+    { name: "vaultId", type: "bytes32", indexed: true },
+    { name: "payoutRef", type: "bytes32", indexed: true },
+    { name: "claimIds", type: "bytes32[]", indexed: false },
+  ],
+} as const;
+
+/**
+ * v4 (R-3): a confirmation not disputed within its window, its vault not frozen meanwhile, became
+ * final (`paidAt` 0, as after a proof of the payout); IZecuredPayouts.
+ */
+export const confirmationExpiredEvent = {
+  type: "event",
+  name: "ConfirmationExpired",
+  inputs: [
+    { name: "vaultId", type: "bytes32", indexed: true },
+    { name: "claimId", type: "bytes32", indexed: true },
+  ],
+} as const;
+
+/** v4 (section 3): a zero-knowledge proof that the claim's payout is in a Zcash block is on Base (IZecuredDisputes). */
+export const payoutProvenEvent = {
+  type: "event",
+  name: "PayoutProven",
+  inputs: [
+    { name: "vaultId", type: "bytes32", indexed: true },
+    { name: "claimId", type: "bytes32", indexed: true },
+    { name: "payoutRef", type: "bytes32", indexed: false },
+  ],
+} as const;
+
+/** v4 (R-11): a Refund claim without a destination set aside as dormant (IZecuredRefunds). */
+export const refundDormantEvent = {
+  type: "event",
+  name: "RefundDormant",
+  inputs: [
+    { name: "vaultId", type: "bytes32", indexed: true },
+    { name: "claimId", type: "bytes32", indexed: true },
+  ],
+} as const;
+
+/** Public Registry events (docs/INTERFACES.md § 3.2), v4's included. */
 export const registryEventsAbi = [
   {
     type: "event",
@@ -61,14 +109,9 @@ export const registryEventsAbi = [
       { name: "mmCommitment", type: "bytes32", indexed: false },
     ],
   },
-  {
-    type: "event",
-    name: "PayoutConfirmed",
-    inputs: [
-      { name: "vaultId", type: "bytes32", indexed: true },
-      { name: "claimIds", type: "bytes32[]", indexed: false },
-    ],
-  },
+  // IZecuredPayouts (v4, R-1: a confirmation names its payout), emitted at the Registry's address.
+  payoutConfirmedEvent,
+  confirmationExpiredEvent,
   {
     type: "event",
     name: "RefundOpened",
@@ -116,6 +159,9 @@ export const registryEventsAbi = [
       { name: "claimId", type: "bytes32", indexed: true },
     ],
   },
+  payoutProvenEvent,
+  // R-11: a Refund claim without a destination set aside (the spend logic emits it at the Registry's address).
+  refundDormantEvent,
 ] as const;
 
 /** Registry errors an account's own calls can hit (IZecuredRegistry), decoded to explain reverts. */
@@ -407,6 +453,8 @@ export const intakeAbi = [
           { name: "anchor", type: "bytes32" },
           { name: "readyHeight", type: "uint256" },
           { name: "readyTime", type: "uint256" },
+          // R-14 (v4): the deposit version whose seal proved it.
+          { name: "versionId", type: "bytes32" },
         ],
       },
     ],

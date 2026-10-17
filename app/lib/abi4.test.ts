@@ -53,13 +53,16 @@ describe("v4 fragments: the V4 interface freeze's signatures", () => {
     expect(toFunctionSelector(find(adapterV4Abi, "function", "clearPreLiquidation") as AbiFunction)).toBe("0xad90c3b3");
   });
 
-  it("the Registry (sections 1, 2, 4): PayoutConfirmed names the payout, PayoutProven, RefundDormant", () => {
+  it("the Registry (sections 1, 2, 4): PayoutConfirmed names the payout, PayoutProven, ConfirmationExpired, RefundDormant", () => {
     const confirmed = find(registryV4EventsAbi, "event", "PayoutConfirmed");
     expect(signature(confirmed)).toBe("PayoutConfirmed(bytes32,bytes32,bytes32[])");
     expect(indexed(confirmed)).toEqual([true, true, false]);
     const proven = find(registryV4EventsAbi, "event", "PayoutProven");
     expect(signature(proven)).toBe("PayoutProven(bytes32,bytes32,bytes32)");
     expect(indexed(proven)).toEqual([true, true, false]);
+    const expired = find(registryV4EventsAbi, "event", "ConfirmationExpired");
+    expect(signature(expired)).toBe("ConfirmationExpired(bytes32,bytes32)");
+    expect(indexed(expired)).toEqual([true, true]);
     expect(signature(find(registryV4EventsAbi, "event", "RefundDormant"))).toBe("RefundDormant(bytes32,bytes32)");
   });
 
@@ -104,22 +107,16 @@ describe("fragments against the compiled contracts (contracts/abi), once they co
   const shape = (p: Param): string => (p.components ? `(${p.components.map(shape).join(",")})` : p.type);
   const full = (i: Compiled) =>
     `${i.type} ${i.name}(${(i.inputs ?? []).map((p) => `${shape(p)}${p.indexed ? " indexed" : ""}`).join(",")}) -> (${(i.outputs ?? []).map(shape).join(",")})`;
-  /** What v4 changes: the v3 shape still in today's ABIs until they are regenerated (R-1 adds the payout's reference). */
-  const V3_SHAPES: Record<string, string> = {
-    PayoutConfirmed: "event PayoutConfirmed(bytes32 indexed,bytes32[]) -> ()",
-  };
-  /** Every fragment whose name the compiled ABI has must match it exactly; v3 views must already be there. */
+  /** Every fragment whose name the compiled ABI has must match it exactly; with `mustExist`, it must be there. */
   const check = (file: string, items: readonly Compiled[], mustExist: boolean) => {
     const known = compiled(file);
     for (const item of items) {
       const theirs = known.filter((k) => k.type === item.type && k.name === item.name);
       if (theirs.length === 0) {
-        expect(mustExist, `${file}: ${item.type} ${item.name} is not compiled yet`).toBe(false);
+        expect(mustExist, `${file}: ${item.type} ${item.name} is not compiled`).toBe(false);
         continue;
       }
-      const shapes = theirs.map(full);
-      if (item.name && V3_SHAPES[item.name] && shapes.every((s) => s === V3_SHAPES[item.name!])) continue;
-      expect(shapes, `${file}: ${item.name}`).toContain(full(item));
+      expect(theirs.map(full), `${file}: ${item.name}`).toContain(full(item));
     }
   };
 
@@ -129,12 +126,21 @@ describe("fragments against the compiled contracts (contracts/abi), once they co
     check("ZecuredIntake", intakeViewsAbi, true);
   });
 
-  it("v4 fragments match the compiled v4 contracts where they exist", () => {
-    check("SignerBondV2", bondV4Abi.filter((i) => i.type !== "error"), false);
-    check("SettlementAdapter", adapterV4Abi.filter((i) => i.type !== "error"), false);
-    check("ZecuredRegistry", registryV4EventsAbi, false);
-    check("ZecuredIntake", intakeV4Abi, false);
-    check("ZecuredSwap", swapAbi, false);
+  it("v4 fragments match the compiled v4 contracts, each where it is emitted or served", () => {
+    check("SignerBondV2", bondV4Abi, true);
+    check("SettlementAdapter", adapterV4Abi, true);
+    check("ZecuredIntake", intakeV4Abi, true);
+    check("ZecuredSwap", swapAbi, true);
+    // The Registry's v4 events: its own, and those of the logic behind its fallback (at its address).
+    const at: Record<string, string> = {
+      PayoutProven: "IZecuredDisputes",
+      PayoutConfirmed: "IZecuredPayouts",
+      ConfirmationExpired: "IZecuredPayouts",
+      RefundDormant: "ZecuredRegistry",
+    };
+    expect(registryV4EventsAbi.map((e) => e.name).sort()).toEqual(Object.keys(at).sort());
+    for (const e of registryV4EventsAbi) check(at[e.name]!, [e], true);
+    check("IZecuredRefunds", refundsV4Abi, true);
   });
 
   it("the refunds' dormancy views are served at the Registry's address (its spend logic), not in its own ABI", () => {

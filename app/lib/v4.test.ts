@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { capWait, openingsNotice, openRefusal, PROOF_MINTING_SENTENCE, SWAP_PRIVACY_SENTENCE } from "./v4";
+import { capWait, openingsNotice, openRefusal, PROOF_MINTING_SENTENCE, refundProofRefusal, SWAP_PRIVACY_SENTENCE } from "./v4";
 
 describe("R-11.1: a deposit waiting for room under the coverage cap", () => {
   const waiting = { vaultStatus: "awaiting_deposit", baseStatus: "None" as const, pending: false, mintBlock: "CapExceeded" as const };
@@ -24,6 +24,18 @@ describe("R-11.1: a deposit waiting for room under the coverage cap", () => {
     for (const mintBlock of ["None", "Paused", "NotBonded", "Halted", null, undefined] as const) {
       expect(capWait({ ...waiting, mintBlock })).toBe("none");
     }
+  });
+});
+
+describe("R-11.1: the coordinator's refusals of a refund proof (track OFF's codes)", () => {
+  it("says what each means, cap_full included; null for codes it does not know", () => {
+    expect(refundProofRefusal("not_blocked")).toMatch(/room again/);
+    expect(refundProofRefusal("no_deposit")).toMatch(/confirmations/);
+    expect(refundProofRefusal("already_landed")).toMatch(/already on Base/);
+    expect(refundProofRefusal("refund_unavailable")).toMatch(/cannot prove a deposit as a refund/);
+    expect(refundProofRefusal("cap_full")).toMatch(/waits until there is room, or you ask for your deposit back/);
+    expect(refundProofRefusal("not_owner")).toBeNull();
+    expect(refundProofRefusal(null)).toBeNull();
   });
 });
 

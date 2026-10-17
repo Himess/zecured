@@ -260,6 +260,28 @@ describe("GET /vaults/:id normalization", () => {
     expect("cancellable" in v).toBe(false);
   });
 
+  it("reads v4's delivery badges from the coordinator: proven, disputable until, liveness armed", () => {
+    const v = parseVault({
+      vaultId: VAULT,
+      status: "active",
+      amount: "5000000",
+      expiryHeight: 100,
+      claims: [
+        { claimId: VAULT, kind: "Release", amount: "200000", status: "paid", proven: true, disputableUntil: null, livenessArmed: false },
+        { claimId: VAULT, kind: "Release", amount: "100000", status: "paid", proven: false, disputableUntil: 1_800_086_400, livenessArmed: true },
+        { claimId: VAULT, kind: "Refund", amount: "20000", status: "pending" },
+      ],
+    });
+    expect(v.claims.map((c) => [c.proven, c.disputableUntil, c.livenessArmed])).toEqual([
+      [true, undefined, false],
+      [undefined, 1_800_086_400, true],
+      [undefined, undefined, undefined],
+    ]);
+    expect(() => parseVault({ vaultId: VAULT, status: "active", amount: "1", expiryHeight: 1, claims: [{ claimId: VAULT, kind: "Release", amount: "1", disputableUntil: -1 }] })).toThrow(
+      /disputableUntil/,
+    );
+  });
+
   it("maps unknown statuses to 'unknown' and rejects broken responses", () => {
     expect(parseVault({ vaultId: VAULT, status: "weird", amount: 1, expiryHeight: 1 }).status).toBe("unknown");
     expect(() => parseVault({ status: "active" })).toThrow(ApiError);
@@ -751,12 +773,18 @@ describe("v4 endpoints", () => {
     );
     const q = await api.getSwapQuote({ usdc: 12_000_000n, taker: "0x3333333333333333333333333333333333333333" });
     expect(calls[0]!.url).toBe(`${BASE}/swap/quote?side=buy&usdc=12000000&taker=0x3333333333333333333333333333333333333333`);
+    expect((calls[0]!.init.headers as Record<string, string>)["x-zecured-invite"]).toBeUndefined();
     expect(q.quote).toMatchObject({ side: 0, zatoshi: 10_000_000n, usdc: 12_000_000n, payWindow: 21_600, nonce: 5n });
     expect(q.swap).toBe("0x7777777777777777777777777777777777777777");
     await api.postSwapDestination(ORDER, "utest1receiver", `0x${"5a".repeat(32)}`);
     expect(calls[1]!.url).toBe(`${BASE}/swap/orders/${ORDER}/destination`);
     expect(calls[1]!.body).toEqual({ receiver: "utest1receiver", salt: `0x${"5a".repeat(32)}` });
     expect(await api.getSwapOrder(ORDER)).toBe("paid");
+    // The mainnet beta maker's invite code travels in a header, never in the URL.
+    await api.getSwapQuote({ usdc: 1n, invite: " beta-7f3k " });
+    const invited = calls.at(-1)!;
+    expect(invited.url).not.toMatch(/invite|beta-7f3k/);
+    expect((invited.init.headers as Record<string, string>)["x-zecured-invite"]).toBe("beta-7f3k");
     // Strict about the quote's fields.
     expect(() => parseSignedSwapQuote({ ...signed, quote: { ...signed.quote, side: 2 } })).toThrow(/quote.side/);
     expect(() => parseSignedSwapQuote({ ...signed, quote: { ...signed.quote, zatoshi: "0" } })).toThrow(/quote.zatoshi/);

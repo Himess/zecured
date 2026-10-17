@@ -265,9 +265,9 @@ export interface ClaimView {
 /**
  * A claim of the vault, in plain words. Section 3 of the v4 design: a pending claim whose payout
  * the signers committed on Base is "Sent"; one they confirmed paid is "Signers confirmed —
- * disputable until …" (`disputeWindow` after the confirmation, when known); one whose delivery a
- * zero-knowledge proof showed on Base (`paidAt` 0) is "Delivery proven on Base ✓", final. R-11: a
- * Refund claim without a destination may be set aside as dormant.
+ * disputable until …" (`disputeWindow` after the confirmation, when known); a final one (`paidAt`
+ * 0: its delivery proven on Base, or its confirmation undisputed through the window) is "Final on
+ * Base ✓". R-11: a Refund claim without a destination may be set aside as dormant.
  */
 export function claimView(
   c: LedgerClaim,
@@ -320,11 +320,14 @@ export function claimView(
       }
       return { label, badge: { tone: "warn", text: "Pending" }, detail: "The signers pay it in their payout queue." };
     case "Paid":
+      // `paidAt` 0: a proof of the payout's inclusion, or `expireConfirmation` once a confirmation
+      // stood undisputed through its window (R-3); Base keeps no trace of which in the claim itself.
       if (c.paidAt === 0) {
         return {
           label,
-          badge: { tone: "ok", text: "Delivery proven on Base ✓" },
-          detail: "A zero-knowledge proof that the payout is in a Zcash block is on Base: this claim is final.",
+          badge: { tone: "ok", text: "Final on Base ✓" },
+          detail:
+            "Its delivery was proven on Base (a zero-knowledge proof that the payout is in a Zcash block, which the coordinator makes for every payout), or the signers' confirmation stood undisputed through its dispute window: this claim is final.",
         };
       }
       if (ctx.disputeWindow !== undefined && ctx.nowSeconds <= c.paidAt + ctx.disputeWindow) {

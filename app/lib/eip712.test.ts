@@ -42,6 +42,7 @@ import {
   type PrimaryType,
 } from "./eip712";
 import { DESTINATION_RECEIVED_TYPES } from "./receipt";
+import { SWAP_QUOTE_TYPES } from "./swap";
 
 // ------------------------------------------------------------------ the spec
 
@@ -114,17 +115,17 @@ const NOT_IN_APP: Record<string, string> = {
 };
 
 /**
- * v4 types the app signs whose docs/INTERFACES.md entry comes with the v4 docs (the integration owner
- * adds it): pinned here as track OFF's signer/crates/base-client pins them, and byte for byte against
- * the spec once it has them.
+ * Types the app signs whose docs/INTERFACES.md entry has not landed yet (the integration owner adds
+ * it), pinned here byte for byte until it does. Empty: v4's ProveRefund is in § 2.3 now.
  */
-const PENDING_SPEC: Record<string, string> = {
-  ProveRefund: "ProveRefund(bytes32 vaultId,uint64 nonce,uint64 deadline)",
-};
+const PENDING_SPEC: Record<string, string> = {};
 
 /** Spec types the app checks outside lib/eip712.ts, with their type string there. */
 const ELSEWHERE: Record<string, string> = {
+  // R-5: a signer's receipt, checked before the account arms a claim (lib/receipt.ts).
   DestinationReceived: typeStringOf("DestinationReceived", DESTINATION_RECEIVED_TYPES.DestinationReceived),
+  // Zecured Swap: the maker's quote, checked before it is shown (lib/swap.ts).
+  SwapQuote: typeStringOf("SwapQuote", SWAP_QUOTE_TYPES.SwapQuote),
 };
 
 function typeStringOf(name: string, fields: readonly { name: string; type: string }[]): string {
@@ -147,8 +148,11 @@ describe("type strings (docs/INTERFACES.md § 2)", () => {
     expect(typeString(name)).toBe(spec.get(name) ?? PENDING_SPEC[name]);
   });
 
-  it("types checked elsewhere match the spec once it has them (R-5's receipt: the V4 freeze's string)", () => {
+  it("types checked elsewhere match the spec once it has them (R-5's receipt, the swap's quote)", () => {
     expect(ELSEWHERE.DestinationReceived).toBe("DestinationReceived(bytes32 claimId,bytes32 commitment,uint64 receivedAt)");
+    expect(ELSEWHERE.SwapQuote).toBe(
+      "SwapQuote(address maker,address taker,uint8 side,uint64 zatoshi,uint256 usdc,bytes32 makerReceiverCommitment,uint32 payWindow,uint64 quoteDeadline,uint256 nonce)",
+    );
     for (const [name, s] of Object.entries(ELSEWHERE)) if (spec.has(name)) expect(s).toBe(spec.get(name));
   });
 

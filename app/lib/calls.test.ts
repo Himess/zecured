@@ -9,6 +9,7 @@ import {
   CLAIM_KIND,
   CLAIM_STATUS,
   compensatorAbi,
+  depositRefundedEvent,
   disputesAbi,
   erc20Abi,
   intakeAbi,
@@ -18,11 +19,12 @@ import {
   REFUND_REASON,
   registryAbi,
   registryErrorsAbi,
+  registryEventsAbi,
   relayAbi,
   revertErrorsAbi,
   slasherAbi,
 } from "./abi";
-import { adapterV4Abi, bondV4Abi, v4ErrorsAbi } from "./abi4";
+import { adapterV4Abi, bondV4Abi, refundPendingEvent, v4ErrorsAbi } from "./abi4";
 import { PRE_LIQUIDATION_PRESETS, termsOf } from "./preliq";
 import {
   armLivenessCalls,
@@ -155,6 +157,7 @@ describe("ABI fragments match the compiled contracts (contracts/abi)", () => {
   interface Param {
     type: string;
     components?: readonly Param[];
+    indexed?: boolean;
   }
   interface Item {
     type: string;
@@ -182,6 +185,19 @@ describe("ABI fragments match the compiled contracts (contracts/abi)", () => {
     // Served by the Registry's fallback: not in its own ABI.
     expect(compiled("ZecuredRegistry").some((i) => i.name === "disputePayout")).toBe(false);
     expect(compiled("ZecuredRegistry").some((i) => i.type === "fallback")).toBe(true);
+  });
+
+  it("every event the app decodes, with its indexed fields, where the contracts emit it (v4's at the Registry's address)", () => {
+    const flagged = (p: Param): string => `${shape(p)}${p.indexed ? " indexed" : ""}`;
+    const eventSig = (e: Item) => `${e.name}(${(e.inputs ?? []).map(flagged).join(",")})`;
+    const emitted = (files: string[]) => new Set(files.flatMap((f) => compiled(f).filter((i) => i.type === "event").map(eventSig)));
+    // The Registry's own events, and those its fallback (the spend logic) emits at its address.
+    const atRegistry = emitted(["ZecuredRegistry", "IZecuredPayouts", "IZecuredDisputes", "IZecuredRefunds"]);
+    for (const e of registryEventsAbi) expect(atRegistry.has(eventSig(e)), eventSig(e)).toBe(true);
+    const atIntake = emitted(["ZecuredIntake"]);
+    for (const e of [depositRefundedEvent, refundPendingEvent]) expect(atIntake.has(eventSig(e)), eventSig(e)).toBe(true);
+    // R-1: the confirmation names its payout.
+    expect(eventSig(registryEventsAbi.find((e) => e.name === "PayoutConfirmed")!)).toBe("PayoutConfirmed(bytes32 indexed,bytes32 indexed,bytes32[])");
   });
 
   it("the Intake, the relay, the slasher, the bond and the compensator", () => {
