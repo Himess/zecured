@@ -19,6 +19,7 @@ pub mod error;
 mod frost;
 pub mod inflight;
 pub mod invites;
+mod keepers;
 pub mod nodes;
 pub mod proofs;
 pub mod queue;
@@ -92,7 +93,10 @@ use crate::{
     inflight::{Action, Inputs},
     invites::{InviteGate, OpeningsStatus},
     nodes::{Answer, Nodes, is_refusal, shortfall, split},
-    store::{Armed, CommittedPayout, CoordVault, Inflight, KeptCommitment, PendingRefund, Refund, Store, VaultStatus},
+    store::{
+        Armed, CommittedPayout, CoordVault, InclusionCase, Inflight, KeptCommitment, PendingRefund, Refund, Store,
+        VaultStatus,
+    },
 };
 
 const NETWORK: Network = Network::TestNetwork;
@@ -295,6 +299,10 @@ pub struct Coordinator {
     dispute_window: OnceLock<u64>,
     /// R-10: whether the deployment's `commitGrace` was compared with the payout lifetime.
     grace_checked: AtomicBool,
+    /// The compensator the Registry names, read once (R-19's burn).
+    compensator: OnceCell<Address>,
+    /// When each keeper last acted for each vault (`keepers.rs`).
+    keeper_tries: std::sync::Mutex<HashMap<(B256, keepers::Keeper), Instant>>,
     /// TEST ONLY: see [`TEST_WITHHOLD_FLAG`].
     #[cfg(feature = "test-hooks")]
     withhold_flag: std::path::PathBuf,
@@ -450,6 +458,10 @@ fn finish_open(
         last_event_at: 0,
         refund_requested: false,
         used_request_nonces: vec![],
+        inclusion_cases: vec![],
+        compromised: false,
+        collateral_burned: false,
+        compensated: false,
     };
     let response = OpenVaultResponse {
         vault_id: vault.vault_id,
@@ -519,6 +531,44 @@ fn apply_event(v: &mut CoordVault, ev: &VaultEvent) {
             // Section 4: the Registry's `LiquidationRelease` of the same transaction creates the
             // claim; this only says it was a pre-liquidation. Nothing but the vault's id prefix.
             info!(vault = %short(&v.vault_id), "a pre-liquidation of the vault: its claim is paid as a liquidation");
+        }
+        RegistryEvent::CaseExecuted {
+            case_id,
+            kind,
+            payout_ref,
+        } => {
+            // R-2: an executed F2 or F4 case proved its committed payout is in a block; the keeper
+            // uses its journal for the payout's claims (`proveInclusionByCase`).
+            if matches!(*kind, events::VIOLATION_WITHHELD_CHANGE | events::VIOLATION_WRONG_CLAIM_REF)
+                && *payout_ref != B256::ZERO
+                && !v.inclusion_cases.iter().any(|c| c.case_id == *case_id)
+            {
+                v.inclusion_cases.push(InclusionCase {
+                    case_id: *case_id,
+                    payout_ref: *payout_ref,
+                });
+            }
+        }
+        RegistryEvent::VaultCompromised { .. } => {
+            if !v.compromised {
+                error!(
+                    vault = %short(&v.vault_id),
+                    "an executed theft case compromised the vault (T-04): the compensator settles its claims and burns its collateral down to the LLTV (R-19)"
+                );
+            }
+            v.compromised = true;
+        }
+        RegistryEvent::CollateralBurned { .. } => {
+            if !v.collateral_burned {
+                info!(vault = %short(&v.vault_id), "the compromised vault's collateral was burned (R-19)");
+            }
+            v.collateral_burned = true;
+        }
+        RegistryEvent::VaultCompensated { .. } => {
+            if !v.compensated {
+                info!(vault = %short(&v.vault_id), "the compensator settled the compromised vault, which stays active (R-20)");
+            }
+            v.compensated = true;
         }
         RegistryEvent::ChangeTagOverridden { .. } => {
             error!(
@@ -696,6 +746,8 @@ impl Coordinator {
             receipts: std::sync::Mutex::default(),
             dispute_window: OnceLock::new(),
             grace_checked: AtomicBool::new(false),
+            compensator: OnceCell::new(),
+            keeper_tries: std::sync::Mutex::default(),
             #[cfg(feature = "test-hooks")]
             withhold_flag: data_dir.join(TEST_WITHHOLD_FLAG),
             cfg,
@@ -1310,8 +1362,9 @@ impl Coordinator {
     }
 
     /// Applies the deployment's events up to Base's safe head: the Registry's, the Intake's pending
-    /// refunds (R-12), the bond's liveness arming (R-5) and the Adapter's pre-liquidations. No lock
-    /// is held while the RPC answers.
+    /// refunds (R-12), the bond's liveness arming (R-5), the Adapter's pre-liquidations, the
+    /// slasher's executed cases and compromises and the compensator's burns (R-2, R-19). No lock is
+    /// held while the RPC answers.
     async fn sync_base(&self) -> Result<()> {
         let provider = ProviderBuilder::new().connect_http(self.cfg.base_rpc_url.parse()?);
         let safe = events::safe_head(&provider).await?;
@@ -1321,6 +1374,14 @@ impl Coordinator {
             intake: v3.intake,
             bond: v3.bond,
             adapter: self.cfg.adapter,
+            slasher: v3.slasher,
+            // R-19's burns only: unreadable for now, they are not followed (the keeper's simulation
+            // then finds out whether a burn is still due).
+            compensator: if v3.slasher == Address::ZERO {
+                Address::ZERO
+            } else {
+                self.compensator().await.unwrap_or(Address::ZERO)
+            },
         };
         let cursor = self.store.lock().await.base_cursor;
         let start = cursor.max(self.cfg.registry_from_block.saturating_sub(1)) + 1;
@@ -1329,7 +1390,8 @@ impl Coordinator {
         let mut from = start;
         while from <= safe {
             let to = (from + step - 1).min(safe);
-            let evs = events::fetch_deployment(&provider, &contracts, from, to).await?;
+            let mut evs = events::fetch_deployment(&provider, &contracts, from, to).await?;
+            keepers::resolve_cases(&provider, contracts.slasher, &mut evs).await;
             let mut store = self.store.lock().await;
             for ev in evs {
                 // The bond's arming names a claim, not a vault.
@@ -1414,6 +1476,9 @@ impl Coordinator {
 
     async fn process(&self, id: &B256) -> Result<()> {
         let v = self.vault(id).await?;
+        // The keyless keepers of v4 (keepers.rs) need no scan: every vault, every pass; each does
+        // nothing locally when it has nothing to do.
+        self.keep(&v).await;
         // Expired, closed and cancelled vaults with nothing to pay are only watched for late
         // deposits, which are refunded through proofs (T-02).
         let idle = v.is_idle();
@@ -2666,6 +2731,203 @@ mod tests {
         c3.commitment = [9; 32];
         assert!(!v.armed(&c3), "a changed destination voids the arming");
         assert_eq!(v.last_event_block, 18);
+    }
+
+    /// R-2, R-19, R-20: an executed F2 or F4 case is kept for its payout (once), an F3 or F1 case is
+    /// not; a compromise, a burn and a settlement are recorded.
+    #[test]
+    fn executed_cases_compromises_and_burns_are_recorded() {
+        let mut v = vault(1);
+        v.status = VaultStatus::Active;
+        let executed = |case: u8, kind: u8, payout: u8| {
+            at(RegistryEvent::CaseExecuted {
+                case_id: B256::repeat_byte(case),
+                kind,
+                payout_ref: B256::repeat_byte(payout),
+            })
+        };
+        apply_event(&mut v, &executed(1, events::VIOLATION_WITHHELD_CHANGE, 0xaa));
+        apply_event(&mut v, &executed(1, events::VIOLATION_WITHHELD_CHANGE, 0xaa));
+        apply_event(&mut v, &executed(2, events::VIOLATION_WRONG_CLAIM_REF, 0xab));
+        apply_event(&mut v, &executed(3, 3, 0xac)); // F3: a claim's reference, not a payout's
+        apply_event(&mut v, &executed(4, 1, 0xad)); // F1: nothing committed
+        apply_event(&mut v, &executed(5, events::VIOLATION_WITHHELD_CHANGE, 0)); // never resolved
+        let cases: Vec<(B256, B256)> = v.inclusion_cases.iter().map(|c| (c.case_id, c.payout_ref)).collect();
+        assert_eq!(
+            cases,
+            [
+                (B256::repeat_byte(1), B256::repeat_byte(0xaa)),
+                (B256::repeat_byte(2), B256::repeat_byte(0xab))
+            ]
+        );
+        assert!(!keepers::burn_due(&v));
+        apply_event(
+            &mut v,
+            &at(RegistryEvent::VaultCompromised {
+                case_id: B256::repeat_byte(1),
+            }),
+        );
+        assert!(v.compromised && keepers::burn_due(&v), "compromised without a burn: the burn is run again");
+        apply_event(&mut v, &at(RegistryEvent::CollateralBurned { retired: 400_000 }));
+        assert!(v.collateral_burned && !keepers::burn_due(&v));
+        apply_event(&mut v, &at(RegistryEvent::VaultCompensated { outstanding: 600_000 }));
+        assert!(v.compensated);
+    }
+
+    /// A Base RPC stub answering `eth_call` by function selector (an unknown one reverts), every
+    /// other method with the chain id, and recording the selector of every `eth_call` and the name
+    /// of every other method it was asked.
+    async fn recording_stub(returns: Vec<([u8; 4], Vec<u8>)>) -> (String, Arc<std::sync::Mutex<Vec<String>>>) {
+        use axum::{Json, Router, routing::post};
+        let returns = Arc::new(returns);
+        let calls: Arc<std::sync::Mutex<Vec<String>>> = Arc::default();
+        let seen = calls.clone();
+        let app = Router::new().route(
+            "/",
+            post(move |Json(req): Json<serde_json::Value>| {
+                let (returns, seen) = (returns.clone(), seen.clone());
+                async move {
+                    let method = req["method"].as_str().unwrap_or_default().to_owned();
+                    if method != "eth_call" {
+                        seen.lock().unwrap().push(method);
+                        return Json(serde_json::json!({ "jsonrpc": "2.0", "id": req["id"], "result": "0x14a34" }));
+                    }
+                    let call = &req["params"][0];
+                    let data = call["input"].as_str().or(call["data"].as_str()).unwrap_or_default();
+                    let selector = hex::decode(data.trim_start_matches("0x").get(..8).unwrap_or_default()).unwrap();
+                    seen.lock().unwrap().push(format!("call:{}", hex::encode(&selector)));
+                    match returns.iter().find(|(s, _)| s.as_slice() == selector.as_slice()) {
+                        Some((_, ret)) => Json(
+                            serde_json::json!({ "jsonrpc": "2.0", "id": req["id"], "result": format!("0x{}", hex::encode(ret)) }),
+                        ),
+                        None => Json(serde_json::json!({ "jsonrpc": "2.0", "id": req["id"],
+                            "error": { "code": 3, "message": "execution reverted" } })),
+                    }
+                }
+            }),
+        );
+        (crate::nodes::tests::serve(app).await, calls)
+    }
+
+    /// The keepers simulate before they send: nothing is sent when Base says there is nothing to do
+    /// or would refuse the call, and a vault is tried again only after the keeper's retry interval.
+    #[tokio::test]
+    async fn the_keepers_send_nothing_base_would_refuse() {
+        use alloy::sol_types::SolCall;
+        use zecured_base::events::IZecuredCompensator;
+        let selector = |s: [u8; 4]| format!("call:{}", hex::encode(s));
+        // The calls a stub saw (other methods left out).
+        let eth_calls = |calls: &Arc<std::sync::Mutex<Vec<String>>>| -> Vec<String> {
+            calls.lock().unwrap().iter().filter(|m| m.starts_with("call:")).cloned().collect()
+        };
+        let (mut c, _dir) = offline("keepers");
+        let _ = c.dispute_window.set(3_600);
+        let mut v = vault(1);
+        v.status = VaultStatus::Active;
+        v.claims = vec![Claim {
+            state: ClaimState::Paid,
+            confirmed_at: 1_000,
+            ..claim(1, 300_000)
+        }];
+        // R-3: Base has no open confirmation of the vault (its events are behind): nothing expires.
+        let (rpc, calls) = recording_stub(vec![(
+            IZecuredRegistry::unprovenConfirmationsCall::SELECTOR,
+            IZecuredRegistry::unprovenConfirmationsCall::abi_encode_returns(&alloy::primitives::U256::ZERO),
+        )])
+        .await;
+        c.cfg.base_rpc_url = rpc;
+        c.expire_confirmations(&v).await.unwrap();
+        assert_eq!(eth_calls(&calls), [selector(IZecuredRegistry::unprovenConfirmationsCall::SELECTOR)]);
+        // Tried again only after the retry interval.
+        c.expire_confirmations(&v).await.unwrap();
+        assert_eq!(eth_calls(&calls).len(), 1);
+        // One open confirmation the Registry refuses to expire (a suspect one, R-3): simulated, not sent.
+        let (rpc, calls) = recording_stub(vec![(
+            IZecuredRegistry::unprovenConfirmationsCall::SELECTOR,
+            IZecuredRegistry::unprovenConfirmationsCall::abi_encode_returns(&alloy::primitives::U256::from(1)),
+        )])
+        .await;
+        c.cfg.base_rpc_url = rpc;
+        c.keeper_tries.lock().unwrap().clear();
+        c.expire_confirmations(&v).await.unwrap();
+        assert_eq!(
+            eth_calls(&calls),
+            [
+                selector(IZecuredRegistry::unprovenConfirmationsCall::SELECTOR),
+                selector(IZecuredRegistry::expireConfirmationCall::SELECTOR)
+            ]
+        );
+        assert!(!calls.lock().unwrap().iter().any(|m| m == "eth_sendRawTransaction"));
+        // A confirmation still inside its window is not even looked at.
+        let mut recent = v.clone();
+        recent.claims[0].confirmed_at = now();
+        c.keeper_tries.lock().unwrap().clear();
+        let before = calls.lock().unwrap().len();
+        c.expire_confirmations(&recent).await.unwrap();
+        assert_eq!(calls.lock().unwrap().len(), before);
+
+        // R-2: a case whose payout's claims are all final already: dropped without a transaction.
+        let slasher = Address::repeat_byte(0xa2);
+        let (rpc, calls) = recording_stub(vec![
+            (IZecuredRegistry::intakeCall::SELECTOR, word(Address::repeat_byte(0xa1))),
+            (IZecuredRegistry::slasherCall::SELECTOR, word(slasher)),
+            (IZecuredRegistry::signerBondCall::SELECTOR, word(Address::repeat_byte(0xa3))),
+            (
+                IZecuredSlasher::proveInclusionByCaseCall::SELECTOR,
+                IZecuredSlasher::proveInclusionByCaseCall::abi_encode_returns(&alloy::primitives::U256::ZERO),
+            ),
+        ])
+        .await;
+        c.cfg.base_rpc_url = rpc;
+        let mut cased = vault(1);
+        cased.status = VaultStatus::Active;
+        cased.claims = vec![claim(1, 300_000)];
+        cased.inclusion_cases = vec![InclusionCase {
+            case_id: B256::repeat_byte(0xca),
+            payout_ref: B256::repeat_byte(0xaa),
+        }];
+        c.store.lock().await.save(cased.clone()).unwrap();
+        c.prove_by_cases(&cased).await.unwrap();
+        assert!(c.vault(&cased.vault_id).await.unwrap().inclusion_cases.is_empty(), "nothing left to prove by it");
+        assert!(!calls.lock().unwrap().iter().any(|m| m == "eth_sendRawTransaction"));
+        // A case the slasher refuses now (simulated, reverts): kept, tried again later.
+        let (rpc, calls) = recording_stub(vec![
+            (IZecuredRegistry::intakeCall::SELECTOR, word(Address::repeat_byte(0xa1))),
+            (IZecuredRegistry::slasherCall::SELECTOR, word(slasher)),
+            (IZecuredRegistry::signerBondCall::SELECTOR, word(Address::repeat_byte(0xa3))),
+        ])
+        .await;
+        c.cfg.base_rpc_url = rpc;
+        c.store.lock().await.save(cased.clone()).unwrap();
+        c.keeper_tries.lock().unwrap().clear();
+        c.prove_by_cases(&cased).await.unwrap();
+        assert_eq!(c.vault(&cased.vault_id).await.unwrap().inclusion_cases.len(), 1);
+        assert!(eth_calls(&calls).contains(&selector(IZecuredSlasher::proveInclusionByCaseCall::SELECTOR)));
+        assert!(!calls.lock().unwrap().iter().any(|m| m == "eth_sendRawTransaction"));
+
+        // R-19: a compromised vault whose burn retires nothing now, or that cannot be burned: nothing sent.
+        let compensator = Address::repeat_byte(0xa5);
+        let (rpc, calls) = recording_stub(vec![
+            (IZecuredRegistry::compensatorCall::SELECTOR, word(compensator)),
+            (
+                IZecuredCompensator::burnCollateralCall::SELECTOR,
+                IZecuredCompensator::burnCollateralCall::abi_encode_returns(&0u64),
+            ),
+        ])
+        .await;
+        c.cfg.base_rpc_url = rpc;
+        let mut compromised = vault(1);
+        compromised.status = VaultStatus::Active;
+        compromised.compromised = true;
+        c.burn_again(&compromised).await.unwrap();
+        assert!(eth_calls(&calls).contains(&selector(IZecuredCompensator::burnCollateralCall::SELECTOR)));
+        assert!(!calls.lock().unwrap().iter().any(|m| m == "eth_sendRawTransaction"));
+        // Burned already: not tried at all.
+        compromised.collateral_burned = true;
+        c.keeper_tries.lock().unwrap().clear();
+        let before = calls.lock().unwrap().len();
+        c.burn_again(&compromised).await.unwrap();
+        assert_eq!(calls.lock().unwrap().len(), before);
     }
 
     /// O-2: a signing threshold of nodes must report a Base block at least as recent as the event.
