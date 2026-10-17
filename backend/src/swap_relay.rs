@@ -11,7 +11,9 @@
 //!   Ironwood receiver of the deployment's Zcash network); neither is ever logged.
 //! - `GET /swap/orders/:orderId` → the maker's view of the order (`{ status }`).
 //!
-//! The maker's refusals become fixed messages (L-2); nothing it says passes as text.
+//! The paths, the query and the refusal codes are swap/maker's (`api.rs`). The maker's refusals
+//! become fixed messages (L-2); nothing it says passes as text. On the mainnet beta the maker quotes
+//! invitees only: the browser's `x-zecured-invite` header is passed on as it is, never logged.
 
 use std::{sync::Arc, time::Duration};
 
@@ -19,7 +21,7 @@ use alloy::primitives::{Address, B256};
 use axum::{
     Json,
     extract::{Path, Query, rejection::JsonRejection, rejection::PathRejection, rejection::QueryRejection},
-    http::StatusCode,
+    http::{HeaderMap, StatusCode},
     response::{IntoResponse, Response},
 };
 use serde::Deserialize;
@@ -64,19 +66,69 @@ pub const INVALID_RECEIVER: SwapError = SwapError::new(
     "Not an Ironwood address of this deployment's Zcash network.",
 );
 
-/// The maker's refusal code, as a fixed message.
+/// The header of the maker's invite code (swap/maker's `INVITE_HEADER`).
+pub const INVITE_HEADER: &str = "x-zecured-invite";
+
+/// The maker's refusal code (swap/maker `api.rs`), as a fixed message of ours.
 pub fn maker_error(code: &str) -> SwapError {
-    let refused = |code, message| SwapError::new(StatusCode::UNPROCESSABLE_ENTITY, code, message);
+    use StatusCode as S;
+    let e = SwapError::new;
     match code {
-        "no_quote" => refused("no_quote", "The maker has no quote for that amount right now."),
-        "amount_out_of_range" => refused("amount_out_of_range", "That amount is outside the maker's limits."),
-        "unknown_order" => refused("unknown_order", "The maker does not know this order (yet). Try again in a minute."),
-        "bad_commitment" => refused("bad_commitment", "The address and salt do not match the order's commitment."),
-        "invalid_receiver" => INVALID_RECEIVER,
-        "order_closed" => refused("order_closed", "The order is no longer open."),
         "bad_request" => BAD_REQUEST,
-        _ => SwapError::new(StatusCode::BAD_GATEWAY, "swap_maker_refused", "The swap's maker refused the request."),
+        "invite_required" => {
+            e(S::FORBIDDEN, "invite_required", "The maker quotes invitees only: give your invite code.")
+        }
+        "side_disabled" => e(S::UNPROCESSABLE_ENTITY, "side_disabled", "The maker does not quote this side now."),
+        "taker_required" => e(
+            S::UNPROCESSABLE_ENTITY,
+            "taker_required",
+            "Connect your wallet first: the quote is bound to your address.",
+        ),
+        "too_small" => e(S::UNPROCESSABLE_ENTITY, "too_small", "That amount is below the maker's minimum."),
+        "too_large" => e(S::UNPROCESSABLE_ENTITY, "too_large", "That amount is above the maker's maximum."),
+        "no_inventory" => e(S::CONFLICT, "no_inventory", "The maker cannot fill this order now."),
+        "busy" => e(S::SERVICE_UNAVAILABLE, "busy", "The maker has too many open orders. Try again later."),
+        "relay_behind" => e(
+            S::SERVICE_UNAVAILABLE,
+            "relay_behind",
+            "The Zcash header relay lags, so the maker cannot meet the pay window now. Try again later.",
+        ),
+        "price_stale" => {
+            e(S::SERVICE_UNAVAILABLE, "price_stale", "The maker has no fresh ZEC price now. Try again later.")
+        }
+        "unavailable" => UNAVAILABLE,
+        "unknown_order" => {
+            e(S::NOT_FOUND, "unknown_order", "The maker does not know this order (yet). Try again in a minute.")
+        }
+        "not_buy" => e(S::CONFLICT, "not_buy", "Only a Buy order takes a destination."),
+        "not_awaiting" => e(S::CONFLICT, "not_awaiting", "This order no longer takes a destination."),
+        "too_late" => e(
+            S::CONFLICT,
+            "too_late",
+            "Too late for the maker to pay and prove before the deadline: the order will be refunded.",
+        ),
+        "bad_destination" => e(
+            S::UNPROCESSABLE_ENTITY,
+            "bad_destination",
+            "The address and salt do not open the order's commitment.",
+        ),
+        _ => e(S::BAD_GATEWAY, "swap_maker_refused", "The swap's maker refused the request."),
     }
+}
+
+/// The browser's invite code for the maker, if any: at most 128 visible ASCII characters.
+fn invite(headers: &HeaderMap) -> Result<Option<String>, SwapError> {
+    let Some(v) = headers.get(INVITE_HEADER) else {
+        return Ok(None);
+    };
+    let code = v.to_str().map_err(|_| BAD_REQUEST)?.trim();
+    if code.is_empty() {
+        return Ok(None);
+    }
+    if code.len() > 128 || !code.bytes().all(|b| b.is_ascii_graphic()) {
+        return Err(BAD_REQUEST);
+    }
+    Ok(Some(code.to_owned()))
 }
 
 /// The relay: the maker's base URL (`SWAP_MAKER_URL`; `None` answers `not_configured`) and the
@@ -173,12 +225,18 @@ pub fn check_destination(b: &DestinationBody, network: &Network) -> Result<Value
 /// `GET /swap/quote`.
 pub async fn quote(
     axum::Extension(m): axum::Extension<SwapMaker>,
+    headers: HeaderMap,
     query: Result<Query<QuoteQuery>, QueryRejection>,
 ) -> Result<Json<Value>, SwapError> {
     let Query(q) = query.map_err(|_| BAD_REQUEST)?;
     let query = quote_query(&q)?;
+    let invite = invite(&headers)?;
     let url = format!("{}/swap/quote?{query}", m.base()?);
-    m.forward(m.http.get(url)).await
+    let mut req = m.http.get(url);
+    if let Some(code) = invite {
+        req = req.header(INVITE_HEADER, code);
+    }
+    m.forward(req).await
 }
 
 /// `POST /swap/orders/:orderId/destination`.
@@ -295,17 +353,55 @@ mod tests {
         }
     }
 
+    /// swap/maker's refusal codes (`api.rs`), each a fixed message of ours; anything else is one code.
     #[test]
     fn the_makers_refusals_are_fixed_messages() {
-        assert_eq!(maker_error("bad_commitment").code, "bad_commitment");
-        assert_eq!(maker_error("no_quote").status, StatusCode::UNPROCESSABLE_ENTITY);
+        for (code, status) in [
+            ("invite_required", StatusCode::FORBIDDEN),
+            ("side_disabled", StatusCode::UNPROCESSABLE_ENTITY),
+            ("taker_required", StatusCode::UNPROCESSABLE_ENTITY),
+            ("too_small", StatusCode::UNPROCESSABLE_ENTITY),
+            ("too_large", StatusCode::UNPROCESSABLE_ENTITY),
+            ("no_inventory", StatusCode::CONFLICT),
+            ("busy", StatusCode::SERVICE_UNAVAILABLE),
+            ("relay_behind", StatusCode::SERVICE_UNAVAILABLE),
+            ("price_stale", StatusCode::SERVICE_UNAVAILABLE),
+            ("unknown_order", StatusCode::NOT_FOUND),
+            ("not_buy", StatusCode::CONFLICT),
+            ("not_awaiting", StatusCode::CONFLICT),
+            ("too_late", StatusCode::CONFLICT),
+            ("bad_destination", StatusCode::UNPROCESSABLE_ENTITY),
+        ] {
+            assert_eq!((maker_error(code).code, maker_error(code).status), (code, status));
+        }
+        assert_eq!(maker_error("unavailable"), UNAVAILABLE);
+        assert_eq!(maker_error("bad_request"), BAD_REQUEST);
         assert_eq!(maker_error("panic at maker.rs:12 with 10.0.0.7").code, "swap_maker_refused");
     }
 
-    /// A maker stub recording what reached it.
+    #[test]
+    fn invite_codes_are_passed_on_only_when_they_look_like_one() {
+        let with = |v: &str| {
+            let mut h = HeaderMap::new();
+            h.insert(INVITE_HEADER, v.parse().unwrap());
+            h
+        };
+        assert_eq!(invite(&HeaderMap::new()), Ok(None));
+        assert_eq!(invite(&with("  ")), Ok(None));
+        assert_eq!(invite(&with(" beta-7f3k ")), Ok(Some("beta-7f3k".into())));
+        assert_eq!(invite(&with("two words")), Err(BAD_REQUEST));
+        assert_eq!(invite(&with(&"x".repeat(129))), Err(BAD_REQUEST));
+    }
+
+    /// A maker stub recording what reached it (the invite header too).
     async fn serve(seen: Arc<Mutex<Vec<String>>>) -> String {
-        async fn quote(State(seen): State<Arc<Mutex<Vec<String>>>>, uri: axum::http::Uri) -> Json<Value> {
-            seen.lock().unwrap().push(uri.to_string());
+        async fn quote(
+            State(seen): State<Arc<Mutex<Vec<String>>>>,
+            headers: HeaderMap,
+            uri: axum::http::Uri,
+        ) -> Json<Value> {
+            let code = headers.get(INVITE_HEADER).map(|v| v.to_str().unwrap().to_owned());
+            seen.lock().unwrap().push(format!("{uri} invite={code:?}"));
             Json(
                 json!({ "quote": { "side": 0 }, "signature": "0x12", "swap": "0x7777777777777777777777777777777777777777" }),
             )
@@ -314,7 +410,7 @@ mod tests {
             seen.lock().unwrap().push(b.to_string());
             (
                 StatusCode::UNPROCESSABLE_ENTITY,
-                Json(json!({ "code": "bad_commitment", "error": "C mismatch for 10.0.0.7" })),
+                Json(json!({ "code": "bad_destination", "error": "C mismatch for 10.0.0.7" })),
             )
         }
         let app = Router::new()
@@ -332,8 +428,16 @@ mod tests {
         let seen = Arc::new(Mutex::new(vec![]));
         let url = serve(seen.clone()).await;
         let m = SwapMaker::new(Some(format!("{url}/")), Network::TestNetwork).unwrap();
-        let r = quote(axum::Extension(m.clone()), Ok(Query(q("buy", Some("25000000"), None, None)))).await.unwrap();
+        let none = HeaderMap::new();
+        let r = quote(axum::Extension(m.clone()), none.clone(), Ok(Query(q("buy", Some("25000000"), None, None))))
+            .await
+            .unwrap();
         assert_eq!(r.0["swap"], "0x7777777777777777777777777777777777777777");
+        let mut invited = HeaderMap::new();
+        invited.insert(INVITE_HEADER, "beta-7f3k".parse().unwrap());
+        quote(axum::Extension(m.clone()), invited, Ok(Query(q("buy", Some("1"), None, None))))
+            .await
+            .unwrap();
         let body = DestinationBody {
             receiver: TESTNET_UA.into(),
             salt: format!("0x{}", "5a".repeat(32)),
@@ -341,14 +445,15 @@ mod tests {
         let e = destination(axum::Extension(m.clone()), Ok(Path(B256::repeat_byte(0x0d))), Ok(Json(body)))
             .await
             .unwrap_err();
-        assert_eq!(e.code, "bad_commitment");
-        assert_eq!(e.message, "The address and salt do not match the order's commitment.");
+        assert_eq!(e.code, "bad_destination");
+        assert_eq!(e.message, "The address and salt do not open the order's commitment.");
         let seen = seen.lock().unwrap().clone();
-        assert_eq!(seen[0], "/swap/quote?side=buy&usdc=25000000");
-        assert!(seen[1].contains(TESTNET_UA) && seen[1].contains(&"5a".repeat(32)));
+        assert_eq!(seen[0], "/swap/quote?side=buy&usdc=25000000 invite=None");
+        assert_eq!(seen[1], "/swap/quote?side=buy&usdc=1 invite=Some(\"beta-7f3k\")");
+        assert!(seen[2].contains(TESTNET_UA) && seen[2].contains(&"5a".repeat(32)));
         let off = SwapMaker::new(None, Network::TestNetwork).unwrap();
         assert_eq!(
-            quote(axum::Extension(off), Ok(Query(q("buy", Some("1"), None, None)))).await.unwrap_err(),
+            quote(axum::Extension(off), none, Ok(Query(q("buy", Some("1"), None, None)))).await.unwrap_err(),
             NOT_CONFIGURED
         );
         let dead = SwapMaker::new(Some("http://127.0.0.1:9".into()), Network::TestNetwork).unwrap();

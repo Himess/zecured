@@ -1095,7 +1095,13 @@ fn cors_layer(origins: &str) -> Result<CorsLayer> {
     Ok(CorsLayer::new()
         .allow_origin(AllowOrigin::list(list))
         .allow_methods([Method::GET, Method::POST])
-        .allow_headers([CONTENT_TYPE, ACCEPT, HeaderName::from_static("x-admin-token")])
+        .allow_headers([
+            CONTENT_TYPE,
+            ACCEPT,
+            HeaderName::from_static("x-admin-token"),
+            // The swap maker's invite code on the mainnet beta (swap_relay.rs).
+            HeaderName::from_static(swap_relay::INVITE_HEADER),
+        ])
         .max_age(Duration::from_secs(600)))
 }
 
@@ -1625,8 +1631,20 @@ mod tests {
             .header("access-control-request-method", "POST")
             .body(HttpBody::empty())
             .unwrap();
-        let r = app.oneshot(preflight).await.unwrap();
+        let r = app.clone().oneshot(preflight).await.unwrap();
         assert_eq!(r.headers().get("access-control-allow-origin").unwrap(), "http://127.0.0.1:3000");
+        // The swap maker's invite code (mainnet beta) is the one custom header the app adds.
+        let invite = axum::http::Request::builder()
+            .method(Method::OPTIONS)
+            .uri("/health")
+            .header("origin", "http://127.0.0.1:3000")
+            .header("access-control-request-method", "GET")
+            .header("access-control-request-headers", "x-zecured-invite")
+            .body(HttpBody::empty())
+            .unwrap();
+        let r = app.oneshot(invite).await.unwrap();
+        let allowed = r.headers().get("access-control-allow-headers").unwrap().to_str().unwrap().to_ascii_lowercase();
+        assert!(allowed.contains("x-zecured-invite"), "{allowed}");
 
         assert!(cors_layer("*").is_err());
         assert!(cors_layer("").is_err());
