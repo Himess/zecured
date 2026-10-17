@@ -4,12 +4,45 @@ pragma solidity 0.8.28;
 import {IMorphoLiquidateCallback, IMorphoRepayCallback} from "morpho-blue/src/interfaces/IMorphoCallbacks.sol";
 import {CloseRequest, DeleverageRequest} from "../libraries/ZecuredEIP712.sol";
 
+/// @notice Pre-liquidation terms a vault's account opts into (all but `expiry` in WAD, 1e18 = 100 %), after Morpho's
+///         PreLiquidation: once the position's LTV is above `preLltv` (and at most the market's LLTV), anyone may repay
+///         up to a close factor of its borrow shares and take the repaid value times an incentive factor in collateral,
+///         paid in ZEC on Zcash. Both factors rise linearly with the LTV across the band, from `preLcf1` / `preLif1` at
+///         `preLltv` to `preLcf2` / `preLif2` at the LLTV.
+/// @param preLltv The LTV above which the position can be pre-liquidated; below the LLTV.
+/// @param preLcf1 Close factor at `preLltv`: the share of the borrow shares one pre-liquidation may repay (0 < preLcf1).
+/// @param preLcf2 Close factor at the LLTV (preLcf1 <= preLcf2 <= 100 %).
+/// @param preLif1 Incentive factor at `preLltv` (at least 1: the collateral taken is worth at least the repayment).
+/// @param preLif2 Incentive factor at the LLTV (preLif1 <= preLif2 <= the market's liquidation incentive factor).
+/// @param expiry Unix time from which the terms no longer apply (later than their setting).
+struct PreLiquidationTerms {
+    uint256 preLltv;
+    uint256 preLcf1;
+    uint256 preLcf2;
+    uint256 preLif1;
+    uint256 preLif2;
+    uint64 expiry;
+}
+
 /// @title ISettlementAdapter
-/// @notice Liquidation and close-from-collateral for Zecured vault accounts (docs/INTERFACES.md § 3.3).
+/// @notice Liquidation, pre-liquidation and close-from-collateral for Zecured vault accounts (docs/INTERFACES.md § 3.3).
 interface ISettlementAdapter is IMorphoLiquidateCallback, IMorphoRepayCallback {
     // ------------------------------------------------------------------ events (docs/INTERFACES.md § 3.3)
 
     event NonceInvalidated(address indexed account, uint256 nonce);
+    /// @notice The account opted into pre-liquidation on these terms (replacing any earlier ones).
+    event PreLiquidationSet(address indexed account, PreLiquidationTerms terms);
+    /// @notice The account withdrew its pre-liquidation terms.
+    event PreLiquidationCleared(address indexed account);
+    /// @notice `liquidator` repaid `repaidAssets` of the account's debt and took `seized` zatoshi of its vault (a
+    ///         Liquidation claim of the liquidator's commitment, recorded by the Registry).
+    event PreLiquidated(
+        bytes32 indexed vaultId,
+        address indexed account,
+        address indexed liquidator,
+        uint256 repaidAssets,
+        uint64 seized
+    );
 
     // ------------------------------------------------------------------ errors
 
@@ -54,6 +87,28 @@ interface ISettlementAdapter is IMorphoLiquidateCallback, IMorphoRepayCallback {
     error DeleverageRemainderTooSmall(uint256 remaining, uint256 minimum);
     /// @notice S18: nothing to repay.
     error ZeroRepay();
+    /// @notice Pre-liquidation terms: `preLltv` must be below the market's LLTV.
+    error InvalidPreLltv(uint256 preLltv, uint256 lltv);
+    /// @notice Pre-liquidation terms: the close factors must satisfy 0 < preLcf1 <= preLcf2 <= 1 (WAD).
+    error InvalidPreLcf(uint256 preLcf1, uint256 preLcf2);
+    /// @notice Pre-liquidation terms: the incentive factors must satisfy 1 <= preLif1 <= preLif2 <= `maxLif`, the
+    ///         market's liquidation incentive factor (WAD).
+    error InvalidPreLif(uint256 preLif1, uint256 preLif2, uint256 maxLif);
+    /// @notice Pre-liquidation terms must expire after they are set.
+    error InvalidExpiry(uint64 expiry);
+    /// @notice The account has no pre-liquidation terms in force (never set, cleared, or expired).
+    error PreLiquidationInactive(address account);
+    /// @notice T-04: the slasher reports the vault frozen (an open theft case, or compromised).
+    error VaultFrozen(bytes32 vaultId);
+    /// @notice The position's LTV is not above the account's `preLltv`: `borrowed <= collateral value * preLltv`.
+    error NotPreLiquidatable(uint256 borrowed, uint256 preLiquidationBorrow);
+    /// @notice The position is past the LLTV (`borrowed > collateral value * LLTV`): it is liquidated through
+    ///         `liquidate`, not pre-liquidated.
+    error PositionLiquidatable(uint256 borrowed, uint256 maxBorrow);
+    /// @notice More borrow shares than the close factor allows at the position's LTV.
+    error PreLiquidationTooLarge(uint256 repaidShares, uint256 repayableShares);
+    /// @notice A pre-liquidation must leave at least the D11 floor in the vault.
+    error PreLiquidationRemainderTooSmall(uint256 remaining, uint256 minimum);
 
     // ------------------------------------------------------------------ functions (docs/INTERFACES.md § 3.3)
 
@@ -100,6 +155,41 @@ interface ISettlementAdapter is IMorphoLiquidateCallback, IMorphoRepayCallback {
     /// @notice Cancels a CloseRequest nonce of `msg.sender` (the account). Idempotent: it never reverts, also for a
     ///         nonce that is already used or invalidated, and emits `NonceInvalidated` on every call.
     function invalidateNonce(uint256 nonce) external;
+
+    /// @notice Pre-liquidation: the caller, the account of an Active vault, opts into pre-liquidation on terms `t`,
+    ///         replacing any earlier ones: `preLltv < LLTV`, `1 <= preLif1 <= preLif2 <= LIF(LLTV)` (Morpho's
+    ///         liquidation incentive factor of the market), `0 < preLcf1 <= preLcf2 <= 1`, all in WAD, and
+    ///         `expiry > block.timestamp`.
+    function setPreLiquidation(PreLiquidationTerms calldata t) external;
+
+    /// @notice Withdraws the caller's pre-liquidation terms. Idempotent: it never reverts and emits
+    ///         `PreLiquidationCleared` on every call.
+    function clearPreLiquidation() external;
+
+    /// @notice Anyone. Pre-liquidates `account`, which opted in (`setPreLiquidation`): the caller repays `repaidShares`
+    ///         of its borrow shares with its own USDC (pulled inside `onMorphoRepay`) and is paid in the vault's ZEC:
+    ///         1. the terms are in force and the vault is Active and not frozen;
+    ///         2. Morpho accrues interest; `borrowed` is the debt rounded up, as Morpho's health check counts it;
+    ///         3. `collateral value * preLltv < borrowed <= collateral value * LLTV` (past the LLTV, `liquidate`);
+    ///         4. `ltv = borrowed / collateral value` (rounded up), `q = (ltv - preLltv) / (LLTV - preLltv)`, and the
+    ///            close factor `preLcf = preLcf1 + q * (preLcf2 - preLcf1)` and the incentive factor
+    ///            `preLif = preLif1 + q * (preLif2 - preLif1)` (rounded down);
+    ///         5. `repaidShares <= borrowShares * preLcf`;
+    ///         6. `seized = assets(repaidShares) * preLif / price`, every step rounded down (the borrower's way), at
+    ///            least the D11 floor `minSeize(outstanding)` and leaving at least that floor in the vault;
+    ///         7. the Adapter withdraws `seized` and the Registry burns it into a Liquidation claim of `mmCommitment`
+    ///            whose claimant is the caller (I2, I9).
+    ///         Since `preLif <= LIF(LLTV)` and `ltv <= LLTV`, `ltv * preLif < 1`: the position's LTV always falls.
+    /// @param mmCommitment Salted commitment of the caller's Ironwood receiver (the claim's destination).
+    /// @return repaidAssets The USDC repaid (6-decimal units), what Morpho pulled.
+    /// @return seized The collateral taken, in zatoshi.
+    function preLiquidate(address account, uint256 repaidShares, bytes32 mmCommitment)
+        external
+        returns (uint256 repaidAssets, uint64 seized);
+
+    /// @notice The account's pre-liquidation terms as stored (all zero if never set or cleared; they apply only while
+    ///         `block.timestamp < expiry`).
+    function preLiquidationTerms(address account) external view returns (PreLiquidationTerms memory);
 
     /// @notice Whether `nonce` of `account` was used by a close or invalidated.
     function nonceUsed(address account, uint256 nonce) external view returns (bool);

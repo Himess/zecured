@@ -150,6 +150,8 @@ abstract contract ZecuredFixture is Test {
     ProofSetup internal proofs;
     /// The compensator the Registry names (`_compensator`).
     address internal compensatorAddress;
+    /// The market's oracle: `oracle` (the MOCK price) unless a suite's `_marketOracle()` wraps it.
+    address internal marketOracle;
     MarketParams internal params;
     Id internal marketId;
 
@@ -240,6 +242,12 @@ abstract contract ZecuredFixture is Test {
     /// T-04: the compensator the Registry names (none unless a suite names one).
     function _compensator() internal virtual returns (address) {}
 
+    /// The market's oracle: the MOCK price itself unless a suite wraps it (in the DemoShockOracle, as the testnet
+    /// deployments do). Runs right after the MOCK price is deployed, before the addresses are predicted.
+    function _marketOracle() internal virtual returns (address) {
+        return address(oracle);
+    }
+
     /// T-08: the deposit-proof work tiers (one tier for every amount unless a suite sets more).
     function _workTiers() internal view virtual returns (WorkTier[] memory tiers) {
         tiers = new WorkTier[](1);
@@ -268,6 +276,7 @@ abstract contract ZecuredFixture is Test {
     function _deploySystem() internal {
         usdc = new MockUSDC(address(this));
         oracle = new MockZecOracle(address(this), PRICE_40);
+        marketOracle = _marketOracle();
         proofs = _proofSetup();
         headerRelay = IZcashHeaderRelay(proofs.relay);
         proofVerifier = IRiscZeroVerifier(proofs.verifier);
@@ -356,7 +365,7 @@ abstract contract ZecuredFixture is Test {
             zzec: zzec,
             adapter: p.adapter,
             loanToken: address(usdc),
-            oracle: address(oracle),
+            oracle: marketOracle,
             irm: ADAPTIVE_CURVE_IRM,
             lltv: LLTV,
             signers: signerSet,

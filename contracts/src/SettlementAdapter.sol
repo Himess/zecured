@@ -8,14 +8,21 @@ import {SignatureChecker} from "@openzeppelin/contracts/utils/cryptography/Signa
 import {Math} from "@openzeppelin/contracts/utils/math/Math.sol";
 import {SafeCast} from "@openzeppelin/contracts/utils/math/SafeCast.sol";
 import {ReentrancyGuardTransient} from "@openzeppelin/contracts/utils/ReentrancyGuardTransient.sol";
-import {IMorpho, MarketParams, Id} from "morpho-blue/src/interfaces/IMorpho.sol";
+import {IMorpho, MarketParams, Id, Market, Position} from "morpho-blue/src/interfaces/IMorpho.sol";
 import {IOracle} from "morpho-blue/src/interfaces/IOracle.sol";
 import {IMorphoLiquidateCallback, IMorphoRepayCallback} from "morpho-blue/src/interfaces/IMorphoCallbacks.sol";
 import {MarketParamsLib} from "morpho-blue/src/libraries/MarketParamsLib.sol";
-import {ORACLE_PRICE_SCALE} from "morpho-blue/src/libraries/ConstantsLib.sol";
+import {MathLib, WAD} from "morpho-blue/src/libraries/MathLib.sol";
+import {SharesMathLib} from "morpho-blue/src/libraries/SharesMathLib.sol";
+import {
+    ORACLE_PRICE_SCALE,
+    LIQUIDATION_CURSOR,
+    MAX_LIQUIDATION_INCENTIVE_FACTOR
+} from "morpho-blue/src/libraries/ConstantsLib.sol";
 import {IZZEC} from "./interfaces/IZZEC.sol";
 import {IZecuredRegistry, VaultStatus} from "./interfaces/v3/IZecuredRegistry.sol";
-import {ISettlementAdapter} from "./interfaces/ISettlementAdapter.sol";
+import {IZecuredSlasher} from "./interfaces/v3/IZecuredSlasher.sol";
+import {ISettlementAdapter, PreLiquidationTerms} from "./interfaces/ISettlementAdapter.sol";
 import {ZecuredEIP712, CloseRequest, DeleverageRequest} from "./libraries/ZecuredEIP712.sol";
 
 /// @title SettlementAdapter
@@ -23,15 +30,22 @@ import {ZecuredEIP712, CloseRequest, DeleverageRequest} from "./libraries/Zecure
 ///         (docs/INTERFACES.md § 3.3):
 ///         - `liquidate`: a permissionless Morpho liquidation routed through this Adapter; the liquidator pays USDC in
 ///           Morpho's callback and is paid in ZEC on Zcash through a Liquidation claim (dust floor D11);
+///         - `preLiquidate`: for an account that opted in (`setPreLiquidation`), anyone repays part of the debt once
+///           the LTV is in the account's band below the LLTV, for a smaller incentive than a liquidation's (Morpho's
+///           PreLiquidation design, carried into the Adapter because zZEC cannot leave Morpho any other way); paid
+///           like a liquidation;
 ///         - `closeWithCollateral`: a market maker (the request's `executor`) repays the whole debt in USDC and is paid
 ///           in ZEC from the vault; the borrower's remainder goes to their own commitment (I7, I8);
 ///         - `deleverageWithCollateral` (S18): the same for part of the debt; the vault stays open with a lower LTV.
-/// @dev Morpho authorization is all-or-nothing, so this contract calls only `liquidate`, `repay` and
-///      `withdrawCollateral` (the latter only for a valid signed CloseRequest whose executor is the caller, I8). It has no
-///      code path that borrows or withdraws loan assets, no admin and no upgrade path.
+/// @dev Morpho authorization is all-or-nothing, so this contract calls only `accrueInterest`, `liquidate`, `repay` and
+///      `withdrawCollateral` (the latter only for a valid signed request whose executor is the caller, I8, or within
+///      the pre-liquidation terms the account itself set on this contract). It has no code path that borrows or
+///      withdraws loan assets, no admin and no upgrade path.
 contract SettlementAdapter is ISettlementAdapter, EIP712, ReentrancyGuardTransient {
     using SafeERC20 for IERC20;
     using MarketParamsLib for MarketParams;
+    using MathLib for uint256;
+    using SharesMathLib for uint256;
 
     /// @inheritdoc ISettlementAdapter
     uint256 public immutable MIN_SEIZE;
@@ -60,8 +74,14 @@ contract SettlementAdapter is ISettlementAdapter, EIP712, ReentrancyGuardTransie
     Id public immutable marketId;
     address private immutable _irm;
     uint256 private immutable _lltv;
+    /// @dev Morpho's liquidation incentive factor of the market, min(1.15, 1 / (1 - 0.3 * (1 - LLTV))), in WAD: the
+    ///      highest pre-liquidation incentive factor.
+    uint256 private immutable _lif;
+    /// @dev The Registry's slasher (zero on deployments without bonds): a vault it reports frozen is not pre-liquidated.
+    address private immutable _slasher;
 
     mapping(address account => mapping(uint256 nonce => bool used)) private _nonceUsed;
+    mapping(address account => PreLiquidationTerms) private _preLiquidation;
 
     // EIP-1153: the operation in flight and the address that pays its USDC (liquidator or executor).
     uint8 private transient _op;
@@ -94,6 +114,11 @@ contract SettlementAdapter is ISettlementAdapter, EIP712, ReentrancyGuardTransie
         _irm = params.irm;
         _lltv = params.lltv;
         marketId = params.id();
+        // As Morpho.liquidate computes it (Morpho enables only LLTVs below 1).
+        _lif = Math.min(
+            MAX_LIQUIDATION_INCENTIVE_FACTOR, WAD.wDivDown(WAD - LIQUIDATION_CURSOR.wMulDown(WAD - params.lltv))
+        );
+        _slasher = registry_.slasher();
     }
 
     // ------------------------------------------------------------------ liquidation
@@ -230,6 +255,58 @@ contract SettlementAdapter is ISettlementAdapter, EIP712, ReentrancyGuardTransie
         emit NonceInvalidated(msg.sender, nonce);
     }
 
+    // ------------------------------------------------------------------ pre-liquidation
+
+    /// @inheritdoc ISettlementAdapter
+    /// @dev Only the account of an Active vault: an activated vault stays its account's for good (I4), so the terms
+    ///      can never apply to another vault, and nothing about a vault reaches this contract before it is active.
+    function setPreLiquidation(PreLiquidationTerms calldata t) external {
+        bytes32 vaultId = registry.vaultOf(msg.sender);
+        if (vaultId == bytes32(0)) revert NotAVaultAccount(msg.sender);
+        (,, VaultStatus status) = registry.vault(vaultId);
+        if (status != VaultStatus.Active) revert VaultNotActive(vaultId);
+        if (t.preLltv >= _lltv) revert InvalidPreLltv(t.preLltv, _lltv);
+        if (t.preLcf1 == 0 || t.preLcf1 > t.preLcf2 || t.preLcf2 > WAD) revert InvalidPreLcf(t.preLcf1, t.preLcf2);
+        if (t.preLif1 < WAD || t.preLif1 > t.preLif2 || t.preLif2 > _lif) {
+            revert InvalidPreLif(t.preLif1, t.preLif2, _lif);
+        }
+        if (t.expiry <= block.timestamp) revert InvalidExpiry(t.expiry);
+        _preLiquidation[msg.sender] = t;
+        emit PreLiquidationSet(msg.sender, t);
+    }
+
+    /// @inheritdoc ISettlementAdapter
+    function clearPreLiquidation() external {
+        delete _preLiquidation[msg.sender]; // idempotent, like invalidateNonce
+        emit PreLiquidationCleared(msg.sender);
+    }
+
+    /// @inheritdoc ISettlementAdapter
+    function preLiquidate(address account, uint256 repaidShares, bytes32 mmCommitment)
+        external
+        nonReentrant
+        returns (uint256 repaidAssets, uint64 seized)
+    {
+        if (mmCommitment == bytes32(0)) revert ZeroCommitment();
+        if (repaidShares == 0) revert ZeroRepay();
+        (bytes32 vaultId, uint64 outstanding) = _preLiquidatableVault(account);
+        // Steps 2 to 6, before any transfer: the collateral the repayment buys, within the floors.
+        seized = _preLiquidationSeize(account, repaidShares, outstanding);
+
+        // The repayment, with the caller's USDC pulled inside onMorphoRepay (the path of a close).
+        _op = OP_CLOSE;
+        _payer = msg.sender;
+        (repaidAssets,) = morpho.repay(_marketParams(), 0, repaidShares, account, abi.encode(OP_CLOSE));
+        _op = OP_NONE;
+        _payer = address(0);
+
+        // The collateral leaves Morpho to this Adapter only (Morpho checks the position's health after the repayment;
+        // its LTV fell) and the Registry burns it into the caller's claim (I2, I9).
+        _withdrawCollateralToSelf(account, seized);
+        registry.recordLiquidation(vaultId, seized, mmCommitment, msg.sender);
+        emit PreLiquidated(vaultId, account, msg.sender, repaidAssets, seized);
+    }
+
     // ------------------------------------------------------------------ views
 
     /// @inheritdoc ISettlementAdapter
@@ -240,6 +317,11 @@ contract SettlementAdapter is ISettlementAdapter, EIP712, ReentrancyGuardTransie
     /// @inheritdoc ISettlementAdapter
     function nonceUsed(address account, uint256 nonce) external view returns (bool) {
         return _nonceUsed[account][nonce];
+    }
+
+    /// @inheritdoc ISettlementAdapter
+    function preLiquidationTerms(address account) external view returns (PreLiquidationTerms memory) {
+        return _preLiquidation[account];
     }
 
     /// @inheritdoc ISettlementAdapter
@@ -320,6 +402,67 @@ contract SettlementAdapter is ISettlementAdapter, EIP712, ReentrancyGuardTransie
         mmAmount = SafeCast.toUint64(mm);
         userAmount = outstanding - mmAmount;
         if (userAmount < req.minUserAmount) revert UserAmountBelowMinimum(userAmount, req.minUserAmount);
+    }
+
+    /// @dev Pre-liquidation step 1: the account's terms are in force, its vault is Active and the slasher does not report
+    ///      it frozen (the Registry refuses a frozen vault's exits too; this fails before any transfer).
+    function _preLiquidatableVault(address account) internal view returns (bytes32 vaultId, uint64 outstanding) {
+        if (block.timestamp >= _preLiquidation[account].expiry) revert PreLiquidationInactive(account);
+        vaultId = registry.vaultOf(account);
+        if (vaultId == bytes32(0)) revert NotAVaultAccount(account);
+        VaultStatus status;
+        (, outstanding, status) = registry.vault(vaultId);
+        if (status != VaultStatus.Active) revert VaultNotActive(vaultId);
+        if (_slasher != address(0) && IZecuredSlasher(_slasher).vaultFrozen(vaultId)) revert VaultFrozen(vaultId);
+    }
+
+    /// @dev Pre-liquidation steps 2 to 6 (see `preLiquidate`), with Morpho's PreLiquidation arithmetic: interest
+    ///      accrued, the LTV band, the close factor's cap and the collateral the repayment buys, rounded down, within the
+    ///      D11 floors. Read before the repayment, on the totals Morpho repays with.
+    function _preLiquidationSeize(address account, uint256 repaidShares, uint64 outstanding) internal returns (uint64) {
+        morpho.accrueInterest(_marketParams());
+        Market memory m = morpho.market(marketId);
+        uint256 price = oracle.price();
+        (uint256 repayable, uint256 preLif) = _preLiquidationQuote(account, m, price);
+        if (repaidShares > repayable) revert PreLiquidationTooLarge(repaidShares, repayable);
+        // price > 0 here: the band check needs a non-zero collateral value.
+        uint256 s = repaidShares.toAssetsDown(m.totalBorrowAssets, m.totalBorrowShares)
+            .wMulDown(preLif)
+            .mulDivDown(ORACLE_PRICE_SCALE, price);
+        uint256 floor = minSeize(outstanding);
+        if (s < floor) revert SeizeBelowMinimum(s, floor);
+        if (s + floor > outstanding) {
+            revert PreLiquidationRemainderTooSmall(outstanding - Math.min(s, outstanding), floor);
+        }
+        return SafeCast.toUint64(s); // < outstanding, a uint64
+    }
+
+    /// @dev Pre-liquidation steps 3 to 5: `preLltv < ltv <= LLTV` with Morpho's rounding (the upper bound is its health
+    ///      check, so a position Morpho can liquidate is never pre-liquidated), then the close and incentive factors,
+    ///      linear in `q = (ltv - preLltv) / (LLTV - preLltv)` (ltv rounded up, `q` and the factors rounded down).
+    /// @return repayable The most borrow shares this pre-liquidation may repay: borrowShares * preLcf, rounded down.
+    /// @return preLif The incentive factor (WAD).
+    function _preLiquidationQuote(address account, Market memory m, uint256 price)
+        internal
+        view
+        returns (uint256 repayable, uint256 preLif)
+    {
+        Position memory p = morpho.position(marketId, account);
+        if (p.borrowShares == 0) revert NoDebt(account);
+        PreLiquidationTerms storage t = _preLiquidation[account];
+        uint256 preLltv = t.preLltv;
+        uint256 collateralQuoted = uint256(p.collateral).mulDivDown(price, ORACLE_PRICE_SCALE);
+        uint256 borrowed = uint256(p.borrowShares).toAssetsUp(m.totalBorrowAssets, m.totalBorrowShares);
+        {
+            uint256 maxBorrow = collateralQuoted.wMulDown(_lltv);
+            if (borrowed > maxBorrow) revert PositionLiquidatable(borrowed, maxBorrow);
+            uint256 preLiquidationBorrow = collateralQuoted.wMulDown(preLltv);
+            // Both checks together make collateralQuoted non-zero (borrowed > 0: the account has borrow shares).
+            if (borrowed <= preLiquidationBorrow) revert NotPreLiquidatable(borrowed, preLiquidationBorrow);
+        }
+        uint256 q = (borrowed.wDivUp(collateralQuoted) - preLltv).wDivDown(_lltv - preLltv);
+        repayable = uint256(p.borrowShares).wMulDown(q.wMulDown(t.preLcf2 - t.preLcf1) + t.preLcf1);
+        preLif = q.wMulDown(t.preLif2 - t.preLif1) + t.preLif1;
     }
 
     /// @dev Withdraws `amount` of `account`'s collateral to this Adapter. Y5: the zZEC expectation is armed immediately
