@@ -594,7 +594,7 @@ pub fn apply(store: &mut Store, ev: &VaultEvent) -> Result<bool> {
         RegistryEvent::ChangeTagOverridden { .. } => {
             tracing::error!(
                 vault = %hex::encode(&ev.vault_id[..4]),
-                "a deposit of another vault took a change tag of this vault's commitment (R-16): that commitment's signers registered a false change; its payout cannot be continued from that tag"
+                "a deposit took a change tag of this vault's commitment (R-16): that commitment's signers registered a false change; its payout cannot be continued from that tag"
             );
         }
         RegistryEvent::VaultActivated {
