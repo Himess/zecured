@@ -16,6 +16,7 @@ import {
   type VaultLedger,
 } from "./chain";
 import type { PreLiquidationTerms } from "./preliq";
+import { readProtocol, type ProtocolSnapshot } from "./public";
 import { config } from "./config";
 import { loanStore, type StoredLoan } from "./keys";
 import { storedVault, verifyVaultOpened, type VaultCheck } from "./signers";
@@ -399,6 +400,16 @@ export function useStatusReport(intervalMs = 30_000): Remote<StatusReport> {
 /** P-2: open vaults per denomination (GET /stats/vaults), polled; null data when the backend has none. */
 export function useVaultStats(intervalMs = 120_000): Remote<VaultStats | null> {
   return useRemote(() => api.getVaultStats(), intervalMs);
+}
+
+/** P-2, P-4: the protocol's public numbers on Base (lib/public.ts), polled through the proxy. */
+export function useProtocol(intervalMs = 60_000): Remote<ProtocolSnapshot> {
+  return useRemote(() => readProtocol(), intervalMs, config.contractsDeployed);
+}
+
+/** P-3: the evidence file, read once; null data when the backend publishes none, an error when it is malformed. */
+export function useEvidence(): Remote<Evidence | null> {
+  return useRemote(() => api.getEvidence(), 0);
 }
 
 // ------------------------------------------------------------------ actions
