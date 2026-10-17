@@ -12,6 +12,7 @@ import {ZZEC} from "../../src/ZZEC.sol";
 import {ZecuredRegistry} from "../../src/ZecuredRegistry.sol";
 import {ZecuredSpendLogic} from "../../src/registry/ZecuredSpendLogic.sol";
 import {IZecuredSpendCommitsEvents} from "../../src/interfaces/v3/IZecuredSpendCommits.sol";
+import {IZecuredRefunds} from "../../src/interfaces/v3/IZecuredRefunds.sol";
 import {SettlementAdapter} from "../../src/SettlementAdapter.sol";
 import {IZZEC} from "../../src/interfaces/IZZEC.sol";
 import {
@@ -214,7 +215,7 @@ contract ZecuredRegistryTest is ZecuredFixture {
         address predictedAdapter = vm.computeCreateAddress(address(this), nonce + 3);
         ZZEC z = new ZZEC(predictedRegistry, predictedAdapter, address(MORPHO));
         ZecuredSpendLogic logic =
-            new ZecuredSpendLogic(predictedRegistry, logicSigners, DISPUTE_WINDOW, INCLUSION_WINDOW);
+            new ZecuredSpendLogic(predictedRegistry, logicSigners, DISPUTE_WINDOW, INCLUSION_WINDOW, REFUND_DORMANCY);
         return _config(z, predictedAdapter, address(logic));
     }
 
@@ -382,7 +383,7 @@ contract ZecuredRegistryTest is ZecuredFixture {
             new ZecuredRegistry(c);
             // The spend logic checks its set the same way.
             vm.expectRevert(IZecuredSignerErrors.InvalidSignerSet.selector);
-            new ZecuredSpendLogic(address(registry), bad[i], DISPUTE_WINDOW, INCLUSION_WINDOW);
+            new ZecuredSpendLogic(address(registry), bad[i], DISPUTE_WINDOW, INCLUSION_WINDOW, REFUND_DORMANCY);
         }
     }
 
@@ -529,7 +530,11 @@ contract ZecuredRegistryTest is ZecuredFixture {
             vm.expectRevert(abi.encodeWithSelector(IZecuredRegistry.OnlyIntake.selector, callers[i]));
             registry.activate(vaultId, account, VAULT_001, tag);
             vm.expectRevert(abi.encodeWithSelector(IZecuredRegistry.OnlyIntake.selector, callers[i]));
-            registry.openRefund(vaultId, account, VAULT_001, tag);
+            registry.reserveRefund(vaultId, account, VAULT_001, tag);
+            vm.expectRevert(abi.encodeWithSelector(IZecuredRegistry.OnlyIntake.selector, callers[i]));
+            IZecuredRefunds(address(registry)).openReservedRefund(vaultId, tag);
+            vm.expectRevert(abi.encodeWithSelector(IZecuredRegistry.OnlyIntake.selector, callers[i]));
+            IZecuredRefunds(address(registry)).releaseRefund(vaultId, tag);
             vm.expectRevert(abi.encodeWithSelector(IZecuredRegistry.OnlyIntake.selector, callers[i]));
             registry.convertToRefund(vaultId, account, VAULT_001, tag);
             // Roles this deployment does not have (zero) admit nobody.
@@ -808,18 +813,25 @@ contract ZecuredRegistryTest is ZecuredFixture {
         assertEq(zzec.totalSupply(), 0);
     }
 
-    /// A refund opened while another proof holds the vault's reservation keeps the vault (cancelled) when the
-    /// reservation is released.
-    function test_releaseDeposit_keepsAVaultWithARefund() public {
+    /// R-8, R-12: a refund reserved while another proof holds the vault's reservation leaves the vault alone: released,
+    /// the reservation makes the vault unknown again, and the refund then opens on it (cancelled, with its account).
+    function test_releaseDeposit_thenAReservedRefundOpens() public {
         bytes32 vaultId = _vaultIdFor(account);
         bytes32 tag = _depositTagFor(account);
+        bytes32 second = keccak256("zecured.registry.second");
         vm.startPrank(address(intake));
         registry.reserveDeposit(vaultId, account, VAULT_001, tag);
-        bytes32 claimId = registry.openRefund(vaultId, account, VAULT_005, keccak256("zecured.registry.second"));
+        registry.reserveRefund(vaultId, account, VAULT_005, second);
         registry.releaseDeposit(vaultId, account, tag);
-        vm.stopPrank();
         (address a,, VaultStatus s) = registry.vault(vaultId);
-        assertEq(a, account, "the refund's account stays");
+        assertEq(a, address(0));
+        assertEq(uint8(s), uint8(VaultStatus.None), "a pending vault never holds a claim");
+        assertEq(registry.openVaultCount(), 0);
+        assertEq(registry.lineageOf(second).value, VAULT_005, "the reserved refund's note is still a lineage note");
+        bytes32 claimId = IZecuredRefunds(address(registry)).openReservedRefund(vaultId, second);
+        vm.stopPrank();
+        (a,, s) = registry.vault(vaultId);
+        assertEq(a, account, "the refund's account");
         assertEq(uint8(s), uint8(VaultStatus.Cancelled));
         assertEq(registry.vaultOf(account), bytes32(0));
         assertFalse(registry.depositTagUsed(tag));

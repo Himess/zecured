@@ -7,8 +7,12 @@ import {IERC20Errors} from "@openzeppelin/contracts/interfaces/draft-IERC6093.so
 import {ReentrancyGuardTransient} from "@openzeppelin/contracts/utils/ReentrancyGuardTransient.sol";
 import {IOracle} from "morpho-blue/src/interfaces/IOracle.sol";
 import {SignerBondV2} from "../../src/SignerBondV2.sol";
+import {ECDSA} from "@openzeppelin/contracts/utils/cryptography/ECDSA.sol";
+import {MessageHashUtils} from "@openzeppelin/contracts/utils/cryptography/MessageHashUtils.sol";
 import {ISignerBond, BondConfig} from "../../src/interfaces/v3/ISignerBond.sol";
 import {ClaimDetails, ClaimKind, ClaimStatus} from "../../src/interfaces/v3/IZecuredRegistry.sol";
+import {Entitlement} from "../../src/interfaces/v3/IZecuredCompensator.sol";
+import {IZecuredPriceFeed} from "../../src/interfaces/v3/IZecuredPriceFeed.sol";
 import {MockUSDC} from "../../src/mocks/MockUSDC.sol";
 import {
     MockBondRegistry,
@@ -16,6 +20,7 @@ import {
     MockBondIntake,
     MockBondCompensator,
     MockBondOracle,
+    MockBondPlainOracle,
     MockHookToken,
     MockReentrantAccount,
     MockReentryProbe
@@ -31,9 +36,10 @@ contract SignerBondV2Harness is SignerBondV2 {
 }
 
 /// @notice Unit tests of SignerBondV2 (design notes T-01 and T-05, with a bound on deferrals; rules in the v3
-///         `ISignerBond`). No fork: the Registry, the slasher, the Intake, the compensator and the oracle are MOCKs
-///         (test/mocks/BondV2Mocks.sol) and the token is MockUSDC. The parameters are the judge deployment's (design
-///         notes § 2.8 and § 8.8): five bonds of 400 USDC (2,000 in all), a 100 USDC minimum, ZEC at $1,200.
+///         `ISignerBond`; v4: liveness receipts R-5, compensator entitlements R-7, stale prices R-9, R-18). No fork: the
+///         Registry, the slasher, the Intake, the compensator and the oracle are MOCKs (test/mocks/BondV2Mocks.sol) and
+///         the token is MockUSDC. The parameters are the judge deployment's (design notes § 2.8 and § 8.8): five bonds of
+///         400 USDC (2,000 in all), a 100 USDC minimum, ZEC at $1,200.
 contract SignerBondV2Test is Test {
     uint256 internal constant START = 1_790_000_000;
     uint256 internal constant MIN_BOND = 100e6;
@@ -63,6 +69,7 @@ contract SignerBondV2Test is Test {
     SignerBondV2 internal bond;
 
     address[5] internal signers;
+    uint256[5] internal signerKeys;
     address internal stranger = makeAddr("bondv2.stranger");
     address internal watcher = makeAddr("bondv2.watcher");
     address internal liquidator = makeAddr("bondv2.liquidator");
@@ -71,12 +78,13 @@ contract SignerBondV2Test is Test {
     function setUp() public {
         vm.warp(START);
         for (uint256 i; i < 5; ++i) {
-            signers[i] = makeAddr(string.concat("bondv2.signer", vm.toString(i)));
+            (signers[i], signerKeys[i]) = makeAddrAndKey(string.concat("bondv2.signer", vm.toString(i)));
         }
-        // Sorted, as the Registry keeps them: a signer's index is its position.
+        // Sorted, as the Registry keeps them: a signer's index is its position (its key moves with it).
         for (uint256 i = 1; i < 5; ++i) {
             for (uint256 j = i; j > 0 && signers[j - 1] > signers[j]; --j) {
                 (signers[j - 1], signers[j]) = (signers[j], signers[j - 1]);
+                (signerKeys[j - 1], signerKeys[j]) = (signerKeys[j], signerKeys[j - 1]);
             }
         }
         usdc = new MockUSDC(address(this));
@@ -142,8 +150,8 @@ contract SignerBondV2Test is Test {
         return bond.slash(caseId, bitmap, watcher);
     }
 
-    /// A pending claim of `VAULT` with a destination, payable from now.
-    function _claim(bytes32 claimId, ClaimKind kind, uint64 zat, address claimant) internal {
+    /// A pending claim of `VAULT` with a destination, created now, without a receipt.
+    function _claimUnarmed(bytes32 claimId, ClaimKind kind, uint64 zat, address claimant) internal {
         registry.setClaim(
             claimId,
             ClaimDetails({
@@ -157,6 +165,29 @@ contract SignerBondV2Test is Test {
                 claimant: claimant
             })
         );
+    }
+
+    /// A pending claim of `VAULT` with a destination, payable from now: for the kinds the bonds pay, a signer's node
+    /// received its destination now (R-5).
+    function _claim(bytes32 claimId, ClaimKind kind, uint64 zat, address claimant) internal {
+        _claimUnarmed(claimId, kind, zat, claimant);
+        if (kind != ClaimKind.Fee && kind != ClaimKind.Retired) _arm(bond, claimId, uint64(block.timestamp), 0);
+    }
+
+    /// Signer `index`'s `DestinationReceived` receipt for the claim's current commitment, under `b`'s domain.
+    function _receipt(SignerBondV2 b, bytes32 claimId, uint64 receivedAt, uint256 index)
+        internal
+        view
+        returns (bytes memory)
+    {
+        bytes32 commitment = registry.claimDetails(claimId).commitment;
+        (uint8 v, bytes32 r, bytes32 s) =
+            vm.sign(signerKeys[index], b.hashDestinationReceived(claimId, commitment, receivedAt));
+        return abi.encodePacked(r, s, v);
+    }
+
+    function _arm(SignerBondV2 b, bytes32 claimId, uint64 receivedAt, uint256 index) internal {
+        b.armLiveness(claimId, receivedAt, _receipt(b, claimId, receivedAt, index));
     }
 
     /// The liveness payment, computed independently: the claim's value at `price` plus the premium, rounded down.
@@ -1130,6 +1161,277 @@ contract SignerBondV2Test is Test {
         assertEq(h.totalSlashable(), total - amount);
     }
 
+    // ================================================================== R-5: liveness receipts
+
+    /// R-5 (the review's finding): v3 paid any claim with a destination once overdue, so a claimant who never handed
+    /// the signers its salt and receiver (nobody could pay it) took 105 % of the claim from the bonds, when it chose.
+    /// Without a receipt there is no liveness: not due, not payable, however long it waits.
+    function test_R5_aClaimWithoutAReceiptIsNeverPaidFromTheBonds() public {
+        _claimUnarmed(CLAIM, ClaimKind.Liquidation, 0.1e8, liquidator);
+        vm.warp(block.timestamp + LIVENESS + GRACE + 365 days);
+        (uint64 dueAt, uint256 amount) = bond.livenessDue(CLAIM);
+        assertEq(dueAt, 0, "not due");
+        assertEq(amount, 0);
+        vm.prank(liquidator);
+        vm.expectRevert(abi.encodeWithSelector(ISignerBond.NotLivenessEligible.selector, CLAIM));
+        bond.slashLiveness(CLAIM);
+        (bytes32 commitment, uint64 payableAt) = bond.livenessArming(CLAIM);
+        assertEq(commitment, bytes32(0));
+        assertEq(payableAt, 0);
+    }
+
+    /// R-5: anyone relays any signer's receipt; the claim is then payable from the receipt, at the earliest from its
+    /// creation, and due `livenessPeriod` later.
+    function test_R5_aSignersReceiptArmsTheClaim() public {
+        _claimUnarmed(CLAIM, ClaimKind.Release, 0.1e8, account);
+        uint64 createdAt = uint64(block.timestamp);
+        vm.warp(createdAt + 3 hours);
+        uint64 receivedAt = createdAt + 2 hours; // the node got the destination two hours after the claim
+        bytes memory receipt = _receipt(bond, CLAIM, receivedAt, 3);
+        vm.expectEmit(address(bond));
+        emit ISignerBond.LivenessArmed(CLAIM, COMMITMENT, receivedAt);
+        vm.prank(stranger); // anyone relays
+        bond.armLiveness(CLAIM, receivedAt, receipt);
+        (bytes32 commitment, uint64 payableAt) = bond.livenessArming(CLAIM);
+        assertEq(commitment, COMMITMENT);
+        assertEq(payableAt, receivedAt);
+        (uint64 dueAt,) = bond.livenessDue(CLAIM);
+        assertEq(dueAt, receivedAt + LIVENESS);
+        vm.warp(dueAt - 1);
+        vm.prank(account);
+        vm.expectRevert(abi.encodeWithSelector(ISignerBond.LivenessNotDue.selector, CLAIM, dueAt));
+        bond.slashLiveness(CLAIM);
+        vm.warp(dueAt);
+        vm.prank(account);
+        assertEq(bond.slashLiveness(CLAIM), 126e6);
+    }
+
+    /// R-5: one honest signer suffices: every signer's receipt arms the claim.
+    function test_R5_everySignersReceiptCounts() public {
+        for (uint256 i; i < 5; ++i) {
+            bytes32 id = keccak256(abi.encode("bondv2.receipt", i));
+            _claimUnarmed(id, ClaimKind.CloseUser, 0.01e8, account);
+            _arm(bond, id, uint64(block.timestamp), i);
+            (, uint64 payableAt) = bond.livenessArming(id);
+            assertEq(payableAt, block.timestamp);
+        }
+    }
+
+    /// R-5: a receipt nobody in the signer set made, one a signer made for another destination or claim, or a malformed
+    /// signature arms nothing.
+    function test_R5_aFakeOrNonSignerReceiptIsRefused() public {
+        _claimUnarmed(CLAIM, ClaimKind.Liquidation, 0.1e8, liquidator);
+        uint64 at = uint64(block.timestamp);
+        bytes32 digest = bond.hashDestinationReceived(CLAIM, COMMITMENT, at);
+        (address outsider, uint256 outsiderKey) = makeAddrAndKey("bondv2.outsider");
+        (uint8 v, bytes32 r, bytes32 s) = vm.sign(outsiderKey, digest);
+        vm.expectRevert(abi.encodeWithSelector(ISignerBond.NotASigner.selector, outsider));
+        bond.armLiveness(CLAIM, at, abi.encodePacked(r, s, v));
+
+        // A signer's receipt for another destination, another claim, or another time recovers to someone else.
+        bytes32[3] memory others = [
+            bond.hashDestinationReceived(CLAIM, keccak256("bondv2.otherDest"), at),
+            bond.hashDestinationReceived(keccak256("bondv2.otherClaim"), COMMITMENT, at),
+            bond.hashDestinationReceived(CLAIM, COMMITMENT, at - 1)
+        ];
+        for (uint256 i; i < 3; ++i) {
+            (v, r, s) = vm.sign(signerKeys[0], others[i]);
+            bytes memory sig = abi.encodePacked(r, s, v);
+            address recovered = ECDSA.recover(digest, sig);
+            vm.expectRevert(abi.encodeWithSelector(ISignerBond.NotASigner.selector, recovered));
+            bond.armLiveness(CLAIM, at, sig);
+        }
+        // Not a signature at all.
+        vm.expectRevert(abi.encodeWithSelector(ECDSA.ECDSAInvalidSignatureLength.selector, 3));
+        bond.armLiveness(CLAIM, at, hex"010203");
+        (, uint64 payableAt) = bond.livenessArming(CLAIM);
+        assertEq(payableAt, 0, "nothing armed");
+    }
+
+    /// R-5: a receipt dated after the block it is used in is refused.
+    function test_R5_aReceiptFromTheFutureIsRefused() public {
+        _claimUnarmed(CLAIM, ClaimKind.Liquidation, 0.1e8, liquidator);
+        uint64 future = uint64(block.timestamp + 1);
+        bytes memory receipt = _receipt(bond, CLAIM, future, 0);
+        vm.expectRevert(abi.encodeWithSelector(ISignerBond.ReceiptFromTheFuture.selector, future));
+        bond.armLiveness(CLAIM, future, receipt);
+        vm.warp(future);
+        bond.armLiveness(CLAIM, future, receipt); // valid from that second on
+    }
+
+    /// R-5: a receipt dated before the claim existed (the node held the destination already) counts from the claim's
+    /// creation.
+    function test_R5_aReceiptBeforeTheClaimCountsFromItsCreation() public {
+        vm.warp(block.timestamp + 10 days);
+        _claimUnarmed(CLAIM, ClaimKind.CloseMarketMaker, 0.1e8, liquidator);
+        uint64 createdAt = uint64(block.timestamp);
+        _arm(bond, CLAIM, createdAt - 5 days, 2);
+        (, uint64 payableAt) = bond.livenessArming(CLAIM);
+        assertEq(payableAt, createdAt);
+        (uint64 dueAt,) = bond.livenessDue(CLAIM);
+        assertEq(dueAt, createdAt + LIVENESS);
+    }
+
+    /// R-5: arming again for the same destination keeps the earliest payable time: a later receipt (a colluder's) never
+    /// restarts the clock, an earlier one (another node's) advances it.
+    function test_R5_armingAgainKeepsTheEarliestReceipt() public {
+        _claimUnarmed(CLAIM, ClaimKind.Liquidation, 0.1e8, liquidator);
+        uint64 t0 = uint64(block.timestamp);
+        vm.warp(t0 + 6 hours);
+        _arm(bond, CLAIM, t0 + 2 hours, 0);
+        _arm(bond, CLAIM, t0 + 5 hours, 1);
+        (, uint64 payableAt) = bond.livenessArming(CLAIM);
+        assertEq(payableAt, t0 + 2 hours, "the later receipt does not restart it");
+        _arm(bond, CLAIM, t0 + 1 hours, 4);
+        (, payableAt) = bond.livenessArming(CLAIM);
+        assertEq(payableAt, t0 + 1 hours, "an earlier receipt advances it");
+    }
+
+    /// R-5: a new destination voids the arming (a Refund claim's account may change it): the old receipt neither counts
+    /// nor arms the new one; a receipt for the new destination does, from the destination's own time.
+    function test_R5_aNewDestinationVoidsTheArming() public {
+        _claim(CLAIM, ClaimKind.Refund, 0.01e8, account);
+        bytes memory oldReceipt = _receipt(bond, CLAIM, uint64(block.timestamp), 0);
+        vm.warp(block.timestamp + 12 hours);
+        ClaimDetails memory c = registry.claimDetails(CLAIM);
+        c.commitment = keccak256("bondv2.newDest");
+        c.createdAt = uint40(block.timestamp); // setRefundDestination restarts the clock
+        registry.setClaim(CLAIM, c);
+        vm.warp(block.timestamp + LIVENESS);
+        (uint64 dueAt,) = bond.livenessDue(CLAIM);
+        assertEq(dueAt, 0, "armed for the old destination only");
+        vm.prank(account);
+        vm.expectRevert(abi.encodeWithSelector(ISignerBond.NotLivenessEligible.selector, CLAIM));
+        bond.slashLiveness(CLAIM);
+        vm.expectPartialRevert(ISignerBond.NotASigner.selector);
+        bond.armLiveness(CLAIM, uint64(c.createdAt) - 12 hours, oldReceipt);
+
+        _arm(bond, CLAIM, uint64(c.createdAt), 1);
+        (dueAt,) = bond.livenessDue(CLAIM);
+        assertEq(dueAt, uint64(c.createdAt) + LIVENESS);
+        vm.prank(account);
+        assertEq(bond.slashLiveness(CLAIM), _due(0.01e8, PRICE));
+    }
+
+    /// R-5: the same destination given again restarts a refund's clock too: the arming counts from the new creation.
+    function test_R5_theSameDestinationGivenAgainRestartsTheClock() public {
+        _claim(CLAIM, ClaimKind.Refund, 0.01e8, account);
+        vm.warp(block.timestamp + 20 hours);
+        ClaimDetails memory c = registry.claimDetails(CLAIM);
+        c.createdAt = uint40(block.timestamp); // same commitment, new createdAt
+        registry.setClaim(CLAIM, c);
+        (uint64 dueAt,) = bond.livenessDue(CLAIM);
+        assertEq(dueAt, block.timestamp + LIVENESS);
+    }
+
+    /// R-5: only a claim the bonds could pay can be armed.
+    function test_R5_onlyAPayableKindOfClaimIsArmed() public {
+        _claimUnarmed(CLAIM, ClaimKind.Fee, 0.01e8, address(0));
+        bytes memory receipt = _receipt(bond, CLAIM, uint64(block.timestamp), 0);
+        vm.expectRevert(abi.encodeWithSelector(ISignerBond.NotLivenessEligible.selector, CLAIM));
+        bond.armLiveness(CLAIM, uint64(block.timestamp), receipt);
+        _claimUnarmed(CLAIM, ClaimKind.Refund, 0.01e8, account);
+        ClaimDetails memory c = registry.claimDetails(CLAIM);
+        c.commitment = bytes32(0); // no destination yet
+        registry.setClaim(CLAIM, c);
+        receipt = _receipt(bond, CLAIM, uint64(block.timestamp), 0);
+        vm.expectRevert(abi.encodeWithSelector(ISignerBond.NotLivenessEligible.selector, CLAIM));
+        bond.armLiveness(CLAIM, uint64(block.timestamp), receipt);
+    }
+
+    /// R-5: the receipt's EIP-712 digest, recomputed from the type string and the domain ("ZecuredSignerBond", "1").
+    function test_R5_receiptDigest() public view {
+        bytes32 structHash = vm.eip712HashStruct(
+            "DestinationReceived(bytes32 claimId,bytes32 commitment,uint64 receivedAt)",
+            abi.encode(CLAIM, COMMITMENT, uint64(1_234))
+        );
+        bytes32 domain = keccak256(
+            abi.encode(
+                keccak256("EIP712Domain(string name,string version,uint256 chainId,address verifyingContract)"),
+                keccak256("ZecuredSignerBond"),
+                keccak256("1"),
+                block.chainid,
+                address(bond)
+            )
+        );
+        assertEq(bond.domainSeparator(), domain);
+        assertEq(
+            bond.hashDestinationReceived(CLAIM, COMMITMENT, 1_234), MessageHashUtils.toTypedDataHash(domain, structHash)
+        );
+    }
+
+    // ================================================================== R-7: the compensator's claims
+
+    /// R-7 (the review's finding): an executed F3 left the claim pending, so its claimant also took liveness from the
+    /// bonds and was paid about twice. A claim the compensator owes is not paid from the bonds.
+    function test_R7_aClaimWithACompensatorEntitlementIsNotPaidFromTheBonds() public {
+        _claim(CLAIM, ClaimKind.Liquidation, 0.1e8, liquidator);
+        vm.warp(block.timestamp + LIVENESS);
+        compensator.setEntitlement(
+            CLAIM, Entitlement({incident: 1, layer: 2, zat: 0.04e8, to: liquidator, paid: false})
+        );
+        (uint64 dueAt, uint256 amount) = bond.livenessDue(CLAIM);
+        assertEq(dueAt, 0);
+        assertEq(amount, 0);
+        vm.prank(liquidator);
+        vm.expectRevert(abi.encodeWithSelector(ISignerBond.NotLivenessEligible.selector, CLAIM));
+        bond.slashLiveness(CLAIM);
+        // Paid or not, an entitlement keeps it out.
+        compensator.setEntitlement(CLAIM, Entitlement({incident: 1, layer: 2, zat: 0, to: liquidator, paid: true}));
+        vm.prank(liquidator);
+        vm.expectRevert(abi.encodeWithSelector(ISignerBond.NotLivenessEligible.selector, CLAIM));
+        bond.slashLiveness(CLAIM);
+    }
+
+    // ================================================================== R-9: never at a stale price
+
+    /// R-9 (the review's finding): the bonds paid at the oracle's last price however old it was. While the feed is
+    /// stale (no source fresh) no liveness is paid; it is paid once a source is fresh again.
+    function test_R9_noLivenessWhileThePriceIsStale() public {
+        assertTrue(bond.priceStateChecked(), "the oracle reports a state");
+        _claim(CLAIM, ClaimKind.Liquidation, 0.1e8, liquidator);
+        vm.warp(block.timestamp + LIVENESS);
+        oracle.setState(IZecuredPriceFeed.FeedState.Stale);
+        (uint64 dueAt, uint256 amount) = bond.livenessDue(CLAIM);
+        assertEq(dueAt, 0);
+        assertEq(amount, 0);
+        vm.prank(liquidator);
+        vm.expectRevert(ISignerBond.PriceStale.selector);
+        bond.slashLiveness(CLAIM);
+        // Any fresh state pays.
+        oracle.setState(IZecuredPriceFeed.FeedState.Diverged);
+        vm.prank(liquidator);
+        assertEq(bond.slashLiveness(CLAIM), 126e6);
+    }
+
+    /// R-9: an oracle without a feed state (the testnets' demo oracles) is never seen as stale.
+    function test_R9_anOracleWithoutAStateIsNotChecked() public {
+        BondConfig memory cfg = _config();
+        cfg.oracle = IOracle(address(new MockBondPlainOracle(PRICE)));
+        SignerBondV2 b = _replaceBond(cfg);
+        assertFalse(b.priceStateChecked());
+        for (uint8 i; i < 5; ++i) {
+            _deposit(i, BOND);
+        }
+        _claim(CLAIM, ClaimKind.Liquidation, 0.1e8, liquidator);
+        vm.warp(block.timestamp + LIVENESS);
+        vm.prank(liquidator);
+        assertEq(b.slashLiveness(CLAIM), 126e6);
+    }
+
+    // ================================================================== R-18: the unbonding outlasts a dispute
+
+    /// R-18 (the review's finding): nothing on chain kept `disputeWindow + inclusionWindow <= unbondingPeriod`, so a
+    /// signer could start a partial exit just after a confirmation and be gone when the disputed claim reopened.
+    function test_R18_theUnbondingOutlastsTheDisputeAndInclusionWindows() public {
+        BondConfig memory cfg = _config();
+        registry.setDisputeWindows(UNBONDING - 6 hours, 6 hours);
+        new SignerBondV2(cfg); // exactly the unbonding: accepted
+        registry.setDisputeWindows(UNBONDING - 6 hours, 6 hours + 1);
+        vm.expectRevert(ISignerBond.InvalidConfig.selector);
+        new SignerBondV2(cfg);
+    }
+
     // ================================================================== reentrancy through the token
 
     /// With a token that calls its recipient back (MOCK; USDC has no such hook), a signer, a claimant or a bounty
@@ -1177,6 +1479,7 @@ contract SignerBondV2Test is Test {
                 claimant: address(evil)
             })
         );
+        _arm(b, CLAIM, uint64(block.timestamp), 1);
         vm.warp(block.timestamp + LIVENESS);
         evil.armProbe(address(b), abi.encodeCall(ISignerBond.slashLiveness, (CLAIM)));
         evil.exec(address(b), abi.encodeCall(ISignerBond.slashLiveness, (CLAIM)));

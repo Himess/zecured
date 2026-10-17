@@ -185,9 +185,9 @@ contract DisputesTest is DisputesBase {
         spendLogic.reopenDisputedClaim(claimId);
 
         vm.expectRevert(ZecuredSpendLogic.InvalidDisputeWindows.selector);
-        new ZecuredSpendLogic(address(registry), signerSet, 0, INCLUSION_WINDOW);
+        new ZecuredSpendLogic(address(registry), signerSet, 0, INCLUSION_WINDOW, REFUND_DORMANCY);
         vm.expectRevert(ZecuredSpendLogic.InvalidDisputeWindows.selector);
-        new ZecuredSpendLogic(address(registry), signerSet, DISPUTE_WINDOW, 0);
+        new ZecuredSpendLogic(address(registry), signerSet, DISPUTE_WINDOW, 0, REFUND_DORMANCY);
     }
 
     function test_registryFallback_refusesUnknownCallsAndEther() public {
@@ -373,6 +373,8 @@ contract DisputesTest is DisputesBase {
         _dispute();
         vm.warp(block.timestamp + INCLUSION_WINDOW + 1);
         disputes.reopenDisputedClaim(claimId);
+        // R-5: a signer's node received the destination when the claim was created.
+        _armLivenessAt(claimId, uint64(createdAt));
 
         (uint64 dueAt, uint256 amount) = bond.livenessDue(claimId);
         assertEq(dueAt, createdAt + LIVENESS_PERIOD, "a false confirmation never restarts the liveness clock");
@@ -437,6 +439,7 @@ contract DisputesTest is DisputesBase {
         _dispute();
         vm.warp(block.timestamp + INCLUSION_WINDOW + 1);
         disputes.reopenDisputedClaim(claimId);
+        _armLivenessAt(claimId, uint64(registry.claimDetails(claimId).createdAt)); // R-5
         (uint64 dueAt,) = bond.livenessDue(claimId);
         if (dueAt > block.timestamp) vm.warp(dueAt);
         vm.prank(account);

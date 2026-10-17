@@ -285,10 +285,15 @@ contract VersionsTest is ZecuredFixture {
         vm.warp(block.timestamp + VERSION_DELAY);
         assertTrue(versions.isActive(violation));
 
-        // A deposit version, even the last one, can be removed (minting stops, exits do not).
-        _remove(_depositId());
+        // R-23: the last working deposit version goes only with all five signers (minting stops, exits do not).
+        bytes32 deposit = _depositId();
+        (nonce, deadline, three) = _removeSigs(deposit);
+        vm.expectRevert(abi.encodeWithSelector(IZecuredVersions.LastDepositVersion.selector, deposit));
+        versions.removeVersion(deposit, nonce, deadline, three);
+        bytes[] memory all5 = _signerSigs(versions.hashRemoveVersion(deposit, nonce, deadline), _five());
+        versions.removeVersion(deposit, nonce, deadline, all5);
         assertEq(versions.versionIds(VersionKind.Deposit).length, 1);
-        assertFalse(versions.isActive(_depositId()));
+        assertFalse(versions.isActive(deposit));
     }
 
     // ------------------------------------------------------------------ the emergency stop

@@ -167,7 +167,7 @@ contract RegistryRulesCheck is Test {
             })
         );
         vm.etch(token, address(new ZZEC(address(registry), ADAPTER, address(morpho))).code);
-        vm.etch(logic, address(new ZecuredSpendLogic(address(registry), signers, 1 days, 6 hours)).code);
+        vm.etch(logic, address(new ZecuredSpendLogic(address(registry), signers, 1 days, 6 hours, 2 days)).code);
         zzec = ZZEC(token);
         // The smart account's setup batch authorizes the Registry and the Adapter on Morpho.
         vm.startPrank(ACCOUNT);
@@ -412,7 +412,7 @@ contract RegistryRulesCheck is Test {
         if (op == 0) data = abi.encodeCall(IZecuredRegistry.activate, (vaultId, account, x, tag));
         else if (op == 1) data = abi.encodeCall(IZecuredRegistry.releaseDeposit, (vaultId, account, tag));
         else if (op == 2) data = abi.encodeCall(IZecuredRegistry.convertToRefund, (vaultId, account, x, tag));
-        else if (op == 3) data = abi.encodeCall(IZecuredRegistry.openRefund, (vaultId, account, x, tag));
+        else if (op == 3) data = abi.encodeCall(IZecuredRegistry.reserveRefund, (vaultId, account, x, tag));
         else data = abi.encodeCall(IZecuredRegistry.reserveDeposit, (vaultId, account, x, tag));
         vm.prank(caller);
         (bool ok, bytes memory ret) = address(registry).call(data);
@@ -428,12 +428,14 @@ contract RegistryRulesCheck is Test {
             return;
         }
         assert(zzec.totalSupply() == supply);
-        if (op == 2 || op == 3) {
+        if (op == 2) {
             assert(registry.lockedZatoshi() == locked + x);
             assert(registry.claimCount(vaultId) == claims + 1);
             _assertClaim(abi.decode(ret, (bytes32)), vaultId, ClaimKind.Refund, x, bytes32(0));
         } else {
+            // R-12: a reserved refund opens no claim and locks nothing until the Intake opens it.
             assert(registry.lockedZatoshi() == locked);
+            assert(registry.claimCount(vaultId) == claims);
         }
     }
 

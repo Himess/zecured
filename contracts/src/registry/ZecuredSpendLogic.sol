@@ -10,40 +10,52 @@ import {
     SpendRecord
 } from "../interfaces/v3/IZecuredSpendCommits.sol";
 import {IZecuredDisputes} from "../interfaces/v3/IZecuredDisputes.sol";
+import {IZecuredRefunds} from "../interfaces/v3/IZecuredRefunds.sol";
 import {IZecuredSlasher} from "../interfaces/v3/IZecuredSlasher.sol";
 import {ZecuredEIP712, SpendCommit} from "../libraries/ZecuredEIP712.sol";
 import {ZecuredRegistryStorage} from "./ZecuredRegistryStorage.sol";
 
 /// @title ZecuredSpendLogic
-/// @notice The code of `ZecuredRegistry.commitSpend` (docs/TIER3.md § 4) and of the dispute path (`IZecuredDisputes`,
-///         which the Registry's fallback serves), run by the Registry with delegatecall on its own storage: it lives in
-///         a separate contract only to keep the Registry under EIP-170 (T-11). It shares the Registry's storage layout,
-///         EIP-712 domain name and signer set through `ZecuredRegistryStorage`; its domain separator is computed for the
-///         Registry's address, since under delegatecall `address(this)` is the Registry. Called directly, it does
-///         nothing (`NotDelegated`).
-contract ZecuredSpendLogic is ZecuredRegistryStorage, IZecuredSpendCommitsEvents, IZecuredDisputes {
+/// @notice The code of `ZecuredRegistry.commitSpend` (docs/TIER3.md § 4), of the dispute path (`IZecuredDisputes`) and
+///         of the refund lifecycle's later steps (`IZecuredRefunds`), which the Registry's fallback serves, run by the
+///         Registry with delegatecall on its own storage: it lives in a separate contract only to keep the Registry
+///         under EIP-170 (T-11). It shares the Registry's storage layout, EIP-712 domain name and signer set through
+///         `ZecuredRegistryStorage`; its domain separator is computed for the Registry's address, since under
+///         delegatecall `address(this)` is the Registry. Called directly, it does nothing (`NotDelegated`).
+contract ZecuredSpendLogic is ZecuredRegistryStorage, IZecuredSpendCommitsEvents, IZecuredDisputes, IZecuredRefunds {
     /// @notice The only Registry that may run this code (its address, predicted before deployment).
     address public immutable registry;
     /// @inheritdoc IZecuredDisputes
     uint64 public immutable disputeWindow;
     /// @inheritdoc IZecuredDisputes
     uint64 public immutable inclusionWindow;
+    /// @inheritdoc IZecuredRefunds
+    uint64 public immutable refundDormancy;
 
     error NotDelegated();
     error InvalidDisputeWindows();
+    error InvalidRefundDormancy();
 
     /// @param registry_ The Registry's (predicted) address.
     /// @param signers_ The Registry's signer set, strictly increasing.
     /// @param disputeWindow_ How long after its confirmation a claim can be disputed (T-05 (a)).
     /// @param inclusionWindow_ How long the signers have to prove a disputed payout (at least the time a payout's block
     ///        takes to gain the slasher's `slashConfirmationWork`, plus proving).
-    constructor(address registry_, address[5] memory signers_, uint64 disputeWindow_, uint64 inclusionWindow_)
-        ZecuredRegistryStorage(signers_)
-    {
+    /// @param refundDormancy_ R-11: how long a Refund claim without a destination counts in `lockedZatoshi` (48 hours
+    ///        on the judge deployment, 7 days on mainnet).
+    constructor(
+        address registry_,
+        address[5] memory signers_,
+        uint64 disputeWindow_,
+        uint64 inclusionWindow_,
+        uint64 refundDormancy_
+    ) ZecuredRegistryStorage(signers_) {
         if (disputeWindow_ == 0 || inclusionWindow_ == 0) revert InvalidDisputeWindows();
+        if (refundDormancy_ == 0) revert InvalidRefundDormancy();
         registry = registry_;
         disputeWindow = disputeWindow_;
         inclusionWindow = inclusionWindow_;
+        refundDormancy = refundDormancy_;
     }
 
     /// @notice The signer set this logic verifies signatures against (the Registry checks it equals its own).
@@ -82,6 +94,8 @@ contract ZecuredSpendLogic is ZecuredRegistryStorage, IZecuredSpendCommitsEvents
         if (c.vaultId == bytes32(0) || input.vaultId != c.vaultId) revert NotALineageNote(c.vaultId, c.inputTag);
         // K3: nothing is paid from a vault whose activation is pending (its reservation may still be released).
         if (_vaults[c.vaultId].status == VaultStatus.Pending) revert VaultPending(c.vaultId);
+        // R-12: nor from a refunded deposit whose claim is not open yet.
+        if (_reservedRefund[c.inputTag] != address(0)) revert RefundNotOpen(c.inputTag);
         uint256 n = c.claimIds.length;
         if (n == 0 || n > MAX_CLAIMS || c.claimRefs.length != n || c.claimOutputs.length != n) {
             revert InvalidClaimCount(n, c.claimRefs.length == n ? c.claimOutputs.length : c.claimRefs.length);
@@ -233,10 +247,138 @@ contract ZecuredSpendLogic is ZecuredRegistryStorage, IZecuredSpendCommitsEvents
         return (c.paidAt, c.disputeDueAt);
     }
 
+    // ------------------------------------------------------------------ refunds (R-8, R-11, R-12)
+
+    /// @inheritdoc IZecuredRefunds
+    function openReservedRefund(bytes32 vaultId, bytes32 depositTag) external returns (bytes32 claimId) {
+        _onlyDelegated();
+        _onlyIntake();
+        address account = _reservedRefund[depositTag];
+        uint64 amount = _lineage[depositTag].value;
+        if (account == address(0) || _lineage[depositTag].vaultId != vaultId) {
+            revert NoReservedRefund(vaultId, depositTag);
+        }
+        _refuseCompromised(vaultId);
+        Vault storage v = _vaults[vaultId];
+        VaultStatus status = v.status;
+        // R-8: no claim on a vault whose activation is pending (none could be paid there, yet it would accrue
+        // liveness): the refund waits until the vault activates, converts or drops.
+        if (status == VaultStatus.Pending) revert VaultPending(vaultId);
+        if (status == VaultStatus.None) {
+            v.account = account;
+            v.status = VaultStatus.Cancelled;
+        } else if (v.account != account) {
+            revert IZecuredRegistry.ReservationMismatch(vaultId);
+        }
+        delete _reservedRefund[depositTag];
+        claimId = _newClaim(vaultId, v, ClaimKind.Refund, amount, bytes32(0));
+        emit IZecuredRegistry.RefundOpened(vaultId, claimId, account, amount, depositTag);
+    }
+
+    /// @inheritdoc IZecuredRefunds
+    function releaseRefund(bytes32 vaultId, bytes32 depositTag) external {
+        _onlyDelegated();
+        _onlyIntake();
+        if (_reservedRefund[depositTag] == address(0) || _lineage[depositTag].vaultId != vaultId) {
+            revert NoReservedRefund(vaultId, depositTag);
+        }
+        delete _reservedRefund[depositTag];
+        delete _lineage[depositTag];
+        _depositTagUsed[depositTag] = false;
+    }
+
+    /// @inheritdoc IZecuredRefunds
+    function setRefundDestination(bytes32 claimId, bytes32 destCommitment) external {
+        _onlyDelegated();
+        Claim storage c = _claims[claimId];
+        if (c.kind != ClaimKind.Refund || c.status == ClaimStatus.None) revert IZecuredRegistry.NotARefund(claimId);
+        bytes32 vaultId = c.vaultId;
+        Vault storage v = _vaults[vaultId];
+        if (msg.sender != v.account) revert IZecuredRegistry.NotVaultAccount(vaultId, msg.sender);
+        if (destCommitment == bytes32(0)) revert IZecuredRegistry.ZeroCommitment();
+        // Bound to a payout, or paid by the bonds (its ZEC now reimburses them, T-05): no longer the account's to move.
+        if (_claimInput[claimId] != bytes32(0) || c.bondPaid) revert IZecuredRegistry.RefundBound(claimId);
+        ClaimStatus status = c.status;
+        if (status == ClaimStatus.WrittenOff) {
+            // Revives an abandoned refund (its note is still a lineage note of the vault); not on a compromised vault,
+            // whose claims the compensator has tallied.
+            _refuseCompromised(vaultId);
+            if (_settled(v)) _openVaults += 1;
+            c.status = ClaimStatus.Pending;
+            v.unpaidClaims += 1;
+            _pendingClaimZat += c.amount;
+        } else if (status != ClaimStatus.Pending) {
+            revert IZecuredRegistry.RefundBound(claimId);
+        } else {
+            // R-11: a dormant refund counts in `lockedZatoshi` again.
+            uint256 slot = _slotOf(c);
+            if (_dormant[slot]) {
+                delete _dormant[slot];
+                _pendingClaimZat += c.amount;
+            }
+        }
+        c.commitment = destCommitment;
+        c.createdAt = uint40(block.timestamp);
+        emit IZecuredRegistry.RefundDestinationSet(vaultId, claimId, destCommitment);
+    }
+
+    /// @inheritdoc IZecuredRefunds
+    function abandonRefund(bytes32 claimId) external {
+        _onlyDelegated();
+        Claim storage c = _claims[claimId];
+        if (c.kind != ClaimKind.Refund || c.status != ClaimStatus.Pending || c.commitment != bytes32(0) || c.bondPaid) {
+            revert IZecuredRegistry.NotARefund(claimId);
+        }
+        uint64 at = uint64(c.createdAt) + IZecuredRegistry(address(this)).refundAbandonPeriod();
+        if (block.timestamp < at) revert IZecuredRegistry.NotAbandonable(claimId, at);
+        _refuseCompromised(c.vaultId); // the compensator settles a compromised vault's claims
+        emit IZecuredRegistry.RefundAbandoned(c.vaultId, claimId);
+        _closeClaim(c, ClaimStatus.WrittenOff);
+    }
+
+    /// @inheritdoc IZecuredRefunds
+    function markRefundDormant(bytes32 claimId) external {
+        _onlyDelegated();
+        Claim storage c = _claims[claimId];
+        uint256 slot = _slotOf(c);
+        if (
+            c.kind != ClaimKind.Refund || c.status != ClaimStatus.Pending || c.commitment != bytes32(0) || c.bondPaid
+                || _dormant[slot]
+        ) revert NotDormantable(claimId);
+        uint64 at = uint64(c.createdAt) + refundDormancy;
+        if (block.timestamp < at) revert NotDormantYet(claimId, at);
+        _dormant[slot] = true;
+        _pendingClaimZat -= c.amount;
+        emit IZecuredRegistry.RefundDormant(c.vaultId, claimId);
+    }
+
+    /// @inheritdoc IZecuredRefunds
+    function isRefundDormant(bytes32 claimId) external view returns (bool) {
+        return _dormant[_slotOf(_claims[claimId])];
+    }
+
+    /// @inheritdoc IZecuredRefunds
+    function reservedRefundOf(bytes32 depositTag) external view returns (address) {
+        return _reservedRefund[depositTag];
+    }
+
     // ------------------------------------------------------------------ internal
 
     function _onlyDelegated() internal view {
         if (address(this) != registry) revert NotDelegated();
+    }
+
+    /// @dev The Registry's Intake only (read through the Registry: under delegatecall `address(this)` is the Registry).
+    function _onlyIntake() internal view {
+        if (msg.sender != IZecuredRegistry(address(this)).intake()) revert IZecuredRegistry.OnlyIntake(msg.sender);
+    }
+
+    /// @dev As `ZecuredRegistry._checkNotCompromised`: the compensator settles a compromised vault's claims.
+    function _refuseCompromised(bytes32 vaultId) internal view {
+        address slasher = IZecuredRegistry(address(this)).slasher();
+        if (slasher != address(0) && IZecuredSlasher(slasher).isCompromised(vaultId)) {
+            revert IZecuredRegistry.VaultCompromised(vaultId);
+        }
     }
 
     /// @dev As `ZecuredRegistry.claimDetails`: the third party of a Liquidation or CloseMarketMaker claim, the vault's

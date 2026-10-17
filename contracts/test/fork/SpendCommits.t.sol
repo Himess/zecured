@@ -411,6 +411,9 @@ contract SpendCommitsTest is ZecuredFixture {
         uint256 supply = zzec.totalSupply();
         _mockProof(_vaultIdFor(b), b, VAULT_001, _depositTagFor(b), keccak256("zecured.commits.haltAnchor"));
         assertEq(zzec.totalSupply(), supply, "nothing minted after the halt");
+        // R-12: the refund waits for the relay like an activation, then opens.
+        assertEq(intake.pendingRefund(_depositTagFor(b)).account, b, "the deposit landed as a pending refund");
+        _finalizeRefund(_depositTagFor(b));
         assertEq(uint8(_status(_vaultIdFor(b))), uint8(VaultStatus.Cancelled), "the deposit landed as a refund");
 
         // The existing vault can still be released and paid out.

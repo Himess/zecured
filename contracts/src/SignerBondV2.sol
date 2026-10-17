@@ -5,14 +5,18 @@ import {IERC20} from "@openzeppelin/contracts/token/ERC20/IERC20.sol";
 import {SafeERC20} from "@openzeppelin/contracts/token/ERC20/utils/SafeERC20.sol";
 import {Math} from "@openzeppelin/contracts/utils/math/Math.sol";
 import {ReentrancyGuardTransient} from "@openzeppelin/contracts/utils/ReentrancyGuardTransient.sol";
+import {ECDSA} from "@openzeppelin/contracts/utils/cryptography/ECDSA.sol";
+import {EIP712} from "@openzeppelin/contracts/utils/cryptography/EIP712.sol";
 import {IOracle} from "morpho-blue/src/interfaces/IOracle.sol";
 import {ORACLE_PRICE_SCALE} from "morpho-blue/src/libraries/ConstantsLib.sol";
 import {ISignerBond, BondConfig} from "./interfaces/v3/ISignerBond.sol";
 import {IZecuredRegistry, ClaimDetails, ClaimKind, ClaimStatus} from "./interfaces/v3/IZecuredRegistry.sol";
 import {IZecuredSpendCommits} from "./interfaces/v3/IZecuredSpendCommits.sol";
+import {IZecuredDisputes} from "./interfaces/v3/IZecuredDisputes.sol";
 import {IZecuredSlasher} from "./interfaces/v3/IZecuredSlasher.sol";
 import {IZecuredIntake} from "./interfaces/v3/IZecuredIntake.sol";
 import {IZecuredCompensator} from "./interfaces/v3/IZecuredCompensator.sol";
+import {IZecuredPriceFeed} from "./interfaces/v3/IZecuredPriceFeed.sol";
 
 /// @title SignerBondV2
 /// @notice The five signers' bonds in USDC (design notes T-01, T-05; rules in the v3 `ISignerBond`). It has no owner and
@@ -28,19 +32,36 @@ import {IZecuredCompensator} from "./interfaces/v3/IZecuredCompensator.sol";
 ///        and `pool` the slashable amount of this signer and the ones after it. `left <= pool` holds at every step, so
 ///        nobody pays more than it has, the last signer with a slashable amount pays exactly what is left (the rounding
 ///        remainder, a few units at most), and the total is exactly the amount due. It emits only `LivenessPaid`.
+///      - R-5: without a receipt there is no liveness. A destination nobody can deliver to (a liquidator, a market
+///        maker or a borrower that never hands the signers its salt and receiver) would otherwise turn into 105 % of
+///        the claim's value from the bonds, at a time the claimant picks; and three colluders could empty the bonds
+///        with dummy claims of their own vaults. The effective `payableAt` is never before the claim's current
+///        `createdAt`, which a refund's new destination restarts.
+///      - R-9: whether the oracle reports a feed state is read once, at construction (a `ZecuredPriceFeed` does, the
+///        demo oracles do not); then `state()` is called directly, so a call that fails for lack of gas reverts the
+///        payment rather than skipping the check.
 ///      - Every state-changing function is `nonReentrant`. A deposit pulls the USDC before crediting it, and every payment
 ///        (unbonding, bounty, slash, liveness) updates the books before the USDC leaves or another contract is called,
 ///        so whenever another contract runs, the bond's views match its balance.
-contract SignerBondV2 is ISignerBond, ReentrancyGuardTransient {
+contract SignerBondV2 is ISignerBond, ReentrancyGuardTransient, EIP712 {
     using SafeERC20 for IERC20;
 
     uint256 private constant BPS = 10_000;
     uint8 private constant SIGNER_COUNT = 5;
+    /// @dev R-5's receipt type (EIP-712 domain "ZecuredSignerBond" "1").
+    bytes32 private constant DESTINATION_RECEIVED_TYPEHASH =
+        keccak256("DestinationReceived(bytes32 claimId,bytes32 commitment,uint64 receivedAt)");
 
     /// @notice A signer's running unbonding: slashable until withdrawn.
     struct Unbonding {
         uint256 amount;
         uint64 readyAt;
+    }
+
+    /// @notice R-5: what a receipt armed: the claim's commitment it was for, and when the claim became payable.
+    struct Arming {
+        bytes32 commitment;
+        uint64 payableAt;
     }
 
     /// @inheritdoc ISignerBond
@@ -71,6 +92,8 @@ contract SignerBondV2 is ISignerBond, ReentrancyGuardTransient {
     uint64 public immutable commitGrace;
     /// @inheritdoc ISignerBond
     uint16 public immutable livenessPremiumBps;
+    /// @inheritdoc ISignerBond
+    bool public immutable priceStateChecked;
 
     /// @inheritdoc ISignerBond
     mapping(uint8 signer => uint256) public bondOf;
@@ -80,10 +103,12 @@ contract SignerBondV2 is ISignerBond, ReentrancyGuardTransient {
     bool public halted;
     /// @inheritdoc ISignerBond
     mapping(address beneficiary => uint256) public bountyOf;
+    mapping(bytes32 claimId => Arming) private _armings;
 
-    /// @param cfg See `BondConfig`. The Registry, the slasher, the Intake and the compensator may be predicted addresses:
-    ///        nothing is called here.
-    constructor(BondConfig memory cfg) {
+    /// @param cfg See `BondConfig`. The Registry must be deployed (its dispute windows are read, R-18) and so must the
+    ///        oracle (whether it reports a feed state is read, R-9); the slasher, the Intake and the compensator may be
+    ///        predicted addresses: nothing is called on them here.
+    constructor(BondConfig memory cfg) EIP712("ZecuredSignerBond", "1") {
         if (
             cfg.registry == address(0) || cfg.slasher == address(0) || cfg.intake == address(0)
                 || cfg.compensator == address(0) || address(cfg.usdc) == address(0) || address(cfg.oracle) == address(0)
@@ -93,6 +118,14 @@ contract SignerBondV2 is ISignerBond, ReentrancyGuardTransient {
                 || cfg.unbondingPeriod < uint256(cfg.challengeWindow) + cfg.livenessPeriod + cfg.commitGrace
                 || cfg.bountyBps > BPS
         ) revert InvalidConfig();
+        // R-18: a claim confirmed just before a partial unbonding starts can be disputed, then reopened once the
+        // inclusion window passes, and be due at once (its liveness clock never restarted): the unbonding amount must
+        // still be slashable then.
+        if (
+            uint256(IZecuredDisputes(cfg.registry).disputeWindow()) + IZecuredDisputes(cfg.registry).inclusionWindow()
+                > cfg.unbondingPeriod
+        ) revert InvalidConfig();
+        priceStateChecked = _reportsState(address(cfg.oracle));
         registry = cfg.registry;
         slasher = cfg.slasher;
         intake = cfg.intake;
@@ -224,14 +257,38 @@ contract SignerBondV2 is ISignerBond, ReentrancyGuardTransient {
     // ------------------------------------------------------------------ liveness (the claimant, T-05)
 
     /// @inheritdoc ISignerBond
-    function slashLiveness(bytes32 claimId) external nonReentrant returns (uint256 paid) {
+    function armLiveness(bytes32 claimId, uint64 receivedAt, bytes calldata signature) external nonReentrant {
         ClaimDetails memory c = IZecuredRegistry(registry).claimDetails(claimId);
         if (!_livenessEligible(c)) revert NotLivenessEligible(claimId);
+        if (receivedAt > block.timestamp) revert ReceiptFromTheFuture(receivedAt);
+        // The receipt is for the claim's current commitment: one for an earlier destination recovers to no signer.
+        _signerIndex(ECDSA.recoverCalldata(_hashDestinationReceived(claimId, c.commitment, receivedAt), signature));
+        uint64 payableAt = receivedAt > c.createdAt ? receivedAt : uint64(c.createdAt);
+        Arming storage a = _armings[claimId];
+        if (a.commitment == c.commitment && a.payableAt != 0 && a.payableAt <= payableAt) {
+            payableAt = a.payableAt; // the earlier receipt stands
+        } else {
+            a.commitment = c.commitment;
+            a.payableAt = payableAt;
+        }
+        emit LivenessArmed(claimId, c.commitment, payableAt);
+    }
+
+    /// @inheritdoc ISignerBond
+    function slashLiveness(bytes32 claimId) external nonReentrant returns (uint256 paid) {
+        ClaimDetails memory c = IZecuredRegistry(registry).claimDetails(claimId);
+        uint64 payableAt = _payableAt(claimId, c);
+        // R-5: no receipt, no liveness.
+        if (!_livenessEligible(c) || payableAt == 0) revert NotLivenessEligible(claimId);
         // Also refuses a claim without a claimant: no caller is the zero address.
         if (msg.sender != c.claimant) revert NotTheClaimant(claimId, msg.sender);
         if (IZecuredSlasher(slasher).vaultFrozen(c.vaultId)) revert NotLivenessEligible(claimId);
-        uint64 dueAt = _livenessDueAt(claimId, c.createdAt);
+        // R-7: a claim the compensator owes (an F3 shortfall) is paid there, never twice.
+        if (_entitled(claimId)) revert NotLivenessEligible(claimId);
+        uint64 dueAt = _livenessDueAt(claimId, payableAt);
         if (block.timestamp < dueAt) revert LivenessNotDue(claimId, dueAt);
+        // R-9: never at a price no source confirms any more.
+        if (_priceStale()) revert PriceStale();
         uint256 price = oracle.price();
         paid = _livenessAmount(c.amount, price);
         if (paid == 0) revert ZeroAmount();
@@ -244,16 +301,40 @@ contract SignerBondV2 is ISignerBond, ReentrancyGuardTransient {
     }
 
     /// @inheritdoc ISignerBond
-    /// @dev `(0, 0)` for a claim that is never payable from the bonds (also one without a claimant). Otherwise `dueAt`
+    /// @dev `(0, 0)` for a claim that is not payable from the bonds now (also one without a claimant). Otherwise `dueAt`
     ///      may be in the past, and `amount` is zero at a zero price (`slashLiveness` would revert `ZeroAmount`). It
     ///      does not check that the bonds cover `amount`.
     function livenessDue(bytes32 claimId) external view returns (uint64 dueAt, uint256 amount) {
         ClaimDetails memory c = IZecuredRegistry(registry).claimDetails(claimId);
-        if (!_livenessEligible(c) || c.claimant == address(0) || IZecuredSlasher(slasher).vaultFrozen(c.vaultId)) {
+        uint64 payableAt = _payableAt(claimId, c);
+        if (
+            !_livenessEligible(c) || payableAt == 0 || c.claimant == address(0)
+                || IZecuredSlasher(slasher).vaultFrozen(c.vaultId) || _entitled(claimId) || _priceStale()
+        ) {
             return (0, 0);
         }
-        dueAt = _livenessDueAt(claimId, c.createdAt);
+        dueAt = _livenessDueAt(claimId, payableAt);
         amount = _livenessAmount(c.amount, oracle.price());
+    }
+
+    /// @inheritdoc ISignerBond
+    function livenessArming(bytes32 claimId) external view returns (bytes32 commitment, uint64 payableAt) {
+        Arming storage a = _armings[claimId];
+        return (a.commitment, a.payableAt);
+    }
+
+    /// @inheritdoc ISignerBond
+    function hashDestinationReceived(bytes32 claimId, bytes32 commitment, uint64 receivedAt)
+        external
+        view
+        returns (bytes32)
+    {
+        return _hashDestinationReceived(claimId, commitment, receivedAt);
+    }
+
+    /// @inheritdoc ISignerBond
+    function domainSeparator() external view returns (bytes32) {
+        return _domainSeparatorV4();
     }
 
     // ------------------------------------------------------------------ views
@@ -332,12 +413,46 @@ contract SignerBondV2 is ISignerBond, ReentrancyGuardTransient {
         return kindOk && c.status == ClaimStatus.Pending && !c.bondPaid && c.commitment != bytes32(0);
     }
 
-    /// @dev T-05, deferrals bounded (design review): `deadline = createdAt + livenessPeriod`; a claim bound to an
-    ///      input waits `commitGrace` after its input's latest commitment, but a commitment made after the deadline
-    ///      never extends that: the claim is due at `max(deadline, min(lastCommitAt, deadline) + commitGrace)`, at
-    ///      most `livenessPeriod + commitGrace` after it became payable, however often the signers re-commit.
-    function _livenessDueAt(bytes32 claimId, uint40 createdAt) internal view returns (uint64 dueAt) {
-        uint64 deadline = uint64(createdAt) + livenessPeriod;
+    /// @dev R-5: when the claim became payable: its arming's `payableAt`, but never before its current `createdAt` (a
+    ///      refund's clock restarts with each destination its account gives); zero if it was never armed, or armed for
+    ///      another commitment.
+    function _payableAt(bytes32 claimId, ClaimDetails memory c) internal view returns (uint64) {
+        Arming storage a = _armings[claimId];
+        uint64 payableAt = a.payableAt;
+        if (payableAt == 0 || a.commitment != c.commitment) return 0;
+        return payableAt > c.createdAt ? payableAt : uint64(c.createdAt);
+    }
+
+    /// @dev R-7: the compensator registered an entitlement for the claim (an F3 shortfall, or its tally).
+    function _entitled(bytes32 claimId) internal view returns (bool) {
+        return IZecuredCompensator(compensator).entitlement(claimId).incident != 0;
+    }
+
+    /// @dev R-9: the oracle reports a feed state and it is `Stale`.
+    function _priceStale() internal view returns (bool) {
+        return priceStateChecked && IZecuredPriceFeed(address(oracle)).state() == IZecuredPriceFeed.FeedState.Stale;
+    }
+
+    /// @dev R-9, at construction: `oracle_` answers `state()` with a feed state.
+    function _reportsState(address oracle_) internal view returns (bool) {
+        (bool ok, bytes memory ret) = oracle_.staticcall(abi.encodeCall(IZecuredPriceFeed.state, ()));
+        return ok && ret.length == 32 && uint256(bytes32(ret)) <= uint256(type(IZecuredPriceFeed.FeedState).max);
+    }
+
+    function _hashDestinationReceived(bytes32 claimId, bytes32 commitment, uint64 receivedAt)
+        internal
+        view
+        returns (bytes32)
+    {
+        return _hashTypedDataV4(keccak256(abi.encode(DESTINATION_RECEIVED_TYPEHASH, claimId, commitment, receivedAt)));
+    }
+
+    /// @dev T-05, deferrals bounded (design review): `deadline = payableAt + livenessPeriod`; a claim bound to an input
+    ///      waits `commitGrace` after its input's latest commitment, but a commitment made after the deadline never
+    ///      extends that: the claim is due at `max(deadline, min(lastCommitAt, deadline) + commitGrace)`, at most
+    ///      `livenessPeriod + commitGrace` after it became payable, however often the signers re-commit.
+    function _livenessDueAt(bytes32 claimId, uint64 payableAt) internal view returns (uint64 dueAt) {
+        uint64 deadline = payableAt + livenessPeriod;
         dueAt = deadline;
         bytes32 input = IZecuredSpendCommits(registry).claimInput(claimId);
         if (input != bytes32(0)) {

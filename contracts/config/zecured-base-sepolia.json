@@ -31,7 +31,7 @@
   "livenessPremiumBps": 500,
   "maxMarginBps": 500,
   "maxPause": 2592000,
-  "maxTotalZat": "150000000",
+  "maxTotalZat": "500000000",
   "minBond": "100000000",
   "minFeeZat": 20000,
   "minRefundZat": 20000,
@@ -40,6 +40,7 @@
   "minWorkFloor": "1000000",
   "pendingRefundDelay": 86400,
   "refundAbandonPeriod": 2592000,
+  "refundDormancy": 172800,
   "slashConfirmationWork": "38000000",
   "slashWorkFloor": "30000000",
   "tierMaxAmountZat": [

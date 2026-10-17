@@ -8,8 +8,17 @@ import {SignerBondV2} from "../../src/SignerBondV2.sol";
 import {BondConfig} from "../../src/interfaces/v3/ISignerBond.sol";
 import {MockUSDC} from "../../src/mocks/MockUSDC.sol";
 
-/// @notice MOCK (tests only): the Registry's sorted signer set, the only part of it a deposit reads.
+/// @notice MOCK (tests only): the Registry's sorted signer set, the only part of it a deposit reads, and the dispute
+///         windows the bond's constructor reads (R-18).
 contract SignerSetForHalmos {
+    function disputeWindow() external pure returns (uint64) {
+        return 1 days;
+    }
+
+    function inclusionWindow() external pure returns (uint64) {
+        return 6 hours;
+    }
+
     function signers() external pure returns (address[5] memory s) {
         s[0] = address(0x5101);
         s[1] = address(0x5102);

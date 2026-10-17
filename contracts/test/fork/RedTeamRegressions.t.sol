@@ -299,6 +299,7 @@ contract RedTeamRegressionsTest is Tier3Base {
         // The innocent pending deposit can never finalize: anyone turns it into a refund (T-02), whose destination its
         // account gives, and the signers pay it with a committed payout like any claim.
         assertTrue(relay.isInBestChain(keccak256("rt6.anchor")));
+        relay.setTipHeight(intake.pendingActivation(innocentVault).readyHeight); // R-12: once ready (K3)
         bytes32 refund = intake.refundPending(innocentVault);
         (,, VaultStatus status) = registry.vault(innocentVault);
         assertEq(uint8(status), uint8(VaultStatus.Cancelled));
