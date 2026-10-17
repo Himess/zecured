@@ -348,6 +348,51 @@ pub async fn signatures_needed<P: Provider>(provider: &P, d: &Deployment, m: &Op
     })
 }
 
+/// One version of the deployment's version registry, as `zecured-ops versions` lists it.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct VersionInfo {
+    pub version_id: B256,
+    pub kind: VersionKind,
+    pub selector: FixedBytes<4>,
+    pub image_id: B256,
+    pub branches: [u32; 4],
+    /// When it starts (or started) verifying; zero: never scheduled.
+    pub active_at: u64,
+    pub removed: bool,
+    /// Active, and its router still verifies its seals.
+    pub working: bool,
+}
+
+/// Every version of the deployment's registry, by kind (a registry from before v4 has no Swap
+/// kind: none are listed for it).
+pub async fn list_versions<P: Provider>(provider: &P, d: &Deployment) -> Result<Vec<VersionInfo>> {
+    let versions = IZecuredVersions::new(d.versions, provider);
+    let mut out = vec![];
+    for kind in [VersionKind::Deposit, VersionKind::Violation, VersionKind::Swap] {
+        let ids = match versions.versionIds(kind.code()).call().await {
+            Ok(ids) => ids,
+            Err(_) if kind == VersionKind::Swap => continue,
+            Err(e) => return Err(e).context("ZecuredVersions.versionIds"),
+        };
+        for id in ids {
+            let v = versions.version(id).call().await.context("ZecuredVersions.version")?;
+            let working = versions.isWorking(id).call().await.context("ZecuredVersions.isWorking")?;
+            out.push(VersionInfo {
+                version_id: id,
+                kind,
+                selector: v.selector,
+                image_id: v.imageId,
+                branches: v.branches,
+                active_at: v.activeAt,
+                removed: v.removed,
+                working,
+            });
+        }
+    }
+    Ok(out)
+}
+
 /// What `prepare` is asked for, before Base gives the contract and the nonce.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum Spec {
@@ -937,6 +982,37 @@ mod tests {
             3,
             "swap versions have no last-version rule"
         );
+        // The listing an operator removes from: each version with its kind and whether it works; a
+        // registry without the Swap kind lists none.
+        let kinds = Answers::default();
+        let listing = base_stub(kinds.clone()).await;
+        let listed = ProviderBuilder::new().connect_http(listing.parse().unwrap());
+        let k = &kinds;
+        let ids_of = |kind: u8| with_arg(IZecuredVersions::versionIdsCall::SELECTOR, B256::with_last_byte(kind));
+        set(k, ids_of(0), IZecuredVersions::versionIdsCall::abi_encode_returns(&vec![target]));
+        set(k, ids_of(1), IZecuredVersions::versionIdsCall::abi_encode_returns(&vec![other]));
+        for (id, kind, works) in [(target, 0, true), (other, 1, false)] {
+            set(
+                k,
+                with_arg(IZecuredVersions::versionCall::SELECTOR, id),
+                IZecuredVersions::versionCall::abi_encode_returns(&version(kind)),
+            );
+            set(
+                k,
+                with_arg(IZecuredVersions::isWorkingCall::SELECTOR, id),
+                IZecuredVersions::isWorkingCall::abi_encode_returns(&works),
+            );
+        }
+        let all = list_versions(&listed, &d).await.unwrap();
+        let summary: Vec<(B256, VersionKind, bool)> = all.iter().map(|v| (v.version_id, v.kind, v.working)).collect();
+        assert_eq!(
+            summary,
+            [
+                (target, VersionKind::Deposit, true),
+                (other, VersionKind::Violation, false)
+            ]
+        );
+        assert_eq!(serde_json::to_value(&all[0]).unwrap()["kind"], "deposit");
         // Other messages have their fixed thresholds.
         assert_eq!(signatures_needed(&provider, &d, &pause(0)).await.unwrap(), 3);
         let reimburse = OperatorMessage::ReimburseDestination {

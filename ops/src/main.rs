@@ -27,8 +27,8 @@ use clap::{Args, Parser, Subcommand, ValueEnum};
 use serde::{Serialize, de::DeserializeOwned};
 use zecured_base::{events::version_id, operator::VersionKind};
 use zecured_ops::{
-    Network, Request, SignatureFile, Spec, check_submission, collect, load_key, parse_branch, parse_time, prepare,
-    scrub, send, sign, simulate,
+    Deployment, Network, Request, SignatureFile, Spec, check_submission, collect, list_versions, load_key,
+    parse_branch, parse_time, prepare, scrub, send, sign, simulate,
 };
 
 #[derive(Parser)]
@@ -58,6 +58,12 @@ enum Cmd {
     },
     /// Show what a request or bundle asks to sign, and the signatures it holds.
     Show { file: PathBuf },
+    /// List the deployment's verifier versions (ids to remove, which ones work).
+    Versions {
+        /// One JSON array instead of a table.
+        #[arg(long)]
+        json: bool,
+    },
     /// Sign a request with one signer's attestation key (no Base access needed).
     Sign {
         file: PathBuf,
@@ -292,6 +298,31 @@ async fn run(cli: Cli, rpc: &str) -> Result<()> {
             request.checked_digest()?;
             let signers = net().map(|n| n.signers()).unwrap_or_default();
             show(&request, &signers);
+        }
+        Cmd::Versions { json } => {
+            let net = net()?;
+            let provider = ProviderBuilder::new().connect_http(rpc.parse().context("Base RPC URL")?);
+            let d = Deployment::read(&provider, net.registry).await?;
+            let all = list_versions(&provider, &d).await?;
+            if json {
+                println!("{}", serde_json::to_string_pretty(&all)?);
+            } else {
+                for v in &all {
+                    let state = match (v.removed, v.working) {
+                        (true, _) => "removed",
+                        (false, true) => "working",
+                        (false, false) if v.active_at > now() => "scheduled",
+                        (false, false) => "not working",
+                    };
+                    println!(
+                        "{}  {:<9} selector {} image {}  {state}",
+                        v.version_id,
+                        format!("{:?}", v.kind).to_lowercase(),
+                        v.selector,
+                        v.image_id
+                    );
+                }
+            }
         }
         Cmd::Sign {
             file,
