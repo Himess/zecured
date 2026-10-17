@@ -157,6 +157,7 @@ describe("which signer set (never the backend's in production)", () => {
     vaultExpiryBlocks: 288,
     openVaultStampBits: 20,
     sponsorship: false,
+    openings: null,
   });
 
   it("a production build without NEXT_PUBLIC_SIGNERS refuses, even with the backend's set", async () => {

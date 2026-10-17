@@ -1,22 +1,37 @@
 import { describe, expect, it } from "vitest";
-import { capBlocksActivation, openRefusal, PROOF_MINTING_SENTENCE, SWAP_PRIVACY_SENTENCE } from "./v4";
+import { capWait, openingsNotice, openRefusal, PROOF_MINTING_SENTENCE, SWAP_PRIVACY_SENTENCE } from "./v4";
 
 describe("R-11.1: a deposit waiting for room under the coverage cap", () => {
-  const waiting = { vaultStatus: "deposit_seen", baseStatus: "None" as const, pending: false, mintBlock: "CapExceeded" as const };
+  const waiting = { vaultStatus: "awaiting_deposit", baseStatus: "None" as const, pending: false, mintBlock: "CapExceeded" as const };
 
-  it("is a deposit the signers saw, nothing on Base yet, and the cap full for its size", () => {
-    expect(capBlocksActivation(waiting)).toBe(true);
-    expect(capBlocksActivation({ ...waiting, baseStatus: undefined })).toBe(true);
+  it("possible while the vault awaits its deposit, nothing is on Base and the cap is full for its size", () => {
+    expect(capWait(waiting)).toBe("possible");
+    expect(capWait({ ...waiting, baseStatus: undefined })).toBe("possible");
   });
 
-  it("is not a deposit already proven, activated or refunded, nor one held by anything else", () => {
-    expect(capBlocksActivation({ ...waiting, pending: true })).toBe(false);
-    expect(capBlocksActivation({ ...waiting, baseStatus: "Active" })).toBe(false);
-    expect(capBlocksActivation({ ...waiting, baseStatus: "Cancelled" })).toBe(false);
-    expect(capBlocksActivation({ ...waiting, vaultStatus: "awaiting_deposit" })).toBe(false);
+  it("confirmed once the coordinator says a deposit was seen", () => {
+    expect(capWait({ ...waiting, depositSeen: true })).toBe("confirmed");
+    expect(capWait({ ...waiting, vaultStatus: "deposit_seen" })).toBe("confirmed");
+  });
+
+  it("none for a deposit already proven, activated or refunded, a closed vault, or anything else holding it", () => {
+    expect(capWait({ ...waiting, pending: true })).toBe("none");
+    expect(capWait({ ...waiting, baseStatus: "Active" })).toBe("none");
+    expect(capWait({ ...waiting, baseStatus: "Cancelled" })).toBe("none");
+    expect(capWait({ ...waiting, vaultStatus: "expired" })).toBe("none");
     for (const mintBlock of ["None", "Paused", "NotBonded", "Halted", null, undefined] as const) {
-      expect(capBlocksActivation({ ...waiting, mintBlock })).toBe(false);
+      expect(capWait({ ...waiting, mintBlock })).toBe("none");
     }
+  });
+});
+
+describe("P-8: the operator's switch on new vaults", () => {
+  it("closed openings are a state of their own, invite-only ones say so, open ones say nothing", () => {
+    expect(openingsNotice({ open: false, inviteOnly: true })?.title).toBe("New vault openings are temporarily closed");
+    expect(openingsNotice({ open: false, inviteOnly: false })?.body).toMatch(/payouts go on/);
+    expect(openingsNotice({ open: true, inviteOnly: true })?.title).toMatch(/invite code/);
+    expect(openingsNotice({ open: true, inviteOnly: false })).toBeNull();
+    expect(openingsNotice(null)).toBeNull();
   });
 });
 

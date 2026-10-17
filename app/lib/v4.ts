@@ -14,27 +14,46 @@ export const PROOF_MINTING_SENTENCE =
   "Once a zero-knowledge proof that your deposit is in a Zcash block reaches Base, zZEC is minted straight into your loan account's Morpho position: no signer vouches for it.";
 
 /**
- * R-11.1: the signers' scan found the deposit, but its proof cannot land while the coverage cap is
- * full (the Intake reverts it rather than cancel the vault), so Base has nothing yet: no pending
- * activation, the vault unknown there. The deposit waits and is proven once there is room; or its
- * owner has it proven as a refund instead (`POST /vaults/:id/prove-refund`).
+ * R-11.1: while the coverage cap has no room for a new vault's activation, the Intake reverts its
+ * deposit proof rather than cancel the vault, so Base has nothing yet: no pending activation, the
+ * vault unknown there. A deposit already made waits and is proven once there is room; or its owner
+ * has it proven as a refund instead (`POST /vaults/:id/prove-refund`, which the coordinator accepts
+ * only once it saw a confirmed deposit of the vault's amount). The coordinator's view shows the
+ * vault still awaiting its deposit, so the app cannot tell whether one was made:
+ * - `possible`: the cap blocks this vault's amount now and nothing is on Base;
+ * - `confirmed`: the same, and the coordinator says a deposit was seen (`deposit_seen`, or a
+ *   `depositSeen` flag a newer backend may add);
+ * - `none`: nothing waits for the cap.
  */
-export function capBlocksActivation(p: {
+export function capWait(p: {
   /** GET /vaults/:id `status` (the coordinator's view). */
   vaultStatus: string | undefined;
+  /** A newer backend's explicit word that the deposit was seen. */
+  depositSeen?: boolean;
   /** The Registry's view of the vault, when read. */
   baseStatus: OnchainVaultStatus | undefined;
   /** Base has a pending activation for the vault. */
   pending: boolean;
   /** GET /status `minting.mintBlock[amount]`. */
   mintBlock: MintBlock | null | undefined;
-}): boolean {
-  return (
-    p.vaultStatus === "deposit_seen" &&
-    !p.pending &&
-    (p.baseStatus === undefined || p.baseStatus === "None") &&
-    p.mintBlock === "CapExceeded"
-  );
+}): "none" | "possible" | "confirmed" {
+  if (p.pending || (p.baseStatus !== undefined && p.baseStatus !== "None") || p.mintBlock !== "CapExceeded") return "none";
+  if (p.vaultStatus === "deposit_seen" || p.depositSeen === true) return "confirmed";
+  return p.vaultStatus === "awaiting_deposit" ? "possible" : "none";
+}
+
+/** P-8: what the operator's switch on new vaults means (C01: separate from existing vaults' payouts). */
+export function openingsNotice(o: { open: boolean; inviteOnly: boolean } | null): { title: string; body: string } | null {
+  if (!o) return null;
+  if (!o.open) {
+    return {
+      title: "New vault openings are temporarily closed",
+      body: "Existing loans are not affected: repayments, exits, liquidations and payouts go on as usual.",
+    };
+  }
+  return o.inviteOnly
+    ? { title: "Opening a vault needs an invite code", body: "New vaults open by invitation only; each code opens one vault." }
+    : null;
 }
 
 export interface Refusal {

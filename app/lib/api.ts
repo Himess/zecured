@@ -73,6 +73,8 @@ export interface Vault {
   birthdayHeight?: number;
   /** Zcash tip at the coordinator's last pass (lets the app show blocks remaining). */
   tipHeight?: number;
+  /** R-11.1: a confirmed deposit of the vault's amount was seen (a newer backend's flag; absent otherwise). */
+  depositSeen?: boolean;
   // Earlier INTERFACES.md variant:
   confirmations?: number;
   deposit?: { attested: boolean; txHash?: Hex };
@@ -345,6 +347,7 @@ export function parseVault(raw: unknown): Vault {
   const outstanding = optional(r.outstanding, (x) => big(x, "outstanding"));
   if (outstanding !== undefined) vault.outstanding = outstanding;
   if (typeof r.payoutInFlight === "boolean") vault.payoutInFlight = r.payoutInFlight;
+  if (typeof r.depositSeen === "boolean") vault.depositSeen = r.depositSeen;
   // 0 means "not known yet" (the coordinator reports tip 0 before its first pass).
   const birthday = optional(r.birthdayHeight, (x) => uint(x, "birthdayHeight"));
   if (birthday) vault.birthdayHeight = birthday;
@@ -431,6 +434,12 @@ export function parseRemoteConfig(raw: unknown): RemoteConfig {
     vaultExpiryBlocks,
     openVaultStampBits,
     sponsorship: r.sponsorship,
+    // v4, section 6: absent from older backends.
+    openings: optional(r.openings, (x) => {
+      const o = obj(x, "config.openings");
+      if (typeof o.open !== "boolean" || typeof o.inviteOnly !== "boolean") throw invalid("config.openings");
+      return { open: o.open, inviteOnly: o.inviteOnly };
+    }) ?? null,
   };
 }
 

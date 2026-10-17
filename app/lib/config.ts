@@ -142,6 +142,8 @@ export interface AppConfig {
   demoPath: boolean;
   /** What the deployment file says the market's tokens and oracle are (null until GET /config answers). */
   marketLabels: MarketLabels | null;
+  /** P-8: whether new vault openings are open now, and invite-only (null until known). */
+  openings: Openings | null;
   /** `GET /config`: not fetched yet, checked and applied, or unavailable (`remoteError` says why). */
   remote: "pending" | "loaded" | "unavailable";
   remoteError: string | null;
@@ -173,6 +175,14 @@ export interface RemoteConfig {
   openVaultStampBits: number | null;
   /** Bundler, paymaster and paymaster allowlist all configured on the backend. */
   sponsorship: boolean;
+  /** v4 (section 6): whether new vaults can be opened now, and only with an invite code; null from an older backend. */
+  openings: Openings | null;
+}
+
+/** `GET /config` `openings`: the operator's switch on new vaults (never on existing ones' exits and payouts). */
+export interface Openings {
+  open: boolean;
+  inviteOnly: boolean;
 }
 
 export interface RemoteContracts {
@@ -394,6 +404,7 @@ export function buildConfig(env: ConfigEnv, remote?: RemoteConfigResult): AppCon
   let sponsorship = false;
   let denominations: readonly bigint[] = profile.defaultDenominations;
   let marketLabels: MarketLabels | null = null;
+  let openings: Openings | null = null;
   let confirmations: number | null = null;
   let vaultExpiryBlocks: number | null = null;
   let openVaultStampBits: number | null = null;
@@ -411,6 +422,7 @@ export function buildConfig(env: ConfigEnv, remote?: RemoteConfigResult): AppCon
     vaultExpiryBlocks = remote.vaultExpiryBlocks;
     openVaultStampBits = remote.openVaultStampBits;
     v3 = remote.v3;
+    openings = remote.openings;
     if (remote.chainId !== profile.chainId) {
       problems.push(`The backend is configured for chain ${remote.chainId}, this app for ${profile.chainName} (${profile.chainId}).`);
     } else {
@@ -502,6 +514,7 @@ export function buildConfig(env: ConfigEnv, remote?: RemoteConfigResult): AppCon
     swap,
     demoPath: env.NEXT_PUBLIC_DEMO_PATH?.trim() === "1" && profile.demoAllowed,
     marketLabels,
+    openings,
     remote: status,
     remoteError,
     problems,

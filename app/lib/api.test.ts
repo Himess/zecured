@@ -419,11 +419,18 @@ describe("GET /config", () => {
       vaultExpiryBlocks: 288,
       openVaultStampBits: 20,
       sponsorship: true,
+      openings: null,
     });
     // H-01: a backend from before the stamp does not report its bits.
     const { openVaultStampBits: _bits, ...older } = DRY_RUN_CONFIG;
     expect(parseRemoteConfig(older).openVaultStampBits).toBeNull();
     expect(parseRemoteConfig({ ...DRY_RUN_CONFIG, openVaultStampBits: 0 }).openVaultStampBits).toBe(0);
+    // v4 (section 6): the operator's switch on new vaults, as track OFF's backend reports it.
+    expect(parseRemoteConfig({ ...DRY_RUN_CONFIG, openings: { open: false, inviteOnly: true } }).openings).toEqual({
+      open: false,
+      inviteOnly: true,
+    });
+    expect(() => parseRemoteConfig({ ...DRY_RUN_CONFIG, openings: { open: "no" } })).toThrow(/config.openings/);
   });
 
   it("reads the market's oracle as MarketOracle, else the shock oracle, else the mocks (older deployments)", () => {

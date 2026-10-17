@@ -25,7 +25,7 @@ import { checkVaultAddress, openVault, requestRefundProof } from "@/lib/owner";
 import { vaultHref } from "@/lib/routes";
 import { vaultCheckUnavailable, VaultProofError, type VaultCheck } from "@/lib/signers";
 import { feeNotice, formatPeriod, openGate } from "@/lib/v3";
-import { capBlocksActivation, openRefusal, PROOF_MINTING_SENTENCE } from "@/lib/v4";
+import { capWait, openingsNotice, openRefusal } from "@/lib/v4";
 import { blocksToDuration, formatTaz } from "@/lib/zcash";
 import { DemoPayment } from "./DemoPayment";
 
@@ -174,6 +174,7 @@ function AmountStep({
   const [unvouched, setUnvouched] = useState(false);
   // The mainnet beta opens vaults by invitation only; the backend's refusal code, if any.
   const [invite, setInvite] = useState("");
+  const invitesOn = DEPLOYMENT.invites || config.openings?.inviteOnly === true;
   const [refusalCode, setRefusalCode] = useState<string | null>(null);
   const inviteId = useId();
   const cannotCheck = vaultCheckUnavailable();
@@ -184,7 +185,7 @@ function AmountStep({
     const l = current ?? createLoan(amount);
     if (!current) onLoan(l);
     try {
-      const res = await openVault(l, DEPLOYMENT.invites ? { invite } : {});
+      const res = await openVault(l, invitesOn ? { invite } : {});
       // Stored as payable only now that every signer vouches for the address (lib/signers.ts).
       onLoan({
         ...l,
@@ -203,7 +204,10 @@ function AmountStep({
   });
   const alreadyBound = open.error?.includes("already has a vault");
   const refusal = openRefusal(refusalCode);
-  const needsInvite = DEPLOYMENT.invites && !invite.trim();
+  const needsInvite = invitesOn && !invite.trim();
+  // P-8: the operator's switch on new vaults (never on existing vaults' exits and payouts).
+  const openings = openingsNotice(config.openings);
+  const openingsClosed = config.openings?.open === false;
 
   return (
     <Card title="How much ZEC do you want to lock?">
@@ -250,6 +254,13 @@ function AmountStep({
           </Notice>
         </div>
       ) : null}
+      {openings ? (
+        <div className="mt-4">
+          <Notice tone={openingsClosed ? "warn" : "info"} title={openings.title}>
+            <p>{openings.body}</p>
+          </Notice>
+        </div>
+      ) : null}
       <div className="mt-4">
         <Notice tone="warn" title="Get your ZEC into Ironwood well before this step">
           <p>
@@ -268,7 +279,7 @@ function AmountStep({
           <Link href="/prepare">why this matters</Link>).
         </span>
       </label>
-      {DEPLOYMENT.invites ? (
+      {invitesOn ? (
         <div className="mt-4 space-y-1">
           <label htmlFor={inviteId} className="block text-sm font-medium">
             Invite code
@@ -301,7 +312,7 @@ function AmountStep({
         <Button
           onClick={() => open.run(loan)}
           busy={open.busy}
-          disabled={(!ready && !loan) || !config.ownerSigning || cannotCheck !== null || !gate.allowed || needsInvite}
+          disabled={(!ready && !loan) || !config.ownerSigning || cannotCheck !== null || !gate.allowed || needsInvite || openingsClosed}
         >
           {loan ? "Retry opening the vault" : "Create loan and open vault"}
         </Button>
@@ -393,8 +404,9 @@ function DepositStep({ loan, vault, vaultError }: { loan: StoredLoan; vault: Vau
   const blocksLeft = vault?.tipHeight !== undefined && expiry !== undefined ? expiry - vault.tipHeight : null;
   // R-11.1: the deposit is on Zcash but its proof waits for room under the coverage cap.
   const minting = useMintingStatus();
-  const capWait = capBlocksActivation({
+  const cap = capWait({
     vaultStatus: vault?.status,
+    depositSeen: vault?.depositSeen,
     baseStatus: l?.status,
     pending: Boolean(l?.pending),
     mintBlock: minting.data?.mintBlock.get(amount),
@@ -435,7 +447,7 @@ function DepositStep({ loan, vault, vaultError }: { loan: StoredLoan; vault: Vau
             Checking the signers&apos; signatures on this vault…
           </p>
         ) : null}
-        {!awaiting && vault?.status === "deposit_seen" && !l?.pending && !capWait ? (
+        {!awaiting && vault?.status === "deposit_seen" && !l?.pending && cap === "none" ? (
           <Notice tone="ok" title="Deposit received on Zcash" live>
             <p>
               A zero-knowledge proof that your deposit is in a Zcash block is being made and sent to Base; nothing is
@@ -444,13 +456,18 @@ function DepositStep({ loan, vault, vaultError }: { loan: StoredLoan; vault: Vau
             </p>
           </Notice>
         ) : null}
-        {capWait ? (
-          <Notice tone="warn" title="Your deposit waits for room under the coverage cap" live>
+        {cap !== "none" ? (
+          <Notice
+            tone="warn"
+            title={cap === "confirmed" ? "Your deposit waits for room under the coverage cap" : "The coverage cap is full right now"}
+            live
+          >
             <p>
-              Your deposit is on Zcash, but the signers&apos; bonds cover no more collateral right now, so its proof cannot
-              land yet. Nothing is lost and the vault stays yours: the proof is sent again once there is room, and zZEC is
-              minted then.
+              {cap === "confirmed" ? "Your deposit is on Zcash, but the" : "If you already paid this vault, your deposit is on Zcash, but the"}{" "}
+              signers&apos; bonds cover no more collateral right now, so its proof cannot land yet. Nothing is lost and the vault
+              stays yours: the proof is sent again once there is room, and zZEC is minted then.
             </p>
+            {cap === "possible" ? <p>If you have not paid yet, wait until there is room before you pay.</p> : null}
             {refundInstead.result ? (
               <p>
                 Refund requested: the coordinator proves your deposit as a refund instead. It then appears on the{" "}
