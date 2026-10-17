@@ -318,9 +318,10 @@ interface IZecuredRegistry is IZecuredSignerErrors {
     ///         note of the vault (spending it without a commitment is F1), but no payout may spend it and no claim
     ///         exists until `IZecuredRefunds.openReservedRefund`; `IZecuredRefunds.releaseRefund` frees both if the
     ///         proof is dropped. The vault itself is untouched. An existing vault must have this account and must not
-    ///         be compromised (`VaultCompromised`: its claims are the compensator's, and an unpayable late refund would
-    ///         keep it open for good). `convertToRefund` has no such rule: the compensator needs a compromised pending
-    ///         activation converted before it can tally the vault.
+    ///         be compromised (`VaultCompromised`: its claims are the compensator's, which tallies the vault once). A
+    ///         refund reserved before the compromise still opens, for the compensator, which waits for it
+    ///         (`IZecuredRefunds.reservedRefundCount`). `convertToRefund` has no such rule: the compensator needs a
+    ///         compromised pending activation converted before it can tally the vault.
     function reserveRefund(bytes32 vaultId, address account, uint64 amount, bytes32 depositTag) external;
 
     /// @notice T-02, T-03: Pending -> Cancelled for the reservation `(account, amount, depositTag)`, whose lineage note

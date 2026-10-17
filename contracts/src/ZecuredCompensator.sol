@@ -22,6 +22,7 @@ import {
 import {IZecuredSpendCommits} from "./interfaces/v3/IZecuredSpendCommits.sol";
 import {IZecuredDisputes} from "./interfaces/v3/IZecuredDisputes.sol";
 import {IZecuredPayouts} from "./interfaces/v3/IZecuredPayouts.sol";
+import {IZecuredRefunds} from "./interfaces/v3/IZecuredRefunds.sol";
 import {IZecuredSlasher, ViolationKind} from "./interfaces/v3/IZecuredSlasher.sol";
 import {ISignerBond} from "./interfaces/v3/ISignerBond.sol";
 import {CompensationMath} from "./libraries/CompensationMath.sol";
@@ -41,10 +42,11 @@ import {CompensationMath} from "./libraries/CompensationMath.sol";
 ///        pays it for good instead. Fee and bond-paid claims are settled too, without an entitlement (`ClaimTallied`
 ///        with layer 0): they are the signers' own. `Victim.pendingClaims` counts the claims tallied with an
 ///        entitlement, `Victim.talliedClaims` every claim settled. Once a vault is compromised, the Registry lets no
-///        claim become pending except through the Intake's `refundPending` of a Pending vault, or the end of a dispute
+///        claim become pending except through the Intake's `refundPending` of a Pending vault, the end of a dispute
 ///        opened before (`IZecuredDisputes`: a disputed claim counts as unpaid, and is upheld or reopened within the
-///        inclusion window), both of which `tallyVault` waits for; a claim pending after its incident was finalized
-///        could not be tallied any more and would keep its vault open.
+///        inclusion window), or the opening of a refund reserved before the compromise (R-12: `finalizeRefund`; while
+///        one is reserved, `IZecuredRefunds.reservedRefundCount` holds the tally), all of which `tallyVault` waits for;
+///        a claim pending after its incident was finalized could not be tallied any more and would keep its vault open.
 ///      - R-3: a claim three signers confirmed within the dispute window before the vault froze is tallied like a
 ///        pending one (the signers' word, given shortly before a proven theft, counts for nothing) unless a proof of its
 ///        payout comes first; `tallyVault` waits until the vault has no confirmation left that is neither proven,
@@ -274,9 +276,10 @@ contract ZecuredCompensator is IZecuredCompensator, ReentrancyGuardTransient {
     }
 
     /// @inheritdoc IZecuredCompensator
-    /// @dev Requires the Registry's `unpaidClaims` of the vault to be zero (every claim went through `tallyClaim`) and,
-    ///      R-3, no confirmation by signatures left open (`unprovenConfirmations`). R-19: the outstanding it records
-    ///      adds back what `burnCollateral` burned before, so the equity is that of what the vault held.
+    /// @dev Requires the Registry's `unpaidClaims` of the vault to be zero (every claim went through `tallyClaim`), R-12,
+    ///      no refund of it still reserved (each opens a claim to tally first, or is released) and, R-3, no confirmation
+    ///      by signatures left open (`unprovenConfirmations`). R-19: the outstanding it records adds back what
+    ///      `burnCollateral` burned before, so the equity is that of what the vault held.
     function tallyVault(bytes32 vaultId) external nonReentrant {
         Victim storage v = _victims[vaultId];
         uint256 id = v.incident;
@@ -285,6 +288,8 @@ contract ZecuredCompensator is IZecuredCompensator, ReentrancyGuardTransient {
         VaultDetails memory d = IZecuredRegistry(registry).vaultDetails(vaultId);
         if (d.status == VaultStatus.Pending) revert VaultStillPending(vaultId);
         if (d.unpaidClaims != 0) revert ClaimsNotTallied(vaultId, d.unpaidClaims);
+        uint256 reservedRefunds = IZecuredRefunds(registry).reservedRefundCount(vaultId);
+        if (reservedRefunds != 0) revert RefundsReserved(vaultId, reservedRefunds);
         uint256 unproven = IZecuredPayouts(registry).unprovenConfirmations(vaultId);
         if (unproven != 0) revert ConfirmationsUnsettled(vaultId, unproven);
 

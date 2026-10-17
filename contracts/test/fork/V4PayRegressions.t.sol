@@ -14,6 +14,7 @@ import {IZecuredSpendCommitsEvents} from "../../src/interfaces/v3/IZecuredSpendC
 import {IZecuredCompensator} from "../../src/interfaces/v3/IZecuredCompensator.sol";
 import {ISignerBond} from "../../src/interfaces/v3/ISignerBond.sol";
 import {SpendCommit} from "../../src/libraries/ZecuredEIP712.sol";
+import {MockHeaderRelay} from "../mocks/MockHeaderRelay.sol";
 import {DisputesBase} from "./Disputes.t.sol";
 
 /// Shared helpers of the v4 payout suites (this file and ProvenDelivery.t.sol).
@@ -758,6 +759,106 @@ contract V4PayRegressionsTest is V4PayBase {
         assertEq(compensator.entitlement(refundId).zat, VAULT_001);
         assertEq(compensator.entitlement(refundId).to, account);
         assertEq(registry.lockedZatoshi(), locked, "taken off the books once");
+        compensator.tallyVault(vaultId);
+    }
+
+    // ================================================================== a refund reserved before the compromise (R-12)
+
+    /// A refund proven before its vault was compromised waits for its claim (R-12). The claim never opened on a
+    /// compromised vault, nor could the refund be dropped while its proof stayed valid: the compensator never saw it,
+    /// and its depositor got nothing. It now opens there, where only the compensator settles it, once.
+    function test_R12_aRefundReservedBeforeTheCompromiseIsCompensated() public {
+        bytes32 vaultId = _attest(account, VAULT_005);
+        bytes32 tag = keccak256("v4.r12.refund");
+        _mockProof(vaultId, account, VAULT_001, tag, keccak256("v4.r12.anchor")); // the vault is not new: a refund
+        IZecuredRefunds refunds = IZecuredRefunds(address(registry));
+        assertEq(refunds.reservedRefundCount(vaultId), 1);
+        _compromise(_depositTagFor(account));
+
+        bytes32 refundId = _finalizeRefund(tag);
+        assertEq(refunds.reservedRefundCount(vaultId), 0);
+        assertEq(uint8(_claimStatus(refundId)), uint8(ClaimStatus.Pending));
+        // The signers cannot pay it: no payout is committed on a compromised vault.
+        vm.prank(account);
+        registry.setRefundDestination(refundId, keccak256("v4.r12.dest"));
+        SpendCommit memory c = _spendCommit(vaultId, tag, _one(refundId), "v4.r12.pay");
+        bytes[] memory sigs = _threeSigs(registry.hashSpendCommit(c));
+        vm.expectRevert(abi.encodeWithSelector(IZecuredRegistry.VaultCompromised.selector, vaultId));
+        registry.commitSpend(c, sigs);
+
+        compensator.tallyClaim(refundId);
+        assertEq(uint8(_claimStatus(refundId)), uint8(ClaimStatus.Compensated));
+        assertEq(compensator.entitlement(refundId).zat, VAULT_001);
+        assertEq(compensator.entitlement(refundId).to, account);
+        vm.expectRevert(abi.encodeWithSelector(IZecuredCompensator.AlreadyTallied.selector, refundId));
+        compensator.tallyClaim(refundId);
+        compensator.tallyVault(vaultId);
+        vm.warp(block.timestamp + INCIDENT_WINDOW);
+        compensator.finalizeIncident(compensator.currentIncident());
+        assertEq(compensator.withdrawEntitlement(refundId), uint256(VAULT_001) * PRICE_40 / 1e36);
+    }
+
+    /// The vault's tally, and with it the incident's finalization, waits while a refund of the vault is still reserved:
+    /// once opened, its claim is tallied first; one whose proof was dropped no longer holds the tally.
+    function test_R12_theTallyWaitsForEveryReservedRefund() public {
+        bytes32 vaultId = _attest(account, VAULT_005);
+        bytes32 kept = keccak256("v4.r12.kept");
+        bytes32 dropped = keccak256("v4.r12.dropped");
+        bytes32 droppedAnchor = keccak256("v4.r12.droppedAnchor");
+        _mockProof(vaultId, account, VAULT_001, kept, keccak256("v4.r12.keptAnchor"));
+        _mockProof(vaultId, account, VAULT_001, dropped, droppedAnchor);
+        _compromise(_depositTagFor(account));
+        IZecuredRefunds refunds = IZecuredRefunds(address(registry));
+        assertEq(refunds.reservedRefundCount(vaultId), 2);
+
+        vm.expectRevert(abi.encodeWithSelector(IZecuredCompensator.RefundsReserved.selector, vaultId, 2));
+        compensator.tallyVault(vaultId);
+
+        // A reorganisation takes one proof's anchor off the best chain: that refund is dropped, its note freed.
+        MockHeaderRelay(address(headerRelay)).setBlock(droppedAnchor, false, 0);
+        intake.dropPendingRefund(dropped);
+        assertEq(refunds.reservedRefundCount(vaultId), 1);
+        assertFalse(registry.depositTagUsed(dropped), "its note may be proven again");
+        vm.expectRevert(abi.encodeWithSelector(IZecuredCompensator.RefundsReserved.selector, vaultId, 1));
+        compensator.tallyVault(vaultId);
+
+        bytes32 refundId = _finalizeRefund(kept);
+        assertEq(refunds.reservedRefundCount(vaultId), 0);
+        vm.expectRevert(abi.encodeWithSelector(IZecuredCompensator.ClaimsNotTallied.selector, vaultId, 1));
+        compensator.tallyVault(vaultId);
+        compensator.tallyClaim(refundId);
+        compensator.tallyVault(vaultId);
+        assertTrue(compensator.victim(vaultId).tallied);
+    }
+
+    /// A refund opened on a compromised vault keeps the refund rules that still apply there: it may go dormant (out of
+    /// `lockedZatoshi`, R-11) but is never abandoned (the compensator settles it), and its tally takes it off the books
+    /// once.
+    function test_R12_aRefundOpenedOnACompromisedVaultLeavesTheBooksOnce() public {
+        bytes32 vaultId = _attest(account, VAULT_005);
+        _authorizeBoth(account);
+        bytes32 tag = keccak256("v4.r12.dormant");
+        _mockProof(vaultId, account, VAULT_001, tag, keccak256("v4.r12.dormantAnchor"));
+        _compromise(_depositTagFor(account)); // no debt: retired at once (R-19), so the vault is closed and settled
+        assertEq(uint8(_status(vaultId)), uint8(VaultStatus.Closed));
+        uint256 open = registry.openVaultCount();
+        bytes32 refundId = _finalizeRefund(tag);
+        assertEq(registry.openVaultCount(), open + 1, "the vault holds a claim again");
+        IZecuredRefunds refunds = IZecuredRefunds(address(registry));
+        uint256 locked = registry.lockedZatoshi();
+        vm.warp(block.timestamp + REFUND_DORMANCY);
+        refunds.markRefundDormant(refundId);
+        assertEq(registry.lockedZatoshi(), locked - VAULT_001, "dormant: out of lockedZatoshi");
+        vm.warp(block.timestamp + ABANDON_PERIOD);
+        vm.expectRevert(abi.encodeWithSelector(IZecuredRegistry.VaultCompromised.selector, vaultId));
+        registry.abandonRefund(refundId);
+
+        locked = registry.lockedZatoshi();
+        compensator.tallyClaim(refundId);
+        assertEq(uint8(_claimStatus(refundId)), uint8(ClaimStatus.Compensated));
+        assertFalse(refunds.isRefundDormant(refundId), "no longer dormant");
+        assertEq(registry.lockedZatoshi(), locked, "taken off the books once");
+        assertEq(registry.openVaultCount(), open, "settled again");
         compensator.tallyVault(vaultId);
     }
 }

@@ -11,11 +11,17 @@ import {MockRiscZeroVerifier} from "../../src/mocks/MockRiscZeroVerifier.sol";
 import {ZecuredRegistry} from "../../src/ZecuredRegistry.sol";
 import {ZecuredSlasher} from "../../src/ZecuredSlasher.sol";
 import {ZecuredCompensator} from "../../src/ZecuredCompensator.sol";
-import {VaultStatus, ClaimKind, ClaimStatus, ClaimDetails} from "../../src/interfaces/v3/IZecuredRegistry.sol";
+import {
+    IZecuredRegistry,
+    VaultStatus,
+    ClaimKind,
+    ClaimStatus,
+    ClaimDetails
+} from "../../src/interfaces/v3/IZecuredRegistry.sol";
 import {IZecuredDisputes} from "../../src/interfaces/v3/IZecuredDisputes.sol";
 import {IZecuredPayouts} from "../../src/interfaces/v3/IZecuredPayouts.sol";
 import {ViolationKind, ViolationJournal} from "../../src/interfaces/v3/IZecuredSlasher.sol";
-import {Incident, Victim, Entitlement} from "../../src/interfaces/v3/IZecuredCompensator.sol";
+import {IZecuredCompensator, Incident, Victim, Entitlement} from "../../src/interfaces/v3/IZecuredCompensator.sol";
 import {SpendCommit} from "../../src/libraries/ZecuredEIP712.sol";
 import {MockHeaderRelay} from "../mocks/MockHeaderRelay.sol";
 import {IntakeHarness} from "../utils/IntakeHarness.sol";
@@ -85,6 +91,13 @@ contract CompensationHandler is Test {
     bytes32[] internal openCases;
     mapping(bytes32 claimId => bool) public reopened;
     uint256 internal nonce;
+    /// R-12: the deposit tags of the refunds reserved and neither opened nor released yet, the vault of each, and how
+    /// many each vault has (the ghost of `reservedRefundCount`).
+    bytes32[] internal reservedTags;
+    mapping(bytes32 tag => bytes32 vaultId) public reservedVault;
+    mapping(bytes32 vaultId => uint256) public reservedCountOf;
+    /// R-12: the Refund claims opened on a vault already compromised (reserved before its compromise).
+    bytes32[] public lateRefunds;
 
     bool public violated;
     string public violation;
@@ -118,6 +131,14 @@ contract CompensationHandler is Test {
 
     function payoutCount() external view returns (uint256) {
         return payouts.length;
+    }
+
+    function lateRefundCount() external view returns (uint256) {
+        return lateRefunds.length;
+    }
+
+    function reservedCount() external view returns (uint256) {
+        return reservedTags.length;
     }
 
     // ------------------------------------------------------------------ helpers
@@ -489,13 +510,15 @@ contract CompensationHandler is Test {
     }
 
     /// Three colluders spend a vault's lineage note without a commitment: F1 (the first vault from the seed that has
-    /// one and is not compromised yet).
+    /// one and is not compromised yet), sometimes while a refund of the vault waits for its claim (R-12).
     function theft(uint256 vaultSeed) external {
         for (uint256 k; k < vaultIds.length; ++k) {
             bytes32 vaultId = vaultIds[(vaultSeed % vaultIds.length + k) % vaultIds.length];
             if (head[vaultId] == bytes32(0) || slasher.isCompromised(vaultId) || slasher.theftCasesOf(vaultId) != 0) {
                 continue;
             }
+            // R-12: half the time the account's refund of another note is in flight when the theft is proven.
+            if (_mix(vaultSeed) % 2 == 0) _reserve(vaultId, 200_000);
             bytes32 ref = keccak256(abi.encode("zecured.comp.inv.theft", nonce++));
             if (_open(_journal(ViolationKind.Uncommitted, ref, head[vaultId], 0, bytes32(0)))) calls["F1"]++;
             return;
@@ -536,23 +559,107 @@ contract CompensationHandler is Test {
         }
     }
 
+    // ------------------------------------------------------------------ refunds (R-12)
+
+    /// The account sends its vault another note, proven as a refund: reserved until its claim opens (R-12). Refused once
+    /// the vault is compromised (the compensator tallies it once).
+    function reserveRefund(uint256 vaultSeed, uint256 amountSeed) external {
+        (bool found, bytes32 vaultId) = _vault(vaultSeed);
+        if (!found) return;
+        _reserve(vaultId, uint64(bound(amountSeed, 100_000, 2_000_000)));
+    }
+
+    function _reserve(bytes32 vaultId, uint64 amount) internal {
+        bytes32 tag = keccak256(abi.encode("zecured.comp.inv.refund", nonce++));
+        bool compromised = slasher.isCompromised(vaultId);
+        try intake.harnessReserveRefund(vaultId, _accountOf(vaultId), amount, tag) {
+            if (compromised) _flag("R-12: a refund reserved on a compromised vault");
+            reservedTags.push(tag);
+            reservedVault[tag] = vaultId;
+            reservedCountOf[vaultId] += 1;
+            calls["reserve refund"]++;
+        } catch (bytes memory reason) {
+            if (compromised && bytes4(reason) == IZecuredRegistry.VaultCompromised.selector) {
+                calls["reserve refund (compromised)"]++;
+            } else {
+                _flag("a refund could not be reserved");
+            }
+        }
+    }
+
+    /// A reserved refund is ready: anyone opens its claim (`finalizeRefund`), on a compromised vault too, which then
+    /// was not tallied yet (its tally waits for every reserved refund).
+    function openRefund(uint256 seed) external {
+        if (reservedTags.length == 0) return;
+        uint256 i = seed % reservedTags.length;
+        bytes32 tag = reservedTags[i];
+        bytes32 vaultId = reservedVault[tag];
+        if (compensator.victim(vaultId).tallied) _flag("R-12: a victim was tallied while a refund of it was reserved");
+        _openRefund(i, tag, vaultId);
+    }
+
+    /// A reserved refund's proof fell off the best chain: it is released (`dropPendingRefund`), its note freed.
+    function dropRefund(uint256 seed) external {
+        if (reservedTags.length == 0) return;
+        uint256 i = seed % reservedTags.length;
+        bytes32 tag = reservedTags[i];
+        bytes32 vaultId = reservedVault[tag];
+        try intake.harnessReleaseRefund(vaultId, tag) {
+            _removeReserved(i, vaultId);
+            calls["drop refund"]++;
+        } catch {
+            _flag("a reserved refund could not be released");
+        }
+    }
+
+    function _openRefund(uint256 i, bytes32 tag, bytes32 vaultId) internal {
+        bool compromised = slasher.isCompromised(vaultId);
+        try intake.harnessOpenRefund(vaultId, tag) returns (bytes32 claimId) {
+            _removeReserved(i, vaultId);
+            if (compromised) lateRefunds.push(claimId);
+            calls[compromised ? "open refund (compromised)" : "open refund"]++;
+        } catch {
+            _flag("a reserved refund could not be opened");
+        }
+    }
+
+    function _removeReserved(uint256 i, bytes32 vaultId) internal {
+        reservedTags[i] = reservedTags[reservedTags.length - 1];
+        reservedTags.pop();
+        reservedCountOf[vaultId] -= 1;
+    }
+
     // ------------------------------------------------------------------ compensation
 
     /// Anyone tallies a victim vault: every claim the compensator takes (after the R-2 proof window for committed ones),
-    /// the old confirmations expired (R-3), a dispute still open reopened once due; then the vault. Never reverts.
+    /// the old confirmations expired (R-3), a dispute still open reopened once due; then the vault. A keeper usually
+    /// opens the vault's reserved refunds first (R-12); while one is still reserved, the vault's tally waits.
     function tally(uint256 vaultSeed) external {
         for (uint256 k; k < vaultIds.length; ++k) {
             bytes32 vaultId = vaultIds[(vaultSeed % vaultIds.length + k) % vaultIds.length];
             Victim memory v = compensator.victim(vaultId);
             if (v.incident == 0 || v.tallied || compensator.incident(v.incident).finalized) continue;
+            if (_mix(vaultSeed) % 4 != 0) {
+                for (uint256 i = reservedTags.length; i > 0; --i) {
+                    if (reservedVault[reservedTags[i - 1]] == vaultId) {
+                        _openRefund(i - 1, reservedTags[i - 1], vaultId);
+                    }
+                }
+            }
             uint64 count = registry.claimCount(vaultId);
             for (uint64 j; j < count; ++j) {
                 _tallyOne(vaultId, registry.claimIdOf(vaultId, j));
             }
+            uint256 reserved = reservedCountOf[vaultId];
             try compensator.tallyVault(vaultId) {
+                if (reserved != 0) _flag("R-12: a victim was tallied while a refund of it was reserved");
                 calls["tally vault"]++;
-            } catch {
-                _flag("a victim vault could not be tallied");
+            } catch (bytes memory reason) {
+                if (reserved != 0 && bytes4(reason) == IZecuredCompensator.RefundsReserved.selector) {
+                    calls["tally vault (refunds reserved)"]++;
+                } else {
+                    _flag("a victim vault could not be tallied");
+                }
             }
             return;
         }

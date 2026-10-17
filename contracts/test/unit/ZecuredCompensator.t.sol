@@ -895,6 +895,30 @@ contract ZecuredCompensatorTest is Test {
         _assertBooks();
     }
 
+    /// R-12: while a refund of the victim reserved before its compromise is neither opened nor released, the vault's
+    /// tally waits (and with it the incident's finalization); once it opens, its claim is tallied like any other.
+    function test_R12_theTallyWaitsForReservedRefunds() public {
+        _openVault(VAULT_A, alice, 10 * ZEC, 0);
+        registry.setReservedRefunds(VAULT_A, 2);
+        _fund(1_000 * USD);
+        _steal(VAULT_A);
+        vm.expectRevert(abi.encodeWithSelector(IZecuredCompensator.RefundsReserved.selector, VAULT_A, 2));
+        comp.tallyVault(VAULT_A);
+        vm.warp(comp.incident(1).closesAt);
+        vm.expectRevert(abi.encodeWithSelector(IZecuredCompensator.VictimsNotTallied.selector, 1, 1));
+        comp.finalizeIncident(1);
+        // One is released (its proof fell), the other opens its claim, which is tallied first.
+        registry.setReservedRefunds(VAULT_A, 0);
+        bytes32 refund = registry.addClaim(VAULT_A, ClaimKind.Refund, ZEC, alice, false);
+        vm.expectRevert(abi.encodeWithSelector(IZecuredCompensator.ClaimsNotTallied.selector, VAULT_A, 1));
+        comp.tallyVault(VAULT_A);
+        comp.tallyClaim(refund);
+        comp.tallyVault(VAULT_A);
+        _finalize(1);
+        assertEq(comp.withdrawEntitlement(refund), 40 * USD);
+        _assertBooks();
+    }
+
     /// R-19: the collateral burned before the tally still counts in the vault's equity, and the settlement retires what
     /// is left of the outstanding.
     function test_R19_burnBeforeTheTally_keepsTheEquity() public {

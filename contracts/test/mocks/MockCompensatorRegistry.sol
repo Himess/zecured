@@ -28,7 +28,7 @@ interface ICompromised {
 ///         refund); no zZEC, no signatures. v4: the claim hooks of `IZecuredPayouts` with the spend logic's rules
 ///         (R-3 confirmations shortly before the freeze, R-7 F3 closure, R-20 settled active vaults, R-21 abandoned
 ///         refunds), and the views the compensator reads (`claimInput`, `payoutDispute`, the dispute windows,
-///         `unprovenConfirmations`).
+///         `unprovenConfirmations`, and R-12's `reservedRefundCount`, which the test sets).
 contract MockCompensatorRegistry {
     MockMorphoForCompensator public immutable morphoMock;
     MarketParams internal _params;
@@ -43,6 +43,9 @@ contract MockCompensatorRegistry {
     mapping(bytes32 claimId => bytes32) public claimInput;
     mapping(bytes32 claimId => uint64) internal _paidAt;
     mapping(bytes32 vaultId => bool) public vaultCompensated;
+    /// @notice R-12 (`IZecuredRefunds.reservedRefundCount`): refunds of the vault reserved and not yet opened or
+    ///         released, as the test sets them (`setReservedRefunds`).
+    mapping(bytes32 vaultId => uint256) public reservedRefundCount;
 
     uint64 public constant disputeWindow = 1 days;
     uint64 public constant inclusionWindow = 6 hours;
@@ -106,6 +109,12 @@ contract MockCompensatorRegistry {
     /// @notice Binds a claim to a lineage note (a committed payout of it).
     function setClaimInput(bytes32 claimId, bytes32 input) external {
         claimInput[claimId] = input;
+    }
+
+    /// @notice R-12: how many refunds of the vault are reserved (the Intake reserved them and has not opened or
+    ///         released them yet).
+    function setReservedRefunds(bytes32 vaultId, uint256 count) external {
+        reservedRefundCount[vaultId] = count;
     }
 
     // ------------------------------------------------------------------ the IZecuredRegistry subset

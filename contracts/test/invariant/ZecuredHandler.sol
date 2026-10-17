@@ -631,7 +631,8 @@ contract ZecuredHandler is Test {
     // ------------------------------------------------------------------ pending refunds (R-8, R-12)
 
     /// R-12: the relay moves on, the delay passes, and anyone opens the refund's claim; it waits while the vault's
-    /// activation pends (R-8), and never opens on a compromised vault.
+    /// activation pends (R-8). On a compromised vault it opens all the same (it was reserved before the compromise),
+    /// for the compensator to settle.
     function finalizeRefund(uint256 seed) external {
         if (pendingRefundTags.length == 0) return;
         uint256 i = seed % pendingRefundTags.length;
@@ -645,21 +646,18 @@ contract ZecuredHandler is Test {
         try intake.finalizeRefund(tag) returns (bytes32 claimId) {
             if (anchorGone) _flag("R-12: a refund opened off the best chain");
             if (vaultPending) _flag("R-8: a refund opened on a pending vault");
-            if (compromised) _flag("a refund opened on a compromised vault");
             _removePendingRefund(i);
             pendingRefundOf[p.vaultId] -= p.amount;
             _markTag(tag, p.vaultId, TAG_REFUND);
             refunded[p.vaultId] += p.amount;
             refundNoteOf[claimId] = tag;
-            calls["finalize refund"]++;
+            calls[compromised ? "finalize refund (compromised)" : "finalize refund"]++;
         } catch (bytes memory reason) {
             bytes4 selector = bytes4(reason);
             if (anchorGone && selector == IZecuredIntake.AnchorNotConfirmed.selector) {
                 calls["finalize refund (anchor gone)"]++;
             } else if (vaultPending && selector == IZecuredSpendCommitsEvents.VaultPending.selector) {
                 calls["finalize refund (vault pending)"]++;
-            } else if (compromised && selector == IZecuredRegistry.VaultCompromised.selector) {
-                calls["finalize refund (compromised)"]++;
             } else {
                 _flag("a ready refund could not be opened");
             }
