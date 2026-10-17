@@ -112,6 +112,7 @@ txids) and how to reproduce every run: [docs/TESTING.md](docs/TESTING.md).
 | `ops/` | `zecured-ops`: prepares, signs, collects and submits the signers' operator messages ([docs/OPERATIONS.md](docs/OPERATIONS.md) § 8) |
 | `swap/` | Zecured Swap: the shared swap crate and the market maker bot (`zecured-swap-maker`) ([docs/SWAP.md](docs/SWAP.md)) |
 | `tools/leak-scan` | Searches a deployment's events, calldata and storage for the Zcash identifiers of our own runs ([docs/TESTING.md](docs/TESTING.md) § 4) |
+| `tools/recipient` | Draws the salt of a destination that must be fixed before any backend runs (the treasury's `FEE_COMMITMENT`) and prints its commitment |
 | `backend/` | Public API + privacy proxy (RPC, bundler, paymaster allowlist) |
 | `bots/` | Liquidator and market maker |
 | `cli/` | `zecured-wallet`: Ironwood CLI wallet and borrower actions |

@@ -1,0 +1,18 @@
+[package]
+name = "zecured-recipient"
+description = "Draws a salt for an Ironwood receiver and prints its recipient commitment"
+version = "0.1.0"
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+publish = false
+
+[dependencies]
+zecured-zcash-ops = { path = "../../signer/crates/zcash-ops" }
+zecured-policy = { path = "../../signer/crates/policy" }
+zcash_protocol.workspace = true
+anyhow.workspace = true
+clap.workspace = true
+hex.workspace = true
+serde_json.workspace = true
+rand_core_06.workspace = true
