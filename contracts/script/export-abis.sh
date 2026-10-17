@@ -1,9 +1,9 @@
 #!/usr/bin/env bash
 # Writes the ABIs used by the app and the off-chain services to contracts/abi/<Contract>.json.
 # Each file holds only the contract's `abi` array (no bytecode or metadata).
-# IZecuredDisputes and IZecuredRefunds are served at the Registry's address (its fallback runs
-# ZecuredSpendLogic's code), so the Registry's own ABI does not list those functions (the refund events
-# stay in the Registry's ABI).
+# IZecuredDisputes, IZecuredRefunds and IZecuredPayouts (v4: confirmPayout and the compensator's claim hooks)
+# are served at the Registry's address (its fallback runs ZecuredSpendLogic's code), so the Registry's own
+# ABI does not list those functions (the refund events stay in the Registry's ABI).
 # Re-run after any change to a contract's external interface, and commit contracts/abi/.
 #
 # Usage (from any directory): contracts/script/export-abis.sh
@@ -16,6 +16,7 @@ contracts=(
   "src/ZecuredRegistry.sol:ZecuredRegistry"
   "src/interfaces/v3/IZecuredDisputes.sol:IZecuredDisputes"
   "src/interfaces/v3/IZecuredRefunds.sol:IZecuredRefunds"
+  "src/interfaces/v3/IZecuredPayouts.sol:IZecuredPayouts"
   "src/SettlementAdapter.sol:SettlementAdapter"
   "src/ZecuredIntake.sol:ZecuredIntake"
   "src/SignerBondV2.sol:SignerBondV2"

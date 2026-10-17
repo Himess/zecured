@@ -9,6 +9,7 @@ import {MockZecOracle} from "../../src/mocks/MockZecOracle.sol";
 import {ZecuredRegistry} from "../../src/ZecuredRegistry.sol";
 import {SignerBondV2} from "../../src/SignerBondV2.sol";
 import {ClaimDetails, ClaimKind, ClaimStatus, VaultStatus} from "../../src/interfaces/v3/IZecuredRegistry.sol";
+import {IZecuredPayouts} from "../../src/interfaces/v3/IZecuredPayouts.sol";
 import {SpendCommit} from "../../src/libraries/ZecuredEIP712.sol";
 import {IntakeHarness} from "../utils/IntakeHarness.sol";
 
@@ -336,11 +337,14 @@ contract BondHandler is Test {
         }
     }
 
-    /// The signers confirm the committed payout of `claimId` (the confirmation's interface is the Registry's today).
-    function _confirm(bytes32 vaultId, bytes32, bytes32 claimId) internal {
+    /// The signers confirm the committed payout of `claimId` (R-1: a confirmation names its payout; `IZecuredPayouts`,
+    /// served at the Registry's address).
+    function _confirm(bytes32 vaultId, bytes32 payoutRef, bytes32 claimId) internal {
         bytes32[] memory ids = new bytes32[](1);
         ids[0] = claimId;
-        try registry.confirmPayout(vaultId, ids, _sigs(registry.hashPayoutConfirmation(vaultId, ids), 3)) {
+        IZecuredPayouts payouts = IZecuredPayouts(address(registry));
+        bytes[] memory sigs = _sigs(payouts.hashPayoutConfirmation(vaultId, payoutRef, ids), 3);
+        try payouts.confirmPayout(vaultId, payoutRef, ids, sigs) {
             calls["confirm"]++;
         } catch {
             _flag("a committed payout could not be confirmed");

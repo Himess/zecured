@@ -10,19 +10,27 @@ import {
     SpendRecord
 } from "../interfaces/v3/IZecuredSpendCommits.sol";
 import {IZecuredDisputes} from "../interfaces/v3/IZecuredDisputes.sol";
+import {IZecuredPayouts} from "../interfaces/v3/IZecuredPayouts.sol";
 import {IZecuredRefunds} from "../interfaces/v3/IZecuredRefunds.sol";
 import {IZecuredSlasher} from "../interfaces/v3/IZecuredSlasher.sol";
 import {ZecuredEIP712, SpendCommit} from "../libraries/ZecuredEIP712.sol";
 import {ZecuredRegistryStorage} from "./ZecuredRegistryStorage.sol";
 
 /// @title ZecuredSpendLogic
-/// @notice The code of `ZecuredRegistry.commitSpend` (docs/TIER3.md § 4), of the dispute path (`IZecuredDisputes`) and
-///         of the refund lifecycle's later steps (`IZecuredRefunds`), which the Registry's fallback serves, run by the
-///         Registry with delegatecall on its own storage: it lives in a separate contract only to keep the Registry
-///         under EIP-170 (T-11). It shares the Registry's storage layout, EIP-712 domain name and signer set through
+/// @notice The code of `ZecuredRegistry.commitSpend` (docs/TIER3.md § 4), of the dispute path (`IZecuredDisputes`), of
+///         the refund lifecycle's later steps (`IZecuredRefunds`) and of the payout confirmations and the compensator's
+///         hooks (`IZecuredPayouts`, v4), the last three served by the Registry's fallback, run by the Registry with
+///         delegatecall on its own storage: it lives in a separate contract only to keep the Registry under EIP-170
+///         (T-11). It shares the Registry's storage layout, EIP-712 domain name and signer set through
 ///         `ZecuredRegistryStorage`; its domain separator is computed for the Registry's address, since under
 ///         delegatecall `address(this)` is the Registry. Called directly, it does nothing (`NotDelegated`).
-contract ZecuredSpendLogic is ZecuredRegistryStorage, IZecuredSpendCommitsEvents, IZecuredDisputes, IZecuredRefunds {
+contract ZecuredSpendLogic is
+    ZecuredRegistryStorage,
+    IZecuredSpendCommitsEvents,
+    IZecuredDisputes,
+    IZecuredRefunds,
+    IZecuredPayouts
+{
     /// @notice The only Registry that may run this code (its address, predicted before deployment).
     address public immutable registry;
     /// @inheritdoc IZecuredDisputes
@@ -85,8 +93,8 @@ contract ZecuredSpendLogic is ZecuredRegistryStorage, IZecuredSpendCommitsEvents
     }
 
     /// @dev The parts of a commitment that need no claim lookup: a new, non-zero payout ref; an input that is a lineage
-    ///      note of the vault, which is not pending; 1 to MAX_CLAIMS claims with one ref each; a change tag exactly when there is change, not
-    ///      already a lineage note. Returns the input's value.
+    ///      note of the vault, which is not pending; 1 to MAX_CLAIMS claims with one ref each; a change tag exactly when
+    ///      there is change, not already a lineage note. Returns the input's value.
     function _checkSpendShape(SpendCommit calldata c) internal view returns (uint64) {
         if (c.payoutRef == bytes32(0)) revert ZeroPayoutRef();
         if (_spends[c.payoutRef].vaultId != bytes32(0)) revert PayoutAlreadyCommitted(c.payoutRef);
@@ -140,6 +148,8 @@ contract ZecuredSpendLogic is ZecuredRegistryStorage, IZecuredSpendCommitsEvents
     ///      A new commitment of the claim's own input may also name it once confirmed or disputed (D57): its input
     ///      carries the same claims (RT-4), so while that input is unspent no payout of it landed, whatever was
     ///      confirmed (a false confirmation, or one a reorganization undid), and only this payout can pay them.
+    ///      R-16: a pending claim bound to an input that is no longer a lineage note of its vault (a proven deposit took
+    ///      over that tag from a change record, which could never have been a real note) is bound to this input instead.
     function _commitClaim(SpendCommit calldata c, uint256 i, uint64 fee) internal returns (uint64 amount) {
         bytes32 id = c.claimIds[i];
         uint8 output = c.claimOutputs[i];
@@ -157,7 +167,7 @@ contract ZecuredSpendLogic is ZecuredRegistryStorage, IZecuredSpendCommitsEvents
         bytes32 commitment = cl.commitment;
         if (commitment == bytes32(0)) revert ClaimDestinationUnset(id);
         if (_claimRefOf[c.payoutRef][commitment] != bytes32(0)) revert DuplicateClaimCommitment(commitment);
-        if (bound == bytes32(0)) _claimInput[id] = c.inputTag;
+        if (bound == bytes32(0) || _lineage[bound].vaultId != c.vaultId) _claimInput[id] = c.inputTag;
         else if (bound != c.inputTag) revert ClaimBoundToAnotherInput(id, bound);
 
         bytes32 ref = c.claimRefs[i];
@@ -170,14 +180,95 @@ contract ZecuredSpendLogic is ZecuredRegistryStorage, IZecuredSpendCommitsEvents
         _claimRefOf[c.payoutRef][commitment] = ref;
     }
 
-    // ------------------------------------------------------------------ disputes (T-05 (a))
+    // ------------------------------------------------------------------ confirmations (R-1, R-3)
+
+    /// @inheritdoc IZecuredPayouts
+    function confirmPayout(bytes32 vaultId, bytes32 payoutRef, bytes32[] calldata claimIds, bytes[] calldata sigs)
+        external
+    {
+        _onlyDelegated();
+        uint256 n = claimIds.length;
+        if (n == 0) revert NoClaims();
+        // R-3: the signers' word is not taken while a theft case is open on the vault, nor after one was executed.
+        address slasher = _slasher();
+        if (slasher != address(0) && IZecuredSlasher(slasher).vaultFrozen(vaultId)) revert VaultFrozen(vaultId);
+        bytes32 input = _spends[payoutRef].inputTag;
+        if (vaultId == bytes32(0) || _spends[payoutRef].vaultId != vaultId) {
+            revert PayoutNotOfVault(vaultId, payoutRef);
+        }
+        if (_payoutConfirmed[payoutRef]) revert PayoutAlreadyConfirmed(payoutRef);
+        _verifySignerSignatures(
+            _hashTypedDataV4(ZecuredEIP712.hashPayoutConfirmation(vaultId, payoutRef, claimIds)), sigs, SIGNER_THRESHOLD
+        );
+        _payoutConfirmed[payoutRef] = true;
+
+        for (uint256 i; i < n; ++i) {
+            bytes32 id = claimIds[i];
+            Claim storage c = _claims[id];
+            ClaimStatus status = c.status;
+            if (status == ClaimStatus.None) revert UnknownClaim(id);
+            if (c.vaultId != vaultId) revert ClaimVaultMismatch(id, vaultId);
+            if (status == ClaimStatus.Paid) revert ClaimAlreadyPaid(id); // also rejects duplicate ids
+            if (status != ClaimStatus.Pending) revert ClaimNotPayable(id);
+            // R-1: a reopened claim's confirmation was disputed and not upheld: only a proof pays it now.
+            if (_reopened[id]) revert ClaimReopened(id);
+            // Tier 3: a claim is paid by a committed payout only, which its claimant can check (F3); every commitment
+            // of its input pays the same claims (RT-4).
+            bytes32 bound = _claimInput[id];
+            if (bound == bytes32(0)) revert ClaimNotCommitted(id);
+            if (bound != input) revert PayoutNotOfClaim(id, payoutRef);
+            // A uint40 of seconds outlasts the chain.
+            // forge-lint: disable-next-line(unsafe-typecast)
+            c.paidAt = uint40(block.timestamp); // its claimant may dispute this for `disputeWindow`
+            _closeClaim(c, ClaimStatus.Paid);
+        }
+        _unproven[vaultId] += n;
+        emit PayoutConfirmed(vaultId, payoutRef, claimIds);
+    }
+
+    /// @inheritdoc IZecuredPayouts
+    function hashPayoutConfirmation(bytes32 vaultId, bytes32 payoutRef, bytes32[] calldata claimIds)
+        external
+        view
+        returns (bytes32)
+    {
+        _onlyDelegated(); // the Registry's domain: under delegatecall `address(this)` is the Registry
+        return _hashTypedDataV4(ZecuredEIP712.hashPayoutConfirmation(vaultId, payoutRef, claimIds));
+    }
+
+    /// @inheritdoc IZecuredPayouts
+    function payoutConfirmed(bytes32 payoutRef) external view returns (bool) {
+        return _payoutConfirmed[payoutRef];
+    }
+
+    /// @inheritdoc IZecuredPayouts
+    function unprovenConfirmations(bytes32 vaultId) external view returns (uint256) {
+        return _unproven[vaultId];
+    }
+
+    /// @inheritdoc IZecuredPayouts
+    function expireConfirmation(bytes32 claimId) external {
+        _onlyDelegated();
+        Claim storage c = _claims[claimId];
+        uint64 paidAt = c.paidAt;
+        if (c.status != ClaimStatus.Paid || paidAt == 0) revert NotUnproven(claimId);
+        uint64 closesAt = paidAt + disputeWindow;
+        if (block.timestamp <= closesAt) revert DisputeWindowOpen(claimId, closesAt);
+        bytes32 vaultId = c.vaultId;
+        if (_suspect(vaultId, paidAt)) revert ConfirmationSuspect(claimId);
+        c.paidAt = 0;
+        _unproven[vaultId] -= 1;
+        emit ConfirmationExpired(vaultId, claimId);
+    }
+
+    // ------------------------------------------------------------------ disputes and proofs (T-05 (a), v4)
 
     /// @inheritdoc IZecuredDisputes
     function disputePayout(bytes32 claimId) external {
         _onlyDelegated();
         Claim storage c = _claims[claimId];
         uint64 paidAt = c.paidAt;
-        // A bond-paid claim's claimant has its USDC; an upheld confirmation has `paidAt` zero.
+        // A bond-paid claim's claimant has its USDC; a final claim (proven, or expired) has `paidAt` zero.
         if (c.status != ClaimStatus.Paid || paidAt == 0 || c.bondPaid) revert NotDisputable(claimId);
         address claimant = _claimant(claimId, c);
         if (claimant == address(0)) revert NotDisputable(claimId);
@@ -186,16 +277,14 @@ contract ZecuredSpendLogic is ZecuredRegistryStorage, IZecuredSpendCommitsEvents
         if (block.timestamp > closesAt) revert DisputeWindowClosed(claimId, closesAt);
         bytes32 vaultId = c.vaultId;
         // The compensator has tallied a compromised vault's claims: a claim unpaid again there would never settle.
-        address slasher = IZecuredRegistry(address(this)).slasher();
-        if (slasher != address(0) && IZecuredSlasher(slasher).isCompromised(vaultId)) {
-            revert DisputeVaultCompromised(vaultId);
-        }
+        if (_compromised(vaultId)) revert DisputeVaultCompromised(vaultId);
 
         // Unpaid again until resolved: it keeps (or reopens) the vault and counts in `lockedZatoshi`.
         Vault storage v = _vaults[vaultId];
         if (_settled(v)) _openVaults += 1;
         v.unpaidClaims += 1;
         _pendingClaimZat += c.amount;
+        _unproven[vaultId] -= 1;
         // A uint64 of seconds outlasts the chain.
         // forge-lint: disable-next-line(unsafe-typecast)
         uint64 dueAt = uint64(block.timestamp) + inclusionWindow;
@@ -209,21 +298,36 @@ contract ZecuredSpendLogic is ZecuredRegistryStorage, IZecuredSpendCommitsEvents
     /// @inheritdoc IZecuredDisputes
     function upholdPayout(bytes32 claimId, bytes32 payoutRef) external {
         _onlyDelegated();
-        address slasher = IZecuredRegistry(address(this)).slasher();
+        address slasher = _slasher();
         if (msg.sender != slasher || slasher == address(0)) revert OnlySlasher(msg.sender);
         Claim storage c = _claims[claimId];
         ClaimStatus status = c.status;
+        if (status == ClaimStatus.Paid) {
+            if (c.paidAt == 0) revert AlreadyFinal(claimId);
+        } else if (status != ClaimStatus.Pending && status != ClaimStatus.Disputed) {
+            revert NotUpholdable(claimId);
+        }
+        // Every commitment of an input pays the same claims (RT-4), so any committed payout of this claim's input, of
+        // its vault, pays it. On a frozen or compromised vault too: the compensator waits for such proofs (R-2) and
+        // takes over only the claims nobody proved.
+        bytes32 vaultId = c.vaultId;
+        bytes32 input = _claimInput[claimId];
+        SpendRecord storage s = _spends[payoutRef];
+        if (input == bytes32(0) || s.inputTag != input || s.vaultId != vaultId) {
+            revert PayoutNotOfClaim(claimId, payoutRef);
+        }
+        if (status == ClaimStatus.Paid) {
+            // Confirmed by signatures, now proven: the dispute window closes.
+            c.paidAt = 0;
+            _unproven[vaultId] -= 1;
+            emit PayoutProven(vaultId, claimId, payoutRef);
+            return;
+        }
         // D57: a proof that comes after the inclusion window still upholds a reopened claim, also one the bonds paid
         // meanwhile (their reimbursement is then forgone: the claim's ZEC reached its claimant).
-        if (status != ClaimStatus.Disputed && !(status == ClaimStatus.Pending && _reopened[claimId])) {
-            revert NotDisputed(claimId);
-        }
-        // Every commitment of an input pays the same claims (RT-4), so any committed payout of this claim's input pays
-        // it.
-        bytes32 input = _claimInput[claimId];
-        if (input == bytes32(0) || _spends[payoutRef].inputTag != input) revert PayoutNotOfClaim(claimId, payoutRef);
+        if (status == ClaimStatus.Disputed || _reopened[claimId]) emit PayoutUpheld(vaultId, claimId, payoutRef);
+        else emit PayoutProven(vaultId, claimId, payoutRef);
         c.disputeDueAt = 0;
-        emit PayoutUpheld(c.vaultId, claimId, payoutRef);
         _closeClaim(c, ClaimStatus.Paid);
     }
 
@@ -362,6 +466,72 @@ contract ZecuredSpendLogic is ZecuredRegistryStorage, IZecuredSpendCommitsEvents
         return _reservedRefund[depositTag];
     }
 
+    // ------------------------------------------------------------------ hooks: the compensator (T-04, v4)
+
+    /// @inheritdoc IZecuredPayouts
+    function settleCompensatedClaim(bytes32 claimId) external {
+        _onlyDelegated();
+        _onlyCompensator();
+        Claim storage c = _claims[claimId];
+        bytes32 vaultId = c.vaultId;
+        if (!_compromised(vaultId)) revert NotCompensable(claimId);
+        ClaimStatus status = c.status;
+        if (status == ClaimStatus.Pending) {
+            _closeClaim(c, ClaimStatus.Compensated);
+        } else if (status == ClaimStatus.Paid && c.paidAt != 0 && _suspect(vaultId, c.paidAt)) {
+            // R-3: confirmed shortly before the freeze and never proven: counted unpaid (already off the books).
+            c.paidAt = 0;
+            c.status = ClaimStatus.Compensated;
+            _unproven[vaultId] -= 1;
+        } else if (status == ClaimStatus.WrittenOff && c.kind == ClaimKind.Refund) {
+            // R-21: an abandoned refund (off the books, its note taken with the vault's lineage).
+            c.status = ClaimStatus.Compensated;
+        } else {
+            revert NotCompensable(claimId);
+        }
+        emit ClaimCompensated(vaultId, claimId);
+    }
+
+    /// @inheritdoc IZecuredPayouts
+    function closeMisdirectedClaim(bytes32 claimId) external {
+        _onlyDelegated();
+        _onlyCompensator();
+        Claim storage c = _claims[claimId];
+        ClaimStatus status = c.status;
+        if (status == ClaimStatus.Pending || status == ClaimStatus.Disputed) {
+            c.disputeDueAt = 0;
+            _closeClaim(c, ClaimStatus.Compensated);
+        } else if (status == ClaimStatus.Paid && c.paidAt != 0) {
+            c.paidAt = 0;
+            c.status = ClaimStatus.Compensated;
+            _unproven[c.vaultId] -= 1;
+        } else {
+            return; // final, compensated already, or never paid by a payout: nothing more is owed on Zcash
+        }
+        emit ClaimCompensated(c.vaultId, claimId);
+    }
+
+    /// @inheritdoc IZecuredPayouts
+    function markVaultCompensated(bytes32 vaultId) external {
+        _onlyDelegated();
+        _onlyCompensator();
+        Vault storage v = _vaults[vaultId];
+        if (v.status != VaultStatus.Active || _compensatedVault[vaultId] || !_compromised(vaultId)) {
+            revert NotCompensableVault(vaultId);
+        }
+        _compensatedVault[vaultId] = true;
+        uint64 outstanding = v.outstanding;
+        _compensatedZat += outstanding;
+        // Active, so counted as open until now; its claims were all tallied, and a compromised vault takes no new one.
+        _settle();
+        emit VaultCompensated(vaultId, outstanding);
+    }
+
+    /// @inheritdoc IZecuredPayouts
+    function vaultCompensated(bytes32 vaultId) external view returns (bool) {
+        return _compensatedVault[vaultId];
+    }
+
     // ------------------------------------------------------------------ internal
 
     function _onlyDelegated() internal view {
@@ -379,6 +549,30 @@ contract ZecuredSpendLogic is ZecuredRegistryStorage, IZecuredSpendCommitsEvents
         if (slasher != address(0) && IZecuredSlasher(slasher).isCompromised(vaultId)) {
             revert IZecuredRegistry.VaultCompromised(vaultId);
         }
+    }
+
+    function _onlyCompensator() internal view {
+        address compensator = IZecuredRegistry(address(this)).compensator();
+        if (msg.sender != compensator || compensator == address(0)) revert OnlyCompensator(msg.sender);
+    }
+
+    /// @dev The Registry's slasher (zero on deployments without bonds).
+    function _slasher() internal view returns (address) {
+        return IZecuredRegistry(address(this)).slasher();
+    }
+
+    function _compromised(bytes32 vaultId) internal view returns (bool) {
+        address slasher = _slasher();
+        return slasher != address(0) && IZecuredSlasher(slasher).isCompromised(vaultId);
+    }
+
+    /// @dev R-3: a confirmation by signatures made within `disputeWindow` before its vault froze (an F1/F2 case open,
+    ///      or executed). No confirmation is accepted while the vault is frozen, so every confirmation precedes the freeze.
+    function _suspect(bytes32 vaultId, uint64 paidAt) internal view returns (bool) {
+        address slasher = _slasher();
+        if (slasher == address(0)) return false;
+        uint64 frozenSince = IZecuredSlasher(slasher).frozenSince(vaultId);
+        return frozenSince != 0 && paidAt + disputeWindow > frozenSince;
     }
 
     /// @dev As `ZecuredRegistry.claimDetails`: the third party of a Liquidation or CloseMarketMaker claim, the vault's

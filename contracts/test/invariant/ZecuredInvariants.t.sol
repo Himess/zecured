@@ -7,6 +7,7 @@ import {VaultStatus, ClaimKind, ClaimStatus, ClaimDetails} from "../../src/inter
 import {LineageNote} from "../../src/interfaces/v3/IZecuredSpendCommits.sol";
 import {PendingActivation, PendingRefund} from "../../src/interfaces/v3/IZecuredIntake.sol";
 import {IZecuredDisputes} from "../../src/interfaces/v3/IZecuredDisputes.sol";
+import {IZecuredPayouts} from "../../src/interfaces/v3/IZecuredPayouts.sol";
 import {IZecuredRefunds} from "../../src/interfaces/v3/IZecuredRefunds.sol";
 import {ZecuredFixture} from "../utils/ZecuredFixture.sol";
 import {MockHeaderRelay} from "../mocks/MockHeaderRelay.sol";
@@ -70,7 +71,7 @@ contract ZecuredInvariantsTest is ZecuredFixture {
         usdc.transferOwnership(address(handler)); // MOCK mint for the handler's actors
         oracle.transferOwnership(address(handler)); // MOCK price moves
 
-        bytes4[] memory selectors = new bytes4[](57);
+        bytes4[] memory selectors = new bytes4[](61);
         selectors[0] = ZecuredHandler.prove.selector;
         selectors[1] = ZecuredHandler.prove.selector; // weighted: deposits first
         selectors[2] = ZecuredHandler.prove.selector;
@@ -130,6 +131,11 @@ contract ZecuredInvariantsTest is ZecuredFixture {
         selectors[54] = ZecuredHandler.proveSecond.selector;
         selectors[55] = ZecuredHandler.proveSecond.selector;
         selectors[56] = ZecuredHandler.markDormant.selector;
+        // v4: proven delivery, expired confirmations (R-3), replays and final claims (R-1).
+        selectors[57] = ZecuredHandler.provePayout.selector;
+        selectors[58] = ZecuredHandler.provePayout.selector;
+        selectors[59] = ZecuredHandler.expireConfirmation.selector;
+        selectors[60] = ZecuredHandler.attackReplayOrFinal.selector;
         targetSelector(FuzzSelector({addr: address(handler), selectors: selectors}));
         targetContract(address(handler));
         // The handler pranks its own actors, so the caller does not matter. A fixed caller matters on a fork: every
@@ -463,6 +469,60 @@ contract ZecuredInvariantsTest is ZecuredFixture {
         assertEq(registry.lockedZatoshi(), zzec.totalSupply() + unpaid, "lockedZatoshi");
     }
 
+    /// v4 (R-3, proven delivery): a vault's `unprovenConfirmations` counts exactly its claims confirmed by signatures
+    /// and not yet final (Paid with `paidAt != 0`); a final claim (`paidAt == 0`) is never counted.
+    function invariant_unprovenConfirmations() public view {
+        IZecuredDisputes disputes = IZecuredDisputes(address(registry));
+        for (uint256 i; i < handler.vaultCount(); ++i) {
+            bytes32 vaultId = handler.vaultIds(i);
+            uint256 open;
+            uint64 count = registry.claimCount(vaultId);
+            for (uint64 j; j < count; ++j) {
+                bytes32 claimId = registry.claimIdOf(vaultId, j);
+                (,,,, ClaimStatus s) = registry.claim(claimId);
+                (uint64 paidAt,) = disputes.payoutDispute(claimId);
+                if (s == ClaimStatus.Paid && paidAt != 0) ++open;
+            }
+            assertEq(IZecuredPayouts(address(registry)).unprovenConfirmations(vaultId), open, "unproven confirmations");
+        }
+    }
+
+    /// The v4 actions do reach their success paths (the review found the campaign never exercised payout proofs): one
+    /// deterministic sequence through the handler, a pending claim proven, a confirmation proven, another expired.
+    function test_handler_exercisesTheV4PayoutPaths() public {
+        uint256 confirmed = _seedWithMix(0);
+        uint256 pendingOnly = _seedWithMix(1);
+        for (uint256 i; handler.pendingCount() < 2 && i < 40; ++i) {
+            handler.prove(i, false, false);
+        }
+        assertEq(handler.pendingCount(), 2, "two deposits pending");
+        handler.finalize(0);
+        handler.finalize(0);
+        // Vault 0: a partial release whose payout is committed, then proven before anyone confirms it.
+        handler.partialRelease(0, 0);
+        handler.provePayout(0, pendingOnly);
+        assertEq(handler.calls("prove pending"), 1, "a committed pending claim proven");
+        // Vault 1: a release committed and confirmed, then proven.
+        handler.release(1);
+        handler.confirm(1, 7, false);
+        assertEq(handler.calls("confirm"), 1);
+        handler.provePayout(1, confirmed);
+        assertEq(handler.calls("prove confirmed"), 1, "a confirmation proven");
+        // Vault 0 again: a confirmation nobody disputes expires.
+        handler.release(0);
+        handler.confirm(0, 3, false);
+        assertEq(handler.calls("confirm"), 2);
+        handler.expireConfirmation(0);
+        assertEq(handler.calls("expire"), 1, "an old confirmation expired");
+        assertFalse(handler.violated(), handler.violation());
+        assertFalse(handler.attackSucceeded());
+    }
+
+    /// A seed whose hash (the handler's `_mix`) has the given parity.
+    function _seedWithMix(uint256 parity) internal pure returns (uint256 seed) {
+        while (uint256(keccak256(abi.encode(seed))) % 2 != parity) ++seed;
+    }
+
     // ------------------------------------------------------------------ violations caught while acting
 
     /// D14: every partial release left the position at <= 50 % LTV and at least MIN_RELEASE in the vault, kept the
@@ -493,7 +553,7 @@ contract ZecuredInvariantsTest is ZecuredFixture {
     }
 
     function afterInvariant() external view {
-        string[66] memory names = [
+        string[72] memory names = [
             "prove: pending",
             "prove: refund (known vault)",
             "prove: refund (account bound)",
@@ -537,6 +597,11 @@ contract ZecuredInvariantsTest is ZecuredFixture {
             "commit",
             "commit only",
             "confirm",
+            "confirm (frozen)",
+            "prove pending",
+            "prove confirmed",
+            "expire",
+            "expire (suspect)",
             "dispute",
             "uphold",
             "uphold late",
@@ -559,7 +624,8 @@ contract ZecuredInvariantsTest is ZecuredFixture {
             "preLiquidate",
             "preLiquidate (refused)",
             "attack: pre-liquidation",
-            "attack: spend pending refund"
+            "attack: spend pending refund",
+            "attack: replay or final"
         ];
         for (uint256 i; i < names.length; ++i) {
             console.log(names[i], handler.calls(names[i]));

@@ -3,6 +3,7 @@ pragma solidity 0.8.28;
 
 import {IZecuredRegistry, ClaimStatus} from "../../src/interfaces/v3/IZecuredRegistry.sol";
 import {IZecuredDisputes, IZecuredDisputesEvents} from "../../src/interfaces/v3/IZecuredDisputes.sol";
+import {IZecuredPayoutsEvents} from "../../src/interfaces/v3/IZecuredPayouts.sol";
 import {IZecuredSlasher, ViolationKind} from "../../src/interfaces/v3/IZecuredSlasher.sol";
 import {IZecuredVersions, VersionKind} from "../../src/interfaces/v3/IZecuredVersions.sol";
 import {IZecuredSpendCommitsEvents} from "../../src/interfaces/v3/IZecuredSpendCommits.sol";
@@ -117,11 +118,18 @@ contract DisputesTest is DisputesBase {
         assertEq(confirmedAt, 0);
         assertEq(dueAt, due);
 
-        // No signature confirms it meanwhile (a new payout of its input may be committed, D57, but only a proof
-        // upholds it), and no bond leaves in full.
-        bytes[] memory sigs = _threeSigs(registry.hashPayoutConfirmation(vaultId, _one(claimId)));
+        // No signature confirms it meanwhile: not that payout again (R-1: each payout is confirmed once), nor a new
+        // payout of its input (D57 lets one be committed, but only a proof upholds the claim); and no bond leaves in
+        // full.
+        bytes[] memory sigs = _threeSigs(_payouts().hashPayoutConfirmation(vaultId, payoutRef, _one(claimId)));
+        vm.expectRevert(abi.encodeWithSelector(IZecuredPayoutsEvents.PayoutAlreadyConfirmed.selector, payoutRef));
+        _payouts().confirmPayout(vaultId, payoutRef, _one(claimId), sigs);
+        SpendCommit memory again =
+            _spendCommit(vaultId, _depositTagFor(account), _one(claimId), keccak256("zecured.disputes.meanwhile"));
+        _send(again);
+        sigs = _threeSigs(_payouts().hashPayoutConfirmation(vaultId, again.payoutRef, _one(claimId)));
         vm.expectRevert(abi.encodeWithSelector(IZecuredSpendCommitsEvents.ClaimNotPayable.selector, claimId));
-        registry.confirmPayout(vaultId, _one(claimId), sigs);
+        _payouts().confirmPayout(vaultId, again.payoutRef, _one(claimId), sigs);
         vm.prank(signerSet[0]);
         vm.expectRevert(abi.encodeWithSelector(ISignerBond.FullExitLocked.selector, 1, 0, uint64(paidAt) + WINDOW));
         bond.requestUnbond(MIN_BOND);
@@ -231,7 +239,7 @@ contract DisputesTest is DisputesBase {
         vm.prank(account);
         vm.expectRevert(abi.encodeWithSelector(IZecuredDisputesEvents.NotDisputable.selector, claimId));
         disputes.disputePayout(claimId);
-        vm.expectRevert(abi.encodeWithSelector(IZecuredDisputesEvents.NotDisputed.selector, claimId));
+        vm.expectRevert(abi.encodeWithSelector(IZecuredDisputesEvents.AlreadyFinal.selector, claimId));
         slasher.proveInclusion(journal, seal, violationImage, claimId);
     }
 
@@ -313,11 +321,11 @@ contract DisputesTest is DisputesBase {
             claimId,
             abi.encodeWithSelector(IZecuredDisputesEvents.PayoutNotOfClaim.selector, claimId, otherRef)
         );
-        // A claim nobody disputes.
+        // A claim nobody disputed is proven too (v4, proven delivery): then it is final.
+        bytes memory otherJournal = _included(ANCHOR, otherRef);
+        slasher.proveInclusion(otherJournal, _seal(otherJournal), violationImage, otherClaim);
         _proveIncludedExpectRevert(
-            _included(ANCHOR, otherRef),
-            otherClaim,
-            abi.encodeWithSelector(IZecuredDisputesEvents.NotDisputed.selector, otherClaim)
+            otherJournal, otherClaim, abi.encodeWithSelector(IZecuredDisputesEvents.AlreadyFinal.selector, otherClaim)
         );
         // Only the slasher upholds.
         vm.prank(stranger);
@@ -352,20 +360,28 @@ contract DisputesTest is DisputesBase {
         vm.expectRevert(abi.encodeWithSelector(IZecuredDisputesEvents.NotDisputed.selector, claimId));
         disputes.reopenDisputedClaim(claimId);
 
-        // Payable again: a new payout of the same input and claims, confirmed, which its claimant may dispute again.
+        // R-1: the old confirmation's signatures are never replayed: that payout's confirmation was recorded.
+        bytes[] memory old = _threeSigs(_payouts().hashPayoutConfirmation(vaultId, payoutRef, _one(claimId)));
+        vm.expectRevert(abi.encodeWithSelector(IZecuredPayoutsEvents.PayoutAlreadyConfirmed.selector, payoutRef));
+        _payouts().confirmPayout(vaultId, payoutRef, _one(claimId), old);
+        // Payable again by a new payout of the same input and claims (D57), which no signature confirms any more: a
+        // reopened claim is paid only by a proof.
         SpendCommit memory again =
             _spendCommit(vaultId, _depositTagFor(account), _one(claimId), keccak256("zecured.disputes.again"));
         _send(again);
-        _confirm(vaultId, _one(claimId));
+        bytes[] memory sigs = _threeSigs(_payouts().hashPayoutConfirmation(vaultId, again.payoutRef, _one(claimId)));
+        vm.expectRevert(abi.encodeWithSelector(IZecuredPayoutsEvents.ClaimReopened.selector, claimId));
+        _payouts().confirmPayout(vaultId, again.payoutRef, _one(claimId), sigs);
+        assertEq(uint8(_claimStatus(claimId)), uint8(ClaimStatus.Pending));
+        // Any committed payout of the claim's input pays it, the first one included; then it is final.
+        _upholdWith(again.payoutRef, claimId);
         assertEq(uint8(_claimStatus(claimId)), uint8(ClaimStatus.Paid));
         assertEq(registry.openVaultCount(), 0);
         (confirmedAt,) = disputes.payoutDispute(claimId);
-        assertEq(confirmedAt, block.timestamp);
-        _dispute();
-        // Any committed payout of the claim's input upholds it, the first one included.
-        bytes memory journal = _included(ANCHOR, payoutRef);
-        slasher.proveInclusion(journal, _seal(journal), violationImage, claimId);
-        assertEq(uint8(_claimStatus(claimId)), uint8(ClaimStatus.Paid));
+        assertEq(confirmedAt, 0, "final");
+        vm.prank(account);
+        vm.expectRevert(abi.encodeWithSelector(IZecuredDisputesEvents.NotDisputable.selector, claimId));
+        disputes.disputePayout(claimId);
     }
 
     function test_reopenedClaim_isPaidByTheBonds_onItsOriginalSchedule() public {
@@ -386,14 +402,19 @@ contract DisputesTest is DisputesBase {
         assertEq(usdc.balanceOf(account), before + amount);
         assertTrue(registry.claimDetails(claimId).bondPaid);
 
-        // Its ZEC now reimburses the bonds; that payout's confirmation is not the claimant's to dispute.
+        // Its ZEC now reimburses the bonds, to the destination all five signers give (R-6); being reopened, the claim
+        // is paid by a proof of that payout (R-1), never by the signers' word; nothing is left for its claimant to
+        // dispute.
         bytes32 dest = keccak256("zecured.disputes.reimburse");
         uint64 deadline = uint64(block.timestamp + 1 hours);
         registry.setReimburseDestination(
-            claimId, dest, deadline, _threeSigs(registry.hashReimburseDestination(claimId, dest, deadline))
+            claimId, dest, deadline, _fiveSigs(registry.hashReimburseDestination(claimId, dest, deadline))
         );
-        _send(_spendCommit(vaultId, _depositTagFor(account), _one(claimId), keccak256("zecured.disputes.reimburse")));
-        _confirm(vaultId, _one(claimId));
+        SpendCommit memory reimburse =
+            _spendCommit(vaultId, _depositTagFor(account), _one(claimId), keccak256("zecured.disputes.reimburse"));
+        _send(reimburse);
+        _upholdWith(reimburse.payoutRef, claimId);
+        assertEq(uint8(_claimStatus(claimId)), uint8(ClaimStatus.Paid));
         vm.prank(account);
         vm.expectRevert(abi.encodeWithSelector(IZecuredDisputesEvents.NotDisputable.selector, claimId));
         disputes.disputePayout(claimId);
@@ -422,15 +443,17 @@ contract DisputesTest is DisputesBase {
         vm.expectRevert(abi.encodeWithSelector(IZecuredDisputesEvents.NotDisputable.selector, claimId));
         disputes.disputePayout(claimId);
         _proveIncludedExpectRevert(
-            journal, claimId, abi.encodeWithSelector(IZecuredDisputesEvents.NotDisputed.selector, claimId)
+            journal, claimId, abi.encodeWithSelector(IZecuredDisputesEvents.AlreadyFinal.selector, claimId)
         );
-        // A committed claim that was never disputed is confirmed by the signers, not by a proof.
+        // v4: a committed claim that was never disputed is proven the same way (PayoutProven, not PayoutUpheld).
         (bytes32 otherClaim, bytes32 otherRef) = _otherCommitted();
-        _proveIncludedExpectRevert(
-            _included(ANCHOR, otherRef),
-            otherClaim,
-            abi.encodeWithSelector(IZecuredDisputesEvents.NotDisputed.selector, otherClaim)
-        );
+        bytes memory otherJournal = _included(ANCHOR, otherRef);
+        bytes memory otherSeal = _seal(otherJournal);
+        (bytes32 otherVault,,,,) = registry.claim(otherClaim);
+        vm.expectEmit(address(registry));
+        emit IZecuredDisputesEvents.PayoutProven(otherVault, otherClaim, otherRef);
+        slasher.proveInclusion(otherJournal, otherSeal, violationImage, otherClaim);
+        assertEq(uint8(_claimStatus(otherClaim)), uint8(ClaimStatus.Paid));
     }
 
     /// D57: the bonds paid the reopened claim, then a proof shows that its payout had landed: the claim is paid, the
@@ -504,6 +527,11 @@ contract DisputesTest is DisputesBase {
         compensator.tallyClaim(claimId);
 
         disputes.reopenDisputedClaim(claimId); // the inclusion window ended during the challenge window
+        // R-2: a committed claim gets the inclusion window from the compromise for a proof of its payout.
+        uint64 provableUntil = slasher.compromisedAt(vaultId) + INCLUSION_WINDOW;
+        vm.expectRevert(abi.encodeWithSelector(IZecuredCompensator.ProofWindowOpen.selector, claimId, provableUntil));
+        compensator.tallyClaim(claimId);
+        vm.warp(provableUntil);
         compensator.tallyClaim(claimId);
         assertEq(uint8(_claimStatus(claimId)), uint8(ClaimStatus.Compensated));
         compensator.tallyVault(vaultId);
@@ -568,7 +596,8 @@ contract DisputedFeePayoutTest is DisputesBase {
             _spendCommit(vaultId, input, _two(releaseId, feeId), keccak256("zecured.disputes.fee.again"));
         _send(again);
         assertEq(registry.claimPayment(again.claimRefs[1]).expected, registry.claimDetails(feeId).amount - 5_000);
-        _confirm(vaultId, _one(releaseId));
+        // The reopened release is paid by a proof of the new payout (R-1: never by a confirmation).
+        _upholdWith(again.payoutRef, releaseId);
         assertEq(uint8(_feeCaseStatus(releaseId)), uint8(ClaimStatus.Paid));
         assertEq(registry.openVaultCount(), 0, "the vault settles again");
         assertEq(registry.lockedZatoshi(), 0);

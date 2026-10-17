@@ -12,6 +12,8 @@ import {ZZEC} from "../../src/ZZEC.sol";
 import {ZecuredRegistry} from "../../src/ZecuredRegistry.sol";
 import {ZecuredSpendLogic} from "../../src/registry/ZecuredSpendLogic.sol";
 import {IZecuredSpendCommitsEvents} from "../../src/interfaces/v3/IZecuredSpendCommits.sol";
+import {IZecuredPayoutsEvents} from "../../src/interfaces/v3/IZecuredPayouts.sol";
+import {IZecuredDisputes, IZecuredDisputesEvents} from "../../src/interfaces/v3/IZecuredDisputes.sol";
 import {IZecuredRefunds} from "../../src/interfaces/v3/IZecuredRefunds.sol";
 import {SettlementAdapter} from "../../src/SettlementAdapter.sol";
 import {IZZEC} from "../../src/interfaces/IZZEC.sol";
@@ -168,18 +170,21 @@ contract ZecuredRegistryTest is ZecuredFixture {
         bytes32[] memory ids = new bytes32[](2);
         ids[0] = claimId;
         ids[1] = registry.claimIdOf(vaultId, 1);
+        bytes32 payoutRef = keccak256("zecured.registry.payoutRef");
         json = string.concat(
             types,
-            '"PayoutConfirmation":[{"name":"vaultId","type":"bytes32"},{"name":"claimIdsHash","type":"bytes32"}]},',
+            '"PayoutConfirmation":[{"name":"vaultId","type":"bytes32"},{"name":"payoutRef","type":"bytes32"},{"name":"claimIdsHash","type":"bytes32"}]},',
             '"primaryType":"PayoutConfirmation",',
             domain,
             ',"message":{"vaultId":"',
             vm.toString(vaultId),
+            '","payoutRef":"',
+            vm.toString(payoutRef),
             '","claimIdsHash":"',
             vm.toString(keccak256(abi.encodePacked(ids))),
             '"}}'
         );
-        assertEq(registry.hashPayoutConfirmation(vaultId, ids), vm.eip712HashTypedData(json));
+        assertEq(_payouts().hashPayoutConfirmation(vaultId, payoutRef, ids), vm.eip712HashTypedData(json));
     }
 
     // ================================================================== constructor
@@ -407,11 +412,11 @@ contract ZecuredRegistryTest is ZecuredFixture {
     // ================================================================== signer signatures (every 3-of-5 call)
 
     /// A released vault whose claim is committed: ready for `confirmPayout`.
-    function _committedClaim(address acct) internal returns (bytes32 vaultId, bytes32[] memory ids) {
+    function _committedClaim(address acct) internal returns (bytes32 vaultId, bytes32[] memory ids, bytes32 ref) {
         bytes32 claimId;
         (vaultId, claimId) = _releasedVault(acct, VAULT_001);
         ids = _ids(claimId);
-        _commitNext(vaultId, ids);
+        ref = _commitNext(vaultId, ids).payoutRef;
     }
 
     function test_signatures_acceptAnyThreeOrMoreDistinctSignersInOrder() public {
@@ -424,80 +429,92 @@ contract ZecuredRegistryTest is ZecuredFixture {
         sets[4] = new uint256[](5);
         (sets[4][0], sets[4][1], sets[4][2], sets[4][3], sets[4][4]) = (0, 1, 2, 3, 4);
         for (uint256 i; i < sets.length; ++i) {
-            (bytes32 vaultId, bytes32[] memory ids) =
+            (bytes32 vaultId, bytes32[] memory ids, bytes32 ref) =
                 _committedClaim(makeAddr(string.concat("zecured.registry.multi", vm.toString(i))));
-            registry.confirmPayout(vaultId, ids, _signerSigs(registry.hashPayoutConfirmation(vaultId, ids), sets[i]));
+            bytes[] memory sigs = _signerSigs(_payouts().hashPayoutConfirmation(vaultId, ref, ids), sets[i]);
+            _payouts().confirmPayout(vaultId, ref, ids, sigs);
             (,,,, ClaimStatus status) = registry.claim(ids[0]);
             assertEq(uint8(status), uint8(ClaimStatus.Paid));
         }
     }
 
     function test_signatures_revertWithFewerThanThree() public {
-        (bytes32 vaultId, bytes32[] memory ids) = _committedClaim(account);
-        bytes32 digest = registry.hashPayoutConfirmation(vaultId, ids);
+        (bytes32 vaultId, bytes32[] memory ids, bytes32 ref) = _committedClaim(account);
+        bytes32 digest = _payouts().hashPayoutConfirmation(vaultId, ref, ids);
+        bytes[] memory two = _signerSigs(digest, _idx(0, 4));
         vm.expectRevert(abi.encodeWithSelector(IZecuredSignerErrors.InsufficientSignatures.selector, 2));
-        registry.confirmPayout(vaultId, ids, _signerSigs(digest, _idx(0, 4)));
+        _payouts().confirmPayout(vaultId, ref, ids, two);
         vm.expectRevert(abi.encodeWithSelector(IZecuredSignerErrors.InsufficientSignatures.selector, 0));
-        registry.confirmPayout(vaultId, ids, new bytes[](0));
+        _payouts().confirmPayout(vaultId, ref, ids, new bytes[](0));
     }
 
     function test_signatures_revertWithThreeSignaturesFromTwoSigners() public {
-        (bytes32 vaultId, bytes32[] memory ids) = _committedClaim(account);
-        bytes32 digest = registry.hashPayoutConfirmation(vaultId, ids);
+        (bytes32 vaultId, bytes32[] memory ids, bytes32 ref) = _committedClaim(account);
+        bytes32 digest = _payouts().hashPayoutConfirmation(vaultId, ref, ids);
+        bytes[] memory sigs = _signerSigs(digest, _idx(0, 1, 1));
         vm.expectRevert(abi.encodeWithSelector(IZecuredSignerErrors.SignaturesNotSorted.selector, 2));
-        registry.confirmPayout(vaultId, ids, _signerSigs(digest, _idx(0, 1, 1)));
+        _payouts().confirmPayout(vaultId, ref, ids, sigs);
+        sigs = _signerSigs(digest, _idx(3, 3, 4));
         vm.expectRevert(abi.encodeWithSelector(IZecuredSignerErrors.SignaturesNotSorted.selector, 1));
-        registry.confirmPayout(vaultId, ids, _signerSigs(digest, _idx(3, 3, 4)));
+        _payouts().confirmPayout(vaultId, ref, ids, sigs);
         // Four signatures, still only two distinct signers.
         uint256[] memory four = new uint256[](4);
         (four[0], four[1], four[2], four[3]) = (1, 1, 2, 2);
+        sigs = _signerSigs(digest, four);
         vm.expectRevert(abi.encodeWithSelector(IZecuredSignerErrors.SignaturesNotSorted.selector, 1));
-        registry.confirmPayout(vaultId, ids, _signerSigs(digest, four));
+        _payouts().confirmPayout(vaultId, ref, ids, sigs);
     }
 
     function test_signatures_revertWhenUnsorted() public {
-        (bytes32 vaultId, bytes32[] memory ids) = _committedClaim(account);
-        bytes32 digest = registry.hashPayoutConfirmation(vaultId, ids);
+        (bytes32 vaultId, bytes32[] memory ids, bytes32 ref) = _committedClaim(account);
+        bytes32 digest = _payouts().hashPayoutConfirmation(vaultId, ref, ids);
+        bytes[] memory sigs = _signerSigs(digest, _idx(1, 0, 2));
         vm.expectRevert(abi.encodeWithSelector(IZecuredSignerErrors.SignaturesNotSorted.selector, 1));
-        registry.confirmPayout(vaultId, ids, _signerSigs(digest, _idx(1, 0, 2)));
+        _payouts().confirmPayout(vaultId, ref, ids, sigs);
+        sigs = _signerSigs(digest, _idx(0, 4, 2));
         vm.expectRevert(abi.encodeWithSelector(IZecuredSignerErrors.SignaturesNotSorted.selector, 2));
-        registry.confirmPayout(vaultId, ids, _signerSigs(digest, _idx(0, 4, 2)));
+        _payouts().confirmPayout(vaultId, ref, ids, sigs);
     }
 
     function test_signatures_revertWithANonSignerSignature() public {
-        (bytes32 vaultId, bytes32[] memory ids) = _committedClaim(account);
-        bytes32 digest = registry.hashPayoutConfirmation(vaultId, ids);
+        (bytes32 vaultId, bytes32[] memory ids, bytes32 ref) = _committedClaim(account);
+        bytes32 digest = _payouts().hashPayoutConfirmation(vaultId, ref, ids);
         (address outsider, uint256 outsiderKey) = makeAddrAndKey("zecured.registry.outsider");
         bytes[] memory sigs = _signerSigs(digest, _idx(0, 1, 2));
         sigs[2] = _sign(outsiderKey, digest);
         vm.expectRevert(abi.encodeWithSelector(IZecuredSignerErrors.UnknownSigner.selector, outsider));
-        registry.confirmPayout(vaultId, ids, sigs);
+        _payouts().confirmPayout(vaultId, ref, ids, sigs);
     }
 
     function test_signatures_revertWhenTheSignedDataDiffers() public {
-        (bytes32 vaultId, bytes32[] memory ids) = _committedClaim(account);
-        // The signers confirmed another vault's payout of the same list.
-        bytes[] memory sigs = _threeSigs(registry.hashPayoutConfirmation(keccak256("zecured.registry.otherVault"), ids));
+        (bytes32 vaultId, bytes32[] memory ids, bytes32 ref) = _committedClaim(account);
+        // The signers confirmed another vault's payout of the same list ...
+        bytes[] memory sigs =
+            _threeSigs(_payouts().hashPayoutConfirmation(keccak256("zecured.registry.otherVault"), ref, ids));
         vm.expectPartialRevert(IZecuredSignerErrors.UnknownSigner.selector);
-        registry.confirmPayout(vaultId, ids, sigs);
+        _payouts().confirmPayout(vaultId, ref, ids, sigs);
+        // ... or another payout (R-1: a confirmation names the payout it confirms).
+        sigs = _threeSigs(_payouts().hashPayoutConfirmation(vaultId, keccak256("zecured.registry.otherPayout"), ids));
+        vm.expectPartialRevert(IZecuredSignerErrors.UnknownSigner.selector);
+        _payouts().confirmPayout(vaultId, ref, ids, sigs);
     }
 
     /// Every request kind has its own type: a ReimburseDestination signature never verifies as a PayoutConfirmation,
     /// and a signature without the Registry domain (raw struct hash) is refused too.
     function test_signatures_revertWhenOfAnotherTypeOrDomain() public {
-        (bytes32 vaultId, bytes32[] memory ids) = _committedClaim(account);
+        (bytes32 vaultId, bytes32[] memory ids, bytes32 ref) = _committedClaim(account);
         bytes[] memory otherType =
             _threeSigs(registry.hashReimburseDestination(ids[0], vaultId, uint64(block.timestamp)));
         vm.expectPartialRevert(IZecuredSignerErrors.UnknownSigner.selector);
-        registry.confirmPayout(vaultId, ids, otherType);
-        bytes[] memory raw = _threeSigs(ZecuredEIP712.hashPayoutConfirmation(vaultId, ids));
+        _payouts().confirmPayout(vaultId, ref, ids, otherType);
+        bytes[] memory raw = _threeSigs(ZecuredEIP712.hashPayoutConfirmation(vaultId, ref, ids));
         vm.expectPartialRevert(IZecuredSignerErrors.UnknownSigner.selector);
-        registry.confirmPayout(vaultId, ids, raw);
+        _payouts().confirmPayout(vaultId, ref, ids, raw);
     }
 
     function test_signatures_revertWhenMalleableOrMalformed() public {
-        (bytes32 vaultId, bytes32[] memory ids) = _committedClaim(account);
-        bytes32 digest = registry.hashPayoutConfirmation(vaultId, ids);
+        (bytes32 vaultId, bytes32[] memory ids, bytes32 ref) = _committedClaim(account);
+        bytes32 digest = _payouts().hashPayoutConfirmation(vaultId, ref, ids);
         bytes[] memory sigs = _threeSigs(digest);
 
         // High-s twin of a valid signature: same signer for ecrecover, rejected by OpenZeppelin ECDSA.
@@ -505,14 +522,14 @@ contract ZecuredRegistryTest is ZecuredFixture {
         bytes32 highS = bytes32(SECP256K1_N - uint256(s));
         sigs[1] = abi.encodePacked(r, highS, v == 27 ? uint8(28) : uint8(27));
         vm.expectRevert(abi.encodeWithSelector(ECDSA.ECDSAInvalidSignatureS.selector, highS));
-        registry.confirmPayout(vaultId, ids, sigs);
+        _payouts().confirmPayout(vaultId, ref, ids, sigs);
 
         // 64-byte (ERC-2098 compact) signatures are not accepted.
         sigs = _threeSigs(digest);
         (bytes32 cr, bytes32 vs) = vm.signCompact(signerKeys[2], digest);
         sigs[1] = abi.encodePacked(cr, vs);
         vm.expectRevert(abi.encodeWithSelector(ECDSA.ECDSAInvalidSignatureLength.selector, 64));
-        registry.confirmPayout(vaultId, ids, sigs);
+        _payouts().confirmPayout(vaultId, ref, ids, sigs);
     }
 
     // ================================================================== deposit hooks (ZecuredIntake only)
@@ -541,7 +558,11 @@ contract ZecuredRegistryTest is ZecuredFixture {
             vm.expectRevert(abi.encodeWithSelector(IZecuredRegistry.OnlyCompensator.selector, callers[i]));
             registry.retireVault(vaultId, VAULT_001);
             vm.expectRevert(abi.encodeWithSelector(IZecuredRegistry.OnlyCompensator.selector, callers[i]));
-            registry.settleCompensatedClaim(tag);
+            _payouts().settleCompensatedClaim(tag);
+            vm.expectRevert(abi.encodeWithSelector(IZecuredRegistry.OnlyCompensator.selector, callers[i]));
+            _payouts().closeMisdirectedClaim(tag);
+            vm.expectRevert(abi.encodeWithSelector(IZecuredRegistry.OnlyCompensator.selector, callers[i]));
+            _payouts().markVaultCompensated(vaultId);
             vm.expectRevert(abi.encodeWithSelector(IZecuredRegistry.OnlyBond.selector, callers[i]));
             registry.markBondPaid(tag);
             vm.stopPrank();
@@ -550,6 +571,8 @@ contract ZecuredRegistryTest is ZecuredFixture {
         vm.startPrank(address(0));
         vm.expectRevert(abi.encodeWithSelector(IZecuredRegistry.OnlyCompensator.selector, address(0)));
         registry.retireVault(vaultId, VAULT_001);
+        vm.expectRevert(abi.encodeWithSelector(IZecuredRegistry.OnlyCompensator.selector, address(0)));
+        _payouts().settleCompensatedClaim(tag);
         vm.expectRevert(abi.encodeWithSelector(IZecuredRegistry.OnlyBond.selector, address(0)));
         registry.markBondPaid(tag);
         vm.stopPrank();
@@ -785,8 +808,7 @@ contract ZecuredRegistryTest is ZecuredFixture {
     function test_openRefund_reopensASettledVault() public {
         (bytes32 vaultId, bytes32 releaseId) = _releasedVault(account, VAULT_001);
         bytes32[] memory ids = _ids(releaseId);
-        _commitNext(vaultId, ids);
-        registry.confirmPayout(vaultId, ids, _threeSigs(registry.hashPayoutConfirmation(vaultId, ids)));
+        _confirmPayout(vaultId, _commitNext(vaultId, ids).payoutRef, ids);
         assertEq(registry.openVaultCount(), 0);
 
         bytes32 claimId = intake.harnessRefund(vaultId, account, VAULT_005, keccak256("zecured.registry.late"));
@@ -860,12 +882,12 @@ contract ZecuredRegistryTest is ZecuredFixture {
         // The account may change its mind until a payout binds the claim.
         vm.prank(account);
         registry.setRefundDestination(claimId, USER_COMMITMENT);
-        _commitNext(vaultId, ids);
+        bytes32 payoutRef = _commitNext(vaultId, ids).payoutRef;
         vm.prank(account);
         vm.expectRevert(abi.encodeWithSelector(IZecuredRegistry.RefundBound.selector, claimId));
         registry.setRefundDestination(claimId, REFUND_COMMITMENT);
 
-        registry.confirmPayout(vaultId, ids, _threeSigs(registry.hashPayoutConfirmation(vaultId, ids)));
+        _confirmPayout(vaultId, payoutRef, ids);
         _assertClaim(claimId, vaultId, ClaimKind.Refund, VAULT_001, USER_COMMITMENT, ClaimStatus.Paid);
         assertEq(registry.lockedZatoshi(), 0);
         assertEq(registry.openVaultCount(), 0, "the cancelled vault settled");
@@ -933,8 +955,7 @@ contract ZecuredRegistryTest is ZecuredFixture {
         registry.abandonRefund(claimId);
 
         bytes32[] memory ids = _ids(claimId);
-        _commitNext(vaultId, ids);
-        registry.confirmPayout(vaultId, ids, _threeSigs(registry.hashPayoutConfirmation(vaultId, ids)));
+        _confirmPayout(vaultId, _commitNext(vaultId, ids).payoutRef, ids);
         assertEq(registry.openVaultCount(), 0);
         assertEq(registry.lockedZatoshi(), 0);
     }
@@ -1331,87 +1352,126 @@ contract ZecuredRegistryTest is ZecuredFixture {
     function test_confirmPayout_marksTheClaimPaid() public {
         (bytes32 vaultId, bytes32 claimId) = _releasedVault(account, VAULT_005);
         bytes32[] memory ids = _ids(claimId);
-        _commitNext(vaultId, ids);
-        bytes[] memory sigs = _signerSigs(registry.hashPayoutConfirmation(vaultId, ids), _idx(1, 2, 3));
+        bytes32 ref = _commitNext(vaultId, ids).payoutRef;
+        bytes[] memory sigs = _signerSigs(_payouts().hashPayoutConfirmation(vaultId, ref, ids), _idx(1, 2, 3));
         vm.expectEmit(address(registry));
-        emit IZecuredRegistry.PayoutConfirmed(vaultId, ids);
+        emit IZecuredPayoutsEvents.PayoutConfirmed(vaultId, ref, ids);
         vm.prank(stranger); // anyone may relay
-        registry.confirmPayout(vaultId, ids, sigs);
+        _payouts().confirmPayout(vaultId, ref, ids, sigs);
         _assertClaim(claimId, vaultId, ClaimKind.Release, VAULT_005, RELEASE_COMMITMENT, ClaimStatus.Paid);
+        assertTrue(_payouts().payoutConfirmed(ref));
+        assertEq(_payouts().unprovenConfirmations(vaultId), 1, "confirmed by signatures, not proven");
+        (uint64 paidAt,) = IZecuredDisputes(address(registry)).payoutDispute(claimId);
+        assertEq(paidAt, block.timestamp);
     }
 
     function test_confirmPayout_revertsOnBadSignatureSets() public {
         (bytes32 vaultId, bytes32 claimId) = _releasedVault(account, VAULT_005);
         bytes32[] memory ids = _ids(claimId);
-        _commitNext(vaultId, ids);
-        bytes32 digest = registry.hashPayoutConfirmation(vaultId, ids);
+        bytes32 ref = _commitNext(vaultId, ids).payoutRef;
+        bytes32 digest = _payouts().hashPayoutConfirmation(vaultId, ref, ids);
 
+        bytes[] memory sigs = _signerSigs(digest, _idx(0, 1));
         vm.expectRevert(abi.encodeWithSelector(IZecuredSignerErrors.InsufficientSignatures.selector, 2));
-        registry.confirmPayout(vaultId, ids, _signerSigs(digest, _idx(0, 1)));
+        _payouts().confirmPayout(vaultId, ref, ids, sigs);
+        sigs = _signerSigs(digest, _idx(0, 2, 2));
         vm.expectRevert(abi.encodeWithSelector(IZecuredSignerErrors.SignaturesNotSorted.selector, 2));
-        registry.confirmPayout(vaultId, ids, _signerSigs(digest, _idx(0, 2, 2)));
+        _payouts().confirmPayout(vaultId, ref, ids, sigs);
+        sigs = _signerSigs(digest, _idx(4, 2, 3));
         vm.expectRevert(abi.encodeWithSelector(IZecuredSignerErrors.SignaturesNotSorted.selector, 1));
-        registry.confirmPayout(vaultId, ids, _signerSigs(digest, _idx(4, 2, 3)));
+        _payouts().confirmPayout(vaultId, ref, ids, sigs);
 
         // Signatures over another claim list (here: an extra id) do not verify.
         bytes32[] memory more = _ids(claimId, keccak256("zecured.registry.otherClaim"));
-        bytes[] memory otherListSigs = _threeSigs(registry.hashPayoutConfirmation(vaultId, more));
+        bytes[] memory otherListSigs = _threeSigs(_payouts().hashPayoutConfirmation(vaultId, ref, more));
         vm.expectPartialRevert(IZecuredSignerErrors.UnknownSigner.selector);
-        registry.confirmPayout(vaultId, ids, otherListSigs);
+        _payouts().confirmPayout(vaultId, ref, ids, otherListSigs);
         // ... nor do signatures of another type (a ReimburseDestination).
         bytes[] memory otherTypeSigs =
             _threeSigs(registry.hashReimburseDestination(claimId, RELEASE_COMMITMENT, uint64(block.timestamp)));
         vm.expectPartialRevert(IZecuredSignerErrors.UnknownSigner.selector);
-        registry.confirmPayout(vaultId, ids, otherTypeSigs);
+        _payouts().confirmPayout(vaultId, ref, ids, otherTypeSigs);
         _assertClaim(claimId, vaultId, ClaimKind.Release, VAULT_005, RELEASE_COMMITMENT, ClaimStatus.Pending);
+        assertFalse(_payouts().payoutConfirmed(ref));
     }
 
     function test_confirmPayout_revertsOnEmptyUnknownForeignOrPaidClaims() public {
         (bytes32 vaultA, bytes32 claimA) = _releasedVault(account, VAULT_005);
         (bytes32 vaultB, bytes32 claimB) = _releasedVault(makeAddr("zecured.registry.accountB"), VAULT_001);
+        bytes32 refA = _commitNext(vaultA, _ids(claimA)).payoutRef;
+        bytes32 refB = _commitNext(vaultB, _ids(claimB)).payoutRef;
 
         bytes32[] memory none = new bytes32[](0);
-        bytes[] memory sigs = _threeSigs(registry.hashPayoutConfirmation(vaultA, none));
-        vm.expectRevert(IZecuredRegistry.NoClaims.selector);
-        registry.confirmPayout(vaultA, none, sigs);
+        bytes[] memory sigs = _threeSigs(_payouts().hashPayoutConfirmation(vaultA, refA, none));
+        vm.expectRevert(IZecuredPayoutsEvents.NoClaims.selector);
+        _payouts().confirmPayout(vaultA, refA, none, sigs);
 
         bytes32 unknown = keccak256("zecured.registry.unknownClaim");
         bytes32[] memory ids = _ids(unknown);
-        sigs = _threeSigs(registry.hashPayoutConfirmation(vaultA, ids));
-        vm.expectRevert(abi.encodeWithSelector(IZecuredRegistry.UnknownClaim.selector, unknown));
-        registry.confirmPayout(vaultA, ids, sigs);
+        sigs = _threeSigs(_payouts().hashPayoutConfirmation(vaultA, refA, ids));
+        vm.expectRevert(abi.encodeWithSelector(IZecuredPayoutsEvents.UnknownClaim.selector, unknown));
+        _payouts().confirmPayout(vaultA, refA, ids, sigs);
 
-        // A foreign vault's claim, even with valid signatures over (vaultA, [claimB]).
+        // A foreign vault's claim, even with valid signatures over (vaultA, refA, [claimB]).
         ids = _ids(claimB);
-        sigs = _threeSigs(registry.hashPayoutConfirmation(vaultA, ids));
-        vm.expectRevert(abi.encodeWithSelector(IZecuredRegistry.ClaimVaultMismatch.selector, claimB, vaultA));
-        registry.confirmPayout(vaultA, ids, sigs);
+        sigs = _threeSigs(_payouts().hashPayoutConfirmation(vaultA, refA, ids));
+        vm.expectRevert(abi.encodeWithSelector(IZecuredPayoutsEvents.ClaimVaultMismatch.selector, claimB, vaultA));
+        _payouts().confirmPayout(vaultA, refA, ids, sigs);
+        // A foreign vault's payout.
+        sigs = _threeSigs(_payouts().hashPayoutConfirmation(vaultA, refB, ids));
+        vm.expectRevert(abi.encodeWithSelector(IZecuredPayoutsEvents.PayoutNotOfVault.selector, vaultA, refB));
+        _payouts().confirmPayout(vaultA, refB, ids, sigs);
 
-        // Already paid, and the same id twice in one call.
+        // R-1: each payout is confirmed once ...
         ids = _ids(claimA);
-        _commitNext(vaultA, ids);
-        _commitNext(vaultB, _ids(claimB));
-        sigs = _threeSigs(registry.hashPayoutConfirmation(vaultA, ids));
-        registry.confirmPayout(vaultA, ids, sigs);
-        vm.expectRevert(abi.encodeWithSelector(IZecuredRegistry.ClaimAlreadyPaid.selector, claimA));
-        registry.confirmPayout(vaultA, ids, sigs);
+        sigs = _threeSigs(_payouts().hashPayoutConfirmation(vaultA, refA, ids));
+        _payouts().confirmPayout(vaultA, refA, ids, sigs);
+        vm.expectRevert(abi.encodeWithSelector(IZecuredPayoutsEvents.PayoutAlreadyConfirmed.selector, refA));
+        _payouts().confirmPayout(vaultA, refA, ids, sigs);
+        // ... and a claim once: a new payout of its input (D57) may name it again, but no signature confirms it twice.
+        SpendCommit memory again =
+            _spendCommit(vaultA, _depositTagFor(account), ids, keccak256("zecured.registry.againA"));
+        registry.commitSpend(again, _threeSigs(registry.hashSpendCommit(again)));
+        sigs = _threeSigs(_payouts().hashPayoutConfirmation(vaultA, again.payoutRef, ids));
+        vm.expectRevert(abi.encodeWithSelector(IZecuredPayoutsEvents.ClaimAlreadyPaid.selector, claimA));
+        _payouts().confirmPayout(vaultA, again.payoutRef, ids, sigs);
+        // The same id twice in one call.
         ids = _ids(claimB, claimB);
-        sigs = _threeSigs(registry.hashPayoutConfirmation(vaultB, ids));
-        vm.expectRevert(abi.encodeWithSelector(IZecuredRegistry.ClaimAlreadyPaid.selector, claimB));
-        registry.confirmPayout(vaultB, ids, sigs);
+        sigs = _threeSigs(_payouts().hashPayoutConfirmation(vaultB, refB, ids));
+        vm.expectRevert(abi.encodeWithSelector(IZecuredPayoutsEvents.ClaimAlreadyPaid.selector, claimB));
+        _payouts().confirmPayout(vaultB, refB, ids, sigs);
         _assertClaim(claimB, vaultB, ClaimKind.Release, VAULT_001, RELEASE_COMMITMENT, ClaimStatus.Pending);
     }
 
-    /// Tier 3: a claim is confirmed paid only once a payout of it was committed, which its claimant can check (F3).
-    function test_confirmPayout_revertsOnAnUncommittedClaim() public {
-        (bytes32 vaultId, bytes32 claimId) = _releasedVault(account, VAULT_005);
-        bytes32[] memory ids = _ids(claimId);
-        bytes[] memory sigs = _threeSigs(registry.hashPayoutConfirmation(vaultId, ids));
-        vm.expectRevert(abi.encodeWithSelector(IZecuredSpendCommitsEvents.ClaimNotCommitted.selector, claimId));
-        registry.confirmPayout(vaultId, ids, sigs);
-        _commitNext(vaultId, ids);
-        registry.confirmPayout(vaultId, ids, sigs);
-        _assertClaim(claimId, vaultId, ClaimKind.Release, VAULT_005, RELEASE_COMMITMENT, ClaimStatus.Paid);
+    /// Tier 3: a claim is confirmed paid only by a payout committed for it, which its claimant can check (F3): never
+    /// while uncommitted, never by a payout of another input of the vault.
+    function test_confirmPayout_revertsOnAClaimThePayoutDoesNotPay() public {
+        bytes32 vaultId = _attest(account, VAULT_005);
+        vm.startPrank(account);
+        MORPHO.setAuthorization(address(registry), true);
+        bytes32 a = registry.requestPartialRelease(vaultId, 1_000_000, RELEASE_COMMITMENT);
+        bytes32 b = registry.requestPartialRelease(vaultId, 1_000_000, USER_COMMITMENT);
+        vm.stopPrank();
+        SpendCommit memory first = _commitNext(vaultId, _ids(a)); // from the deposit, with change
+
+        bytes[] memory sigs = _threeSigs(_payouts().hashPayoutConfirmation(vaultId, first.payoutRef, _ids(b)));
+        vm.expectRevert(abi.encodeWithSelector(IZecuredSpendCommitsEvents.ClaimNotCommitted.selector, b));
+        _payouts().confirmPayout(vaultId, first.payoutRef, _ids(b), sigs);
+
+        SpendCommit memory second = _commitNext(vaultId, _ids(b)); // from the first payout's change
+        vm.expectRevert(abi.encodeWithSelector(IZecuredDisputesEvents.PayoutNotOfClaim.selector, b, first.payoutRef));
+        _payouts().confirmPayout(vaultId, first.payoutRef, _ids(b), sigs);
+        _confirmPayout(vaultId, second.payoutRef, _ids(b));
+        _assertClaim(b, vaultId, ClaimKind.Release, 1_000_000, USER_COMMITMENT, ClaimStatus.Paid);
+    }
+
+    /// The spend logic answers only through the Registry, whose domain it signs in.
+    function test_confirmPayout_onlyThroughTheRegistry() public {
+        (bytes32 vaultId, bytes32[] memory ids, bytes32 ref) = _committedClaim(account);
+        vm.expectRevert(ZecuredSpendLogic.NotDelegated.selector);
+        spendLogic.confirmPayout(vaultId, ref, ids, new bytes[](0));
+        vm.expectRevert(ZecuredSpendLogic.NotDelegated.selector);
+        spendLogic.hashPayoutConfirmation(vaultId, ref, ids);
     }
 
     // ================================================================== views
