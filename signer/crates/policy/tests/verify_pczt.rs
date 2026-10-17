@@ -340,6 +340,8 @@ fn a_planned_payout_of_eight_claims_builds_and_verifies() {
             state: ClaimState::Unpaid,
             refund_tag: None,
             bond_paid: false,
+            proven: false,
+            confirmed_at: 0,
         })
         .collect();
     let recipient = |c: &[u8; 32]| recipients.iter().find(|r| r.commitment() == *c).copied();

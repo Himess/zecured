@@ -131,12 +131,25 @@ pub struct Claim {
     #[serde(default)]
     pub refund_tag: Option<[u8; 32]>,
     /// T-05: the bonds paid the claimant; the claim's ZEC now reimburses them, at the destination
-    /// three signers give (`ReimburseDestinationSet`).
+    /// the signers give (`ReimburseDestinationSet`).
     #[serde(default)]
     pub bond_paid: bool,
+    /// v4 (proven delivery): Base holds its payout proven mined (`PayoutProven`, or an upheld
+    /// dispute): `Paid` and final (`paidAt == 0`), never disputable again.
+    #[serde(default)]
+    pub proven: bool,
+    /// When three signers confirmed its payout on Base (`PayoutConfirmed`, Unix seconds; 0: never):
+    /// until proven, its claimant may dispute the confirmation for the Registry's `disputeWindow`.
+    #[serde(default)]
+    pub confirmed_at: u64,
 }
 
 impl Claim {
+    /// Final on Base: paid, and the payout proven (no dispute can reopen it).
+    pub fn is_final(&self) -> bool {
+        self.state == ClaimState::Paid && self.proven
+    }
+
     /// Counted in the vault's books (I10): not paid on Zcash and not settled in USDC. A
     /// written-off claim's value stays in the vault, and a disputed one is unpaid again.
     pub fn in_books(&self) -> bool {
@@ -679,6 +692,42 @@ pub fn overdue(claims: &[Claim], now: u64, age: u64) -> Vec<&Claim> {
         .collect()
 }
 
+/// O-4 rules 1 and 2 (R-10): no payout is committed for a claim closer than one payout lifetime
+/// (`lifetime` seconds: its expiry, the broadcast delay and the reorganisation margin) to the time
+/// the bonds may pay its claimant (`due_of(claim)`, the bond's `livenessDue`; 0: never, an unarmed
+/// claim or one the bonds do not cover). Such a payout could land after that time and pay the
+/// claimant twice, in ZEC and from the bonds; so does a new payout of a reopened claim that is
+/// already due. The claim is set aside in `claims`, a planning copy (its destination cleared, so
+/// the planner skips it and its value stays in the vault, I10), until the bonds pay it, its payout is
+/// proven, or its clock moves. A payout bound to such a claim on Base (RT-3) waits too, as a whole.
+/// Returns the claims set aside.
+pub fn defer_near_due(claims: &mut [Claim], now: u64, lifetime: u64, due_of: impl Fn(&ClaimId) -> u64) -> Vec<ClaimId> {
+    let mut deferred = vec![];
+    for c in claims.iter_mut().filter(|c| c.payable()) {
+        let due = due_of(&c.id);
+        if due != 0 && now.saturating_add(lifetime) > due {
+            c.commitment = [0; 32];
+            deferred.push(c.id);
+        }
+    }
+    deferred
+}
+
+/// O-4 rule 3: claims confirmed paid on Base (not proven) whose input note the vault still holds
+/// unspent were never paid by that input: the confirmation was false, or a reorganisation undid the
+/// payout. In `claims`, a planning copy, they count unpaid again (I10 holds with them), so the
+/// payout of the input's claim list is planned again (RT-3, D57) and then proven, never confirmed
+/// (R-1). `unlanded`: the claims whose input (`claimInput` on Base) is an unspent lineage note of
+/// the vault. Returns the claims counted unpaid again.
+pub fn revert_unlanded(claims: &mut [Claim], unlanded: &[ClaimId]) -> Vec<ClaimId> {
+    let mut reverted = vec![];
+    for c in claims.iter_mut().filter(|c| unlanded.contains(&c.id) && c.state == ClaimState::Paid && !c.proven) {
+        c.state = ClaimState::Unpaid;
+        reverted.push(c.id);
+    }
+    reverted
+}
+
 /// P5: refunds one deposit that no guest of the deployment can land on Base (note id `note_id`,
 /// value `note_value`) to its depositor, net of the fee; no change. Never for a note a guest can
 /// land: that one leaves the vault only as a Refund claim (I30, [`crate::classify::Landing`]).
@@ -748,6 +797,8 @@ mod tests {
             state: ClaimState::Unpaid,
             refund_tag: None,
             bond_paid: false,
+            proven: false,
+            confirmed_at: 0,
         }
     }
 
@@ -1295,6 +1346,94 @@ mod tests {
         ];
         let ids: Vec<u8> = overdue(&claims, 60_000, 43_200).iter().map(|c| c.id[0]).collect();
         assert_eq!(ids, vec![1, 7]);
+    }
+
+    /// O-4 rules 1 and 2 (R-10): a claim the bonds may pay within one payout lifetime is set aside
+    /// (its value stays in the vault, I10 holds), an unarmed claim (due 0) is not, and the boundary
+    /// is exact; a payout bound on Base to a claim set aside waits as a whole.
+    #[test]
+    fn claims_close_to_their_due_time_are_not_committed() {
+        const LIFETIME: u64 = 3_000;
+        const NOW: u64 = 10_000;
+        let far = claim(1, ClaimKind::Liquidation, 1_000_000, (10, 0), None);
+        let near = claim(2, ClaimKind::Release, 500_000, (11, 0), None);
+        let unarmed = claim(3, ClaimKind::Liquidation, 400_000, (12, 0), None);
+        let overdue = claim(4, ClaimKind::CloseMarketMaker, 300_000, (13, 0), None);
+        let boundary = claim(5, ClaimKind::Liquidation, 200_000, (14, 0), None);
+        let all = [
+            far.clone(),
+            near.clone(),
+            unarmed.clone(),
+            overdue.clone(),
+            boundary.clone(),
+        ];
+        let due = |id: &ClaimId| match id[0] {
+            1 => 20_000,
+            2 => 12_999,         // 10,000 + 3,000 > 12,999: too close
+            3 => 0,              // unarmed: the bonds never pay it
+            4 => 5_000,          // already due (a reopened claim, O-4 rule 1)
+            5 => NOW + LIFETIME, // exactly one lifetime away: still committed
+            _ => unreachable!(),
+        };
+        let mut planning = all.to_vec();
+        let deferred = defer_near_due(&mut planning, NOW, LIFETIME, due);
+        assert_eq!(deferred, vec![near.id, overdue.id]);
+        assert!(planning.iter().filter(|c| deferred.contains(&c.id)).all(|c| c.commitment == [0; 32]));
+        let total: u64 = all.iter().map(|c| c.amount).sum();
+        check_i10(DEPOSIT, DEPOSIT - total, &planning).unwrap();
+        let NextPayout::Pay(p) = next_payout(&planning, known(&[1, 2, 3, 4, 5]), DEPOSIT, 1, NOW, &[]).unwrap() else {
+            panic!()
+        };
+        assert_eq!(p.claims, vec![far.id, unarmed.id, boundary.id]);
+        assert_eq!(p.change, DEPOSIT - (far.amount + unarmed.amount + boundary.amount));
+        // Bound on Base with the claim set aside (a rebuild): nothing until it is settled.
+        assert_eq!(
+            next_payout(&planning, known(&[1, 2]), DEPOSIT, 1, NOW, &[far.id, near.id]).unwrap(),
+            NextPayout::Nothing
+        );
+        // Paid, written-off and Fee claims are not touched.
+        let mut paid = vec![Claim {
+            state: ClaimState::Paid,
+            ..near.clone()
+        }];
+        assert!(defer_near_due(&mut paid, NOW, LIFETIME, |_| 1).is_empty());
+    }
+
+    /// O-4 rule 3: claims confirmed paid whose input is still unspent count unpaid again, so the
+    /// payout of the input's list is planned again; a proven claim, or one whose input was spent,
+    /// stays paid.
+    #[test]
+    fn a_payout_undone_after_its_confirmation_is_planned_again() {
+        let a = claim(1, ClaimKind::Liquidation, 1_000_000, (10, 0), None);
+        let b = claim(2, ClaimKind::Release, 500_000, (11, 0), None);
+        let proven = Claim {
+            state: ClaimState::Paid,
+            proven: true,
+            ..claim(3, ClaimKind::Liquidation, 300_000, (5, 0), None)
+        };
+        let elsewhere = Claim {
+            state: ClaimState::Paid,
+            ..claim(4, ClaimKind::Liquidation, 200_000, (6, 0), None)
+        };
+        let confirmed = |c: &Claim| Claim {
+            state: ClaimState::Paid,
+            confirmed_at: 1_000,
+            ..c.clone()
+        };
+        let mut claims = vec![confirmed(&a), confirmed(&b), proven.clone(), elsewhere.clone()];
+        let outstanding = DEPOSIT - 2_000_000;
+        // As confirmed, the books do not add up: the input still holds a and b.
+        let lineage = outstanding + a.amount + b.amount;
+        assert!(check_i10(lineage, outstanding, &claims).is_err());
+        let reverted = revert_unlanded(&mut claims, &[a.id, b.id, proven.id]);
+        assert_eq!(reverted, vec![a.id, b.id], "never a proven claim");
+        check_i10(lineage, outstanding, &claims).unwrap();
+        let NextPayout::Pay(p) = next_payout(&claims, known(&[1, 2]), lineage, 1, 2_000, &[b.id, a.id]).unwrap() else {
+            panic!()
+        };
+        assert_eq!(p.claims, vec![a.id, b.id]);
+        assert_eq!(p.change, outstanding);
+        assert!(claims.iter().find(|c| c.id == elsewhere.id).is_some_and(|c| c.state == ClaimState::Paid));
     }
 
     /// P5: an off-chain refund is the note less the fee of one input and one output, to one

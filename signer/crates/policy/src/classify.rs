@@ -76,34 +76,51 @@ pub enum Classification {
 }
 
 /// I30: what the deployment's deposit guests can land on Base, as the Intake says (its journal
-/// version and `minRefundZat`). A note a guest can land becomes a lineage note once someone proves
-/// it, and an off-chain refund of it would then look exactly like a theft (F1): such a note leaves
-/// the vault only as a Refund claim. Only a note no guest can land may be refunded off-chain (P5).
+/// version, `minRefundZat` and its work tiers). A note a guest can land becomes a lineage note once
+/// someone proves it, and an off-chain refund of it would then look exactly like a theft (F1): such
+/// a note leaves the vault only as a Refund claim. Only a note no guest can land may be refunded
+/// off-chain (P5).
+///
+/// R-15: in both versions `largest_tier` is the largest amount of the Intake's work tiers (its last
+/// tier's `maxAmountZat`): the Intake refuses a proof of anything above it
+/// (`AmountAboveLargestTier`), so such a note never lands and is refunded off-chain.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub enum Landing {
     /// Journal v1: Activate mode only. The deposit rule D5, the vault's amount, mined at or
     /// below its expiry height, to its published receiver; it lands as collateral, or as a
     /// refund once the vault cannot take it (a second payment, T-02).
-    ActivateOnly,
+    ActivateOnly { largest_tier: u64 },
     /// Journal v2: Refund mode too, any note to the vault's published receiver of at least
     /// `min_refund` zatoshi, at any height, in any transaction with an Ironwood bundle (T-09).
-    WithRefunds { min_refund: u64 },
+    WithRefunds { min_refund: u64, largest_tier: u64 },
 }
 
 impl Landing {
     /// Whether a guest of the deployment can land `note` on Base, as collateral or as a refund.
     /// In doubt it can: the notes this says no to are those no mode proves at all (another
-    /// address of the vault, K2-c), or that Activate mode refuses under v1 and that v2 would take
-    /// only above its floor.
+    /// address of the vault, K2-c, or above the largest work tier, R-15), or that Activate mode
+    /// refuses under v1 and that v2 would take only above its floor.
     pub fn can_land(&self, note: &DepositNote, rules: &DepositRules) -> bool {
-        if !note.to_vault_receiver {
+        if !note.to_vault_receiver || note.value > self.largest_tier() {
             return false;
         }
         let activates = note.ironwood_only && note.value == rules.amount && note.position.height <= rules.expiry_height;
         match *self {
-            Landing::ActivateOnly => activates,
-            Landing::WithRefunds { min_refund } => activates || note.value >= min_refund,
+            Landing::ActivateOnly { .. } => activates,
+            Landing::WithRefunds { min_refund, .. } => activates || note.value >= min_refund,
         }
+    }
+
+    /// R-15: the largest amount a proof can land (the Intake's last work tier).
+    pub fn largest_tier(&self) -> u64 {
+        match *self {
+            Landing::ActivateOnly { largest_tier } | Landing::WithRefunds { largest_tier, .. } => largest_tier,
+        }
+    }
+
+    /// Journal v2: the Intake proves refunds (Refund mode).
+    pub fn proves_refunds(&self) -> bool {
+        matches!(self, Landing::WithRefunds { .. })
     }
 }
 
@@ -297,8 +314,11 @@ mod tests {
     /// Intake's floor on. A note to another address of the vault never lands.
     #[test]
     fn what_a_deployment_can_land() {
-        let v1 = Landing::ActivateOnly;
-        let v2 = Landing::WithRefunds { min_refund: 20_000 };
+        let v1 = Landing::ActivateOnly { largest_tier: u64::MAX };
+        let v2 = Landing::WithRefunds {
+            min_refund: 20_000,
+            largest_tier: u64::MAX,
+        };
         let good = note(900, 0, 0, AMOUNT, true);
         for landing in [v1, v2] {
             assert!(landing.can_land(&good, &RULES), "the deposit itself, or a second payment of it");
@@ -319,6 +339,30 @@ mod tests {
             assert!(v2.can_land(n, &RULES), "{n:?} under v2");
         }
         assert!(!v2.can_land(&tiny, &RULES), "below the Intake's refund floor");
+    }
+
+    /// R-15: above the Intake's largest work tier no proof lands (`AmountAboveLargestTier`), in
+    /// either journal version, so the note is refundable off-chain; at the tier it still lands.
+    #[test]
+    fn nothing_above_the_largest_work_tier_lands() {
+        const TIER: u64 = 50_000_000;
+        let v2 = Landing::WithRefunds {
+            min_refund: 20_000,
+            largest_tier: TIER,
+        };
+        let v1 = Landing::ActivateOnly { largest_tier: TIER };
+        let at_tier = note(900, 0, 0, TIER, true);
+        let above = note(900, 0, 0, TIER + 1, true);
+        assert!(v2.can_land(&at_tier, &RULES));
+        assert!(!v2.can_land(&above, &RULES));
+        // A vault whose own amount is above the tier: not even its deposit lands.
+        let big_vault = DepositRules {
+            amount: TIER + 1,
+            ..RULES
+        };
+        assert!(!v1.can_land(&above, &big_vault));
+        assert!(!v2.can_land(&above, &big_vault));
+        assert_eq!((v1.largest_tier(), v2.proves_refunds(), v1.proves_refunds()), (TIER, true, false));
     }
 
     #[test]

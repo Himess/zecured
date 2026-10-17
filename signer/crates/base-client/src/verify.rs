@@ -11,10 +11,14 @@
 //!   amount, and (unless it is a refund, created without a destination) that commitment, and did
 //!   not exist before it; a refund's note is a lineage note of the vault for its amount (T-02);
 //! - a changed claim (a destination given, the bonds' payment, a write-off, a compensation, a
-//!   dispute and its outcome): the Registry shows the change from the event's block on, and the
-//!   claim was in the state the change starts from before it;
-//! - `PayoutConfirmed`: every claim, of that vault, is paid (or already disputed) from the
-//!   event's block on and was pending before it.
+//!   dispute and its outcome, a proven delivery, a dormant refund): the Registry shows the change
+//!   from the event's block on, and the claim was in the state the change starts from before it; a
+//!   proven claim is final there (`paidAt == 0`) and its payout a committed payout of its input;
+//! - `PayoutConfirmed` (R-1): the payout is a committed payout of that vault, and every claim, of
+//!   that vault and bound to the payout's input, is paid (or already disputed) from the event's
+//!   block on and was pending before it;
+//! - `ChangeTagOverridden` (R-16): the tag was a lineage note of the event's vault before it and is
+//!   a used deposit tag of another vault from it on.
 //!
 //! What a node then applies is the claim as the Registry holds it at the block it read, not as
 //! the log tells it: a claim's destination, state and whether the bonds paid it change after it
@@ -118,12 +122,27 @@ pub struct BlockInfo {
     pub timestamp: u64,
 }
 
+/// `Registry.spendRecord(payoutRef)`, as far as the checks use it: the committed payout's vault
+/// (zero: no such commitment) and the lineage note it spends.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct PayoutRecord {
+    pub vault_id: B256,
+    pub input_tag: B256,
+}
+
 /// Read access to the Registry's state at a given block.
 pub trait RegistryReader {
     fn vault_at(&self, vault_id: B256, block: u64) -> impl Future<Output = Result<VaultState>> + Send;
     fn claim_at(&self, claim_id: B256, block: u64) -> impl Future<Output = Result<ClaimRecord>> + Send;
     fn tag_used_at(&self, deposit_tag: B256, block: u64) -> impl Future<Output = Result<bool>> + Send;
     fn lineage_at(&self, tag: B256, block: u64) -> impl Future<Output = Result<Lineage>> + Send;
+    /// `spendRecord(payoutRef)`.
+    fn payout_at(&self, payout_ref: B256, block: u64) -> impl Future<Output = Result<PayoutRecord>> + Send;
+    /// `claimInput(claimId)`: the lineage note a commitment bound the claim to (zero: none).
+    fn input_at(&self, claim_id: B256, block: u64) -> impl Future<Output = Result<B256>> + Send;
+    /// `payoutDispute(claimId).paidAt`: when the claim was confirmed paid; zero once its payout is
+    /// proven (final) or while it is not paid.
+    fn paid_at(&self, claim_id: B256, block: u64) -> impl Future<Output = Result<u64>> + Send;
     fn block(&self, number: u64) -> impl Future<Output = Result<BlockInfo>> + Send;
 }
 
@@ -188,6 +207,38 @@ impl<P: Provider> RegistryReader for ProviderReader<'_, P> {
         })
     }
 
+    async fn payout_at(&self, payout_ref: B256, block: u64) -> Result<PayoutRecord> {
+        let r = IZecuredRegistry::new(self.registry, self.provider)
+            .spendRecord(payout_ref)
+            .call()
+            .block(BlockId::number(block))
+            .await
+            .with_context(|| format!("Registry.spendRecord at block {block}"))?;
+        Ok(PayoutRecord {
+            vault_id: r.vaultId,
+            input_tag: r.inputTag,
+        })
+    }
+
+    async fn input_at(&self, claim_id: B256, block: u64) -> Result<B256> {
+        IZecuredRegistry::new(self.registry, self.provider)
+            .claimInput(claim_id)
+            .call()
+            .block(BlockId::number(block))
+            .await
+            .with_context(|| format!("Registry.claimInput at block {block}"))
+    }
+
+    async fn paid_at(&self, claim_id: B256, block: u64) -> Result<u64> {
+        let d = IZecuredRegistry::new(self.registry, self.provider)
+            .payoutDispute(claim_id)
+            .call()
+            .block(BlockId::number(block))
+            .await
+            .with_context(|| format!("Registry.payoutDispute at block {block}"))?;
+        Ok(d.paidAt)
+    }
+
     async fn block(&self, number: u64) -> Result<BlockInfo> {
         let b = self
             .provider
@@ -219,6 +270,9 @@ pub struct Evidence {
     pub claims: Vec<ClaimRecord>,
     pub tags: Vec<bool>,
     pub lineages: Vec<Lineage>,
+    pub payouts: Vec<PayoutRecord>,
+    pub inputs: Vec<B256>,
+    pub paid_at: Vec<u64>,
 }
 
 /// The outcome of checking an event on one provider.
@@ -251,8 +305,13 @@ fn shows(change: &ClaimChange, now: &ClaimRecord, at: At) -> bool {
         ClaimChange::WrittenOff => now.status == CLAIM_WRITTEN_OFF,
         ClaimChange::Compensated => now.status == CLAIM_COMPENSATED,
         ClaimChange::Disputed { .. } => now.status == CLAIM_DISPUTED,
-        ClaimChange::Upheld { .. } => now.status == CLAIM_PAID,
+        // Final from then on (`paidAt == 0`), checked with the payout's record (`proven`).
+        ClaimChange::Upheld { .. } | ClaimChange::Proven { .. } => now.status == CLAIM_PAID,
         ClaimChange::Reopened => now.status == CLAIM_PENDING,
+        // A refund still without a destination (one given since makes it stale).
+        ClaimChange::Dormant => {
+            now.kind == kind_code(ClaimKind::Refund) && now.status == CLAIM_PENDING && now.commitment == B256::ZERO
+        }
     }
 }
 
@@ -269,6 +328,14 @@ fn starts_from(change: &ClaimChange, prev: &ClaimRecord) -> bool {
         // leaves the claim paid, exactly as a confirmation would: the state Base shows.
         ClaimChange::Upheld { .. } => prev.status == CLAIM_DISPUTED || prev.status == CLAIM_PENDING,
         ClaimChange::Reopened => prev.status == CLAIM_DISPUTED,
+        // Proven delivery: a committed pending claim, or one confirmed paid (not yet final).
+        ClaimChange::Proven { .. } => prev.status == CLAIM_PENDING || prev.status == CLAIM_PAID,
+        ClaimChange::Dormant => {
+            prev.kind == kind_code(ClaimKind::Refund)
+                && prev.status == CLAIM_PENDING
+                && prev.commitment == B256::ZERO
+                && !prev.bond_paid
+        }
     }
 }
 
@@ -292,8 +359,36 @@ pub async fn check_event<R: RegistryReader>(reader: &R, ev: &VaultEvent, at: At)
     let mut stale: Option<String> = None;
     let mut applied = ev.clone();
     match &ev.event {
-        RegistryEvent::Reserved { .. } | RegistryEvent::ReservationReleased => {
-            problems.push("signer nodes do not apply reservation events".into());
+        RegistryEvent::Reserved { .. }
+        | RegistryEvent::ReservationReleased
+        | RegistryEvent::SpendCommitted { .. }
+        | RegistryEvent::RefundPending { .. }
+        | RegistryEvent::PendingRefundDropped { .. }
+        | RegistryEvent::LivenessArmed { .. }
+        | RegistryEvent::PreLiquidated { .. } => {
+            problems.push("signer nodes do not apply this event (the coordinator's only)".into());
+        }
+        RegistryEvent::ChangeTagOverridden { tag } => {
+            // R-16: from the event's block on, a deposit of another vault holds the tag (released
+            // since if that deposit's reservation was dropped: stale); before it, the tag was a
+            // lineage note of this vault (a change tag of one of its commitments).
+            let used = reader.tag_used_at(*tag, after).await?;
+            evidence.tags.push(used);
+            let lineage = reader.lineage_at(*tag, after).await?;
+            evidence.lineages.push(lineage);
+            if !used || lineage.vault_id == B256::ZERO || lineage.vault_id == ev.vault_id {
+                match at {
+                    At::EventBlock => problems.push("the Registry does not show the tag taken by a deposit".into()),
+                    At::Later(_) => stale = Some("the tag changed hands again since".into()),
+                }
+            }
+            if let Some(b) = before {
+                let prev = reader.lineage_at(*tag, b).await?;
+                evidence.lineages.push(prev);
+                if prev.vault_id != ev.vault_id {
+                    problems.push("the tag was not a lineage note of the vault before the event's block".into());
+                }
+            }
         }
         RegistryEvent::VaultActivated {
             account,
@@ -378,6 +473,21 @@ pub async fn check_event<R: RegistryReader>(reader: &R, ev: &VaultEvent, at: At)
                     At::EventBlock => problems.push("the Registry does not show the claim's change".into()),
                     At::Later(_) => stale = Some("the claim changed again since".into()),
                 }
+            } else if let ClaimChange::Upheld { payout_ref } | ClaimChange::Proven { payout_ref } = change {
+                // Section 3: final from then on, by a committed payout of the claim's own input
+                // (a final claim never changes again, so this holds at any later block too).
+                let paid_at = reader.paid_at(*claim_id, after).await?;
+                evidence.paid_at.push(paid_at);
+                let input = reader.input_at(*claim_id, after).await?;
+                evidence.inputs.push(input);
+                let payout = reader.payout_at(*payout_ref, after).await?;
+                evidence.payouts.push(payout);
+                if paid_at != 0 {
+                    problems.push("the claim is not final in the Registry".into());
+                }
+                if input == B256::ZERO || payout.vault_id != ev.vault_id || payout.input_tag != input {
+                    problems.push("the proven payout is no committed payout of the claim's input".into());
+                }
             }
             if let Some(b) = before {
                 let prev = reader.claim_at(*claim_id, b).await?;
@@ -387,13 +497,24 @@ pub async fn check_event<R: RegistryReader>(reader: &R, ev: &VaultEvent, at: At)
                 }
             }
         }
-        RegistryEvent::PayoutConfirmed(ids) => {
+        RegistryEvent::PayoutConfirmed { payout_ref, claims } => {
+            // R-1: a committed payout of this vault, each claim bound to its input.
+            let payout = reader.payout_at(*payout_ref, after).await?;
+            evidence.payouts.push(payout);
+            if payout.vault_id != ev.vault_id {
+                problems.push("no such committed payout of the vault in the Registry".into());
+            }
             let mut confirmed = vec![];
-            for &id in ids {
+            for &id in claims {
                 let now = reader.claim_at(id, after).await?;
                 evidence.claims.push(now);
                 if now.vault_id != ev.vault_id {
                     problems.push("claim of another vault".into());
+                }
+                let input = reader.input_at(id, after).await?;
+                evidence.inputs.push(input);
+                if input != payout.input_tag {
+                    problems.push("claim not bound to the confirmed payout's input".into());
                 }
                 match (now.status, at) {
                     // Disputed since its confirmation (T-05 (a)): the dispute's event follows.
@@ -413,7 +534,10 @@ pub async fn check_event<R: RegistryReader>(reader: &R, ev: &VaultEvent, at: At)
             if confirmed.is_empty() && problems.is_empty() {
                 stale = Some("none of the claims is still paid".into());
             }
-            applied.event = RegistryEvent::PayoutConfirmed(confirmed);
+            applied.event = RegistryEvent::PayoutConfirmed {
+                payout_ref: *payout_ref,
+                claims: confirmed,
+            };
         }
     }
     Ok(if !problems.is_empty() {
@@ -485,6 +609,9 @@ mod tests {
     const CLAIM: B256 = B256::repeat_byte(3);
     const COMMITMENT: [u8; 32] = [4; 32];
     const TAG: B256 = B256::repeat_byte(0x7a);
+    /// The lineage note the claim's payout spends, and the payout's reference.
+    const INPUT: B256 = B256::repeat_byte(0x7c);
+    const PAYOUT: B256 = B256::repeat_byte(0xaa);
 
     /// A Registry whose history is a list of state changes by block.
     #[derive(Clone, Default)]
@@ -496,6 +623,12 @@ mod tests {
         tag: Vec<(u64, bool)>,
         /// (from block, lineage note) of `TAG`; every other tag is no lineage note.
         lineage: Vec<(u64, Lineage)>,
+        /// (from block, payout reference, record) of committed payouts.
+        payouts: Vec<(u64, B256, PayoutRecord)>,
+        /// (from block, input) of the claim's `claimInput`.
+        input: Vec<(u64, B256)>,
+        /// (from block, paidAt) of the claim's `payoutDispute`.
+        paid_at: Vec<(u64, u64)>,
         /// Blocks below this have no state any more (not an archive node).
         pruned_below: u64,
         /// Hash reported for every block.
@@ -564,6 +697,27 @@ mod tests {
             })
         }
 
+        async fn payout_at(&self, payout_ref: B256, block: u64) -> Result<PayoutRecord> {
+            self.ok(block)?;
+            Ok(self.payouts.iter().rev().find(|(from, r, _)| *from <= block && *r == payout_ref).map_or(
+                PayoutRecord {
+                    vault_id: B256::ZERO,
+                    input_tag: B256::ZERO,
+                },
+                |(_, _, p)| *p,
+            ))
+        }
+
+        async fn input_at(&self, _: B256, block: u64) -> Result<B256> {
+            self.ok(block)?;
+            Ok(latest(&self.input, block, B256::ZERO))
+        }
+
+        async fn paid_at(&self, _: B256, block: u64) -> Result<u64> {
+            self.ok(block)?;
+            Ok(latest(&self.paid_at, block, 0))
+        }
+
         async fn block(&self, number: u64) -> Result<BlockInfo> {
             if self.down {
                 return Err(anyhow!("connection refused"));
@@ -592,7 +746,8 @@ mod tests {
         value: 1_000_000,
     };
 
-    /// Reserved at block 40, activated at 50; a release claim created at 100 and paid at 200.
+    /// Reserved at block 40, activated at 50; a release claim created at 100, its payout (of the
+    /// lineage note `INPUT`) committed at 150 and confirmed at 200.
     fn honest() -> Chain {
         let vault = |outstanding, status| VaultState {
             account: ACCOUNT,
@@ -608,9 +763,30 @@ mod tests {
             claim: vec![(100, claim_state(CLAIM_PENDING)), (200, claim_state(CLAIM_PAID))],
             tag: vec![(40, true)],
             lineage: vec![(40, DEPOSIT)],
+            payouts: vec![(
+                150,
+                PAYOUT,
+                PayoutRecord {
+                    vault_id: VAULT,
+                    input_tag: INPUT,
+                },
+            )],
+            input: vec![(150, INPUT)],
+            paid_at: vec![(200, 400)],
             hash: B256::repeat_byte(9),
             ..Default::default()
         }
+    }
+
+    /// R-1: the confirmation of the payout `PAYOUT` at `block`.
+    fn confirmation(block: u64) -> VaultEvent {
+        event(
+            block,
+            RegistryEvent::PayoutConfirmed {
+                payout_ref: PAYOUT,
+                claims: vec![CLAIM],
+            },
+        )
     }
 
     fn event(block: u64, event: RegistryEvent) -> VaultEvent {
@@ -636,6 +812,8 @@ mod tests {
             state: Paid::Unpaid,
             refund_tag: None,
             bond_paid: false,
+            proven: false,
+            confirmed_at: 0,
         }
     }
 
@@ -668,7 +846,7 @@ mod tests {
         for ev in [
             activation(50, ACCOUNT, TAG),
             release(100, 300_000, COMMITMENT),
-            event(200, RegistryEvent::PayoutConfirmed(vec![CLAIM])),
+            confirmation(200),
         ] {
             assert!(matches!(verdict(&chain, None, &ev).await.unwrap(), Verdict::Proven(_)), "{ev:?}");
             assert!(matches!(verdict(&chain, Some(&chain.clone()), &ev).await.unwrap(), Verdict::Proven(_)), "{ev:?}");
@@ -692,8 +870,17 @@ mod tests {
             // A real claim re-dated to another block (reordering the payout queue).
             release(150, 300_000, COMMITMENT),
             // A confirmation of a claim that is still pending, or re-dated.
-            event(150, RegistryEvent::PayoutConfirmed(vec![CLAIM])),
-            event(250, RegistryEvent::PayoutConfirmed(vec![CLAIM])),
+            confirmation(150),
+            confirmation(250),
+            // R-1: a confirmation naming a payout the Registry has no commitment of, or one of
+            // another input.
+            event(
+                200,
+                RegistryEvent::PayoutConfirmed {
+                    payout_ref: B256::repeat_byte(0xab),
+                    claims: vec![CLAIM],
+                },
+            ),
             // An activation for another account, or before it happened.
             activation(50, Address::repeat_byte(8), TAG),
             activation(120, ACCOUNT, TAG),
@@ -831,7 +1018,8 @@ mod tests {
             status: CLAIM_DISPUTED,
             ..claim_state(CLAIM_PAID)
         };
-        // Paid at 200, disputed at 300, reopened at 400 (pending again), upheld late at 450 (D57).
+        // Paid at 200, disputed at 300, reopened at 400 (pending again), upheld late at 450 (D57),
+        // which makes it final (`paidAt` cleared).
         chain.claim = vec![
             (100, claim_state(CLAIM_PENDING)),
             (200, claim_state(CLAIM_PAID)),
@@ -839,6 +1027,7 @@ mod tests {
             (400, claim_state(CLAIM_PENDING)),
             (450, claim_state(CLAIM_PAID)),
         ];
+        chain.paid_at = vec![(200, 400), (450, 0)];
         let change = |block: u64, change: ClaimChange| {
             event(
                 block,
@@ -855,11 +1044,17 @@ mod tests {
         // Re-dated, or a change that did not happen.
         assert!(forged(verdict(&chain, None, &change(350, ClaimChange::Disputed { due_at: 9_000 })).await.unwrap()));
         assert!(forged(verdict(&chain, None, &change(300, ClaimChange::Compensated)).await.unwrap()));
-        assert!(forged(verdict(&chain, None, &change(300, ClaimChange::Upheld { payout_ref: TAG })).await.unwrap()));
-        assert!(forged(verdict(&chain, None, &change(400, ClaimChange::Upheld { payout_ref: TAG })).await.unwrap()));
+        assert!(forged(
+            verdict(&chain, None, &change(300, ClaimChange::Upheld { payout_ref: PAYOUT })).await.unwrap()
+        ));
+        assert!(forged(
+            verdict(&chain, None, &change(400, ClaimChange::Upheld { payout_ref: PAYOUT })).await.unwrap()
+        ));
         // D57: the reopened claim upheld by a later proof.
-        let late = change(450, ClaimChange::Upheld { payout_ref: TAG });
+        let late = change(450, ClaimChange::Upheld { payout_ref: PAYOUT });
         assert!(matches!(verdict(&chain, None, &late).await.unwrap(), Verdict::Proven(_)));
+        // Upheld by a payout the Registry has no commitment of: forged.
+        assert!(forged(verdict(&chain, None, &change(450, ClaimChange::Upheld { payout_ref: TAG })).await.unwrap()));
         // At a later block (state pruned): the dispute and the reopening were resolved since:
         // stale; the late upholding still shows.
         chain.pruned_below = 500;
@@ -867,8 +1062,7 @@ mod tests {
         assert!(matches!(verdict(&chain, None, &reopen).await.unwrap(), Verdict::Stale(_)));
         assert!(matches!(verdict(&chain, None, &late).await.unwrap(), Verdict::Proven(_)));
         // The confirmation at 200: the claim is paid again now (upheld): it still shows.
-        let confirmed = event(200, RegistryEvent::PayoutConfirmed(vec![CLAIM]));
-        assert!(matches!(verdict(&chain, None, &confirmed).await.unwrap(), Verdict::Proven(_)));
+        assert!(matches!(verdict(&chain, None, &confirmation(200)).await.unwrap(), Verdict::Proven(_)));
         // A witness that reads another state disputes even a stale verdict.
         let mut other = chain.clone();
         other.claim.push((480, claim_state(CLAIM_PENDING)));
@@ -884,11 +1078,136 @@ mod tests {
             ..claim_state(CLAIM_PAID)
         };
         chain.claim = vec![(100, claim_state(CLAIM_PENDING)), (200, disputed)];
-        let confirmed = event(200, RegistryEvent::PayoutConfirmed(vec![CLAIM]));
-        let Verdict::Proven(applied) = verdict(&chain, None, &confirmed).await.unwrap() else {
+        let Verdict::Proven(applied) = verdict(&chain, None, &confirmation(200)).await.unwrap() else {
             panic!()
         };
-        assert_eq!(applied.event, RegistryEvent::PayoutConfirmed(vec![CLAIM]));
+        assert_eq!(applied.event, confirmation(200).event);
+    }
+
+    /// R-1: a confirmation names a payout the Registry committed for the vault, and every claim it
+    /// confirms is bound to that payout's input.
+    #[tokio::test]
+    async fn a_confirmation_names_a_committed_payout_of_the_claims_input() {
+        let chain = honest();
+        assert!(matches!(verdict(&chain, None, &confirmation(200)).await.unwrap(), Verdict::Proven(_)));
+        // The claim bound to another input than the payout's.
+        let mut other_input = honest();
+        other_input.input = vec![(150, B256::repeat_byte(0x7d))];
+        assert!(forged(verdict(&other_input, None, &confirmation(200)).await.unwrap()));
+        // A payout committed for another vault.
+        let mut other_vault = honest();
+        other_vault.payouts[0].2.vault_id = B256::repeat_byte(8);
+        assert!(forged(verdict(&other_vault, None, &confirmation(200)).await.unwrap()));
+        // A witness without the commitment disputes it.
+        let mut no_record = honest();
+        no_record.payouts.clear();
+        assert!(matches!(verdict(&chain, Some(&no_record), &confirmation(200)).await.unwrap(), Verdict::Disputed(_)));
+    }
+
+    /// Section 3: a proven delivery makes a committed pending claim, or a confirmed one, final, by a
+    /// committed payout of its own input; a claim that is not final there, a payout of another
+    /// input, or a proof of a disputed claim (that is `PayoutUpheld`) is refused.
+    #[tokio::test]
+    async fn a_proven_delivery_is_final_and_of_the_claims_input() {
+        let proven = |block: u64, payout_ref: B256| {
+            event(
+                block,
+                RegistryEvent::ClaimChanged {
+                    claim_id: CLAIM,
+                    change: ClaimChange::Proven { payout_ref },
+                },
+            )
+        };
+        // Confirmed at 200, proven at 300.
+        let mut chain = honest();
+        chain.paid_at = vec![(200, 400), (300, 0)];
+        assert!(matches!(verdict(&chain, None, &proven(300, PAYOUT)).await.unwrap(), Verdict::Proven(_)));
+        // Proven straight from pending (never confirmed: the vault was frozen, R-3), at 200.
+        let mut unconfirmed = honest();
+        unconfirmed.paid_at = vec![];
+        assert!(matches!(verdict(&unconfirmed, None, &proven(200, PAYOUT)).await.unwrap(), Verdict::Proven(_)));
+        // Not final in the Registry (only confirmed), another payout, a re-dated proof.
+        assert!(forged(verdict(&honest(), None, &proven(300, PAYOUT)).await.unwrap()));
+        assert!(forged(verdict(&chain, None, &proven(300, B256::repeat_byte(0xab))).await.unwrap()));
+        assert!(forged(verdict(&chain, None, &proven(150, PAYOUT)).await.unwrap()));
+        // From a dispute it is `PayoutUpheld`, never `PayoutProven`.
+        let mut disputed = chain.clone();
+        disputed.claim = vec![
+            (100, claim_state(CLAIM_PENDING)),
+            (
+                250,
+                ClaimRecord {
+                    status: CLAIM_DISPUTED,
+                    ..claim_state(CLAIM_PAID)
+                },
+            ),
+            (300, claim_state(CLAIM_PAID)),
+        ];
+        assert!(forged(verdict(&disputed, None, &proven(300, PAYOUT)).await.unwrap()));
+        // At a later block the final claim still shows it.
+        chain.pruned_below = 500;
+        assert!(matches!(verdict(&chain, None, &proven(300, PAYOUT)).await.unwrap(), Verdict::Proven(_)));
+    }
+
+    /// R-11: a dormant refund has no destination (one given since makes the event stale); R-16: an
+    /// overridden change tag belonged to the vault and now names another vault's used deposit tag.
+    #[tokio::test]
+    async fn dormant_refunds_and_overridden_change_tags_are_checked() {
+        let refund = |commitment: B256| ClaimRecord {
+            kind: kind_code(ClaimKind::Refund),
+            commitment,
+            ..claim_state(CLAIM_PENDING)
+        };
+        let mut chain = honest();
+        chain.claim = vec![(100, refund(B256::ZERO)), (600, refund(B256::from(COMMITMENT)))];
+        let dormant = event(
+            300,
+            RegistryEvent::ClaimChanged {
+                claim_id: CLAIM,
+                change: ClaimChange::Dormant,
+            },
+        );
+        assert!(matches!(verdict(&chain, None, &dormant).await.unwrap(), Verdict::Proven(_)));
+        let mut with_destination = chain.clone();
+        with_destination.claim = vec![(100, refund(B256::from(COMMITMENT)))];
+        assert!(forged(verdict(&with_destination, None, &dormant).await.unwrap()));
+        chain.pruned_below = 700;
+        assert!(matches!(verdict(&chain, None, &dormant).await.unwrap(), Verdict::Stale(_)));
+
+        // `TAG` was a change tag of VAULT until block 300, when another vault's deposit took it.
+        let victim = B256::repeat_byte(0x44);
+        let mut tags = honest();
+        tags.lineage = vec![(
+            150,
+            Lineage {
+                vault_id: VAULT,
+                value: 700_000,
+            },
+        )];
+        tags.lineage.push((
+            300,
+            Lineage {
+                vault_id: victim,
+                value: 1_000_000,
+            },
+        ));
+        tags.tag = vec![(300, true)];
+        let overridden = |block: u64| event(block, RegistryEvent::ChangeTagOverridden { tag: TAG });
+        assert!(matches!(verdict(&tags, None, &overridden(300)).await.unwrap(), Verdict::Proven(_)));
+        assert!(forged(verdict(&tags, None, &overridden(200)).await.unwrap()), "re-dated");
+        let mut never = honest();
+        never.lineage = vec![(150, DEPOSIT)];
+        assert!(forged(verdict(&never, None, &overridden(300)).await.unwrap()), "the tag is still the vault's");
+        // The depositor's reservation was released since: stale.
+        tags.lineage.push((
+            400,
+            Lineage {
+                vault_id: B256::ZERO,
+                value: 0,
+            },
+        ));
+        tags.pruned_below = 500;
+        assert!(matches!(verdict(&tags, None, &overridden(300)).await.unwrap(), Verdict::Stale(_)));
     }
 
     #[tokio::test]
@@ -931,8 +1250,7 @@ mod tests {
         assert!(matches!(verdict(&pruned, Some(&pruned.clone()), &ev).await.unwrap(), Verdict::Proven(_)));
         assert!(forged(verdict(&pruned, None, &release(100, 300_000, [6; 32])).await.unwrap()));
         // A confirmation is still checked as paid; an activation still names the vault's deposit.
-        let confirmed = event(200, RegistryEvent::PayoutConfirmed(vec![CLAIM]));
-        assert!(matches!(verdict(&pruned, None, &confirmed).await.unwrap(), Verdict::Proven(_)));
+        assert!(matches!(verdict(&pruned, None, &confirmation(200)).await.unwrap(), Verdict::Proven(_)));
         assert!(matches!(verdict(&pruned, None, &activation(50, ACCOUNT, TAG)).await.unwrap(), Verdict::Proven(_)));
         assert!(forged(verdict(&pruned, None, &activation(50, ACCOUNT, B256::repeat_byte(0x7b))).await.unwrap()));
     }
