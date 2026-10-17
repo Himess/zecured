@@ -501,6 +501,54 @@ contract V4PayRegressionsTest is V4PayBase {
         slasher.proveInclusion(journal, seal, violationImage, victimClaim);
     }
 
+    /// The squatted tag is that of a refund deposit to the squatting vault itself (R-12 reserves it for the existing
+    /// vault): the override keeps the vault's own record's claim set. Its commitments bound a claim to the tag, so every
+    /// commitment of the note must still name it (RT-4) and a proof of any of them really pays it; with the set cleared,
+    /// a payout of other claims from the note, once proven, made the bound claim final without paying it.
+    function test_R16_theVaultsOwnRecordKeepsItsClaimSet() public {
+        bytes32 vaultId = _attest(account, VAULT_005);
+        _authorizeBoth(account);
+        vm.startPrank(account);
+        bytes32 a = registry.requestPartialRelease(vaultId, 1_000_000, RELEASE_COMMITMENT);
+        bytes32 b = registry.requestPartialRelease(vaultId, 1_000_000, USER_COMMITMENT);
+        vm.stopPrank();
+        bytes32 tag = keccak256("v4.r16.ownRefund");
+        SpendCommit memory squat = _spendCommit(vaultId, _depositTagFor(account), _one(a), "v4.r16.own.squat");
+        squat.changeTag = tag; // value 4,000,000
+        _send(squat);
+        SpendCommit memory fromTag = _spendCommit(vaultId, tag, _one(b), "v4.r16.own.fromTag");
+        _send(fromTag);
+        bytes32 claimSet = registry.inputClaimSet(tag);
+        uint40 committedAt = registry.lastCommitAt(tag);
+
+        vm.expectEmit(address(registry));
+        emit IZecuredRegistry.ChangeTagOverridden(tag, vaultId);
+        bytes32 refundId = intake.harnessRefund(vaultId, account, VAULT_001, tag);
+        assertEq(registry.inputClaimSet(tag), claimSet, "the vault's own record keeps its claim set");
+        assertEq(registry.lastCommitAt(tag), committedAt);
+        assertEq(registry.lineageOf(tag).value, VAULT_001, "the note's real value");
+
+        // No payout of the note leaves b out.
+        vm.prank(account);
+        registry.setRefundDestination(refundId, keccak256("v4.r16.own.refundDest"));
+        SpendCommit memory other = _spendCommit(vaultId, tag, _one(refundId), "v4.r16.own.other");
+        bytes[] memory sigs = _threeSigs(registry.hashSpendCommit(other));
+        vm.expectRevert(abi.encodeWithSelector(IZecuredSpendCommitsEvents.ClaimSetMismatch.selector, tag));
+        registry.commitSpend(other, sigs);
+
+        // A payout of the note naming b pays it, and its proof makes b final.
+        SpendCommit memory payB = _spendCommit(vaultId, tag, _one(b), "v4.r16.own.payB");
+        _send(payB);
+        _upholdWith(payB.payoutRef, b);
+        assertEq(uint8(_claimStatus(b)), uint8(ClaimStatus.Paid));
+        assertEq(_paidAt(b), 0, "final");
+        // The refund is paid from another real note: the deposit, never really spent, pays `a` again with a real change.
+        SpendCommit memory redo = _spendCommit(vaultId, _depositTagFor(account), _one(a), "v4.r16.own.redo");
+        _send(redo);
+        _send(_spendCommit(vaultId, redo.changeTag, _one(refundId), "v4.r16.own.refund"));
+        assertEq(registry.claimInput(refundId), redo.changeTag);
+    }
+
     // ================================================================== R-19: borrowing against stolen collateral
 
     /// The owner of a compromised vault borrowed against its unbacked zZEC until the settlement, moving value from the

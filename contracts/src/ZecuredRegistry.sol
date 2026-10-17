@@ -660,16 +660,21 @@ contract ZecuredRegistry is IZecuredRegistry, IZecuredSpendCommits, ZecuredRegis
     /// @dev I5 and RT-16: a deposit's tag marks one note, used once. R-16: a lineage note under the tag that is not a
     ///      deposit's is a change record, which a proven deposit overrides: a real change note never carries a deposit's
     ///      tag (another note has another `cmx`, another vault another tag key), so the record was false, and keeping it
-    ///      would let three signers block any deposit they can see on Zcash. The note becomes this vault's; the input
-    ///      state the false record had (its claim set, its commitment time) goes with it.
+    ///      would let three signers block any deposit they can see on Zcash. The note becomes this vault's, at its real
+    ///      value. Another vault's record takes its input state (claim set, commitment time) with it: that vault's claims
+    ///      bound to the tag are bound again by its next commitment. The vault's own record (a refund of a deposit to an
+    ///      existing vault) keeps it: the claims bound to the note stay bound, so every commitment of the note must still
+    ///      name them all (RT-4), and a proof of any of them pays them.
     function _addLineage(bytes32 vaultId, uint64 amount, bytes32 depositTag) internal {
         if (amount == 0) revert ZeroAmount();
         if (depositTag == bytes32(0)) revert ZeroDepositTag();
         if (_depositTagUsed[depositTag]) revert DepositTagUsed(depositTag);
         bytes32 previous = _lineage[depositTag].vaultId;
         if (previous != bytes32(0)) {
-            delete _inputClaimSet[depositTag];
-            delete _lastCommitAt[depositTag];
+            if (previous != vaultId) {
+                delete _inputClaimSet[depositTag];
+                delete _lastCommitAt[depositTag];
+            }
             emit ChangeTagOverridden(depositTag, previous);
         }
         _depositTagUsed[depositTag] = true;
