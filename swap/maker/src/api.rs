@@ -12,6 +12,9 @@
 //!   txid).
 //! - `GET /swap/status`: what the maker quotes now.
 //!
+//! And on the operators' loopback address only (`status_bind`, O-7), never through the public API
+//! or the backend's proxy: `GET /inventory`, the maker's free ZEC and USDC for the watchdog.
+//!
 //! Errors are `{ "error": message, "code": code }` with fixed messages.
 
 use std::sync::{Arc, atomic::Ordering};
@@ -268,6 +271,31 @@ async fn get_order(
     })))
 }
 
+/// O-7: what the maker can still fill: ZEC (the last scan's spendable balance less what its open
+/// Buy orders reserved) and USDC (its balance within its allowance to ZecuredSwap, which Sell orders
+/// lock), in zatoshi and USDC units.
+pub async fn inventory(m: &Maker) -> anyhow::Result<(u64, U256)> {
+    let reserved = m.book.lock().await.reserved_zatoshi();
+    let zec_free = m.balance.load(Ordering::Relaxed).saturating_sub(reserved);
+    let me = m.signer.address();
+    let usdc = IERC20::new(m.swap().usdc().call().await?, &m.provider);
+    let balance = usdc.balanceOf(me).call().await?;
+    let allowance = usdc.allowance(me, m.cfg.swap).call().await?;
+    Ok((zec_free, balance.min(allowance)))
+}
+
+/// O-7: the operators' local endpoint, served on `status_bind` (a loopback address) only:
+/// `GET /inventory` answers `{ "zecFreeZat", "usdcFree" }` (decimal strings). Never part of
+/// [`router`], so neither the public API nor the backend's `/swap/*` proxy can reach it.
+pub fn status_router(maker: Arc<Maker>) -> Router {
+    Router::new().route("/inventory", get(get_inventory)).with_state(maker)
+}
+
+async fn get_inventory(State(m): State<Arc<Maker>>) -> Result<Json<serde_json::Value>, ApiError> {
+    let (zec_free, usdc_free) = inventory(&m).await?;
+    Ok(Json(json!({ "zecFreeZat": zec_free.to_string(), "usdcFree": usdc_free.to_string() })))
+}
+
 async fn get_status(State(m): State<Arc<Maker>>) -> Json<serde_json::Value> {
     let open = m.book.lock().await.open_orders().count();
     Json(json!({
@@ -284,4 +312,117 @@ async fn get_status(State(m): State<Arc<Maker>>) -> Json<serde_json::Value> {
         "openOrders": open,
         "maxOpenOrders": m.cfg.max_open_orders,
     }))
+}
+
+#[cfg(test)]
+mod tests {
+    use alloy::{
+        primitives::Address,
+        providers::{Provider, ProviderBuilder},
+        signers::local::PrivateKeySigner,
+        sol_types::SolCall,
+    };
+    use axum::body::Body;
+    use orchard::keys::{FullViewingKey, SpendingKey};
+    use tower::ServiceExt;
+    use zcash_protocol::consensus::Network;
+    use zecured_swap::abi::IZecuredSwap;
+
+    use super::*;
+    use crate::{
+        config::tests::judge_like,
+        engine::{Wallet, new_record},
+        quoting::ChainLimits,
+        state::Book,
+    };
+
+    /// A Base RPC stub answering the three reads `inventory` makes, by function selector.
+    async fn base_stub(usdc: Address) -> String {
+        let app = Router::new().route(
+            "/",
+            post(move |Json(req): Json<serde_json::Value>| async move {
+                let call = &req["params"][0];
+                let data = call["input"].as_str().or(call["data"].as_str()).unwrap_or_default();
+                let selector = hex::decode(data.trim_start_matches("0x").get(..8).unwrap_or_default()).unwrap();
+                let word = |v: U256| format!("0x{}", hex::encode(v.to_be_bytes::<32>()));
+                let result = if selector == IZecuredSwap::usdcCall::SELECTOR {
+                    word(U256::from_be_slice(usdc.as_slice()))
+                } else if selector == IERC20::balanceOfCall::SELECTOR {
+                    word(U256::from(250_000_000u64))
+                } else if selector == IERC20::allowanceCall::SELECTOR {
+                    word(U256::from(200_000_000u64))
+                } else {
+                    "0x14a34".to_owned()
+                };
+                Json(json!({ "jsonrpc": "2.0", "id": req["id"], "result": result }))
+            }),
+        );
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        tokio::spawn(async move { axum::serve(listener, app).await.unwrap() });
+        format!("http://{addr}")
+    }
+
+    fn wallet() -> Wallet {
+        let sk = (1u8..).find_map(|b| Option::<SpendingKey>::from(SpendingKey::from_bytes([b; 32]))).unwrap();
+        Wallet {
+            fvk: FullViewingKey::from(&sk),
+            sk,
+            birthday: 1,
+            scan: None,
+        }
+    }
+
+    /// O-7: the operators' endpoint answers the free ZEC (the scanned balance less what open Buy
+    /// orders reserved) and the lockable USDC (balance within the allowance); the public API never
+    /// serves it.
+    #[tokio::test]
+    async fn the_inventory_is_served_on_the_status_router_only() {
+        let rpc = base_stub(Address::repeat_byte(0x55)).await;
+        let provider = ProviderBuilder::new().connect_http(rpc.parse().unwrap()).erased();
+        let cfg = judge_like();
+        let mut book = Book::default();
+        let order = B256::repeat_byte(1);
+        book.orders.insert(
+            order,
+            new_record(
+                order,
+                Side::Buy,
+                Address::repeat_byte(2),
+                30_000_000,
+                U256::from(1u64),
+                2_000_000_000,
+                B256::repeat_byte(3),
+            ),
+        );
+        let limits = ChainLimits {
+            max_order_usdc: U256::from(1u64),
+            max_order_zat: 1,
+            min_pay_window: 1,
+            max_pay_window: 2,
+        };
+        let domain = zecured_swap::quote::swap_domain(cfg.chain_id, cfg.swap);
+        let maker = Arc::new(Maker::new(
+            cfg,
+            Network::TestNetwork,
+            PrivateKeySigner::random(),
+            provider,
+            domain,
+            limits,
+            book,
+            wallet(),
+        ));
+        maker.balance.store(100_000_000, Ordering::Relaxed);
+        let get = |app: Router| async move {
+            let r = app.oneshot(axum::http::Request::get("/inventory").body(Body::empty()).unwrap()).await.unwrap();
+            let status = r.status();
+            let body = axum::body::to_bytes(r.into_body(), 1 << 16).await.unwrap();
+            (status, serde_json::from_slice::<serde_json::Value>(&body).unwrap_or_default())
+        };
+        let (status, body) = get(status_router(maker.clone())).await;
+        assert_eq!(status, StatusCode::OK);
+        assert_eq!(body, json!({ "zecFreeZat": "70000000", "usdcFree": "200000000" }));
+        let (status, _) = get(router(maker)).await;
+        assert_eq!(status, StatusCode::NOT_FOUND, "never on the public API");
+    }
 }

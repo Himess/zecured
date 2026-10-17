@@ -88,6 +88,11 @@ pub struct MakerConfig {
     /// keccak256 of each invite code's UTF-8 bytes (the code itself is never stored or logged).
     #[serde(default)]
     pub invite_code_hashes: Vec<B256>,
+    /// O-7: a loopback address (127.0.0.1 or ::1) for the operators' watchdog, where
+    /// `GET /inventory` answers the maker's free ZEC and USDC. Never the public API's address and
+    /// never proxied: the maker's balances stay off the public API. Unset: no such endpoint.
+    #[serde(default)]
+    pub status_bind: Option<SocketAddr>,
 }
 
 fn default_block_secs() -> u64 {
@@ -152,6 +157,13 @@ impl MakerConfig {
         if self.invite_only {
             ensure!(!self.invite_code_hashes.is_empty(), "invite_only needs invite_code_hashes");
         }
+        if let Some(status) = self.status_bind {
+            ensure!(
+                status.ip().is_loopback(),
+                "status_bind must be a loopback address: it reports the maker's balances"
+            );
+            ensure!(status != self.bind, "status_bind must not be the public API's address");
+        }
         Ok(())
     }
 }
@@ -195,6 +207,7 @@ pub mod tests {
             from_block: 0,
             invite_only: false,
             invite_code_hashes: vec![],
+            status_bind: None,
         }
     }
 
@@ -247,5 +260,28 @@ pub mod tests {
         let mut c = judge_like();
         c.sides.clear();
         assert!(c.check().is_err());
+    }
+
+    /// O-7: the inventory endpoint listens on a loopback address only, apart from the public API.
+    #[test]
+    fn the_status_endpoint_is_local_only() {
+        let mut c = judge_like();
+        c.status_bind = Some("127.0.0.1:8096".parse().unwrap());
+        c.check().unwrap();
+        c.status_bind = Some("[::1]:8096".parse().unwrap());
+        c.check().unwrap();
+        c.status_bind = Some("0.0.0.0:8096".parse().unwrap());
+        assert!(c.check().is_err(), "every interface");
+        c.status_bind = Some("10.0.0.7:8096".parse().unwrap());
+        assert!(c.check().is_err(), "a private network address");
+        c.status_bind = Some(c.bind);
+        assert!(c.check().is_err(), "the public API's own address");
+        let parsed: MakerConfig = serde_json::from_value({
+            let mut v = serde_json::to_value(judge_like()).unwrap();
+            v["status_bind"] = serde_json::json!("127.0.0.1:8096");
+            v
+        })
+        .unwrap();
+        assert_eq!(parsed.status_bind, Some("127.0.0.1:8096".parse().unwrap()));
     }
 }
