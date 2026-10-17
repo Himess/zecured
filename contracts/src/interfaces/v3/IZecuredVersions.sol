@@ -4,7 +4,8 @@ pragma solidity 0.8.28;
 /// @notice Which proofs a version verifies.
 enum VersionKind {
     Deposit,
-    Violation
+    Violation,
+    Swap
 }
 
 /// @notice A verifier version: a RISC Zero router selector, a guest image id and (deposits) the consensus branch ids a

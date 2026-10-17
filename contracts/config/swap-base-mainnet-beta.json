@@ -1,0 +1,32 @@
+{
+  "_comment": "ZecuredSwap on Base mainnet, the capped invite-only beta (work order 5.9, mainnet beta column; docs/MAINNET.md). Circle USDC; the Intake's mainnet work tiers; the Swap version's branch ids NU6.3 and NU7; a 24-hour pay window; no fee. Invitations are the maker's (GET /swap/quote), not the contract's.",
+  "network": "base-mainnet-beta",
+  "chainId": 8453,
+  "zcashNetwork": "zcash-mainnet",
+  "localFork": false,
+  "usdc": "0x833589fCD6eDb6E08f4c7C32D4f71b54bdA02913",
+  "riscZeroRouter": "0x0b144E07A0826182B6b59788c34b32Bfa86Fb711",
+  "branchIds": [
+    933566043,
+    1998129881
+  ],
+  "tierMaxAmountZat": [
+    "100000000",
+    "1000000000",
+    "10000000000"
+  ],
+  "tierMinWork": [
+    "10765160327562",
+    "35883867758540",
+    "340896743706130"
+  ],
+  "minWorkFloor": "10765160327562",
+  "finalizeDepth": 6,
+  "finalizeDelay": 1800,
+  "maxOrderUsdc": "250000000",
+  "maxOrderZat": "500000000",
+  "minPayWindow": 21600,
+  "maxPayWindow": 86400,
+  "feeBps": 0,
+  "feeRecipient": "0x0000000000000000000000000000000000000000"
+}

@@ -20,6 +20,7 @@ contracts=(
   "src/ZecuredSlasher.sol:ZecuredSlasher"
   "src/ZecuredCompensator.sol:ZecuredCompensator"
   "src/ZecuredVersions.sol:ZecuredVersions"
+  "src/ZecuredSwap.sol:ZecuredSwap"
   "src/mocks/MockUSDC.sol:MockUSDC"
   "src/mocks/MockZecOracle.sol:MockZecOracle"
 )
