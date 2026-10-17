@@ -69,7 +69,7 @@ contract ZecuredInvariantsTest is ZecuredFixture {
         usdc.transferOwnership(address(handler)); // MOCK mint for the handler's actors
         oracle.transferOwnership(address(handler)); // MOCK price moves
 
-        bytes4[] memory selectors = new bytes4[](44);
+        bytes4[] memory selectors = new bytes4[](48);
         selectors[0] = ZecuredHandler.prove.selector;
         selectors[1] = ZecuredHandler.prove.selector; // weighted: deposits first
         selectors[2] = ZecuredHandler.prove.selector;
@@ -114,6 +114,11 @@ contract ZecuredInvariantsTest is ZecuredFixture {
         selectors[41] = ZecuredHandler.resolveDispute.selector;
         selectors[42] = ZecuredHandler.dispute.selector; // weighted: a dispute needs a confirmed claim first
         selectors[43] = ZecuredHandler.resolveDispute.selector;
+        // v4 pre-liquidation
+        selectors[44] = ZecuredHandler.setPreLiquidationTerms.selector;
+        selectors[45] = ZecuredHandler.preLiquidate.selector;
+        selectors[46] = ZecuredHandler.preLiquidate.selector; // weighted: a pre-liquidation needs terms and a loan first
+        selectors[47] = ZecuredHandler.attackPreLiquidation.selector;
         targetSelector(FuzzSelector({addr: address(handler), selectors: selectors}));
         targetContract(address(handler));
         // The handler pranks its own actors, so the caller does not matter. A fixed caller matters on a fork: every
@@ -394,7 +399,7 @@ contract ZecuredInvariantsTest is ZecuredFixture {
     }
 
     function afterInvariant() external view {
-        string[52] memory names = [
+        string[57] memory names = [
             "prove: pending",
             "prove: refund (known vault)",
             "prove: refund (account bound)",
@@ -446,7 +451,12 @@ contract ZecuredInvariantsTest is ZecuredFixture {
             "attack: partial release",
             "attack: flash loan",
             "attack: deleverage",
-            "attack: close request"
+            "attack: close request",
+            "preLiquidation terms set",
+            "preLiquidation terms cleared",
+            "preLiquidate",
+            "preLiquidate (refused)",
+            "attack: pre-liquidation"
         ];
         for (uint256 i; i < names.length; ++i) {
             console.log(names[i], handler.calls(names[i]));

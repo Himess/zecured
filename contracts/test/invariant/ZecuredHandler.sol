@@ -24,6 +24,7 @@ import {
 import {IZecuredIntake, PendingActivation} from "../../src/interfaces/v3/IZecuredIntake.sol";
 import {IZecuredDisputes} from "../../src/interfaces/v3/IZecuredDisputes.sol";
 import {CloseRequest, SpendCommit, DeleverageRequest} from "../../src/libraries/ZecuredEIP712.sol";
+import {PreLiquidationTerms} from "../../src/interfaces/ISettlementAdapter.sol";
 import {MockHeaderRelay} from "../mocks/MockHeaderRelay.sol";
 import {MockSignerBond} from "../mocks/MockSignerBond.sol";
 import {MockCapPrice} from "../mocks/MockCapPrice.sol";
@@ -1306,5 +1307,185 @@ contract ZecuredHandler is Test {
             attackSucceeded = true;
         } catch {}
         calls["attack: close request"]++;
+    }
+
+    // ------------------------------------------------------------------ pre-liquidation (v4)
+
+    /// Terms within the bounds, drawn from `seed`: preLltv 45 % to 60 %, close factors from 1 % up to 100 %, incentive
+    /// factors from 1 up to Morpho's 1.1268 at this LLTV, for 1 to 60 days.
+    function _drawTerms(uint256 seed) internal view returns (PreLiquidationTerms memory t) {
+        seed = _mix(seed);
+        uint256 lif = 1_126_760_563_380_281_690; // min(1.15, 1 / (1 - 0.3 * (1 - 0.625)))
+        t.preLltv = bound(seed % 1e6, 450_000, 600_000) * 1e12;
+        t.preLcf1 = bound((seed >> 32) % 1e6, 10_000, 500_000) * 1e12;
+        t.preLcf2 = bound((seed >> 64) % 1e6, t.preLcf1 / 1e12, 1_000_000) * 1e12;
+        t.preLif1 = 1e18 + bound((seed >> 96) % 1e6, 0, 50_000) * 1e12;
+        t.preLif2 = bound(t.preLif1 + ((seed >> 128) % 1e17), t.preLif1, lif);
+        t.expiry = uint64(block.timestamp + bound((seed >> 192) % 1e9, 1 days, 60 days));
+    }
+
+    /// The account of an active vault opts into pre-liquidation (or, now and then, withdraws its terms).
+    function setPreLiquidationTerms(uint256 vaultSeed, uint256 termsSeed) external {
+        (bool found, bytes32 vaultId, address account) = _vault(vaultSeed);
+        if (!found) return;
+        (bool active,) = _active(vaultId);
+        if (!active) return;
+        if (_mix(termsSeed) % 8 == 0) {
+            vm.prank(account);
+            adapter.clearPreLiquidation();
+            calls["preLiquidation terms cleared"]++;
+            return;
+        }
+        PreLiquidationTerms memory t = _drawTerms(termsSeed);
+        vm.prank(account);
+        try adapter.setPreLiquidation(t) {
+            calls["preLiquidation terms set"]++;
+        } catch {
+            _flag("an account could not set valid pre-liquidation terms");
+        }
+    }
+
+    /// Morpho's state after interest about `account`, restated independently: whether the position is in its terms'
+    /// band, the most shares one pre-liquidation may repay, and the collateral `repaidShares` buy (Morpho's
+    /// PreLiquidation arithmetic, every step rounded down but the LTV).
+    struct PreQuote {
+        bool inBand;
+        uint256 repayable;
+        uint256 seized;
+        uint256 ltv;
+        // the state it is computed from
+        uint256 totalBorrowAssets;
+        uint256 totalBorrowShares;
+        uint256 shares;
+        uint256 price;
+        uint256 value;
+        uint256 borrowed;
+        uint256 q;
+        uint256 preLif;
+    }
+
+    function _preQuote(address account, PreLiquidationTerms memory t, uint256 repaidShares)
+        internal
+        view
+        returns (PreQuote memory r)
+    {
+        (,, r.totalBorrowAssets, r.totalBorrowShares) = morpho.expectedMarketBalances(params);
+        r.shares = morpho.position(marketId, account).borrowShares;
+        r.price = oracle.price();
+        r.value = uint256(morpho.position(marketId, account).collateral) * r.price / ORACLE_PRICE_SCALE;
+        r.borrowed =
+            (r.shares * (r.totalBorrowAssets + 1) + (r.totalBorrowShares + 1e6) - 1) / (r.totalBorrowShares + 1e6);
+        if (r.value == 0 || r.shares == 0) return r;
+        r.inBand = r.borrowed <= r.value * params.lltv / 1e18 && r.borrowed > r.value * t.preLltv / 1e18;
+        if (!r.inBand) return r;
+        r.ltv = (r.borrowed * 1e18 + r.value - 1) / r.value;
+        r.q = (r.ltv - t.preLltv) * 1e18 / (params.lltv - t.preLltv);
+        r.repayable = r.shares * (t.preLcf1 + r.q * (t.preLcf2 - t.preLcf1) / 1e18) / 1e18;
+        r.preLif = t.preLif1 + r.q * (t.preLif2 - t.preLif1) / 1e18;
+        uint256 assets = repaidShares * (r.totalBorrowAssets + 1) / (r.totalBorrowShares + 1e6);
+        r.seized = (assets * r.preLif / 1e18) * ORACLE_PRICE_SCALE / r.price;
+    }
+
+    /// Goal-directed: makes sure the vault has a loan and terms in force, moves the price so that its LTV is around the
+    /// band (mostly inside, sometimes just outside), then the liquidator pre-liquidates up to the close factor's cap
+    /// (sometimes past it). Whatever the outcome, it must be the one the terms and the floors say.
+    function preLiquidate(uint256 vaultSeed, uint256 ltvSeed, uint256 sharesSeed) external {
+        (bool found, bytes32 vaultId, address account) = _vault(vaultSeed);
+        if (!found) return;
+        (bool active, uint64 outstandingBefore) = _active(vaultId);
+        if (!active || !_ensureDebt(account, outstandingBefore, 5_000)) return;
+        _authorize(account);
+        PreLiquidationTerms memory t = adapter.preLiquidationTerms(account);
+        if (block.timestamp >= t.expiry) {
+            t = _drawTerms(ltvSeed);
+            vm.prank(account);
+            adapter.setPreLiquidation(t);
+        }
+        uint256 debt = morpho.expectedBorrowAssets(params, account);
+        // An LTV from preLltv - 1 % to LLTV + 1 %.
+        uint256 ltv = bound(_mix(ltvSeed) % 1e9, t.preLltv / 1e10 - 1e6, 63_500_000) * 1e10;
+        uint256 price = debt * 1e18 * ORACLE_PRICE_SCALE / (ltv * outstandingBefore);
+        if (price == 0) return;
+        oracle.setPrice(price);
+        PreQuote memory r = _preQuote(account, t, 0);
+        // Mostly the cap (what a pre-liquidator takes), else anything up to an eighth past it.
+        uint256 repaidShares =
+            _mix(sharesSeed) % 4 == 0 ? bound(sharesSeed, 1, r.repayable + r.repayable / 8 + 1) : r.repayable;
+        if (repaidShares == 0) repaidShares = 1;
+        r = _preQuote(account, t, repaidShares);
+        _fund(liquidator, address(adapter), debt + 1e6);
+        _tryPreLiquidate(vaultId, account, outstandingBefore, repaidShares, r);
+    }
+
+    function _tryPreLiquidate(
+        bytes32 vaultId,
+        address account,
+        uint64 outstandingBefore,
+        uint256 repaidShares,
+        PreQuote memory r
+    ) internal {
+        uint256 floor = adapter.minSeize(outstandingBefore);
+        bool frozen = gates.vaultFrozen(vaultId);
+        bool allowed = r.inBand && repaidShares <= r.repayable && r.seized >= floor
+            && r.seized + floor <= outstandingBefore && !frozen;
+        uint64 claimsBefore = registry.claimCount(vaultId);
+        vm.prank(liquidator);
+        try adapter.preLiquidate(account, repaidShares, keccak256("zecured.inv.preLiquidator")) returns (
+            uint256, uint64 seized
+        ) {
+            if (!allowed) _flag("a pre-liquidation outside the terms, the floors or a freeze went through");
+            calls["preLiquidate"]++;
+            _checkPreLiquidation(vaultId, account, claimsBefore, outstandingBefore, seized, r);
+        } catch {
+            if (allowed) _flag("an honest pre-liquidation reverted");
+            calls["preLiquidate (refused)"]++;
+        }
+    }
+
+    /// I9 and D11 at the moment of a pre-liquidation: one Liquidation claim of exactly what left the vault, the
+    /// restated amount, the liquidator its claimant, the vault still open with at least the floor; the LTV fell.
+    function _checkPreLiquidation(
+        bytes32 vaultId,
+        address account,
+        uint64 claimsBefore,
+        uint64 outstandingBefore,
+        uint64 seized,
+        PreQuote memory r
+    ) internal {
+        (bool stillActive, uint64 outstandingAfter) = _active(vaultId);
+        ClaimDetails memory c = registry.claimDetails(registry.claimIdOf(vaultId, claimsBefore));
+        if (
+            !stillActive || seized != r.seized || uint256(seized) + outstandingAfter != outstandingBefore
+                || c.amount != seized || c.kind != ClaimKind.Liquidation || c.claimant != liquidator
+                || outstandingAfter < adapter.minSeize(outstandingBefore)
+                || registry.claimCount(vaultId) != claimsBefore + 1
+        ) i9Violated = true;
+        uint256 value = uint256(outstandingAfter) * oracle.price() / ORACLE_PRICE_SCALE;
+        if (value != 0 && morpho.expectedBorrowAssets(params, account) * 1e18 / value >= r.ltv) {
+            _flag("a pre-liquidation did not lower the LTV");
+        }
+    }
+
+    /// Pre-liquidation without consent: an account without terms in force, or a position below its terms' band, is
+    /// never pre-liquidated. Must always fail.
+    function attackPreLiquidation(uint256 vaultSeed, uint256 seed) external {
+        (bool found, bytes32 vaultId, address account) = _vault(vaultSeed);
+        if (!found) return;
+        (bool active, uint64 outstanding) = _active(vaultId);
+        if (!active || !_ensureDebt(account, outstanding, 5_000)) return;
+        PreLiquidationTerms memory t = adapter.preLiquidationTerms(account);
+        if (block.timestamp < t.expiry) {
+            // Terms in force: the LTV 0.5 % to 5 % below the band.
+            uint256 debt = morpho.expectedBorrowAssets(params, account);
+            uint256 ltv = t.preLltv - bound(_mix(seed) % 1e9, 5e15, 5e16);
+            oracle.setPrice(debt * 1e18 * ORACLE_PRICE_SCALE / (ltv * outstanding) + 1);
+        }
+        uint256 shares = bound(seed, 1, morpho.position(marketId, account).borrowShares);
+        _fund(stranger, address(adapter), 100 * 1e6);
+        vm.prank(stranger);
+        try adapter.preLiquidate(account, shares, keccak256("zecured.inv.x")) {
+            attackSucceeded = true;
+        } catch {}
+        calls["attack: pre-liquidation"]++;
     }
 }
