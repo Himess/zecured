@@ -32,8 +32,9 @@ contract ZecuredSlasher is IZecuredSlasher {
     /// @dev The violation guest's `Included` kind (tier2/statement, `violation::Kind`).
     uint256 private constant INCLUDED = 5;
     /// @inheritdoc IZecuredSlasher
-    /// @dev The burn accrues Morpho's interest, reads the price, and withdraws, transfers and burns zZEC: about 150,000
-    ///      gas from cold storage on a Base Sepolia fork (test `test_R19_theBurnFitsItsGas`), so this leaves a wide margin.
+    /// @dev The burn accrues Morpho's interest (calling its IRM), reads the price, and withdraws, transfers and burns
+    ///      zZEC: at most about 245,000 gas from cold storage in the R-19 tests on a Base Sepolia fork (which check it
+    ///      stays below this), so this leaves about twice that.
     uint256 public constant BURN_GAS = 500_000;
 
     /// @inheritdoc IZecuredSlasher

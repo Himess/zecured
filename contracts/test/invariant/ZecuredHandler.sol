@@ -956,16 +956,26 @@ contract ZecuredHandler is Test {
     /// `Included` proof) makes its payment final from any state before the compensator: committed and pending (also on
     /// a frozen vault), or confirmed by signatures. Never reverts for such a claim; afterwards `paidAt == 0`.
     function provePayout(uint256 vaultSeed, uint256 howSeed) external {
-        (bool found, bytes32 vaultId,) = _vault(vaultSeed);
-        if (!found) return;
+        if (vaultIds.length == 0) return;
         bool confirmedOnly = _mix(howSeed) % 2 == 0;
-        uint64 count = registry.claimCount(vaultId);
-        for (uint64 j; j < count; ++j) {
-            bytes32 claimId = registry.claimIdOf(vaultId, j);
-            if (!_provable(claimId, confirmedOnly)) continue;
-            _prove(vaultId, claimId, confirmedOnly);
-            return;
+        // Goal-directed: the first provable claim of any vault, starting from the seeded one ...
+        for (uint256 k; k < vaultIds.length; ++k) {
+            bytes32 vaultId = vaultIds[(vaultSeed % vaultIds.length + k) % vaultIds.length];
+            uint64 count = registry.claimCount(vaultId);
+            for (uint64 j; j < count; ++j) {
+                bytes32 claimId = registry.claimIdOf(vaultId, j);
+                if (!_provable(claimId, confirmedOnly)) continue;
+                _prove(vaultId, claimId, confirmedOnly);
+                return;
+            }
         }
+        // ... else a payout committed now, then proven before anyone confirms it.
+        bytes32 v = vaultIds[vaultSeed % vaultIds.length];
+        if (confirmedOnly || !_payable(v)) return;
+        (bool ok, bytes32 next) = _payableClaim(v, false);
+        if (!ok) return;
+        bytes32[] memory ids = _withFee(v, next, howSeed % 3 == 0);
+        if (_commit(v, ids, howSeed)) _prove(v, ids[0], false);
     }
 
     function _provable(bytes32 claimId, bool confirmedOnly) internal view returns (bool) {
@@ -998,28 +1008,34 @@ contract ZecuredHandler is Test {
     /// R-3: anyone makes a confirmation final once its dispute window is over, unless the vault froze within that
     /// window (then only a proof or the compensator settles it).
     function expireConfirmation(uint256 vaultSeed) external {
-        (bool found, bytes32 vaultId,) = _vault(vaultSeed);
-        if (!found) return;
-        IZecuredDisputes disputes = IZecuredDisputes(address(registry));
-        uint64 window = disputes.disputeWindow();
-        uint64 count = registry.claimCount(vaultId);
-        for (uint64 j; j < count; ++j) {
-            bytes32 claimId = registry.claimIdOf(vaultId, j);
-            (,,,, ClaimStatus status) = registry.claim(claimId);
-            (uint64 paidAt,) = disputes.payoutDispute(claimId);
-            if (status != ClaimStatus.Paid || paidAt == 0) continue;
-            if (block.timestamp <= uint256(paidAt) + window) vm.warp(uint256(paidAt) + window + 1);
-            uint64 frozenSince = gates.frozenSince(vaultId);
-            bool suspect = frozenSince != 0 && paidAt + window > frozenSince;
-            vm.prank(stranger);
-            try _payouts().expireConfirmation(claimId) {
-                if (suspect) _flag("R-3: a confirmation made just before a freeze expired");
-                calls["expire"]++;
-            } catch {
-                if (!suspect) _flag("an old confirmation could not expire");
-                calls["expire (suspect)"]++;
+        if (vaultIds.length == 0) return;
+        // Goal-directed: the first confirmation still open, of any vault, starting from the seeded one.
+        for (uint256 k; k < vaultIds.length; ++k) {
+            bytes32 vaultId = vaultIds[(vaultSeed % vaultIds.length + k) % vaultIds.length];
+            uint64 count = registry.claimCount(vaultId);
+            for (uint64 j; j < count; ++j) {
+                bytes32 claimId = registry.claimIdOf(vaultId, j);
+                (,,,, ClaimStatus status) = registry.claim(claimId);
+                (uint64 paidAt,) = IZecuredDisputes(address(registry)).payoutDispute(claimId);
+                if (status != ClaimStatus.Paid || paidAt == 0) continue;
+                _expire(vaultId, claimId, paidAt);
+                return;
             }
-            return;
+        }
+    }
+
+    function _expire(bytes32 vaultId, bytes32 claimId, uint64 paidAt) internal {
+        uint64 window = IZecuredDisputes(address(registry)).disputeWindow();
+        if (block.timestamp <= uint256(paidAt) + window) vm.warp(uint256(paidAt) + window + 1);
+        uint64 frozenSince = gates.frozenSince(vaultId);
+        bool suspect = frozenSince != 0 && paidAt + window > frozenSince;
+        vm.prank(stranger);
+        try _payouts().expireConfirmation(claimId) {
+            if (suspect) _flag("R-3: a confirmation made just before a freeze expired");
+            calls["expire"]++;
+        } catch {
+            if (!suspect) _flag("an old confirmation could not expire");
+            calls["expire (suspect)"]++;
         }
     }
 

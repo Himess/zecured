@@ -388,6 +388,42 @@ contract ZecuredInvariantsTest is ZecuredFixture {
         }
     }
 
+    /// The v4 actions do reach their success paths (the review found the campaign never exercised payout proofs): one
+    /// deterministic sequence through the handler, a pending claim proven, a confirmation proven, another expired.
+    function test_handler_exercisesTheV4PayoutPaths() public {
+        uint256 confirmed = _seedWithMix(0);
+        uint256 pendingOnly = _seedWithMix(1);
+        for (uint256 i; handler.pendingCount() < 2 && i < 40; ++i) {
+            handler.prove(i, false, false);
+        }
+        assertEq(handler.pendingCount(), 2, "two deposits pending");
+        handler.finalize(0);
+        handler.finalize(0);
+        // Vault 0: a partial release whose payout is committed, then proven before anyone confirms it.
+        handler.partialRelease(0, 0);
+        handler.provePayout(0, pendingOnly);
+        assertEq(handler.calls("prove pending"), 1, "a committed pending claim proven");
+        // Vault 1: a release committed and confirmed, then proven.
+        handler.release(1);
+        handler.confirm(1, 7, false);
+        assertEq(handler.calls("confirm"), 1);
+        handler.provePayout(1, confirmed);
+        assertEq(handler.calls("prove confirmed"), 1, "a confirmation proven");
+        // Vault 0 again: a confirmation nobody disputes expires.
+        handler.release(0);
+        handler.confirm(0, 3, false);
+        assertEq(handler.calls("confirm"), 2);
+        handler.expireConfirmation(0);
+        assertEq(handler.calls("expire"), 1, "an old confirmation expired");
+        assertFalse(handler.violated(), handler.violation());
+        assertFalse(handler.attackSucceeded());
+    }
+
+    /// A seed whose hash (the handler's `_mix`) has the given parity.
+    function _seedWithMix(uint256 parity) internal pure returns (uint256 seed) {
+        while (uint256(keccak256(abi.encode(seed))) % 2 != parity) ++seed;
+    }
+
     // ------------------------------------------------------------------ violations caught while acting
 
     /// D14: every partial release left the position at <= 50 % LTV and at least MIN_RELEASE in the vault, kept the
