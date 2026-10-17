@@ -108,7 +108,10 @@ fn the_fixture_proves_its_journal() {
     assert_eq!(verify_on(&MAINNET, &w), Ok(j));
 }
 
-/// The journal, word by word: a cross-language vector for `ZecuredSwap.proveSettlement`'s decoder.
+/// The journal, word by word: a cross-language vector for `ZecuredSwap.proveSettlement`'s decoder
+/// (contracts/test/unit/ZecuredSwap.t.sol `test_theRustFixturesJournalSettlesItsOrder` settles an
+/// order on these 192 bytes). The anchor is SHA-256d of the fixture's T' (Python's hashlib); the
+/// receiver commitment `keccak256(0x5a.. || receiver)` (Foundry's `cast keccak`).
 #[test]
 fn the_journal_is_the_swaps_abi() {
     let w = witness();
@@ -116,19 +119,24 @@ fn the_journal_is_the_swaps_abi() {
     let enc = j.abi_encode();
     assert_eq!(enc.len(), JOURNAL_LENGTH);
     let words: Vec<String> = enc.chunks(32).map(hex).collect();
-    let receiver: [u8; 43] = w.note_recipient.clone().try_into().unwrap();
     assert_eq!(
         words,
         [
-            "0000000000000000000000000000000000000000000000000000000000000001".to_owned(),
-            "0000000000000000000000000000000000000000000000000000000077190ad9".to_owned(),
-            hex(&sha256d(&w.tip_header)),
-            ORDER_ID.to_owned(),
-            hex(&receiver_commitment(&FIXTURE_SALT, &receiver)),
-            "00000000000000000000000000000000000000000000000000000000002625a0".to_owned(),
+            "0000000000000000000000000000000000000000000000000000000000000001",
+            "0000000000000000000000000000000000000000000000000000000077190ad9",
+            ANCHOR,
+            ORDER_ID,
+            RECEIVER_COMMITMENT,
+            "00000000000000000000000000000000000000000000000000000000002625a0",
         ]
     );
+    let receiver: [u8; 43] = w.note_recipient.clone().try_into().unwrap();
+    assert_eq!(hex(&sha256d(&w.tip_header)), ANCHOR);
+    assert_eq!(hex(&receiver_commitment(&FIXTURE_SALT, &receiver)), RECEIVER_COMMITMENT);
 }
+
+const ANCHOR: &str = "301c5d2807c6ed2eaebfe1e92ec0e25a2cb8bd4a7c3d8173c9d717148908d225";
+const RECEIVER_COMMITMENT: &str = "0144dce00498a1cb4e3d04161414ccf1cd42b09f70fe83ddcf745973c522a0a7";
 
 /// The real deposit (a real transaction in a real block under the real header 4,488,560) is a payment
 /// witness up to the memo: the statement walks its real inclusion and recovers its real note, then
