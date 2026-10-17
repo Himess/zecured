@@ -1,9 +1,10 @@
-# Tier 2: trust-minimized deposit proofs (docs/TIER2.md), RISC Zero zkVM.
-# A separate workspace so the main build never compiles the zkVM crates. The guest
-# (methods/guest) has its own workspace and is built by risc0-build for the zkVM target.
+# Tier 2: trust-minimized deposit proofs (docs/TIER2.md) and Zecured Swap's payment proofs, RISC Zero zkVM.
+# A separate workspace so the main build never compiles the zkVM crates. Each guest (methods/guest,
+# methods/violation, methods/payment) has its own workspace and is built by risc0-build for the
+# zkVM target.
 [workspace]
 resolver = "2"
-members = ["host", "methods", "k4"]
+members = ["host", "methods", "k4", "payment-statement", "payment-k4"]
 
 [workspace.package]
 edition = "2024"
