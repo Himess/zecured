@@ -62,6 +62,17 @@ sol! {
         uint128 fee;
     }
 
+    /// The Adapter's pre-liquidation terms of an account (WAD; `expiry` in Unix seconds).
+    #[derive(Debug)]
+    struct PreLiquidationTerms {
+        uint256 preLltv;
+        uint256 preLcf1;
+        uint256 preLcf2;
+        uint256 preLif1;
+        uint256 preLif2;
+        uint64 expiry;
+    }
+
     #[sol(rpc)]
     interface IMorpho {
         function position(bytes32 id, address user) external view returns (uint256 supplyShares, uint128 borrowShares, uint128 collateral);
@@ -92,6 +103,9 @@ sol! {
         function liquidate(address borrower, uint256 seizedAssets, uint256 repaidShares, bytes32 liquidatorCommitment) external returns (uint256 seized, uint256 repaid);
         function closeWithCollateral(CloseRequest req, bytes userSig, bytes32 mmCommitment, uint256 maxRepayAssets, uint64 minMmAmount) external;
         function deleverageWithCollateral(DeleverageRequest req, bytes userSig, bytes32 mmCommitment, uint64 minMmAmount) external returns (uint64 mmAmount);
+        function preLiquidate(address account, uint256 repaidShares, bytes32 mmCommitment) external returns (uint256 repaidAssets, uint64 seized);
+        function preLiquidationTerms(address account) external view returns (PreLiquidationTerms terms);
+        function minSeize(uint64 outstanding) external view returns (uint256);
     }
 
     #[sol(rpc)]
@@ -339,6 +353,195 @@ pub fn liquidation_attempts(plan: Liquidation, pos: &Position, outstanding: u64)
     match plan {
         Liquidation::RepayShares(_) if seizable > 0 => vec![plan, Liquidation::SeizeAll(seizable)],
         _ => vec![plan],
+    }
+}
+
+// ------------------------------------------------------------------ pre-liquidation
+
+/// An account's pre-liquidation terms on the Adapter (`preLiquidationTerms`), WAD, `expiry` in Unix
+/// seconds.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub struct PreTerms {
+    pub pre_lltv: u128,
+    pub pre_lcf1: u128,
+    pub pre_lcf2: u128,
+    pub pre_lif1: u128,
+    pub pre_lif2: u128,
+    pub expiry: u64,
+}
+
+impl PreTerms {
+    /// The terms as the Adapter returns them; `None` for values no valid terms have (the Adapter
+    /// bounds them all by 1.15 WAD).
+    pub fn from_abi(t: &PreLiquidationTerms) -> Option<Self> {
+        let wad = |v: U256| u128::try_from(v).ok();
+        Some(Self {
+            pre_lltv: wad(t.preLltv)?,
+            pre_lcf1: wad(t.preLcf1)?,
+            pre_lcf2: wad(t.preLcf2)?,
+            pre_lif1: wad(t.preLif1)?,
+            pre_lif2: wad(t.preLif2)?,
+            expiry: t.expiry,
+        })
+    }
+
+    /// The Adapter applies terms while `block.timestamp < expiry` (never set or cleared: zero).
+    pub fn in_force(&self, now: u64) -> bool {
+        now < self.expiry
+    }
+}
+
+/// The Adapter's quote for a position in its account's band (`_preLiquidationQuote`).
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct PreQuote {
+    /// The most borrow shares one pre-liquidation may repay: `borrowShares * preLcf`, rounded down.
+    pub repayable: u128,
+    /// The incentive factor at the position's LTV (WAD).
+    pub pre_lif: u128,
+    /// The position's LTV (WAD), rounded up as the Adapter rounds it.
+    pub ltv: u128,
+}
+
+/// The Adapter's pre-liquidation quote of `pos` (read from an accrued [`MarketState`], R-24), with
+/// its arithmetic (Morpho's PreLiquidation): in the band when `collateral value * preLltv <
+/// debt <= collateral value * LLTV` (the upper bound is Morpho's health check), then `q = (ltv -
+/// preLltv) / (LLTV - preLltv)` and the close and incentive factors linear in `q`, rounded down.
+/// `None` outside the band.
+pub fn pre_liquidation_quote(pos: &Position, terms: &PreTerms, lltv: u128) -> Option<PreQuote> {
+    if pos.borrow_shares == 0 || pos.price == 0 || terms.pre_lltv >= lltv {
+        return None;
+    }
+    let collateral_quoted = mul_div_down(pos.collateral, pos.price, ORACLE_PRICE_SCALE);
+    if pos.debt > mul_div_down(collateral_quoted, lltv, WAD)
+        || pos.debt <= mul_div_down(collateral_quoted, terms.pre_lltv, WAD)
+    {
+        return None;
+    }
+    let ltv = mul_div_up(pos.debt, WAD, collateral_quoted);
+    let q = mul_div_down(ltv.checked_sub(terms.pre_lltv)?, WAD, lltv - terms.pre_lltv);
+    let pre_lcf = mul_div_down(q, terms.pre_lcf2.checked_sub(terms.pre_lcf1)?, WAD) + terms.pre_lcf1;
+    let pre_lif = mul_div_down(q, terms.pre_lif2.checked_sub(terms.pre_lif1)?, WAD) + terms.pre_lif1;
+    Some(PreQuote {
+        repayable: mul_div_down(pos.borrow_shares, pre_lcf, WAD),
+        pre_lif,
+        ltv,
+    })
+}
+
+/// The collateral the Adapter gives for `shares` at `pre_lif` (`_preLiquidationSeize`): the shares'
+/// assets rounded down, times the incentive, at the price, each step rounded down.
+pub fn pre_liquidation_seized(shares: u128, pre_lif: u128, m: &MarketState) -> u128 {
+    let assets = mul_div_down(shares, m.total_borrow_assets + VIRTUAL_ASSETS, m.total_borrow_shares + VIRTUAL_SHARES);
+    if m.price == 0 {
+        return u128::MAX;
+    }
+    mul_div_down(mul_div_down(assets, pre_lif, WAD), ORACLE_PRICE_SCALE, m.price)
+}
+
+/// A pre-liquidation the Adapter accepts at the state it was planned from.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct PreLiquidation {
+    pub repaid_shares: u128,
+    /// The USDC Morpho pulls for them (rounded up).
+    pub repaid_assets: u128,
+    /// The collateral they buy, in zatoshi.
+    pub seized: u64,
+    pub pre_lif: u128,
+    pub ltv: u128,
+}
+
+/// The pre-liquidation round: the largest pre-liquidation of `pos` the Adapter accepts at the accrued
+/// state `m` (R-24): terms in force at the state's time, the position in their band, at most the
+/// close factor's cap, at least `floor` (the Adapter's `minSeize(outstanding)`, D11) taken and at
+/// least `floor` left in the vault. `None` when there is none.
+pub fn plan_pre_liquidation(
+    pos: &Position,
+    m: &MarketState,
+    terms: &PreTerms,
+    outstanding: u64,
+    floor: u64,
+) -> Option<PreLiquidation> {
+    if !terms.in_force(m.timestamp) {
+        return None;
+    }
+    let quote = pre_liquidation_quote(pos, terms, m.lltv)?;
+    let max_seized = u128::from(outstanding).checked_sub(u128::from(floor))?;
+    let seized_for = |shares: u128| pre_liquidation_seized(shares, quote.pre_lif, m);
+    let mut shares = quote.repayable;
+    if seized_for(shares) > max_seized {
+        // The seizure grows with the shares: the most shares that still leave the floor.
+        let (mut fits, mut too_many) = (0u128, shares);
+        while too_many - fits > 1 {
+            let mid = fits + (too_many - fits) / 2;
+            if seized_for(mid) <= max_seized {
+                fits = mid;
+            } else {
+                too_many = mid;
+            }
+        }
+        shares = fits;
+    }
+    let seized = seized_for(shares);
+    if shares == 0 || seized < u128::from(floor) {
+        return None;
+    }
+    Some(PreLiquidation {
+        repaid_shares: shares,
+        repaid_assets: mul_div_up(
+            shares,
+            m.total_borrow_assets + VIRTUAL_ASSETS,
+            m.total_borrow_shares + VIRTUAL_SHARES,
+        ),
+        seized: u64::try_from(seized).ok()?,
+        pre_lif: quote.pre_lif,
+        ltv: quote.ltv,
+    })
+}
+
+/// The pre-liquidations to try, in order: the plan, then 95 % of its shares (the borrower may have
+/// repaid, or the price risen, since the state was read: either lowers the cap), if that still
+/// takes at least the floor.
+pub fn pre_liquidation_attempts(plan: &PreLiquidation, m: &MarketState, floor: u64) -> Vec<u128> {
+    let smaller = plan.repaid_shares / 100 * 95;
+    if smaller != 0 && pre_liquidation_seized(smaller, plan.pre_lif, m) >= u128::from(floor) {
+        vec![plan.repaid_shares, smaller]
+    } else {
+        vec![plan.repaid_shares]
+    }
+}
+
+/// What the bot logs about a pre-liquidation before it sends it (a profitability filter that only
+/// logs, never refuses), in USDC units: the incentive (the seized ZEC's value at the oracle price
+/// less the repayment), the gas at `eth_usd` dollars per ETH, and the price risk of waiting
+/// `wait_hours` for the signers' payout of the ZEC at `risk_bps_per_hour` of its value.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct PreEconomics {
+    pub incentive: i128,
+    pub gas: u128,
+    pub wait_risk: u128,
+    pub net: i128,
+}
+
+pub fn pre_liquidation_economics(
+    plan: &PreLiquidation,
+    price: u128,
+    gas_cost_wei: u128,
+    eth_usd: u64,
+    wait_hours: u64,
+    risk_bps_per_hour: u64,
+) -> PreEconomics {
+    let value = mul_div_down(u128::from(plan.seized), price, ORACLE_PRICE_SCALE);
+    let incentive =
+        i128::try_from(value).unwrap_or(i128::MAX) - i128::try_from(plan.repaid_assets).unwrap_or(i128::MAX);
+    // wei * (USD per ETH) * 1e6 USDC units per USD / 1e18 wei per ETH, rounded up.
+    let gas = mul_div_up(gas_cost_wei, u128::from(eth_usd) * 1_000_000, WAD);
+    let wait_risk = mul_div_up(value, u128::from(wait_hours) * u128::from(risk_bps_per_hour), 10_000);
+    let costs = i128::try_from(gas.saturating_add(wait_risk)).unwrap_or(i128::MAX);
+    PreEconomics {
+        incentive,
+        gas,
+        wait_risk,
+        net: incentive.saturating_sub(costs),
     }
 }
 
@@ -860,12 +1063,16 @@ mod tests {
 
     const YEAR: u64 = 365 * 86_400;
 
-    /// The calls the R-24 accrual makes have the selectors of Morpho's IIrm and Morpho Blue.
+    /// The calls the R-24 accrual and the pre-liquidation round make have the selectors of Morpho's
+    /// IIrm and of the SettlementAdapter (forge's method identifiers).
     #[test]
     fn abi_selectors_match_the_contracts() {
         use alloy::sol_types::SolCall;
         assert_eq!(IIrm::borrowRateViewCall::SELECTOR, [0x8c, 0x00, 0xbf, 0x6b]);
         assert_eq!(IMorpho::marketCall::SELECTOR, [0x5c, 0x60, 0xe3, 0x9a]);
+        assert_eq!(ISettlementAdapter::preLiquidateCall::SELECTOR, [0x75, 0x82, 0xc3, 0x58]);
+        assert_eq!(ISettlementAdapter::preLiquidationTermsCall::SELECTOR, [0x97, 0xab, 0xd7, 0x32]);
+        assert_eq!(ISettlementAdapter::minSeizeCall::SELECTOR, [0xe0, 0x3d, 0x3a, 0x8e]);
     }
 
     /// R-24, replayed from the contracts' fork test (`contracts/test/fork/AccruedDebt.t.sol`: the
@@ -951,5 +1158,211 @@ mod tests {
         assert_eq!(year.total_borrow_assets / 1_000, (500_000 + 500_000 * 5 / 3) / 1_000);
         // A rate no IRM gives: past Morpho's bounds, not a wrapped number.
         assert_eq!(expected_market_balances(m, u128::MAX, 2_000, true), None);
+    }
+
+    // ----- pre-liquidation: the Adapter's arithmetic, on the contracts' fork-test vectors
+
+    /// The app's preset: from 55 %, 10 % to 50 % of the debt for a 2 % to 5 % incentive.
+    fn preset() -> PreTerms {
+        PreTerms {
+            pre_lltv: 550_000_000_000_000_000,
+            pre_lcf1: 100_000_000_000_000_000,
+            pre_lcf2: 500_000_000_000_000_000,
+            pre_lif1: 1_020_000_000_000_000_000,
+            pre_lif2: 1_050_000_000_000_000_000,
+            expiry: 10_000,
+        }
+    }
+
+    /// 1.1 USDC borrowed on 0.05 ZEC, alone in a fresh market (1.1e12 shares), at `price`.
+    fn fresh_loan(price: u128) -> (MarketState, Position) {
+        let m = MarketState {
+            total_borrow_assets: 1_100_000,
+            total_borrow_shares: 1_100_000 * VIRTUAL_SHARES,
+            price,
+            lltv: LLTV,
+            block: 1,
+            timestamp: 5_000,
+        };
+        (m, Position::new(1_100_000 * VIRTUAL_SHARES, 5_000_000, &m))
+    }
+
+    /// `test_preLiquidate_ltvEqualToLltvPasses`: at $35.20 the LTV is the LLTV exactly, the factors
+    /// are at their far end, and repaying half the shares (550,000 units) takes 1,640,625 zat; a wei
+    /// of price lower the position is Morpho's to liquidate.
+    #[test]
+    fn pre_liquidation_at_the_lltv_matches_the_adapter() {
+        let (m, pos) = fresh_loan(cents(3_520));
+        let quote = pre_liquidation_quote(&pos, &preset(), LLTV).unwrap();
+        assert_eq!(
+            quote,
+            PreQuote {
+                repayable: 550_000 * VIRTUAL_SHARES,
+                pre_lif: 1_050_000_000_000_000_000,
+                ltv: LLTV
+            }
+        );
+        let plan = plan_pre_liquidation(&pos, &m, &preset(), 5_000_000, 100_000).unwrap();
+        assert_eq!(
+            plan,
+            PreLiquidation {
+                repaid_shares: 550_000 * VIRTUAL_SHARES,
+                repaid_assets: 550_000,
+                seized: 1_640_625,
+                pre_lif: 1_050_000_000_000_000_000,
+                ltv: LLTV,
+            }
+        );
+        let (m, pos) = fresh_loan(cents(3_520) - 1);
+        assert!(!pos.healthy());
+        assert_eq!(plan_pre_liquidation(&pos, &m, &preset(), 5_000_000, 100_000), None);
+    }
+
+    /// `test_preLiquidate_ltvEqualToPreLltvReverts`: at $40 the LTV is 55 % exactly, not above it;
+    /// a wei of price lower it is in the band, at the factors' near end.
+    #[test]
+    fn pre_liquidation_needs_an_ltv_above_pre_lltv() {
+        let (m, pos) = fresh_loan(cents(4_000));
+        assert_eq!(pre_liquidation_quote(&pos, &preset(), LLTV), None);
+        assert_eq!(plan_pre_liquidation(&pos, &m, &preset(), 5_000_000, 100_000), None);
+        let (m, pos) = fresh_loan(cents(4_000) - 1);
+        let plan = plan_pre_liquidation(&pos, &m, &preset(), 5_000_000, 100_000).unwrap();
+        assert!(plan.ltv > preset().pre_lltv && plan.ltv < preset().pre_lltv + 1_000_000_000_000);
+        // About a tenth of the shares (preLcf1), for about 2 % (preLif1).
+        assert!(plan.repaid_shares.abs_diff(110_000 * VIRTUAL_SHARES) < 2 * VIRTUAL_SHARES);
+        assert!(plan.pre_lif.abs_diff(preset().pre_lif1) < 1_000_000_000_000);
+        assert_eq!(plan.seized, u64::try_from(pre_liquidation_seized(plan.repaid_shares, plan.pre_lif, &m)).unwrap());
+    }
+
+    /// Terms the Adapter does not apply: expired at the state's time, or never set (zero).
+    #[test]
+    fn pre_liquidation_needs_terms_in_force() {
+        let (m, pos) = fresh_loan(cents(3_600));
+        assert!(plan_pre_liquidation(&pos, &m, &preset(), 5_000_000, 100_000).is_some());
+        let expired = PreTerms {
+            expiry: m.timestamp,
+            ..preset()
+        };
+        assert_eq!(plan_pre_liquidation(&pos, &m, &expired, 5_000_000, 100_000), None);
+        assert_eq!(plan_pre_liquidation(&pos, &m, &PreTerms::default(), 5_000_000, 100_000), None);
+    }
+
+    /// The D11 floors: a plan takes at least the floor and leaves at least the floor, taking the most
+    /// shares within the cap that do (the seizure grows with the shares).
+    #[test]
+    fn pre_liquidation_keeps_the_floors() {
+        // A 300,000 zat vault with 50,000 units of debt at 62 % LTV, terms that let all of it be
+        // repaid at a liquidation's incentive: repaying everything would take about 209,600 zat.
+        let all = PreTerms {
+            pre_lcf1: WAD,
+            pre_lcf2: WAD,
+            pre_lif1: liquidation_incentive_factor(LLTV),
+            pre_lif2: liquidation_incentive_factor(LLTV),
+            ..preset()
+        };
+        let m = MarketState {
+            total_borrow_assets: 50_000,
+            total_borrow_shares: 50_000 * VIRTUAL_SHARES,
+            price: mul_div_down(50_000, ORACLE_PRICE_SCALE * 100, 62 * 300_000),
+            lltv: LLTV,
+            block: 1,
+            timestamp: 5_000,
+        };
+        let pos = Position::new(50_000 * VIRTUAL_SHARES, 300_000, &m);
+        let quote = pre_liquidation_quote(&pos, &all, LLTV).unwrap();
+        assert_eq!(quote.repayable, pos.borrow_shares);
+        assert!(pre_liquidation_seized(quote.repayable, quote.pre_lif, &m) > 200_000);
+        let plan = plan_pre_liquidation(&pos, &m, &all, 300_000, 100_000).unwrap();
+        assert!(plan.repaid_shares < quote.repayable);
+        assert!((100_000..=200_000).contains(&plan.seized), "{plan:?}");
+        assert!(pre_liquidation_seized(plan.repaid_shares + 1, plan.pre_lif, &m) > 200_000, "the most shares");
+        // A vault too small for both floors, and a floor the cap cannot reach.
+        assert_eq!(plan_pre_liquidation(&pos, &m, &all, 199_999, 100_000), None);
+        let (m, pos) = fresh_loan(cents(3_999));
+        assert_eq!(plan_pre_liquidation(&pos, &m, &preset(), 5_000_000, 4_000_000), None);
+    }
+
+    /// Over random positions and terms in the band: the plan is within the cap and the floors, and
+    /// lowers the position's LTV once executed (Morpho's repayment and withdrawal applied to it).
+    #[test]
+    fn planned_pre_liquidations_lower_the_ltv() {
+        let mut rng = Lcg(0x5eed_2026_1017);
+        let mut planned = 0;
+        for _ in 0..5_000 {
+            // Positions of 0.002 to 100 ZEC with at least 0.1 % of a market of 1 to 100,000 USDC.
+            let total_assets = 1_000_000 + rng.below(100_000_000_000);
+            let total_shares = (total_assets * VIRTUAL_SHARES * (1_000 - rng.below(300)) / 1_000).max(1);
+            let borrow_shares = total_shares / 1_000 + rng.below(total_shares - total_shares / 1_000);
+            let collateral = 200_000 + rng.below(10_000_000_000);
+            let terms = PreTerms {
+                pre_lltv: 450_000_000_000_000_000 + rng.below(150_000_000_000_000_000),
+                pre_lcf1: 10_000_000_000_000_000 + rng.below(490_000_000_000_000_000),
+                pre_lcf2: 0,
+                pre_lif1: WAD + rng.below(50_000_000_000_000_000),
+                pre_lif2: 0,
+                expiry: u64::MAX,
+            };
+            let terms = PreTerms {
+                pre_lcf2: terms.pre_lcf1 + rng.below(WAD - terms.pre_lcf1 + 1),
+                pre_lif2: terms.pre_lif1 + rng.below(liquidation_incentive_factor(LLTV) - terms.pre_lif1 + 1),
+                ..terms
+            };
+            let debt = mul_div_up(borrow_shares, total_assets + VIRTUAL_ASSETS, total_shares + VIRTUAL_SHARES);
+            let ltv_permille = 440 + rng.below(190);
+            let price = mul_div_down(debt * 1_000, ORACLE_PRICE_SCALE, ltv_permille * collateral);
+            // $1 to $10,000 per ZEC.
+            if !(cents(100)..=cents(1_000_000)).contains(&price) {
+                continue;
+            }
+            let m = MarketState {
+                total_borrow_assets: total_assets,
+                total_borrow_shares: total_shares,
+                price,
+                lltv: LLTV,
+                block: 1,
+                timestamp: 1,
+            };
+            let pos = Position::new(borrow_shares, collateral, &m);
+            let outstanding = u64::try_from(collateral).unwrap();
+            let Some(plan) = plan_pre_liquidation(&pos, &m, &terms, outstanding, 100_000) else {
+                continue;
+            };
+            planned += 1;
+            let quote = pre_liquidation_quote(&pos, &terms, LLTV).unwrap();
+            assert!(plan.repaid_shares <= quote.repayable);
+            assert!(u128::from(plan.seized) >= 100_000 && u128::from(plan.seized) + 100_000 <= collateral);
+            // Morpho's state after the repayment (by shares, rounded up) and the withdrawal.
+            let after = MarketState {
+                total_borrow_assets: total_assets.saturating_sub(plan.repaid_assets),
+                total_borrow_shares: total_shares - plan.repaid_shares,
+                ..m
+            };
+            let next = Position::new(borrow_shares - plan.repaid_shares, collateral - u128::from(plan.seized), &after);
+            let value = mul_div_down(next.collateral, price, ORACLE_PRICE_SCALE);
+            assert!(next.healthy(), "Morpho's health check after the withdrawal: {plan:?}");
+            assert!(value > 0 && mul_div_up(next.debt, WAD, value) < plan.ltv, "the LTV falls: {plan:?}");
+        }
+        assert!(planned > 500, "{planned} planned");
+    }
+
+    /// The economics the round logs: the incentive at the oracle price, the gas at the configured ETH
+    /// price, the price risk of waiting for the ZEC.
+    #[test]
+    fn pre_liquidation_economics_are_logged_in_usdc_units() {
+        let (m, pos) = fresh_loan(cents(3_520));
+        let plan = plan_pre_liquidation(&pos, &m, &preset(), 5_000_000, 100_000).unwrap();
+        // 1,640,625 zat at $35.20 is 577,500 units for 550,000 repaid; 300,000 gas at 0.01 gwei and
+        // $3,000 per ETH is $0.009, 9,000 units; an hour at 20 bps an hour is 1,155 units.
+        let e = pre_liquidation_economics(&plan, m.price, 300_000 * 10_000_000, 3_000, 1, 20);
+        assert_eq!(
+            e,
+            PreEconomics {
+                incentive: 27_500,
+                gas: 9_000,
+                wait_risk: 1_155,
+                net: 17_345
+            }
+        );
+        assert!(pre_liquidation_economics(&plan, m.price, 10u128.pow(18), 3_000, 1, 20).net < 0);
     }
 }
