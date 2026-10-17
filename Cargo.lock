@@ -7493,6 +7493,21 @@ dependencies = [
 ]
 
 [[package]]
+name = "zecured-ops"
+version = "0.1.0"
+dependencies = [
+ "alloy",
+ "anyhow",
+ "axum",
+ "clap",
+ "hex",
+ "serde",
+ "serde_json",
+ "tokio",
+ "zecured-base",
+]
+
+[[package]]
 name = "zecured-policy"
 version = "0.1.0"
 dependencies = [
