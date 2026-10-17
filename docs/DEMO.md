@@ -56,13 +56,13 @@ Setup, once:
 
 | Time | Scene | Narration |
 |---|---|---|
-| 0:00–0:10 | Title | "Every way to use ZEC in DeFi today starts with unshielding it. Zecured doesn't." |
+| 0:00–0:10 | Title | "Using ZEC in DeFi today usually means taking it out of the shielded pool. Zecured doesn't." |
 | 0:10–0:28 | Deposit by QR from Ironwood | "Pay a fresh 3-of-5 threshold vault from your Ironwood notes. No pool crossing, nothing revealed." |
 | 0:28–0:45 | Mint and borrow | "A non-transferable collateral receipt is minted straight into a Morpho position for a brand-new, gasless account. Borrow USDC." |
 | 0:45–1:02 | What the world sees | "Here's what the world sees: an anonymous account and a loan. No wallet, no balance, no history." |
 | 1:02–1:22 | Close from collateral | "No need to bring USDC back. A market maker closes the debt, takes ZEC for it, and the rest returns to a new shielded address — in one transaction." |
 | 1:22–1:35 | Liquidation | "If the price drops, a liquidator repays and receives ZEC — shielded." |
-| 1:35–1:52 | Threshold demo + UFVK | "Two signers compromised — nothing moves. And you can verify your vault yourself with its viewing key." |
+| 1:35–1:52 | Threshold demo + UFVK | "Two signers can't move anything; if three collude, the theft is provable and their bonds pay the victims. And you can watch your vault yourself with its viewing key." |
 | 1:52–2:00 | Close | "Sell nothing. Reveal nothing. Zecured." |
 
 Rules for the recording: testnet only; no real personal addresses on screen; only features
