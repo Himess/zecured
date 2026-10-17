@@ -14,6 +14,8 @@ import {ClaimDetails, ClaimKind, ClaimStatus} from "../../src/interfaces/v3/IZec
 import {Entitlement} from "../../src/interfaces/v3/IZecuredCompensator.sol";
 import {IZecuredPriceFeed} from "../../src/interfaces/v3/IZecuredPriceFeed.sol";
 import {MockUSDC} from "../../src/mocks/MockUSDC.sol";
+import {ZecuredPriceFeed} from "../../src/ZecuredPriceFeed.sol";
+import {MockAggregator} from "../mocks/MockAggregator.sol";
 import {
     MockBondRegistry,
     MockBondSlasher,
@@ -1402,6 +1404,33 @@ contract SignerBondV2Test is Test {
         oracle.setState(IZecuredPriceFeed.FeedState.Diverged);
         vm.prank(liquidator);
         assertEq(bond.slashLiveness(CLAIM), 126e6);
+    }
+
+    /// R-9 with the mainnet feed itself: a ZecuredPriceFeed over two sources reports its state; once neither source is
+    /// fresh no liveness is paid, and once one is fresh again it is paid at the feed's price.
+    function test_R9_withTheZecuredPriceFeed() public {
+        MockAggregator primary = new MockAggregator(8);
+        MockAggregator secondary = new MockAggregator(8);
+        primary.set(1_200e8, block.timestamp);
+        secondary.set(1_200e8, block.timestamp);
+        ZecuredPriceFeed feed = new ZecuredPriceFeed(address(primary), 25 hours, address(secondary), 25 hours, 500);
+        BondConfig memory cfg = _config();
+        cfg.oracle = IOracle(address(feed));
+        SignerBondV2 b = _replaceBond(cfg);
+        assertTrue(b.priceStateChecked(), "the feed reports a state");
+        for (uint8 i; i < 5; ++i) {
+            _deposit(i, BOND);
+        }
+        _claim(CLAIM, ClaimKind.Liquidation, 0.1e8, liquidator);
+        vm.warp(block.timestamp + 25 hours + 1); // due, and both sources one second past their max age
+        assertEq(uint256(feed.state()), uint256(IZecuredPriceFeed.FeedState.Stale));
+        vm.prank(liquidator);
+        vm.expectRevert(ISignerBond.PriceStale.selector);
+        b.slashLiveness(CLAIM);
+        secondary.set(1_000e8, block.timestamp); // one source fresh again, at $1,000
+        assertEq(uint256(feed.state()), uint256(IZecuredPriceFeed.FeedState.SecondaryOnly));
+        vm.prank(liquidator);
+        assertEq(b.slashLiveness(CLAIM), _due(0.1e8, 1_000e34));
     }
 
     /// R-9: an oracle without a feed state (the testnets' demo oracles) is never seen as stale.
