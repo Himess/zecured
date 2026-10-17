@@ -133,6 +133,8 @@ interface IZecuredCompensator {
     error ConfirmationsUnsettled(bytes32 vaultId, uint256 left);
     /// @notice R-19, R-20: the vault is not an active victim vault.
     error NotBurnable(bytes32 vaultId);
+    /// @notice R-7: an F3 case's execution left `onCase` less than `F3_GAS`.
+    error InsufficientGasForCase();
 
     function onFunds(bytes32 caseId, uint256 amount) external;
     function onCase(bytes32 caseId, ViolationKind kind, bytes32 vaultId, bytes32 claimId, uint64 shortfallZat) external;

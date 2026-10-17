@@ -389,6 +389,24 @@ contract V4PayRegressionsTest is V4PayBase {
         assertEq(dueAfter, 0);
     }
 
+    /// The claim's closure and the shortfall's registration run under `try` (the slash must stand whatever they do), so
+    /// an executor starving them could leave the claimant without its shortfall or the claim open to the bonds: a
+    /// starved execution reverts instead.
+    function test_R7_aStarvedF3ExecutionReverts() public {
+        (, bytes32 claimId, SpendCommit memory c) = _partialCommitted();
+        bytes32 caseId =
+            _prove(_journal(ViolationKind.Misdirected, ANCHOR, c.claimRefs[0], bytes32(0), 0, RELEASE_COMMITMENT, 0));
+        vm.warp(block.timestamp + WINDOW);
+        uint256 snap = vm.snapshotState();
+        slasher.executeSlash(caseId);
+        Vm.Gas memory gas = vm.lastCallGas();
+        assertEq(uint8(_claimStatus(claimId)), uint8(ClaimStatus.Compensated));
+        vm.revertToState(snap);
+        uint256 consumed = uint256(gas.gasTotalUsed) + (gas.gasRefunded > 0 ? uint256(uint64(gas.gasRefunded)) : 0);
+        vm.expectRevert(IZecuredCompensator.InsufficientGasForCase.selector);
+        slasher.executeSlash{gas: consumed}(caseId);
+    }
+
     // ================================================================== R-16: tag squatting
 
     /// Three colluders recorded a victim's deposit tag, seen on Zcash, as another vault's change: the victim's proof

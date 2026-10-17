@@ -89,6 +89,11 @@ contract ZecuredCompensator is IZecuredCompensator, ReentrancyGuardTransient {
     /// @notice Most victims one `finalizeIncident` call prices: about 8,500 gas each from cold storage, so a full batch
     ///         takes about 2.2 million gas, far below EIP-7825's 2^24 per transaction.
     uint256 public constant FINALIZE_BATCH = 256;
+    /// @notice Gas an F3 case's execution must leave `onCase` (R-7): the registration of the shortfall reads the claim
+    ///         under a `try`, and the claim is then closed in the Registry, also under a `try` (about 175,000 gas in
+    ///         all from cold storage); an executor who starved them could leave the claimant without its shortfall, or
+    ///         the claim open to the bonds as well, so a starved execution reverts instead.
+    uint256 public constant F3_GAS = 300_000;
 
     /// @inheritdoc IZecuredCompensator
     address public immutable registry;
@@ -227,6 +232,7 @@ contract ZecuredCompensator is IZecuredCompensator, ReentrancyGuardTransient {
             inc.victims = index + 1;
             emit VictimRegistered(id, vaultId, caseId);
         } else if (kind == ViolationKind.Misdirected) {
+            if (gasleft() < F3_GAS) revert InsufficientGasForCase();
             _registerShortfall(claimId, shortfallZat);
             try IZecuredPayouts(registry).closeMisdirectedClaim(claimId) {} catch {}
         }
