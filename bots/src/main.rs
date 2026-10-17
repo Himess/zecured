@@ -6,6 +6,8 @@
 //! its claims with `zecured-wallet watch-claims` (Tier 3, F3).
 
 mod chain;
+#[cfg(test)]
+mod fork_tests;
 mod relayer;
 
 use std::{collections::BTreeMap, net::SocketAddr, path::PathBuf, sync::Arc, time::Duration};
@@ -252,7 +254,9 @@ async fn liquidation_pass<P: Provider>(
     if accounts.is_empty() {
         return Ok(());
     }
+    // R-24: the debt with the interest accrued since the market's last update, read once per pass.
     let market = chain::market_state(p, d).await?;
+    debug!(block = market.block, time = market.timestamp, "market state with the interest accrued");
     for (vault_id, account) in accounts.clone() {
         // One vault's failure (a flaky RPC answer, a refused commitment) must not starve the
         // vaults after it.

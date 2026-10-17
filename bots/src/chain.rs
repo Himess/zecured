@@ -8,6 +8,7 @@ use std::{
 };
 
 use alloy::{
+    eips::{BlockId, BlockNumberOrTag},
     primitives::{Address, B256, U256, keccak256},
     providers::Provider,
     sol,
@@ -50,11 +51,28 @@ sol! {
         uint64 deadline;
     }
 
+    /// Morpho Blue's `Market` struct, as `market(id)` stores it (the IRM's `borrowRateView` takes it).
+    #[derive(Debug)]
+    struct Market {
+        uint128 totalSupplyAssets;
+        uint128 totalSupplyShares;
+        uint128 totalBorrowAssets;
+        uint128 totalBorrowShares;
+        uint128 lastUpdate;
+        uint128 fee;
+    }
+
     #[sol(rpc)]
     interface IMorpho {
         function position(bytes32 id, address user) external view returns (uint256 supplyShares, uint128 borrowShares, uint128 collateral);
         function market(bytes32 id) external view returns (uint128 totalSupplyAssets, uint128 totalSupplyShares, uint128 totalBorrowAssets, uint128 totalBorrowShares, uint128 lastUpdate, uint128 fee);
         function accrueInterest(MarketParams marketParams) external;
+    }
+
+    /// Morpho Blue's interest rate model interface (IIrm).
+    #[sol(rpc)]
+    interface IIrm {
+        function borrowRateView(MarketParams marketParams, Market market) external view returns (uint256);
     }
 
     #[sol(rpc)]
@@ -142,14 +160,75 @@ impl Deployment {
 const LIQUIDATION_CURSOR: u128 = 300_000_000_000_000_000;
 const MAX_LIQUIDATION_INCENTIVE_FACTOR: u128 = 1_150_000_000_000_000_000;
 
-/// What Morpho's math needs of the market, read once per pass: the borrow totals as last stored
-/// (interest accrued since the market's last update is not in them), the oracle price and the LLTV.
-#[derive(Clone, Copy, Debug)]
+/// What Morpho's math needs of the market, read once per pass at one block (R-24): the borrow
+/// totals with the interest accrued up to that block's time, as Morpho counts them once anyone
+/// touches the market ([`expected_market_balances`]), the oracle price and the LLTV. The
+/// liquidator, the pre-liquidation round and the market maker's quotes all read the debt from it.
+#[derive(Clone, Copy, Debug, Default)]
 pub struct MarketState {
     pub total_borrow_assets: u128,
     pub total_borrow_shares: u128,
     pub price: u128,
     pub lltv: u128,
+    /// The block the state was read at, and its time (Unix seconds), which the interest is
+    /// accrued to.
+    pub block: u64,
+    pub timestamp: u64,
+}
+
+/// Morpho's market as `market(id)` stores it: the totals as of `last_update`. R-24: interest since
+/// then is not in them until someone accrues; [`expected_market_balances`] adds it.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub struct MarketTotals {
+    pub total_supply_assets: u128,
+    pub total_supply_shares: u128,
+    pub total_borrow_assets: u128,
+    pub total_borrow_shares: u128,
+    pub last_update: u64,
+    pub fee: u128,
+}
+
+/// R-24: Morpho's `MorphoBalancesLib.expectedMarketBalances` (morpho-blue
+/// `src/libraries/periphery/MorphoBalancesLib.sol`), the totals after accruing interest from
+/// `last_update` to `now` at `borrow_rate` (per second, WAD: the IRM's `borrowRateView` on the
+/// stored market):
+///
+/// - `interest = totalBorrowAssets * wTaylorCompounded(borrowRate, elapsed)`, rounded down, is added
+///   to the borrow and the supply assets;
+/// - the fee (`interest * fee`, rounded down) becomes supply shares at the supply share price
+///   without it, rounded down.
+///
+/// Nothing accrues without elapsed time, without borrows or without an IRM. A `now` before the
+/// last update (which an RPC answering from two blocks could show) counts as no time elapsed.
+/// `None` where Morpho would revert (a total past 2^128).
+pub fn expected_market_balances(m: MarketTotals, borrow_rate: u128, now: u64, has_irm: bool) -> Option<MarketTotals> {
+    let elapsed = now.saturating_sub(m.last_update);
+    if elapsed == 0 || m.total_borrow_assets == 0 || !has_irm {
+        return Some(m);
+    }
+    let growth = w_taylor_compounded(U256::from(borrow_rate), U256::from(elapsed))?;
+    let interest = U256::from(m.total_borrow_assets).checked_mul(growth)? / U256::from(WAD);
+    let mut out = m;
+    out.total_borrow_assets = u128::try_from(U256::from(m.total_borrow_assets).checked_add(interest)?).ok()?;
+    out.total_supply_assets = u128::try_from(U256::from(m.total_supply_assets).checked_add(interest)?).ok()?;
+    if m.fee != 0 {
+        let fee_amount = interest.checked_mul(U256::from(m.fee))? / U256::from(WAD);
+        // toSharesDown(feeAmount, totalSupplyAssets - feeAmount, totalSupplyShares)
+        let assets_without_fee = U256::from(out.total_supply_assets).checked_sub(fee_amount)?;
+        let fee_shares = fee_amount.checked_mul(U256::from(m.total_supply_shares) + U256::from(VIRTUAL_SHARES))?
+            / (assets_without_fee + U256::from(VIRTUAL_ASSETS));
+        out.total_supply_shares = u128::try_from(U256::from(m.total_supply_shares).checked_add(fee_shares)?).ok()?;
+    }
+    Some(out)
+}
+
+/// Morpho's `MathLib.wTaylorCompounded`: the first three terms of the Taylor expansion of
+/// `e^(x * n) - 1` (WAD), each rounded down. `None` on overflow.
+pub fn w_taylor_compounded(x: U256, n: U256) -> Option<U256> {
+    let first = x.checked_mul(n)?;
+    let second = first.checked_mul(first)? / (U256::from(2u8) * U256::from(WAD));
+    let third = second.checked_mul(first)? / (U256::from(3u8) * U256::from(WAD));
+    first.checked_add(second)?.checked_add(third)
 }
 
 /// A borrower's position, in asset units, with Morpho's rounding.
@@ -275,15 +354,57 @@ fn mul_div_down(a: u128, b: u128, d: u128) -> u128 {
     u128::try_from(q).unwrap_or(u128::MAX)
 }
 
-/// The market's borrow totals, the oracle price and the LLTV.
+/// The market's state at the latest block (R-24): its borrow totals with the interest accrued up to
+/// that block's time ([`expected_market_balances`], with the IRM's `borrowRateView` on the stored
+/// market, as MorphoBalancesLib reads it), the oracle price and the LLTV. The market, the rate and
+/// the price are read at that one block, so the interest is exactly what Morpho would accrue there.
 pub async fn market_state<P: Provider>(p: &P, d: &Deployment) -> Result<MarketState> {
-    let mkt = IMorpho::new(d.morpho, p).market(d.market_id).call().await?;
-    let price = IOracle::new(d.market.oracle, p).price().call().await?;
-    Ok(MarketState {
+    let latest = p
+        .get_block_by_number(BlockNumberOrTag::Latest)
+        .await
+        .context("get latest block")?
+        .context("node has no latest block")?;
+    let (block, timestamp) = (latest.header.number, latest.header.timestamp);
+    let at = BlockId::number(block);
+    let mkt = IMorpho::new(d.morpho, p).market(d.market_id).call().block(at).await?;
+    let stored = MarketTotals {
+        total_supply_assets: mkt.totalSupplyAssets,
+        total_supply_shares: mkt.totalSupplyShares,
         total_borrow_assets: mkt.totalBorrowAssets,
         total_borrow_shares: mkt.totalBorrowShares,
+        last_update: u64::try_from(mkt.lastUpdate).map_err(|_| anyhow!("lastUpdate overflow"))?,
+        fee: mkt.fee,
+    };
+    let has_irm = d.market.irm != Address::ZERO;
+    let rate = if has_irm && stored.total_borrow_assets != 0 && timestamp > stored.last_update {
+        let market = Market {
+            totalSupplyAssets: mkt.totalSupplyAssets,
+            totalSupplyShares: mkt.totalSupplyShares,
+            totalBorrowAssets: mkt.totalBorrowAssets,
+            totalBorrowShares: mkt.totalBorrowShares,
+            lastUpdate: mkt.lastUpdate,
+            fee: mkt.fee,
+        };
+        let rate = IIrm::new(d.market.irm, p)
+            .borrowRateView(d.market.clone(), market)
+            .call()
+            .block(at)
+            .await
+            .context("the IRM's borrowRateView")?;
+        u128::try_from(rate).map_err(|_| anyhow!("borrow rate overflow"))?
+    } else {
+        0
+    };
+    let accrued = expected_market_balances(stored, rate, timestamp, has_irm)
+        .context("the interest would take a market total past Morpho's bounds")?;
+    let price = IOracle::new(d.market.oracle, p).price().call().block(at).await?;
+    Ok(MarketState {
+        total_borrow_assets: accrued.total_borrow_assets,
+        total_borrow_shares: accrued.total_borrow_shares,
         price: u128::try_from(price).map_err(|_| anyhow!("price overflow"))?,
         lltv: u128::try_from(d.market.lltv).map_err(|_| anyhow!("lltv overflow"))?,
+        block,
+        timestamp,
     })
 }
 
@@ -494,6 +615,7 @@ mod tests {
             total_borrow_shares: 160_000 * VIRTUAL_SHARES,
             price,
             lltv: LLTV,
+            ..MarketState::default()
         };
         Position::new(160_000 * VIRTUAL_SHARES, 1_000_000, &market)
     }
@@ -589,6 +711,7 @@ mod tests {
                 total_borrow_shares: 160_000 * VIRTUAL_SHARES,
                 price,
                 lltv: LLTV,
+                ..MarketState::default()
             };
             assert_eq!(run(&pos, &market, plan), Ok((seized, 160_000 * VIRTUAL_SHARES)));
         }
@@ -606,6 +729,7 @@ mod tests {
                 total_borrow_shares: 160_000 * VIRTUAL_SHARES,
                 price,
                 lltv: LLTV,
+                ..MarketState::default()
             };
             assert_eq!(plan_liquidation(&pos, 1_000_000), Some(Liquidation::SeizeAll(1_000_000)));
             assert_eq!(
@@ -631,6 +755,7 @@ mod tests {
             total_borrow_shares: 160_000 * VIRTUAL_SHARES,
             price: cents(1_800),
             lltv: LLTV,
+            ..MarketState::default()
         };
         let shares = 160_000 * VIRTUAL_SHARES;
         let at = |collateral: u128| Position::new(shares, collateral, &market);
@@ -679,6 +804,7 @@ mod tests {
                 total_borrow_shares: total_shares,
                 price,
                 lltv: LLTV,
+                ..MarketState::default()
             };
             let pos = Position::new(borrow_shares, collateral, &market);
             let outstanding = u64::try_from(collateral).unwrap();
@@ -710,6 +836,7 @@ mod tests {
             total_borrow_shares: 160_000 * VIRTUAL_SHARES,
             price: cents(1_800),
             lltv: LLTV,
+            ..MarketState::default()
         };
         let shares = 160_000 * VIRTUAL_SHARES;
         let pos = Position::new(shares, 1_001_561, &stored);
@@ -727,5 +854,102 @@ mod tests {
         let under = Position::new(shares, 1_000_000, &stored);
         let plan = plan_liquidation(&under, 1_000_000).unwrap();
         assert_eq!(liquidation_attempts(plan, &under, 1_000_000), vec![Liquidation::SeizeAll(1_000_000)]);
+    }
+
+    // ----- R-24: the debt with the interest since the market's last update
+
+    const YEAR: u64 = 365 * 86_400;
+
+    /// The calls the R-24 accrual makes have the selectors of Morpho's IIrm and Morpho Blue.
+    #[test]
+    fn abi_selectors_match_the_contracts() {
+        use alloy::sol_types::SolCall;
+        assert_eq!(IIrm::borrowRateViewCall::SELECTOR, [0x8c, 0x00, 0xbf, 0x6b]);
+        assert_eq!(IMorpho::marketCall::SELECTOR, [0x5c, 0x60, 0xe3, 0x9a]);
+    }
+
+    /// R-24, replayed from the contracts' fork test (`contracts/test/fork/AccruedDebt.t.sol`: the
+    /// real Morpho Blue and AdaptiveCurveIRM on Base Sepolia, keep the two in step). A 0.05 ZEC
+    /// vault borrows 62.45 % of its value at $40 and nobody touches the market for a year. On the
+    /// stored totals, what the liquidator used to read, the position is healthy; with the interest
+    /// the IRM's `borrowRateView` gives for the elapsed time it is not, and the liquidation the bot
+    /// plans is the one Morpho executed on the fork: every share repaid, 3,527,772 zat seized.
+    #[test]
+    fn r24_fork_vector() {
+        let stored = MarketTotals {
+            total_supply_assets: 1_000_000_000_000,
+            total_supply_shares: 10u128.pow(18),
+            total_borrow_assets: 1_249_000,
+            total_borrow_shares: 1_249_000_000_000,
+            last_update: 1_791_664_288,
+            fee: 0,
+        };
+        let now = 1_823_200_288;
+        assert_eq!(now - stored.last_update, YEAR);
+        let accrued = expected_market_balances(stored, 85_220_420, now, true).unwrap();
+        assert_eq!(accrued.total_borrow_assets, 1_252_361);
+        assert_eq!(accrued.total_supply_assets, 1_000_000_003_361);
+        assert_eq!(accrued.total_supply_shares, 10u128.pow(18), "no fee on this market");
+        assert_eq!(accrued.total_borrow_shares, stored.total_borrow_shares, "interest does not mint borrow shares");
+
+        let state = |t: MarketTotals| MarketState {
+            total_borrow_assets: t.total_borrow_assets,
+            total_borrow_shares: t.total_borrow_shares,
+            price: 40 * 10u128.pow(34),
+            lltv: LLTV,
+            block: 0,
+            timestamp: now,
+        };
+        let shares = 1_249_000_000_000;
+        let stale = Position::new(shares, 5_000_000, &state(stored));
+        assert_eq!((stale.debt, stale.max_debt), (1_249_000, 1_250_000));
+        assert_eq!(plan_liquidation(&stale, 5_000_000), None, "the stored totals miss it");
+        let current = Position::new(shares, 5_000_000, &state(accrued));
+        assert_eq!(current.debt, 1_252_361, "what Morpho charged on the fork");
+        assert_eq!(plan_liquidation(&current, 5_000_000), Some(Liquidation::RepayShares(shares)));
+        assert_eq!(current.seized_for_all_shares(), Some(3_527_772), "what Morpho seized on the fork");
+    }
+
+    /// MorphoBalancesLib's conditions and arithmetic, the fee's supply shares included.
+    #[test]
+    fn the_accrual_follows_morpho_balances_lib() {
+        let m = MarketTotals {
+            total_supply_assets: 1_000_000,
+            total_supply_shares: 10u128.pow(12),
+            total_borrow_assets: 500_000,
+            total_borrow_shares: 5 * 10u128.pow(11),
+            last_update: 1_000,
+            fee: 0,
+        };
+        // Nothing accrues without elapsed time, borrows or an IRM (and a time before the last
+        // update counts as none).
+        assert_eq!(expected_market_balances(m, 10u128.pow(9), 1_000, true), Some(m));
+        assert_eq!(expected_market_balances(m, 10u128.pow(9), 999, true), Some(m));
+        assert_eq!(expected_market_balances(m, 10u128.pow(9), 2_000, false), Some(m));
+        let empty = MarketTotals {
+            total_borrow_assets: 0,
+            ..m
+        };
+        assert_eq!(expected_market_balances(empty, 10u128.pow(9), 2_000, true), Some(empty));
+        // wTaylorCompounded(1e9, 1e6) = 1e15 + 5e11 + 166,666,666; interest = 500,000 * that / 1e18 = 500.
+        assert_eq!(
+            w_taylor_compounded(U256::from(10u64.pow(9)), U256::from(10u64.pow(6))),
+            Some(U256::from(1_000_500_166_666_666u64))
+        );
+        let later = expected_market_balances(m, 10u128.pow(9), 1_000 + 1_000_000, true).unwrap();
+        assert_eq!((later.total_borrow_assets, later.total_supply_assets), (500_500, 1_000_500));
+        assert_eq!(later.total_supply_shares, m.total_supply_shares);
+        // A 10 % fee: 50 of the 500 become supply shares at the price without them:
+        // 50 * (1e12 + 1e6) / (1,000,500 - 50 + 1) = 49,977,510.
+        let with_fee =
+            expected_market_balances(MarketTotals { fee: WAD / 10, ..m }, 10u128.pow(9), 1_000 + 1_000_000, true)
+                .unwrap();
+        assert_eq!(with_fee.total_supply_shares, 10u128.pow(12) + 49_977_510);
+        // 100 % APR for a year: 1 + 1/2 + 1/6 of the debt, as MathLib approximates e - 1.
+        let per_second = WAD / u128::from(YEAR);
+        let year = expected_market_balances(m, per_second, 1_000 + YEAR, true).unwrap();
+        assert_eq!(year.total_borrow_assets / 1_000, (500_000 + 500_000 * 5 / 3) / 1_000);
+        // A rate no IRM gives: past Morpho's bounds, not a wrapped number.
+        assert_eq!(expected_market_balances(m, u128::MAX, 2_000, true), None);
     }
 }
