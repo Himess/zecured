@@ -45,6 +45,10 @@ in `test/halmos`.
 | I33 | A dormant claim is a pending Refund claim without a destination that the bonds did not pay; dormant claims are out of `lockedZatoshi` and the cap (R-11) | `markRefundDormant`, `_closeClaim` | invariant `R11_dormantRefunds`; `test_R11_*` |
 | I34 | The bonds pay only a claim armed by a signer's receipt for its current commitment, once, and only when it is due (R-5, I26) | `armLiveness`, `slashLiveness` | bond campaign `B3_bondPaidClaimsWereArmedOnce`; Halmos B4; `test_R5_*` |
 | I35 | The bond's USDC is exactly its books: every unit deposited is still slashable, paid as liveness, or withdrawn; a running unbonding has a ready time; `fullyBonded` means every signer holds `minBond` | SignerBondV2 | bond campaign `B1` (I19), `B2`, `B4`, `B5`, `B6` (I17) |
+| I36 | `ZecuredSwap` holds exactly its open orders' USDC (`lockedUsdc`, and the token balance is what is locked) | ZecuredSwap | swap campaign `lockedUsdcIsTheOpenOrders`, `theBalanceIsWhatIsLocked` |
+| I37 | Each locked unit leaves once: to the counterparty on a finalized proof (less the fee), or back to whoever locked it after the deadline; a settled or refunded order stays so | ZecuredSwap | swap campaign `everyUnitMovesOnce`, `pendingOnlyForOpenOrders_andTerminalStatesStay` |
+| I38 | One payment note settles at most one order, and only on a proof from an active Swap version whose anchor stayed on the best chain with its work through the readiness wait | payment statement (memo binding), ZecuredSwap | K4 memo changes; `test_prove_aJournalOfAnotherOrder`, `test_finalize_*` |
+| I39 | No proof after the deadline, no refund before it, and no refund while a proof made in time stands | ZecuredSwap | `test_prove_byTheDeadline`, `test_refund_notWhileAProofStands` |
 
 The attacks in the campaign (`invariant_attacksAlwaysFail`) must never succeed: reusing a claim
 against another note, confirming an uncommitted claim, committing a claim without a destination,

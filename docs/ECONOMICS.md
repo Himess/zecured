@@ -119,13 +119,14 @@ third party's. Lenders gain from positions brought back before they reach the LL
 ## Zecured Swap
 
 The second product needs no signer in a trade and no bond: USDC escrowed in `ZecuredSwap` on Base
-is released by a zero-knowledge proof of a shielded ZEC payment, made by whoever paid. The signers'
+is released by a zero-knowledge proof of a shielded ZEC payment, made by whoever paid
+(docs/SWAP.md). The signers'
 only part is the list of verifier versions it accepts (`ZecuredVersions`, the Swap kind: added by all
 five after a public delay, removed by three at once).
 
 | Party | Puts up | Gets | Risk |
 |---|---|---|---|
-| Taker buying ZEC | USDC, locked when it opens the order | ZEC at its own Ironwood address, paid by the maker | time only: if the maker never pays, the USDC comes back once the order's pay window has passed (*judge* 6 hours, *beta* 24 hours) |
+| Taker buying ZEC | USDC, locked when it opens the order | ZEC at its own Ironwood address, paid by the maker | time only: if the maker never pays, the USDC comes back once the order's pay window has passed (at most 6 hours on the judge deployment, 24 hours in the beta) |
 | Maker (Buy) | the ZEC, paid first, and the payment's proof | the taker's USDC, once the proof has finalized | the ZEC paid, if its proof cannot land before the deadline (the verifier's emergency stop, a stalled relay): the order then refunds the taker |
 | Taker selling ZEC (CLI) | the ZEC paid to the maker, and its proof | the maker's locked USDC | likewise: the payer proves before the deadline |
 

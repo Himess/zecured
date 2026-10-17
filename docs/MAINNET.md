@@ -126,6 +126,9 @@ name a public-good address instead of burning what no victim needs.
   Base: either the maker signs a receipt when it gets the salt and receiver (as the signers do for
   liveness), or the taker posts them encrypted to the maker's key with a proof that they open the
   order's commitment.
+- **Swap before it opens on mainnet.** The maker proves Testnet payments only today: it needs a
+  Mainnet witness builder, and payment-main must be an active Swap version. USDC's blocklist
+  applies: a blocklisted counterparty cannot be paid, and its order's USDC stays in the contract.
 - **Share refresh and repair through the nodes.** The threshold library refreshes every share of
   a vault and repairs a lost one, but no node runs either yet (docs/TIER3.md § 5). Mainnet needs
   both as node rounds, their private messages sealed node to node as in the DKG, and a runbook: a

@@ -157,6 +157,19 @@ DestinationReceived(bytes32 claimId,bytes32 commitment,uint64 receivedAt)
   through the backend (`POST /claims/:claimId/receipt`, § 4). A new destination needs a new
   receipt.
 
+### 2.8 Swap quotes: signed by a market maker, verified on-chain by `ZecuredSwap` (v4)
+
+```
+SwapQuote(address maker,address taker,uint8 side,uint64 zatoshi,uint256 usdc,bytes32 makerReceiverCommitment,uint32 payWindow,uint64 quoteDeadline,uint256 nonce)
+```
+
+- Signed by the maker, an EOA or an ERC-1271 contract, under the Swap domain (§ 2.1). `side` 0 =
+  Buy (the taker locks USDC, the maker pays ZEC), 1 = Sell (the maker locks USDC, the taker pays
+  ZEC). `taker` zero lets anyone open the quote, otherwise only that address. On a Sell,
+  `makerReceiverCommitment` is `keccak256(salt || receiver)` of the maker's receiver; on a Buy it is
+  zero and the taker gives its own commitment to `open`. `payWindow` must be within the contract's
+  bounds; `nonce` is the maker's and is spent by `open`. docs/SWAP.md describes a whole trade.
+
 ## 3. Contracts (v3)
 
 The authoritative interfaces, with their NatSpec, are in `contracts/src/interfaces/v3/` (and
@@ -543,6 +556,49 @@ zZEC / USDC (Circle's testnet USDC on Base Sepolia) / `DemoShockOracle` / Adapti
 `0x46415998764C29aB2a25CbeA6254146D50D22687` / LLTV `0.625e18`, on Morpho Blue
 `0xBBBBBbbBBb9cC5e90e3b3Af64bdAF62C37EEFFCb`.
 
+### 3.10 `ZecuredSwap` (v4, docs/SWAP.md)
+
+```solidity
+function open(SwapQuote calldata q, bytes calldata makerSig, bytes32 takerReceiverCommitment)
+    external returns (bytes32 orderId);                 // the taker; orderId = keccak256(abi.encode(chainid, this, maker, nonce))
+function proveSettlement(bytes32 orderId, bytes calldata journal, bytes calldata seal, bytes32 imageId) external;   // anyone
+function finalizeSettlement(bytes32 orderId) external;  // anyone, once ready
+function dropSettlement(bytes32 orderId) external;      // anyone, once the record is stale
+function refund(bytes32 orderId) external;              // anyone, after payDeadline: to whoever locked the USDC
+function order(bytes32 orderId) external view returns (Order memory);
+    // (maker, zatoshi, side, status: None | Open | Settled | Refunded, taker, payDeadline, usdc, receiverCommitment)
+function pendingSettlement(bytes32 orderId) external view returns (PendingSettlement memory);
+    // (anchor, versionId, readyHeight, readyTime)
+function settlementStale(bytes32 orderId) external view returns (bool);
+function lockedUsdc() external view returns (uint256);
+
+event OrderOpened(bytes32 indexed orderId, address indexed maker, address indexed taker, uint8 side, uint64 zatoshi,
+    uint256 usdc, bytes32 receiverCommitment, uint64 payDeadline);
+event SettlementPending(bytes32 indexed orderId, bytes32 anchor, uint256 readyHeight, uint256 readyTime);
+event OrderSettled(bytes32 indexed orderId);
+event SettlementDropped(bytes32 indexed orderId);
+event OrderRefunded(bytes32 indexed orderId);
+```
+
+- `open`: the maker's signature (EOA or ERC-1271), `now <= quoteDeadline`, the taker named or none,
+  the nonce unused, `payWindow` within `[minPayWindow, maxPayWindow]`, the order within
+  `maxOrderUsdc` and `maxOrderZat`, exactly one receiver commitment (the taker's on a Buy, the
+  maker's on a Sell); the USDC is pulled from the taker (Buy) or the maker (Sell), exact amounts
+  only; `payDeadline = now + payWindow`.
+- `proveSettlement`: the order Open and `now <= payDeadline`; the seal from an active Swap version of
+  `ZecuredVersions` (its router selector and image id) and the journal's branch id one that version
+  allows; the journal (192 bytes: kind 1, branch id, anchor, order id, receiver commitment, zatoshi)
+  names this order and its commitment, with at least its zatoshi; the anchor on the relay's best
+  chain with the work the order's size requires. The result is a pending settlement that records
+  its version (R-14); a stale one is replaced, a valid one never.
+- `finalizeSettlement`: `readyHeight` and `readyTime` reached (also after the deadline), the anchor
+  still on the best chain with its work and the version still active; the USDC goes to the maker
+  (Buy) or the taker (Sell), less `feeBps` (at most 1 %), rounded down.
+- `dropSettlement`: once the anchor left the best chain or the version is no longer active; the order
+  is Open again and may be proven again before its deadline.
+- `refund`: the order Open, `now > payDeadline`, and no valid pending settlement (a stale one is
+  dropped first); the USDC goes back to whoever locked it.
+
 ## 4. Coordinator API (backend, JSON over HTTPS)
 
 All bodies are JSON; hex is `0x`-prefixed; amounts are decimal strings. No endpoint logs
@@ -620,3 +676,15 @@ as a refund (a Refund-mode proof, a halt, a full cap) binds no account to a vaul
 deployed, the account must still be the canonical Safe proxy with the Safe 4337 module as
 fallback handler. Anything else is rejected. The account never receives ETH. The first UserOp
 must skip authorizations that are already set (Morpho reverts on re-setting).
+
+### 4.3 Market maker API (v4, Zecured Swap; served by `zecured-swap-maker`)
+
+The app reaches it through the backend's proxy, never directly. In invite-only mode (the mainnet
+beta) quotes need the header `X-Zecured-Invite`; the maker stores only the codes' hashes.
+
+| Method and path | Answer |
+|---|---|
+| `GET /swap/quote?side=buy\|sell&zatoshi=N` (or `usdc=N`) `[&taker=0x…]` | `{ quote, signature, swap, chainId, orderId, expiresAt }` (integers as strings; a Sell adds the maker's receiver and salt); errors `bad_request`, `invite_required`, `side_disabled`, `taker_required`, `too_small`, `too_large`, `no_inventory`, `busy`, `relay_behind`, `price_stale`, `unavailable` |
+| `POST /swap/orders/:orderId/destination` | body `{ receiver, salt }` (a unified address or 43 raw bytes, and 32 bytes); 202 `{ orderId, status: "destination_received" }`, idempotent; errors `unknown_order`, `not_buy`, `not_awaiting`, `too_late`, `bad_destination` (a receiver that does not match the order's commitment) |
+| `GET /swap/orders/:orderId` | `{ orderId, side, status, zatoshi, usdc, payDeadline, note }`, status `awaiting_destination`, `destination_received`, `paid`, `proven`, `taker_pays`, `abandoned`, `settled` or `refunded` |
+| `GET /swap/status` | the maker's state: chain, contract, inventory, the relay's lag |
