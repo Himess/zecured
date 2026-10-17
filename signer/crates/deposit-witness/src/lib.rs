@@ -4,11 +4,13 @@
 //! header on the Base relay, without revealing which block: since NU5 every header's
 //! `hashBlockCommitments` commits to the ZIP 221 history tree of the earlier blocks of its
 //! network-upgrade epoch, and since NU6.3 that tree also records the Ironwood pool (ZIP 258).
-//! This crate rebuilds that tree from public data and checks it against real headers.
+//! This crate rebuilds that tree from public data and checks it against real headers, and builds
+//! the witnesses of deposit, violation and (Zecured Swap) payment proofs.
 
 pub mod chain;
 pub mod history;
 pub mod mmr;
 pub mod p2p;
+pub mod payment;
 pub mod violation;
 pub mod witness;
