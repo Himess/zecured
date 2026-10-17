@@ -765,6 +765,13 @@ pub(crate) mod tests {
         clearPreLiquidationCall {}.abi_encode()
     }
 
+    /// The SettlementAdapter's selectors (contracts/abi/SettlementAdapter.json, track L-PRE).
+    #[test]
+    fn pre_liquidation_selectors_match_the_adapter() {
+        assert_eq!(setPreLiquidationCall::SELECTOR, [0x3b, 0x8f, 0x1f, 0xc8]);
+        assert_eq!(clearPreLiquidationCall::SELECTOR, [0xad, 0x90, 0xc3, 0xb3]);
+    }
+
     /// R-5: arming a claim's liveness with a receipt, on the bond only, each claim once per
     /// operation; the claim binds the account (the proxy checks its claimant), and every arming is
     /// simulated before it is sponsored.

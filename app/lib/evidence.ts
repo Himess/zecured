@@ -37,7 +37,9 @@
  * ```
  *
  * Recommended flow ids: deposit, borrow, payout, close, deleverage, liquidation, pre-liquidation,
- * refund, dispute, proven-delivery, theft-demo, swap.
+ * refund, dispute, proven-delivery, theft-demo, swap. Duration keys the app shows (P-8, measured in
+ * the second rehearsal): deposit-to-proof and proof-to-activation (the deposit steps), payout,
+ * proven-delivery, swap.
  */
 import { getAddress, isAddress, type Address } from "viem";
 

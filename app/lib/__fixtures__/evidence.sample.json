@@ -7,7 +7,8 @@
     "zcash-testnet": "https://testnet.cipherscan.app/tx/"
   },
   "durations": {
-    "deposit-to-activation": 1500,
+    "deposit-to-proof": 900,
+    "proof-to-activation": 600,
     "payout": 900,
     "proven-delivery": 3600
   },

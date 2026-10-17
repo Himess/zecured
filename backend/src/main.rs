@@ -39,16 +39,24 @@ use zecured_coordinator::{
 use zecured_node::config::NetworkConfig;
 
 mod allowlist;
+mod app_routes;
+mod demo;
+mod evidence;
 mod limits;
 mod minting;
 mod onchain;
 mod paymaster;
 mod proxy;
+mod stats;
+mod swap_relay;
 mod versions;
 
 #[derive(Parser)]
 #[command(about = "Zecured backend: coordinator + public API")]
 struct Cli {
+    /// The v4 app's routes (demo wallet, evidence, anonymity sets, swap relay): app_routes.rs.
+    #[command(flatten)]
+    app: app_routes::AppArgs,
     #[arg(long, env = "ZECURED_NETWORK_CONFIG", default_value = "signer/data/network.json")]
     config: PathBuf,
     #[arg(long, env = "ZECURED_COORDINATOR_DATA", default_value = "signer/data/coordinator")]
@@ -1228,7 +1236,13 @@ async fn main() -> Result<()> {
             http: reqwest::Client::builder().timeout(Duration::from_secs(180)).build()?,
         },
     };
-    let app = router(coordinator, proxy, wiring, &limits::Limits::default(), cors);
+    let app_wiring = app_routes::AppWiring::new(&cli.app, coordinator.clone(), &cli.data)?;
+    let limits = limits::Limits::default();
+    let app = router(coordinator, proxy, wiring, &limits, cors.clone()).merge(app_routes::router(
+        app_wiring,
+        &limits.global,
+        cors,
+    ));
     let listener = tokio::net::TcpListener::bind(cli.bind).await?;
     info!(bind = %cli.bind, "backend listening");
     axum::serve(listener, app).await.map_err(|e| anyhow!("server: {e}"))?;
