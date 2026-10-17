@@ -13,12 +13,15 @@
 //! vault by the deposit proof that reserved it (`Registry.vaultOf(sender) != 0`, before its first
 //! UserOp), except for the calls about one of its own claims, which the claim itself binds to the
 //! sender (v3: a deposit that landed only as a refund binds no account): a refund's destination,
-//! disputing or reopening a payout confirmation, and having the bonds pay an overdue claim (only
-//! when they can pay it now); `Intake.refundPending` only for the sender's own vault; once
-//! deployed, the sender must still be the canonical SafeProxy with the Safe 4337 module as
-//! fallback handler; the EntryPoint must be v0.7; senders are rate-limited. The smart account
-//! therefore never needs (or receives) ETH, and the paymaster cannot be used for anything but
-//! Zecured flows.
+//! disputing or reopening a payout confirmation, having the bonds pay an overdue claim (only
+//! when they can pay it now) and arming a claim's liveness with a signer's receipt (R-5, only when
+//! the arming succeeds now); `Intake.refundPending` only for the sender's own vault; the account's
+//! own pre-liquidation terms (section 4 of the v4 design: the Settlement Adapter reads them for
+//! `msg.sender`, the account itself), within the bounds the Adapter enforces and only when the
+//! Adapter would take them now; once deployed, the sender must still be the canonical SafeProxy
+//! with the Safe 4337 module as fallback handler; the EntryPoint must be v0.7; senders are
+//! rate-limited. The smart account therefore never needs (or receives) ETH, and the paymaster
+//! cannot be used for anything but Zecured flows.
 //!
 //! Refusal reasons are fixed public strings (L-2).
 
@@ -92,6 +95,62 @@ sol! {
     function invalidateNonce(uint256 nonce);
     function refundPending(bytes32 vaultId);
     function slashLiveness(bytes32 claimId);
+
+    /// v4 (R-5): `SignerBondV2.armLiveness`: a signer's `DestinationReceived` receipt starts the
+    /// claim's liveness clock (permissionless on the bond; sponsored for the claim's claimant).
+    function armLiveness(bytes32 claimId, uint64 receivedAt, bytes signature);
+
+    /// v4 (pre-liquidation): the Settlement Adapter's terms, in WAD (V4 freeze section 5).
+    struct PreLiquidationTerms {
+        uint256 preLltv;
+        uint256 preLcf1;
+        uint256 preLcf2;
+        uint256 preLif1;
+        uint256 preLif2;
+        uint64 expiry;
+    }
+
+    function setPreLiquidation(PreLiquidationTerms t);
+    function clearPreLiquidation();
+}
+
+/// WAD, Morpho's fixed-point one.
+const WAD: u128 = 1_000_000_000_000_000_000;
+/// Morpho Blue's `LIQUIDATION_CURSOR` and `MAX_LIQUIDATION_INCENTIVE_FACTOR` (ConstantsLib).
+const LIQUIDATION_CURSOR: u128 = 300_000_000_000_000_000;
+const MAX_LIQUIDATION_INCENTIVE_FACTOR: u128 = 1_150_000_000_000_000_000;
+
+/// Morpho Blue's liquidation incentive factor at `lltv` (WAD): `min(1.15, 1 / (1 - 0.3 (1 - lltv)))`,
+/// rounded down as `wDivDown(WAD, WAD - wMulDown(LIQUIDATION_CURSOR, WAD - lltv))`. `None` for an
+/// LLTV that is not below one.
+pub fn liquidation_incentive_factor(lltv: U256) -> Option<U256> {
+    let wad = U256::from(WAD);
+    if lltv >= wad {
+        return None;
+    }
+    let cursor_term = U256::from(LIQUIDATION_CURSOR) * (wad - lltv) / wad;
+    let lif = wad * wad / (wad - cursor_term);
+    Some(lif.min(U256::from(MAX_LIQUIDATION_INCENTIVE_FACTOR)))
+}
+
+/// The bounds the Settlement Adapter puts on pre-liquidation terms (V4 freeze section 5, the v4
+/// design's section 4): `preLltv < LLTV`, `WAD <= preLif1 <= preLif2 <= LIF(LLTV)`,
+/// `0 < preLcf1 <= preLcf2 <= WAD`, and an expiry (checked against the chain's time by the
+/// Adapter, and by the proxy's simulation). Terms outside them would only revert.
+pub fn check_pre_liquidation_terms(t: &PreLiquidationTerms, lltv: U256) -> Check {
+    let wad = U256::from(WAD);
+    let lif = liquidation_incentive_factor(lltv).ok_or("pre-liquidation terms out of bounds")?;
+    need(
+        t.preLltv < lltv
+            && wad <= t.preLif1
+            && t.preLif1 <= t.preLif2
+            && t.preLif2 <= lif
+            && !t.preLcf1.is_zero()
+            && t.preLcf1 <= t.preLcf2
+            && t.preLcf2 <= wad
+            && t.expiry != 0,
+        "pre-liquidation terms out of bounds",
+    )
 }
 
 /// Deployment-specific parameters of the allowlist.
@@ -164,6 +223,14 @@ pub struct Bindings {
     /// `SignerBond.slashLiveness(claimId)` (T-05): each a claim whose claimant is the sender, which
     /// the bonds can pay now (`livenessDue` due and non-zero, covered by `totalSlashable`).
     pub liveness_claims: Vec<B256>,
+    /// `SignerBond.armLiveness(claimId, receivedAt, signature)` (R-5): each a claim whose claimant
+    /// is the sender (the call itself is in `simulated`: the receipt must arm the claim now).
+    pub arm_claims: Vec<B256>,
+    /// Calls that must succeed now when the sender makes them (an `eth_call` from the sender at the
+    /// latest block): an arming (R-5: a signer's signature over the claim's current commitment, not
+    /// in the future) and the account's pre-liquidation terms (the Adapter's own checks, its time
+    /// included). The paymaster never pays for a call the contract would refuse.
+    pub simulated: Vec<(Address, Bytes)>,
 }
 
 fn need(ok: bool, reason: &'static str) -> Check {
@@ -319,7 +386,30 @@ impl Allowlist {
             bindings.liveness_claims.push(claim_id);
             return Ok(());
         }
+        // R-5: a signer's receipt arms the claim's liveness; the proxy checks the claim is the
+        // sender's and that the bond takes the receipt now (simulated).
+        if to == self.bond && !self.bond.is_zero() && selector == armLivenessCall::SELECTOR {
+            let claim_id = decode::<armLivenessCall>(data)?.claimId;
+            need(!bindings.arm_claims.contains(&claim_id), "a claim is armed once per operation")?;
+            bindings.arm_claims.push(claim_id);
+            bindings.simulated.push((to, Bytes::copy_from_slice(data)));
+            return Ok(());
+        }
         bindings.bound_sender = true;
+        // v4 pre-liquidation: the Adapter keeps terms for `msg.sender`, so these calls only ever set
+        // or clear the sender's own; the terms must be within the Adapter's bounds, and the proxy
+        // checks the Adapter takes them now (its expiry against the chain's time, among others).
+        if to == self.adapter && selector == setPreLiquidationCall::SELECTOR {
+            let c = decode::<setPreLiquidationCall>(data)?;
+            check_pre_liquidation_terms(&c.t, self.lltv)?;
+            bindings.simulated.push((to, Bytes::copy_from_slice(data)));
+            return Ok(());
+        }
+        if to == self.adapter && selector == clearPreLiquidationCall::SELECTOR {
+            decode::<clearPreLiquidationCall>(data)?;
+            bindings.simulated.push((to, Bytes::copy_from_slice(data)));
+            return Ok(());
+        }
         // T-03: the proxy checks it is the sender's own vault.
         if to == self.intake && selector == refundPendingCall::SELECTOR {
             bindings.own_vaults.push(decode::<refundPendingCall>(data)?.vaultId);
@@ -519,6 +609,7 @@ pub(crate) mod tests {
                 refund_claims: vec![B256::repeat_byte(3), B256::repeat_byte(4)],
                 own_claims: vec![],
                 liveness_claims: vec![],
+                ..Default::default()
             })
         );
         // Such an account's first UserOp deploys it.
@@ -535,6 +626,7 @@ pub(crate) mod tests {
                 refund_claims: vec![],
                 own_claims: vec![],
                 liveness_claims: vec![],
+                ..Default::default()
             })
         );
         // Every other call needs an account bound to a vault, also next to a destination.
@@ -588,6 +680,7 @@ pub(crate) mod tests {
                 refund_claims: vec![],
                 own_claims: vec![B256::repeat_byte(5), B256::repeat_byte(6)],
                 liveness_claims: vec![],
+                ..Default::default()
             })
         );
         // A claim binds its account: no vault needed, unless another call needs one.
@@ -620,6 +713,7 @@ pub(crate) mod tests {
                 refund_claims: vec![],
                 own_claims: vec![],
                 liveness_claims: vec![B256::repeat_byte(5), B256::repeat_byte(6)],
+                ..Default::default()
             })
         );
         assert_eq!(
@@ -639,7 +733,131 @@ pub(crate) mod tests {
         assert_eq!(no_bond.check(&op(me, single(Address::ZERO, liveness(5)))), Err("call not on the allowlist"));
     }
 
+    /// An arming with a placeholder receipt (the proxy's simulation decides whether it holds).
+    pub fn arm(claim: u8) -> Vec<u8> {
+        armLivenessCall {
+            claimId: B256::repeat_byte(claim),
+            receivedAt: 1_800_000_000,
+            signature: vec![0x1b; 65].into(),
+        }
+        .abi_encode()
+    }
+
+    const E15: u64 = 1_000_000_000_000_000;
+
+    /// The app's "Standard" preset: from 55 % LTV, 2 % to 5 % incentive, 10 % to 50 % of the debt.
+    pub fn standard_terms() -> PreLiquidationTerms {
+        PreLiquidationTerms {
+            preLltv: U256::from(550 * E15),
+            preLcf1: U256::from(100 * E15),
+            preLcf2: U256::from(500 * E15),
+            preLif1: U256::from(1_020 * E15),
+            preLif2: U256::from(1_050 * E15),
+            expiry: 1_900_000_000,
+        }
+    }
+
+    pub fn set_pre_liquidation(t: PreLiquidationTerms) -> Vec<u8> {
+        setPreLiquidationCall { t }.abi_encode()
+    }
+
+    pub fn clear_pre_liquidation() -> Vec<u8> {
+        clearPreLiquidationCall {}.abi_encode()
+    }
+
+    /// R-5: arming a claim's liveness with a receipt, on the bond only, each claim once per
+    /// operation; the claim binds the account (the proxy checks its claimant), and every arming is
+    /// simulated before it is sponsored.
+    #[test]
+    fn armings_are_sponsored_on_the_bond_and_simulated() {
+        let l = list();
+        let me = Address::repeat_byte(0x99);
+        let b = l.check(&op(me, batch(&[(l.bond, arm(5)), (l.bond, arm(6))]))).unwrap();
+        assert!(!b.bound_sender, "the claim binds the account");
+        assert_eq!(b.arm_claims, vec![B256::repeat_byte(5), B256::repeat_byte(6)]);
+        assert_eq!(b.simulated, vec![(l.bond, Bytes::from(arm(5))), (l.bond, Bytes::from(arm(6)))]);
+        assert!(b.own_claims.is_empty() && b.liveness_claims.is_empty());
+        assert_eq!(
+            l.check(&op(me, batch(&[(l.bond, arm(5)), (l.bond, arm(5))]))),
+            Err("a claim is armed once per operation")
+        );
+        // Arming then having the bonds pay in one operation is two checks of one claim.
+        let both = l.check(&op(me, batch(&[(l.bond, arm(5)), (l.bond, liveness(5))]))).unwrap();
+        assert_eq!((both.arm_claims.len(), both.liveness_claims.len()), (1, 1));
+        for to in [l.registry, l.intake, l.adapter, l.morpho, l.usdc, Address::ZERO] {
+            assert_eq!(l.check(&op(me, single(to, arm(5)))), Err("call not on the allowlist"));
+        }
+        let no_bond = Allowlist {
+            bond: Address::ZERO,
+            ..list()
+        };
+        assert_eq!(no_bond.check(&op(me, single(Address::ZERO, arm(5)))), Err("call not on the allowlist"));
+        assert_eq!(l.check(&op(me, single(l.bond, vec![0x01, 0x02]))), Err("missing selector"));
+    }
+
+    /// Morpho's incentive factor, as ConstantsLib and MathLib compute it.
+    #[test]
+    fn the_liquidation_incentive_factor_is_morphos() {
+        let lif = |lltv: u64| liquidation_incentive_factor(U256::from(lltv));
+        // 1 / (1 - 0.3 * 0.375) = 1 / 0.8875, rounded down: Zecured's market (12.68 %).
+        assert_eq!(lif(625 * E15), Some(U256::from(1_126_760_563_380_281_690u64)));
+        // 1 / (1 - 0.3 * 0.14) = 1 / 0.958.
+        assert_eq!(lif(860 * E15), Some(U256::from(1_043_841_336_116_910_229u64)));
+        assert_eq!(lif(0), Some(U256::from(1_150 * E15)), "capped at 1.15");
+        assert_eq!(liquidation_incentive_factor(U256::from(WAD)), None);
+    }
+
+    /// v4 pre-liquidation: the account's own terms (`msg.sender` on the Adapter), only from an
+    /// account bound to a vault, within the Adapter's bounds, always simulated.
+    #[test]
+    fn pre_liquidation_terms_are_sponsored_within_the_adapters_bounds() {
+        let l = list();
+        let me = Address::repeat_byte(0x99);
+        let set = set_pre_liquidation(standard_terms());
+        let b = l.check(&op(me, single(l.adapter, set.clone()))).unwrap();
+        assert!(b.bound_sender, "only a loan account bound to a vault");
+        assert_eq!(b.simulated, vec![(l.adapter, Bytes::from(set.clone()))]);
+        let b = l.check(&op(me, single(l.adapter, clear_pre_liquidation()))).unwrap();
+        assert!(b.bound_sender);
+        assert_eq!(b.simulated, vec![(l.adapter, Bytes::from(clear_pre_liquidation()))]);
+        // Next to a borrow, in the first operation of the account.
+        let calls = [(l.adapter, set.clone()), (l.adapter, clear_pre_liquidation())];
+        assert_eq!(l.check(&op(me, batch(&calls))).unwrap().simulated.len(), 2);
+        // The bounds' edges are inside: the incentive up to the market's own, the whole debt.
+        let lif = liquidation_incentive_factor(l.lltv).unwrap();
+        let edge = PreLiquidationTerms {
+            preLif2: lif,
+            preLcf2: U256::from(WAD),
+            preLltv: l.lltv - U256::from(1u8),
+            ..standard_terms()
+        };
+        l.check(&op(me, single(l.adapter, set_pre_liquidation(edge)))).unwrap();
+        let outside: [fn(&mut PreLiquidationTerms); 8] = [
+            |t| t.preLltv = U256::from(625 * E15),
+            |t| t.preLif1 = U256::from(WAD - 1),
+            |t| t.preLif1 = t.preLif2 + U256::from(1u8),
+            |t| t.preLif2 = liquidation_incentive_factor(U256::from(625 * E15)).unwrap() + U256::from(1u8),
+            |t| t.preLcf1 = U256::ZERO,
+            |t| t.preLcf1 = t.preLcf2 + U256::from(1u8),
+            |t| t.preLcf2 = U256::from(WAD + 1),
+            |t| t.expiry = 0,
+        ];
+        for f in outside {
+            let mut t = standard_terms();
+            f(&mut t);
+            assert_eq!(
+                l.check(&op(me, single(l.adapter, set_pre_liquidation(t)))),
+                Err("pre-liquidation terms out of bounds")
+            );
+        }
+        for to in [l.registry, l.intake, l.bond, l.morpho, l.usdc] {
+            assert_eq!(l.check(&op(me, single(to, set.clone()))), Err("call not on the allowlist"));
+            assert_eq!(l.check(&op(me, single(to, clear_pre_liquidation()))), Err("call not on the allowlist"));
+        }
+    }
+
     sol! {
+        function preLiquidate(address account, uint256 repaidShares, bytes32 mmCommitment);
         function upholdPayout(bytes32 claimId, bytes32 payoutRef);
         function finalizeActivation(bytes32 vaultId);
         function dropPendingActivation(bytes32 vaultId);
@@ -661,7 +879,17 @@ pub(crate) mod tests {
         let me = Address::repeat_byte(0x99);
         let id = B256::repeat_byte(7);
         let compensator = Address::repeat_byte(0xc0);
-        let refused: [(Address, Vec<u8>); 10] = [
+        let refused: [(Address, Vec<u8>); 11] = [
+            // v4: pre-liquidating someone else is the caller's own business, never sponsored.
+            (
+                l.adapter,
+                preLiquidateCall {
+                    account: Address::repeat_byte(0xab),
+                    repaidShares: U256::from(1u8),
+                    mmCommitment: id,
+                }
+                .abi_encode(),
+            ),
             // The slasher's call, after an Included proof.
             (
                 l.registry,
