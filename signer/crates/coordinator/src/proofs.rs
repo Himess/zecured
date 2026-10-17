@@ -16,10 +16,15 @@
 //!
 //! Proving runs in the background (seconds with a MOCK seal, minutes to hours for a real one,
 //! depending on the machine); each vault pass only queues a job or submits a finished seal. Jobs
-//! run from one first-in-first-out queue, one or two at a time, one per vault (review H-12,
+//! run from one queue, deposits first, one or two at a time, one per vault (review H-12,
 //! [`crate::queue`]), and the witness, which holds the vault's tag key, reaches the prover through
 //! its standard input: it is never written to disk. A seal is made only by a guest whose image id
 //! is an active version of Base's verifier version registry (T-07a), and submitted with it.
+//!
+//! v4: an activation that the coverage cap has no room for waits (R-11.1: the Intake would revert
+//! it rather than cancel the vault), unless the owner asks for the deposit back
+//! (`request_refund_proof`): it is then proven in Refund mode. Refund proofs wait on the Intake as
+//! activations do (R-12), and this coordinator finalizes or drops them as a keyless keeper.
 
 use std::{
     ffi::OsStr,
@@ -43,9 +48,10 @@ use tracing::{debug, info, warn};
 use zcash_protocol::TxId;
 use zecured_base::{
     events::{
-        ISignerBond, IZcashHeaderRelay, IZecuredIntake, IZecuredRegistry, IZecuredVersions, VERSION_DEPOSIT, version_id,
+        ISignerBond, IZcashHeaderRelay, IZecuredIntake, IZecuredRegistry, IZecuredVersions, MINT_BLOCK_CAP_EXCEEDED,
+        VERSION_DEPOSIT, version_id,
     },
-    journal::{DepositJournal, MODE_ACTIVATE, decode_deposit_journal_for},
+    journal::{DepositJournal, MODE_ACTIVATE, MODE_REFUND, decode_deposit_journal_for},
     verify::{STATUS_NONE, VAULT_CANCELLED},
 };
 use zecured_deposit_witness::{
@@ -53,14 +59,13 @@ use zecured_deposit_witness::{
     witness::{self, Mode},
 };
 use zecured_node::chain::VaultNotes;
-use zecured_policy::classify::Landing;
 use zecured_policy::derive::deposit_tag;
 use zecured_zcash_ops::{lwd, scan::ReceivedNote};
 
 use crate::{
     Coordinator, RECEIPT_TIMEOUT,
-    error::scrubbed,
-    queue::{Enqueued, ProvingQueue, QueueCounts},
+    error::{PublicError, scrubbed},
+    queue::{Enqueued, Priority, ProvingQueue, QueueCounts},
     short,
     store::{CoordVault, VaultStatus},
 };
@@ -351,6 +356,23 @@ pub(crate) fn seal_selector(seal: &[u8]) -> Result<[u8; 4]> {
     seal.get(..4).and_then(|s| s.try_into().ok()).context("the seal is shorter than its selector")
 }
 
+/// The mode of a finished deposit proof (its journal's first word in v2; a v1 journal is always an
+/// activation); `None` for an unreadable file.
+pub(crate) fn seal_mode(path: &Path) -> Option<u8> {
+    let s: SealFile = serde_json::from_slice(&fs::read(path).ok()?).ok()?;
+    Some(journal_mode(&s.journal))
+}
+
+/// The mode a deposit journal names: its first word's last byte in v2 (eight words); v1 journals
+/// are activations.
+pub(crate) fn journal_mode(journal: &[u8]) -> u8 {
+    if journal.len() == zecured_base::journal::JOURNAL_LENGTH {
+        journal[31]
+    } else {
+        MODE_ACTIVATE
+    }
+}
+
 impl Coordinator {
     /// Proof mode: vaults are activated with `attestDepositWithProof`, made by this coordinator.
     pub fn with_deposit_proofs(mut self, settings: DepositProofs, data_dir: &Path) -> Result<Self> {
@@ -367,13 +389,35 @@ impl Coordinator {
         self.proofs.as_ref().map(|p| p.queue.counts())
     }
 
+    /// The hook for track SWAP's maker (section 5): queues a swap settlement's proof, keyed by its
+    /// order id, behind the deposits and the disputed payouts and ahead of the routine inclusion
+    /// proofs (one job per key, as every proof).
+    pub fn enqueue_swap_settlement(
+        &self,
+        order: B256,
+        job: impl std::future::Future<Output = ()> + Send + 'static,
+    ) -> Result<Enqueued> {
+        let prover = self.proofs.as_ref().context(PublicError::NotConfigured)?;
+        Ok(prover.queue.enqueue(order, Priority::SwapSettlement, job))
+    }
+
     /// Queues a proof of `target` for the vault, or submits the vault's finished proof. One proof
-    /// per vault at a time (H-12).
+    /// per vault at a time (H-12). A finished seal of the other mode (an activation made before the
+    /// owner asked for a refund, R-11.1) is set aside and the target's proof is made instead.
     pub(crate) async fn prove_deposit(&self, id: &B256, target: &Target) -> Result<()> {
         let prover = self.proofs.as_ref().context("deposit proofs are not configured")?;
         let seal_path = prover.seal_path(id);
         if seal_path.exists() {
-            return self.submit_proof(id, &seal_path).await;
+            let wanted = match target.mode {
+                Mode::Activate => MODE_ACTIVATE,
+                Mode::Refund => MODE_REFUND,
+            };
+            if seal_mode(&seal_path).is_some_and(|mode| mode != wanted) {
+                let _ = fs::remove_file(&seal_path);
+                info!(vault = %short(id), "a finished proof of the other mode was set aside");
+            } else {
+                return self.submit_proof(id, &seal_path).await;
+            }
         }
         // H-12: one job per vault, queued or running.
         if prover.queue.contains(id) {
@@ -430,7 +474,7 @@ impl Coordinator {
             Mode::Activate => "the deposit",
             Mode::Refund => "a deposit's refund",
         };
-        let queued = prover.queue.enqueue(vault_id, async move {
+        let queued = prover.queue.enqueue(vault_id, Priority::Deposit, async move {
             info!(vault = %short(&vault_id), "proving {what}");
             match job.run().await {
                 Ok(()) => info!(vault = %short(&vault_id), "proof of {what} ready"),
@@ -502,24 +546,26 @@ impl Coordinator {
             if registry.depositTagUsed(tag).call().await.context("Registry.depositTagUsed")? {
                 continue; // landed; its event has not reached the safe head yet
             }
-            // A deposit above the largest work tier can never be proven (T-08).
+            // A deposit above the largest work tier can never be proven (T-08, R-15).
             if intake.minConfirmationWorkFor(note.value()).call().await.is_err() {
                 continue;
             }
-            let target = match landing {
-                Landing::WithRefunds { .. } => Target::refund(note),
-                Landing::ActivateOnly => Target::activation(note, v.amount),
+            let target = if landing.proves_refunds() {
+                Target::refund(note)
+            } else {
+                Target::activation(note, v.amount)
             };
             return self.prove_deposit(&v.vault_id, &target).await;
         }
         Ok(())
     }
 
-    /// Submits a finished proof, then forgets it.
+    /// Submits a finished proof, then forgets it (unless it has to wait: R-11.1).
     async fn submit_proof(&self, id: &B256, seal_path: &Path) -> Result<()> {
         let s: SealFile = serde_json::from_slice(&fs::read(seal_path)?)?;
-        self.submit_seal(id, s).await?;
-        let _ = fs::remove_file(seal_path);
+        if self.submit_seal(id, s).await? {
+            let _ = fs::remove_file(seal_path);
+        }
         Ok(())
     }
 
@@ -535,15 +581,18 @@ impl Coordinator {
             seal.journal.len() != zecured_base::journal::JOURNAL_LENGTH || seal.journal[31] == MODE_ACTIVATE,
             "only an activation is relayed here"
         );
-        self.submit_seal(&id, seal).await
+        ensure!(self.submit_seal(&id, seal).await?, PublicError::CapFull);
+        Ok(())
     }
 
     /// Submits a proof to the Intake with the vault's five `VaultOpened` signatures (sorted by
     /// signer address, as the Intake requires) and the image id the seal was made for, once Base
     /// is known to take it: the journal is of the Intake's version and for this vault, the note is
     /// not on Base yet, and the image id with the seal's router selector is an active version
-    /// (with, for journal v2, the journal's branch id allowed: T-07a).
-    async fn submit_seal(&self, id: &B256, s: SealFile) -> Result<()> {
+    /// (with, for journal v2, the journal's branch id allowed: T-07a). Returns false when the proof
+    /// has to wait: the activation of a vault Base does not know yet, while the coverage cap has
+    /// no room for it (R-11.1: the Intake would revert it).
+    async fn submit_seal(&self, id: &B256, s: SealFile) -> Result<bool> {
         let provider = ProviderBuilder::new()
             .wallet(EthereumWallet::from(self.gas.clone()))
             .connect_http(self.cfg.base_rpc_url.parse()?);
@@ -554,10 +603,20 @@ impl Coordinator {
         let registry = IZecuredRegistry::new(self.cfg.registry, &provider);
         if registry.depositTagUsed(journal.depositTag).call().await.context("Registry.depositTagUsed")? {
             // On Base already (a lost receipt, or the same note proven by someone else).
-            return Ok(());
+            return Ok(true);
         }
         let versions = intake.versions().call().await.context("Intake.versions")?;
         self.check_deposit_version(&provider, versions, &s, &journal, v2).await?;
+        if journal.mode == MODE_ACTIVATE
+            && registry.vault(*id).call().await.context("Registry.vault")?.status == STATUS_NONE
+            && intake.mintBlock(journal.amount).call().await.is_ok_and(|b| b == MINT_BLOCK_CAP_EXCEEDED)
+        {
+            info!(
+                vault = %short(id),
+                "the coverage cap has no room for the vault's activation: it waits (its owner may ask for a refund, R-11.1)"
+            );
+            return Ok(false);
+        }
         let v = self.vault(id).await?;
         ensure!(v.opened_signatures.len() == 5, "the vault has no VaultOpened signatures (opened before C-4)");
         let mut sigs: Vec<(Address, Bytes)> = v
@@ -595,9 +654,13 @@ impl Coordinator {
             // cannot take it (T-02); the Registry's events say which.
             info!(vault = %short(id), "deposit proof accepted on Base");
         } else {
-            info!(vault = %short(id), "refund proof accepted on Base: the deposit lands as a Refund claim (T-02)");
+            self.update_vault(id, |cur| cur.refund_requested = false).await?;
+            info!(
+                vault = %short(id),
+                "refund proof accepted on Base: the deposit's Refund claim opens once the relay has moved on (T-02, R-12)"
+            );
         }
-        Ok(())
+        Ok(true)
     }
 
     /// T-07a: Base takes this seal: its image id with its router selector is an active Deposit
@@ -711,6 +774,73 @@ impl Coordinator {
             .context("finalizeActivation receipt")?;
         ensure!(receipt.status(), "finalizeActivation reverted");
         info!(vault = %short(id), "vault activated on its deposit proof");
+        Ok(())
+    }
+
+    /// R-12, as a keyless keeper (anyone may do each, the Intake checks everything): a refund proof
+    /// pending on the Intake is finalized once ready (its Refund claim opens), or dropped once its
+    /// anchor left the relay's best chain or its version was removed (R-14: the deposit is proven
+    /// again). Each call is simulated first and sent only if the Intake would take it, so a refund
+    /// someone else settled meanwhile costs nothing.
+    pub(crate) async fn keep_pending_refunds(&self, v: &CoordVault) -> Result<()> {
+        if v.pending_refunds.is_empty() {
+            return Ok(());
+        }
+        let provider = ProviderBuilder::new()
+            .wallet(EthereumWallet::from(self.gas.clone()))
+            .connect_http(self.cfg.base_rpc_url.parse()?);
+        let intake = IZecuredIntake::new(self.v3().await?.intake, &provider);
+        let relay = IZcashHeaderRelay::new(intake.relay().call().await.context("Intake.relay")?, &provider);
+        let tip = relay.bestChainTip().call().await.context("relay.bestChainTip")?.height;
+        let now = provider
+            .get_block_by_number(BlockNumberOrTag::Latest)
+            .await
+            .context("latest Base block")?
+            .context("no latest Base block")?
+            .header
+            .timestamp;
+        for p in &v.pending_refunds {
+            let tag = B256::from(p.deposit_tag);
+            if tip >= alloy::primitives::U256::from(p.ready_height) && now >= p.ready_time {
+                let finalize = intake.finalizeRefund(tag);
+                if finalize.call().await.is_ok() {
+                    let gas = zecured_base::gas_with_headroom(
+                        finalize.estimate_gas().await.context("estimate finalizeRefund")?,
+                    );
+                    let receipt = finalize
+                        .gas(gas)
+                        .send()
+                        .await
+                        .context("send finalizeRefund")?
+                        .with_timeout(Some(RECEIPT_TIMEOUT))
+                        .get_receipt()
+                        .await
+                        .context("finalizeRefund receipt")?;
+                    ensure!(receipt.status(), "finalizeRefund reverted");
+                    info!(vault = %short(&v.vault_id), "a pending refund was finalized: its Refund claim is open (R-12)");
+                    continue;
+                }
+            }
+            let drop = intake.dropPendingRefund(tag);
+            if drop.call().await.is_ok() {
+                let gas =
+                    zecured_base::gas_with_headroom(drop.estimate_gas().await.context("estimate dropPendingRefund")?);
+                let receipt = drop
+                    .gas(gas)
+                    .send()
+                    .await
+                    .context("send dropPendingRefund")?
+                    .with_timeout(Some(RECEIPT_TIMEOUT))
+                    .get_receipt()
+                    .await
+                    .context("dropPendingRefund receipt")?;
+                ensure!(receipt.status(), "dropPendingRefund reverted");
+                warn!(
+                    vault = %short(&v.vault_id),
+                    "a pending refund was dropped (its anchor left the best chain, or its version was removed): the deposit is proven again"
+                );
+            }
+        }
         Ok(())
     }
 

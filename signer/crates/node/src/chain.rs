@@ -181,6 +181,20 @@ impl VaultNotes {
     pub fn refund_values(&self) -> Vec<([u8; 32], u64)> {
         self.refunds.iter().map(|(tag, n)| (*tag, n.value())).collect()
     }
+
+    /// Whether the main lineage adds up for `claims` (I10) once restricted to the planned change of
+    /// their book value ([`Self::retain_planned_change`], without changing `self`). When it does
+    /// not, a confirmed claim may still be unpaid (O-4 rule 3: its input is still unspent).
+    pub fn books_add_up(&self, outstanding: u64, claims: &[ledger::Claim]) -> bool {
+        let book = ledger::book_value(outstanding, claims);
+        let value: u64 = self
+            .lineage
+            .iter()
+            .filter(|n| n.scope != Scope::Internal || n.value() == book)
+            .map(ReceivedNote::value)
+            .sum();
+        ledger::check_i10(value, outstanding, claims).is_ok()
+    }
 }
 
 /// The note commitment (`cmx`) of a scanned note: what its tag is keyed over (D24).

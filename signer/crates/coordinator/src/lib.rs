@@ -4,19 +4,21 @@
 //! scans vaults with their viewing keys, proves deposits (as collateral, or as refunds of what
 //! cannot back a vault, T-02), builds and proves PCZTs, runs the FROST rounds with whichever
 //! signers accept, aggregates, broadcasts, and relays deposit proofs, payout commitments and
-//! confirmations to Base with its own gas key. It also keeps the Intake's pending activations
-//! moving (a keyless keeper: anyone may finalize, drop or convert them), and upholds the payout
-//! confirmations a claimant disputes by proving the payout's inclusion (T-05 (a)). A deposit no
-//! guest of the deployment can land on Base is refunded off-chain at its owner's request (P5 under
-//! I30). Every decision that moves value is taken independently by at least three signer nodes.
+//! confirmations to Base with its own gas key. It also keeps the Intake's pending activations and
+//! refunds moving (a keyless keeper: anyone may finalize, drop or convert them), and proves the
+//! delivery of every payout, which makes its claims final on Base (section 3; a disputed one first,
+//! T-05 (a)). A deposit no guest of the deployment can land on Base is refunded off-chain at its
+//! owner's request (P5 under I30). Every decision that moves value is taken independently by at
+//! least three signer nodes.
 //!
 //! Errors returned to API callers carry a [`error::PublicError`] (fixed message and code);
 //! details are logged at debug level only, scrubbed of identifiers and numbers.
 
-mod disputes;
+mod delivery;
 pub mod error;
 mod frost;
 pub mod inflight;
+pub mod invites;
 pub mod nodes;
 pub mod proofs;
 pub mod queue;
@@ -29,7 +31,7 @@ use std::{
     path::Path,
     sync::{
         Arc, OnceLock,
-        atomic::{AtomicU32, Ordering},
+        atomic::{AtomicBool, AtomicU32, Ordering},
     },
     time::{Duration, Instant},
 };
@@ -54,25 +56,27 @@ use zcash_protocol::{
     consensus::{BlockHeight, Network},
 };
 use zecured_base::{
-    Destination, OpenVault, PayoutConfirmation, RefundRequest, ViewKeyRequest, check_signed_by_all, claim_ids_hash,
+    Destination, OpenVault, ProveRefund, RefundRequest, ViewKeyRequest, check_signed_by_all,
     events::{
-        self, ClaimChange, ISignerBond, IZecuredIntake, IZecuredRegistry, IZecuredSlasher, RegistryEvent, VaultEvent,
+        self, ClaimChange, Contracts, ISignerBond, IZecuredIntake, IZecuredRegistry, IZecuredSlasher, RegistryEvent,
+        VaultEvent,
     },
-    recover_typed, registry_domain, vault_opened,
-    verify::VAULT_PENDING,
+    operator::{bond_domain, destination_received},
+    payout_confirmation, recover_typed, registry_domain, vault_opened,
+    verify::{STATUS_NONE, VAULT_PENDING},
 };
 use zecured_node::{
-    ConfirmIn, ConfirmResponse, DestinationIn, RecipientIn, RefundIn,
-    chain::{BaseView, VaultNotes, ZcashView, refund_tags},
+    ConfirmIn, ConfirmResponse, DestinationIn, Planning, ReceiptIn, ReceiptOut, RecipientIn, RefundIn,
+    chain::{BaseView, VaultNotes, ZcashView, note_cmx, refund_tags},
     config::NetworkConfig,
     dkg::{Round1Out, Round2In, Round2Out, Round3In, Round3Out, Sealed, VaultOpen},
-    now,
+    largest_tier, now,
     signing::{CommitRequest, CommitResponse, SignKind, SpendCommitRecord, main_lineage},
 };
 use zecured_policy::{
     classify::{self, Classification, DepositRules, Landing, NotePosition},
-    derive::deposit_tag,
-    ledger::{self, ClaimKind, ClaimState, NextPayout, PayoutInput, PayoutPlan, Recipient},
+    derive::{deposit_tag, payout_ref},
+    ledger::{self, ClaimId, ClaimKind, ClaimState, NextPayout, PayoutInput, PayoutPlan, Recipient},
 };
 use zecured_zcash_ops::{
     keys,
@@ -85,9 +89,10 @@ pub use zecured_threshold::MIN_SIGNERS;
 pub use crate::store::{NodeSignature, NoteView};
 use crate::{
     error::{PublicError, public_error, scrubbed},
-    inflight::{Action, Inputs, Settled},
+    inflight::{Action, Inputs},
+    invites::{InviteGate, OpeningsStatus},
     nodes::{Answer, Nodes, is_refusal, shortfall, split},
-    store::{CoordVault, Inflight, KeptCommitment, Refund, Store, VaultStatus},
+    store::{Armed, CommittedPayout, CoordVault, Inflight, KeptCommitment, PendingRefund, Refund, Store, VaultStatus},
 };
 
 const NETWORK: Network = Network::TestNetwork;
@@ -116,6 +121,15 @@ pub(crate) const RECEIPT_TIMEOUT: Duration = Duration::from_secs(120);
 const COMMIT_WAIT_MARGIN_SECS: u64 = 30;
 /// T-05: how often the coordinator warns at most about one vault's payable claims getting old.
 const LIVENESS_WARNING_INTERVAL: Duration = Duration::from_secs(30 * 60);
+/// O-2: seconds the coordinator waits for the signers to apply a vault's newest Base event before
+/// it asks them to sign anyway (and retries on the next pass if they refuse, as before).
+pub const NODE_CATCH_UP_SECS: u64 = 60;
+/// O-2: how long the nodes' reported Base blocks are reused before they are asked again.
+const NODE_STATUS_TTL: Duration = Duration::from_secs(5);
+/// R-5: seconds a node's `receivedAt` may lie ahead of the coordinator's clock.
+const RECEIPT_CLOCK_SKEW_SECS: u64 = 60;
+/// R-5: receipts kept in memory at most.
+const MAX_CACHED_RECEIPTS: usize = 4_096;
 
 alloy::sol! {
     #[sol(rpc)]
@@ -136,6 +150,21 @@ pub struct OpenVaultRequest {
     /// H-01: the nonce of the request's hashcash stamp (`zecured_base::stamp`).
     #[serde(default)]
     pub stamp: u64,
+    /// Mainnet beta (section 6): the invite code, when openings are invite-only. Never logged.
+    #[serde(default)]
+    pub invite: Option<String>,
+}
+
+/// R-5: a claim's liveness receipt as the backend serves it: one signer's `DestinationReceived`
+/// for the claim's current destination, which `SignerBondV2.armLiveness` takes.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ClaimReceipt {
+    pub claim_id: B256,
+    pub commitment: B256,
+    pub received_at: u64,
+    pub signer: Address,
+    pub signature: Bytes,
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
@@ -180,6 +209,13 @@ pub struct ClaimView {
     pub state: ClaimState,
     /// Whether the claim has a destination on Base (a refund gets one from its account, T-02).
     pub destination_set: bool,
+    /// Section 3: its payout's delivery is proven on Base (final, never disputable again).
+    pub proven: bool,
+    /// Confirmed paid by the signers, not proven yet: its claimant may dispute the confirmation
+    /// until this time (Unix seconds; `None` otherwise, or while the dispute window is unknown).
+    pub disputable_until: Option<u64>,
+    /// R-5: its liveness clock is armed on the bond for its current destination.
+    pub liveness_armed: bool,
 }
 
 /// The word `GET /vaults/:id` gives a claim's state (its `status`, as app/lib/api.ts reads it).
@@ -248,6 +284,17 @@ pub struct Coordinator {
     landing: OnceCell<Landing>,
     /// T-05 (a): when the coordinator last warned about each vault's disputed confirmations.
     dispute_warned: std::sync::Mutex<HashMap<B256, Instant>>,
+    /// O-2: each node's last applied Base block, as its status reported it, and when it was read.
+    node_blocks: std::sync::Mutex<Option<(Instant, Vec<(u16, u64)>)>>,
+    /// Mainnet beta (section 6): the invite gate of `POST /vaults`; `None`: openings are open.
+    invites: Option<InviteGate>,
+    /// R-5: receipts served, by claim (each for the claim's commitment at the time).
+    receipts: std::sync::Mutex<HashMap<B256, ClaimReceipt>>,
+    /// The Registry's `disputeWindow` (seconds), once read: what the vault view's
+    /// `disputable_until` adds to a confirmation's time.
+    dispute_window: OnceLock<u64>,
+    /// R-10: whether the deployment's `commitGrace` was compared with the payout lifetime.
+    grace_checked: AtomicBool,
     /// TEST ONLY: see [`TEST_WITHHOLD_FLAG`].
     #[cfg(feature = "test-hooks")]
     withhold_flag: std::path::PathBuf,
@@ -396,6 +443,13 @@ fn finish_open(
         activated_tag: None,
         pending_tag: None,
         opened_at: now(),
+        commitments: vec![],
+        pending_refunds: vec![],
+        armed: vec![],
+        last_event_block: 0,
+        last_event_at: 0,
+        refund_requested: false,
+        used_request_nonces: vec![],
     };
     let response = OpenVaultResponse {
         vault_id: vault.vault_id,
@@ -409,11 +463,69 @@ fn finish_open(
     Ok((vault, response))
 }
 
-/// Applies one Registry event to the coordinator's record, as the Registry's state machine moves
-/// the vault. Idempotent: a chunk applied again after a crash (vault files are saved before the
-/// cursor) changes nothing.
+/// Applies one event of the deployment to the coordinator's record, as the contracts' state
+/// machines move the vault. Idempotent: a chunk applied again after a crash (vault files are saved
+/// before the cursor) changes nothing.
 fn apply_event(v: &mut CoordVault, ev: &VaultEvent) {
+    // O-2: the signers act on the vault once their own view reaches this block.
+    if ev.block > v.last_event_block {
+        v.last_event_block = ev.block;
+        v.last_event_at = now();
+    }
     match &ev.event {
+        RegistryEvent::SpendCommitted {
+            payout_ref,
+            input_tag,
+            claims,
+        } => {
+            if !v.commitments.iter().any(|c| c.payout_ref == *payout_ref) {
+                v.commitments.push(CommittedPayout {
+                    payout_ref: *payout_ref,
+                    input_tag: *input_tag,
+                    claims: claims.iter().map(|c| c.0).collect(),
+                });
+            }
+        }
+        RegistryEvent::RefundPending {
+            deposit_tag,
+            ready_height,
+            ready_time,
+            ..
+        } => {
+            if !v.pending_refunds.iter().any(|p| p.deposit_tag == deposit_tag.0) {
+                v.pending_refunds.push(PendingRefund {
+                    deposit_tag: deposit_tag.0,
+                    ready_height: *ready_height,
+                    ready_time: *ready_time,
+                });
+            }
+        }
+        RegistryEvent::PendingRefundDropped { deposit_tag } => {
+            v.pending_refunds.retain(|p| p.deposit_tag != deposit_tag.0);
+        }
+        RegistryEvent::LivenessArmed {
+            claim_id,
+            commitment,
+            payable_at,
+        } => {
+            v.armed.retain(|a| a.claim_id != claim_id.0);
+            v.armed.push(Armed {
+                claim_id: claim_id.0,
+                commitment: commitment.0,
+                payable_at: *payable_at,
+            });
+        }
+        RegistryEvent::PreLiquidated { .. } => {
+            // Section 4: the Registry's `LiquidationRelease` of the same transaction creates the
+            // claim; this only says it was a pre-liquidation. Nothing but the vault's id prefix.
+            info!(vault = %short(&v.vault_id), "a pre-liquidation of the vault: its claim is paid as a liquidation");
+        }
+        RegistryEvent::ChangeTagOverridden { .. } => {
+            error!(
+                vault = %short(&v.vault_id),
+                "a deposit of another vault took a change tag of this vault's commitment (R-16): that commitment's signers registered a false change"
+            );
+        }
         RegistryEvent::Reserved { deposit_tag, .. } => {
             v.pending_tag = Some(deposit_tag.0);
             if matches!(v.status, VaultStatus::AwaitingDeposit | VaultStatus::Expired) {
@@ -448,6 +560,8 @@ fn apply_event(v: &mut CoordVault, ev: &VaultEvent) {
                     continue;
                 }
                 if c.kind == ClaimKind::Refund {
+                    // R-12: a pending refund opens its claim when it is finalized.
+                    v.pending_refunds.retain(|p| Some(p.deposit_tag) != c.refund_tag);
                     // T-02: a refund of the pending deposit itself (converted), or of a deposit to
                     // a vault Base had neither activated nor reserved: the vault is cancelled for
                     // good. A refund while another deposit's activation is pending leaves it so.
@@ -497,7 +611,13 @@ fn apply_event(v: &mut CoordVault, ev: &VaultEvent) {
                     // T-05 (a): Base's state; a claim this coordinator saw paid stays paid in its
                     // books ([`CoordVault::books`]), and it proves that payout's inclusion.
                     ClaimChange::Disputed { .. } => claim.state = ClaimState::Disputed,
-                    ClaimChange::Upheld { .. } => claim.state = ClaimState::Paid,
+                    // Section 3: final.
+                    ClaimChange::Upheld { .. } | ClaimChange::Proven { .. } => {
+                        claim.state = ClaimState::Paid;
+                        claim.proven = true;
+                    }
+                    // R-11: out of the coverage cap until its destination is given.
+                    ClaimChange::Dormant => {}
                     ClaimChange::Reopened => {
                         if claim.state == ClaimState::Disputed {
                             claim.state = ClaimState::Unpaid;
@@ -515,15 +635,41 @@ fn apply_event(v: &mut CoordVault, ev: &VaultEvent) {
                 }
             }
         }
-        RegistryEvent::PayoutConfirmed(ids) => {
-            for c in v.claims.iter_mut().filter(|c| ids.iter().any(|i| i.0 == c.id)) {
+        RegistryEvent::PayoutConfirmed { claims, .. } => {
+            for c in v.claims.iter_mut().filter(|c| claims.iter().any(|i| i.0 == c.id)) {
                 c.state = ClaimState::Paid;
+                if !c.proven {
+                    c.confirmed_at = ev.timestamp;
+                }
             }
         }
     }
     if v.status == VaultStatus::Active && v.outstanding == 0 && !v.claims.is_empty() && v.settled() {
         v.status = VaultStatus::Closed;
     }
+}
+
+/// R-5: whether `r`, a node's answer for `claim_id` whose destination is `commitment`, is that
+/// node's valid receipt: its own index, the claim's current commitment, a time not ahead of
+/// `now` (beyond the clock skew), signed by the node's attestation key under the bond's domain.
+fn valid_receipt(
+    r: &ReceiptOut,
+    claim_id: B256,
+    commitment: B256,
+    domain: &alloy::sol_types::Eip712Domain,
+    signer: Address,
+    now: u64,
+) -> bool {
+    r.claim_id == claim_id
+        && r.commitment == commitment
+        && commitment != B256::ZERO
+        && r.received_at <= now.saturating_add(RECEIPT_CLOCK_SKEW_SECS)
+        && select::signed_by(domain, &destination_received(claim_id, commitment, r.received_at), &r.signature, signer)
+}
+
+/// O-2: whether at least `need` of the nodes' reported Base blocks reach `block`.
+pub fn caught_up(blocks: &[(u16, u64)], block: u64, need: usize) -> bool {
+    blocks.iter().filter(|(_, b)| *b >= block).count() >= need
 }
 
 impl Coordinator {
@@ -544,10 +690,37 @@ impl Coordinator {
             liveness_warned: std::sync::Mutex::default(),
             landing: OnceCell::new(),
             dispute_warned: std::sync::Mutex::default(),
+            node_blocks: std::sync::Mutex::default(),
+            invites: None,
+            receipts: std::sync::Mutex::default(),
+            dispute_window: OnceLock::new(),
+            grace_checked: AtomicBool::new(false),
             #[cfg(feature = "test-hooks")]
             withhold_flag: data_dir.join(TEST_WITHHOLD_FLAG),
             cfg,
         })
+    }
+
+    /// Mainnet beta (section 6): vault openings gated by the operator's invite file (`invites.rs`),
+    /// uses counted in `data_dir`.
+    pub fn with_invites(mut self, file: &Path, data_dir: &Path) -> Result<Self> {
+        self.invites = Some(InviteGate::open(file, data_dir)?);
+        Ok(self)
+    }
+
+    /// What `GET /config` says about openings: open and not invite-only without a gate; closed when
+    /// the gate's file is unreadable (an opening would be refused too).
+    pub fn openings(&self) -> OpeningsStatus {
+        match &self.invites {
+            None => OpeningsStatus {
+                open: true,
+                invite_only: false,
+            },
+            Some(gate) => gate.status().unwrap_or(OpeningsStatus {
+                open: false,
+                invite_only: true,
+            }),
+        }
     }
 
     /// The Halo 2 proving key (built once, a few seconds).
@@ -607,6 +780,8 @@ impl Coordinator {
     }
 
     pub async fn open_vault(&self, req: OpenVaultRequest) -> Result<OpenVaultResponse> {
+        // Section 6: the operator's switch closes openings before anything else is looked at.
+        ensure!(self.openings().open, PublicError::OpeningsClosed);
         ensure!(self.cfg.denominations.contains(&req.amount), PublicError::NotDenomination);
         self.check_open_stamp(&req)?;
         // Checked here too (every node checks it), so a forged or stale request costs no DKG.
@@ -628,6 +803,9 @@ impl Coordinator {
             let limits = &self.cfg.open_vault;
             ensure!(store.holding_slots(now(), limits.pending_slot_secs) < limits.max_pending, PublicError::Busy);
         }
+        // Section 6: an invite-only opening takes a use of its code (given back if it fails), only
+        // for a stamped, signed request, so codes cannot be probed for free.
+        let invite = self.invites.as_ref().map(|g| g.take(req.invite.as_deref())).transpose()?;
         let claim = self.claim_open_request(req.request_id, req.deadline)?;
         let tip = self.zcash.lock().await.tip().await.context(PublicError::ChainUnavailable)?;
         let birthday = tip.saturating_sub(BIRTHDAY_MARGIN).max(1);
@@ -683,6 +861,12 @@ impl Coordinator {
         // Kept with the vault, so the signatures can be served again.
         self.store.lock().await.save(vault)?;
         claim.keep();
+        if let Some(invite) = invite
+            && let Err(e) = invite.keep()
+        {
+            error!("an invite's use could not be recorded");
+            debug!(error = %scrubbed(&e), "invite use");
+        }
         info!(vault = %short(&resp.vault_id), "vault opened");
         Ok(resp)
     }
@@ -813,11 +997,114 @@ impl Coordinator {
         })
     }
 
+    /// R-11.1: the owner asks for the vault's deposit back because its activation cannot land (the
+    /// coverage cap has no room, and the Intake refuses the activation of a new vault rather than
+    /// cancel it). The coordinator then proves the deposit in Refund mode on its next passes; the
+    /// Intake lands it as a Refund claim of the vault's account, whose destination the account then
+    /// gives. Refused, with a fixed code, unless this coordinator makes proofs, the owner signed it
+    /// (`ProveRefund`, nonce unused), the deployment's guest has a Refund mode, the vault still waits
+    /// for its deposit and Base does not know it, a confirmed deposit of its amount was seen, and the
+    /// cap blocks the activation now.
+    pub async fn request_refund_proof(
+        &self,
+        vault_id: B256,
+        nonce: u64,
+        deadline: u64,
+        signature: &[u8],
+    ) -> Result<()> {
+        ensure!(self.proves_deposits(), PublicError::NotConfigured);
+        let v = self.vault(&vault_id).await?;
+        let msg = ProveRefund {
+            vaultId: vault_id,
+            nonce,
+            deadline,
+        };
+        self.check_owner(&v, &msg, signature, deadline)?;
+        ensure!(!v.used_request_nonces.contains(&nonce), PublicError::NonceUsed);
+        ensure!(v.status == VaultStatus::AwaitingDeposit, PublicError::AlreadyLanded);
+        ensure!(v.deposit_seen(), PublicError::NoDeposit);
+        let landing = self.landing().await.context(PublicError::ChainUnavailable)?;
+        ensure!(landing.proves_refunds(), PublicError::RefundUnavailable);
+        let provider = ProviderBuilder::new().connect_http(self.cfg.base_rpc_url.parse()?);
+        let status = IZecuredRegistry::new(self.cfg.registry, &provider)
+            .vault(vault_id)
+            .call()
+            .await
+            .context(PublicError::ChainUnavailable)?
+            .status;
+        ensure!(status == STATUS_NONE, PublicError::AlreadyLanded);
+        let intake = IZecuredIntake::new(self.v3().await.context(PublicError::ChainUnavailable)?.intake, &provider);
+        let block = intake.mintBlock(v.amount).call().await.context(PublicError::ChainUnavailable)?;
+        ensure!(block == events::MINT_BLOCK_CAP_EXCEEDED, PublicError::NotBlocked);
+        self.update_vault(&vault_id, |cur| {
+            cur.used_request_nonces.push(nonce);
+            cur.refund_requested = true;
+        })
+        .await?;
+        info!(vault = %short(&vault_id), "the owner asked for the deposit back: it is proven as a refund (R-11.1)");
+        Ok(())
+    }
+
+    /// R-5: a liveness receipt for the claim, for its current destination in this coordinator's
+    /// books: every node is asked at once, each answer checked against that node's attestation key
+    /// under the bond's domain, and of the valid ones the earliest `receivedAt` is served (one
+    /// honest signer is enough, and a signer that dates its receipt late cannot delay the claim's
+    /// clock). A receipt served is kept for that destination, so asking again costs the nodes
+    /// nothing; a changed destination is asked for anew.
+    pub async fn claim_receipt(&self, claim_id: B256) -> Result<ClaimReceipt> {
+        let commitment = {
+            let store = self.store.lock().await;
+            store
+                .vaults
+                .values()
+                .flat_map(|v| v.claims.iter())
+                .find(|c| c.id == claim_id.0)
+                .map(|c| B256::from(c.commitment))
+        }
+        .ok_or(PublicError::NoReceipt)?;
+        ensure!(commitment != B256::ZERO, PublicError::NoReceipt);
+        {
+            let cached = self.receipts.lock().unwrap_or_else(|p| p.into_inner());
+            if let Some(r) = cached.get(&claim_id).filter(|r| r.commitment == commitment) {
+                return Ok(r.clone());
+            }
+        }
+        let bond = self.v3().await.context(PublicError::ChainUnavailable)?.bond;
+        ensure!(bond != Address::ZERO, PublicError::NotConfigured);
+        let domain = bond_domain(self.cfg.chain_id, bond);
+        let answers: Vec<Answer<ReceiptOut>> =
+            self.nodes.post_many(&self.nodes.indices(), "/v1/receipts", &ReceiptIn { claim_id }).await;
+        let now = now();
+        let receipt = answers
+            .into_iter()
+            .filter_map(|(index, answer)| {
+                let r = answer.ok()?;
+                let signer = self.cfg.node(index).ok()?.eth;
+                valid_receipt(&r, claim_id, commitment, &domain, signer, now).then_some((index, r, signer))
+            })
+            .min_by_key(|(index, r, _)| (r.received_at, *index))
+            .map(|(_, r, signer)| ClaimReceipt {
+                claim_id,
+                commitment,
+                received_at: r.received_at,
+                signer,
+                signature: r.signature,
+            })
+            .ok_or(PublicError::NoReceipt)?;
+        let mut cached = self.receipts.lock().unwrap_or_else(|p| p.into_inner());
+        if cached.len() >= MAX_CACHED_RECEIPTS {
+            cached.clear();
+        }
+        cached.insert(claim_id, receipt.clone());
+        Ok(receipt)
+    }
+
     /// The app's view of a vault, from the store alone: no Zcash lock, no scan (L-10). The
     /// deposits waiting for a refund proof are the ones persisted by the last scan (M-10).
     pub async fn view(&self, vault_id: B256) -> Result<VaultView> {
         let store = self.store.lock().await;
         let v = store.vaults.get(&vault_id).context(PublicError::UnknownVault)?;
+        let window = self.dispute_window.get().copied();
         Ok(VaultView {
             vault_id,
             status: v.status,
@@ -834,6 +1121,12 @@ impl Coordinator {
                     paid: c.state == ClaimState::Paid,
                     state: c.state,
                     destination_set: c.commitment != [0; 32],
+                    proven: c.proven,
+                    disputable_until: (c.state == ClaimState::Paid && !c.proven && c.confirmed_at != 0)
+                        .then_some(())
+                        .and(window)
+                        .map(|w| c.confirmed_at.saturating_add(w)),
+                    liveness_armed: v.armed(c),
                 })
                 .collect(),
             non_conforming: v.non_conforming.clone(),
@@ -1000,6 +1293,7 @@ impl Coordinator {
             }
             Err(_) => warn!("base sync timed out"),
         }
+        self.check_commit_grace().await;
         let ids: Vec<B256> = self.store.lock().await.vaults.keys().copied().collect();
         for id in ids {
             // A vault whose pass panics must not starve the vaults after it.
@@ -1014,10 +1308,19 @@ impl Coordinator {
         Ok(())
     }
 
-    /// Applies Registry events up to Base's safe head. No lock is held while the RPC answers.
+    /// Applies the deployment's events up to Base's safe head: the Registry's, the Intake's pending
+    /// refunds (R-12), the bond's liveness arming (R-5) and the Adapter's pre-liquidations. No lock
+    /// is held while the RPC answers.
     async fn sync_base(&self) -> Result<()> {
         let provider = ProviderBuilder::new().connect_http(self.cfg.base_rpc_url.parse()?);
         let safe = events::safe_head(&provider).await?;
+        let v3 = self.v3().await?;
+        let contracts = Contracts {
+            registry: self.cfg.registry,
+            intake: v3.intake,
+            bond: v3.bond,
+            adapter: self.cfg.adapter,
+        };
         let cursor = self.store.lock().await.base_cursor;
         let start = cursor.max(self.cfg.registry_from_block.saturating_sub(1)) + 1;
         // H-11: as many blocks per step as `eth_getLogs` is allowed (`ZECURED_LOG_RANGE`).
@@ -1025,17 +1328,58 @@ impl Coordinator {
         let mut from = start;
         while from <= safe {
             let to = (from + step - 1).min(safe);
-            let evs = events::fetch(&provider, self.cfg.registry, from, to).await?;
+            let evs = events::fetch_deployment(&provider, &contracts, from, to).await?;
             let mut store = self.store.lock().await;
             for ev in evs {
-                if store.vaults.contains_key(&ev.vault_id) {
-                    store.update(&ev.vault_id, |v| apply_event(v, &ev))?;
+                // The bond's arming names a claim, not a vault.
+                let vault = match &ev.event {
+                    RegistryEvent::LivenessArmed { claim_id, .. } => {
+                        store.vaults.values().find(|v| v.claims.iter().any(|c| c.id == claim_id.0)).map(|v| v.vault_id)
+                    }
+                    _ => store.vaults.contains_key(&ev.vault_id).then_some(ev.vault_id),
+                };
+                if let Some(vault) = vault {
+                    store.update(&vault, |v| apply_event(v, &ev))?;
                 }
             }
             store.set_base_cursor(to)?;
             from = to + 1;
         }
         Ok(())
+    }
+
+    /// R-10: warns once if the deployment's `commitGrace` is shorter than a payout's lifetime: a
+    /// payout committed just before a claim's liveness deadline could then land after its claimant
+    /// took the claim's value from the bonds (the planner's rule 2 then keeps such claims back).
+    async fn check_commit_grace(&self) {
+        if self.grace_checked.load(Ordering::Relaxed) {
+            return;
+        }
+        let read = async {
+            let provider = ProviderBuilder::new().connect_http(self.cfg.base_rpc_url.parse()?);
+            let registry = IZecuredRegistry::new(self.cfg.registry, &provider);
+            let window = registry.disputeWindow().call().await.context("Registry.disputeWindow")?;
+            let _ = self.dispute_window.set(window);
+            let bond = self.v3().await?.bond;
+            if bond == Address::ZERO {
+                return anyhow::Ok(None);
+            }
+            Ok(Some(ISignerBond::new(bond, &provider).commitGrace().call().await.context("bond.commitGrace")?))
+        };
+        match read.await {
+            Ok(grace) => {
+                self.grace_checked.store(true, Ordering::Relaxed);
+                let lifetime = self.cfg.payout_lifetime();
+                if let Some(grace) = grace.filter(|g| *g < lifetime) {
+                    warn!(
+                        commit_grace = grace,
+                        payout_lifetime = lifetime,
+                        "the bond's commitGrace is shorter than a payout's lifetime: claims near their liveness deadline are not committed (R-10)"
+                    );
+                }
+            }
+            Err(e) => debug!(error = %scrubbed(&e), "commitGrace unknown"),
+        }
     }
 
     async fn notes(&self, v: &CoordVault, decisions: &mut Vec<(NotePosition, Classification)>) -> Result<VaultNotes> {
@@ -1096,18 +1440,19 @@ impl Coordinator {
             })
             .await?;
         self.warn_overdue(&v).await;
-        // T-05 (a): a disputed confirmation is upheld by proving the payout's inclusion, whatever
-        // else the vault is doing.
-        if let Err(e) = self.uphold_disputes(&v).await {
-            log_failure(id, "upholding a disputed payout", &e);
+        // Section 3 and T-05 (a): every landed payout's delivery is proven (a disputed one first),
+        // whatever else the vault is doing.
+        if let Err(e) = self.prove_deliveries(&v).await {
+            log_failure(id, "proving a payout's delivery", &e);
+        }
+        // R-12: refund proofs pending on the Intake are finalized (or dropped) as they come due.
+        if let Err(e) = self.keep_pending_refunds(&v).await {
+            log_failure(id, "keeping a pending refund", &e);
         }
         if idle {
             self.mark_idle_scanned(id);
             return self.prove_refunds(&v, &notes).await;
         }
-        // Plan from the same lineage as the signers (H-2): the activated deposit or the change
-        // worth exactly the vault's book value; foreign and zero-value notes are ignored.
-        notes.retain_planned_change(ledger::book_value(v.outstanding, &v.books()));
 
         if let Some(inflight) = v.inflight.clone() {
             return self.check_inflight(id, inflight, notes.tip).await;
@@ -1123,7 +1468,12 @@ impl Coordinator {
                         return Ok(());
                     }
                     if self.proves_deposits() {
-                        let target = proofs::Target::activation(conforming, v.amount);
+                        // R-11.1: its owner asked for it back (the cap blocks the activation).
+                        let target = if v.refund_requested {
+                            proofs::Target::refund(conforming)
+                        } else {
+                            proofs::Target::activation(conforming, v.amount)
+                        };
                         self.prove_deposit(id, &target).await?;
                     }
                     // Otherwise the borrower proves it (`POST /vaults/:id/deposit-proof`, Y10).
@@ -1139,7 +1489,7 @@ impl Coordinator {
             // K3: a deposit proof waits on Base until the relay has moved on.
             VaultStatus::DepositSeen => self.finalize_pending(id).await?,
             VaultStatus::Active | VaultStatus::Closed | VaultStatus::Cancelled | VaultStatus::Expired => {
-                if self.pay_next(&v, &notes).await? {
+                if self.pay_next(&v, &mut notes).await? {
                     return Ok(());
                 }
             }
@@ -1166,20 +1516,23 @@ impl Coordinator {
         Ok(false)
     }
 
-    /// I30: what the deployment's guests can land on Base, from the Intake's journal version and
-    /// refund floor (immutable, read once). The nodes read it on each of their providers.
+    /// I30: what the deployment's guests can land on Base, from the Intake's journal version, refund
+    /// floor and largest work tier (R-15; immutable, read once). The nodes read it on each of their
+    /// providers.
     pub(crate) async fn landing(&self) -> Result<Landing> {
         let landing = self
             .landing
             .get_or_try_init(|| async {
                 let provider = ProviderBuilder::new().connect_http(self.cfg.base_rpc_url.parse()?);
                 let intake = IZecuredIntake::new(self.v3().await?.intake, &provider);
+                let largest_tier = largest_tier(&intake.workTiers().call().await.context("Intake.workTiers")?)?;
                 anyhow::Ok(if intake.journalV2().call().await.context("Intake.journalV2")? {
                     Landing::WithRefunds {
                         min_refund: intake.minRefundZat().call().await.context("Intake.minRefundZat")?,
+                        largest_tier,
                     }
                 } else {
-                    Landing::ActivateOnly
+                    Landing::ActivateOnly { largest_tier }
                 })
             })
             .await?;
@@ -1278,10 +1631,14 @@ impl Coordinator {
     // ------------------------------------------------------------------ payouts
 
     /// Returns true if a payout was started: the vault's next payout, from its main lineage or from
-    /// the note of a refunded deposit, planned exactly as the signers plan it.
-    async fn pay_next(&self, v: &CoordVault, notes: &VaultNotes) -> Result<bool> {
-        let claims = v.books();
-        if !claims.iter().any(|c| c.payable()) {
+    /// the note of a refunded deposit, planned exactly as the signers plan it (O-4, `planning`).
+    async fn pay_next(&self, v: &CoordVault, notes: &mut VaultNotes) -> Result<bool> {
+        let books = v.books();
+        // Rule 3 (O-4) may count a confirmed claim unpaid again: the planning decides.
+        if !books
+            .iter()
+            .any(|c| c.payable() || (c.state == ClaimState::Paid && !c.proven && c.kind.main_lineage()))
+        {
             return Ok(false);
         }
         // K3 and T-04: nothing is paid from a pending or compromised vault (the Registry refuses
@@ -1289,8 +1646,18 @@ impl Coordinator {
         if !self.payable_on_base(&v.vault_id).await? {
             return Ok(false);
         }
-        // RT-3: the claims a commitment on Base binds to the lineage note come first, as the nodes plan.
-        let bound = self.bound_claims(v, &claims, notes).await?;
+        let planning = self.planning(v, notes, now()).await?;
+        let claims = planning.claims;
+        let bound = planning.bound;
+        if !claims.iter().any(|c| c.payable()) {
+            return Ok(false);
+        }
+        // O-2: the signers plan from their own view of Base; give them the time to apply the
+        // vault's newest event before asking them to sign, then try anyway.
+        if !self.nodes_caught_up(v).await {
+            debug!(vault = %short(&v.vault_id), "waiting for the signers to apply the vault's newest Base event (O-2)");
+            return Ok(false);
+        }
         // The nodes never pay a vault's own addresses (security review H-2): plan the same way.
         let fvk = fvk_of(v)?;
         let (main, i10) = main_lineage(v.activated_tag.is_some(), v.outstanding, &claims, &notes.lineage, &bound);
@@ -1369,27 +1736,113 @@ impl Coordinator {
         Ok(set == B256::ZERO || set.0 == ledger::claim_set_hash(&plan.claims))
     }
 
-    /// RT-3: the unpaid claims that a commitment on Base binds to the vault's main lineage note.
-    async fn bound_claims(
-        &self,
-        v: &CoordVault,
-        claims: &[ledger::Claim],
-        notes: &VaultNotes,
-    ) -> Result<Vec<[u8; 32]>> {
-        let [input] = notes.lineage.as_slice() else {
-            return Ok(vec![]);
-        };
-        let cmx = orchard::note::ExtractedNoteCommitment::from(input.note.commitment()).to_bytes();
-        let tag = B256::from(deposit_tag(&v.ufvk, &cmx));
+    /// The vault's claims as the signers plan from them (`zecured_node::Node::planning`, the same
+    /// rules on this coordinator's books): O-4 rule 3 counts unpaid again the confirmed claims whose
+    /// input is still an unspent lineage note, the lineage keeps the planned change of that book
+    /// value (H-2), the claims a commitment binds to the lineage note are the payout (RT-3), and
+    /// rules 1 and 2 (R-10) set aside claims within one payout lifetime of their liveness due time.
+    async fn planning(&self, v: &CoordVault, notes: &mut VaultNotes, now: u64) -> Result<Planning> {
+        let tag_of = |n: &ReceivedNote| B256::from(deposit_tag(&v.ufvk, &note_cmx(n)));
+        let candidates: Vec<B256> = notes.lineage.iter().map(tag_of).collect();
+        let mut claims = v.books();
         let provider = ProviderBuilder::new().connect_http(self.cfg.base_rpc_url.parse()?);
         let registry = IZecuredRegistry::new(self.cfg.registry, &provider);
-        let mut bound = vec![];
-        for c in claims.iter().filter(|c| c.state == ClaimState::Unpaid) {
-            if registry.claimInput(B256::from(c.id)).call().await.context("Registry.claimInput")? == tag {
-                bound.push(c.id);
+        let read_inputs = |ids: Vec<ClaimId>| {
+            let registry = &registry;
+            async move {
+                let mut inputs = Vec::with_capacity(ids.len());
+                for id in ids {
+                    inputs.push((id, registry.claimInput(B256::from(id)).call().await.context("Registry.claimInput")?));
+                }
+                anyhow::Ok(inputs)
+            }
+        };
+        let mut inputs = match candidates.is_empty() {
+            true => vec![],
+            false => read_inputs(zecured_node::unpaid_ids(&claims)).await?,
+        };
+        // Rule 3 only when the books do not add up as they are, as the nodes plan.
+        let mut reverted = vec![];
+        if !candidates.is_empty() && !notes.books_add_up(v.outstanding, &claims) {
+            let confirmed = read_inputs(zecured_node::confirmed_ids(&claims)).await?;
+            let unlanded: Vec<ClaimId> = confirmed
+                .iter()
+                .filter(|(_, input)| *input != B256::ZERO && candidates.contains(input))
+                .map(|(id, _)| *id)
+                .collect();
+            reverted = ledger::revert_unlanded(&mut claims, &unlanded);
+            inputs.extend(confirmed);
+        }
+        if !reverted.is_empty() {
+            warn!(
+                vault = %short(&v.vault_id),
+                claims = reverted.len(),
+                "claims confirmed paid whose input is still unspent: their payout is planned again, to be proven (O-4)"
+            );
+        }
+        notes.retain_planned_change(ledger::book_value(v.outstanding, &claims));
+        let bound = match notes.lineage.as_slice() {
+            [input] => {
+                let tag = tag_of(input);
+                let unpaid = |id: &ClaimId| claims.iter().any(|c| c.id == *id && c.state == ClaimState::Unpaid);
+                inputs.iter().filter(|(id, input)| *input == tag && unpaid(id)).map(|(id, _)| *id).collect()
+            }
+            _ => vec![],
+        };
+        let bond = self.v3().await?.bond;
+        let mut dues: Vec<(ClaimId, u64)> = vec![];
+        if bond != Address::ZERO {
+            let bond = ISignerBond::new(bond, &provider);
+            for c in claims.iter().filter(|c| c.payable() && c.kind.liveness_covered()) {
+                // Unreadable (a stale price, R-9): 0, as every node counts it.
+                dues.push((c.id, bond.livenessDue(B256::from(c.id)).call().await.map(|d| d.dueAt).unwrap_or(0)));
             }
         }
-        Ok(bound)
+        let due_of = |id: &ClaimId| dues.iter().find(|(c, _)| c == id).map_or(0, |(_, d)| *d);
+        let deferred = ledger::defer_near_due(&mut claims, now, self.cfg.payout_lifetime(), due_of);
+        if !deferred.is_empty() {
+            info!(
+                vault = %short(&v.vault_id),
+                claims = deferred.len(),
+                "claims within one payout lifetime of their liveness due time are not committed (R-10)"
+            );
+        }
+        Ok(Planning {
+            claims,
+            bound,
+            reverted,
+            deferred,
+        })
+    }
+
+    /// O-2: whether enough signers (a signing threshold) have applied the vault's newest Base event,
+    /// by the last Base block each node's status reports; past [`NODE_CATCH_UP_SECS`] after the
+    /// coordinator applied it, the signers are asked anyway (they refuse until they have it, and
+    /// the next pass tries again).
+    async fn nodes_caught_up(&self, v: &CoordVault) -> bool {
+        if v.last_event_block == 0 || now() >= v.last_event_at.saturating_add(NODE_CATCH_UP_SECS) {
+            return true;
+        }
+        let fresh = {
+            let cached = self.node_blocks.lock().unwrap_or_else(|p| p.into_inner());
+            cached.as_ref().filter(|(at, _)| at.elapsed() < NODE_STATUS_TTL).map(|(_, b)| b.clone())
+        };
+        let blocks = match fresh {
+            Some(b) => b,
+            None => {
+                let mut blocks = vec![];
+                for health in self.node_health().await {
+                    let index = health.get("index").and_then(serde_json::Value::as_u64);
+                    let block = health.get("base_block").and_then(serde_json::Value::as_u64);
+                    if let (Some(index), Some(block)) = (index, block) {
+                        blocks.push((u16::try_from(index).unwrap_or(0), block));
+                    }
+                }
+                *self.node_blocks.lock().unwrap_or_else(|p| p.into_inner()) = Some((Instant::now(), blocks.clone()));
+                blocks
+            }
+        };
+        caught_up(&blocks, v.last_event_block, usize::from(MIN_SIGNERS))
     }
 
     /// TEST ONLY: consumes the withhold flag if this build has the `test-hooks` feature.
@@ -1605,16 +2058,36 @@ impl Coordinator {
         }
     }
 
-    /// The mined payout is confirmed on Base (unless it already is) and its record closed.
+    /// The mined payout's pending claims are confirmed on Base (R-1: never a reopened one, and not
+    /// on a frozen vault, which refuses confirmations) and its record closed; its delivery proof
+    /// then makes every claim final (section 3).
     async fn settle(&self, id: &B256, inflight: &Inflight) -> Result<()> {
         if !inflight.claim_ids.is_empty() {
-            match self.claims_settled(id, &inflight.claim_ids).await? {
-                // H-5: confirmPayout went through but its receipt was lost (or another
-                // coordinator pass sent it): sending it again would revert forever.
-                Settled::All => info!(vault = %short(id), "payout already confirmed on Base"),
-                Settled::None => self.confirm_on_base(id, inflight).await?,
-                Settled::Partial => bail!("the claims of one payout are partly paid on Base; investigate"),
+            let pending = self.claims_to_confirm(id, &inflight.claim_ids).await?;
+            if pending.is_empty() {
+                // H-5: the confirmation went through but its receipt was lost (or another pass sent
+                // it); or nothing is left to confirm: the proof settles the rest.
+                info!(vault = %short(id), "nothing of the payout is left to confirm on Base");
+            } else if self.vault_frozen(id).await {
+                info!(vault = %short(id), "the vault is frozen: the payout is settled by its delivery proof, not confirmed (R-3)");
+            } else {
+                self.confirm_on_base(id, inflight, &pending).await?;
             }
+        }
+        if let Some(kept) = &inflight.spend_commit {
+            // Section 3: the payout's commitment, whose delivery this coordinator proves (its event
+            // records it too).
+            let record = CommittedPayout {
+                payout_ref: kept.record.payout_ref,
+                input_tag: kept.record.input_tag,
+                claims: kept.record.claim_ids.iter().map(|c| c.0).collect(),
+            };
+            self.update_vault(id, |v| {
+                if !v.commitments.iter().any(|c| c.payout_ref == record.payout_ref) {
+                    v.commitments.push(record);
+                }
+            })
+            .await?;
         }
         self.update_vault(id, |v| {
             for c in v.claims.iter_mut().filter(|c| inflight.claim_ids.iter().any(|i| i.0 == c.id)) {
@@ -1642,16 +2115,20 @@ impl Coordinator {
         .await
     }
 
-    /// Whether the Registry already marks a payout's claims paid (H-5).
-    async fn claims_settled(&self, id: &B256, claim_ids: &[B256]) -> Result<Settled> {
-        let known_paid = {
+    /// R-1 and H-5: the claims of a mined payout that three signers confirm: those the Registry
+    /// still has pending, never a reopened one; none if the books already show them all paid (the
+    /// confirmation's event reached the safe head).
+    async fn claims_to_confirm(&self, id: &B256, claim_ids: &[B256]) -> Result<Vec<B256>> {
+        let (known_paid, reopened) = {
             let store = self.store.lock().await;
-            store.vaults.get(id).is_some_and(|v| {
+            let v = store.vaults.get(id);
+            let paid = v.is_some_and(|v| {
                 claim_ids.iter().all(|c| v.claims.iter().any(|x| x.id == c.0 && x.state == ClaimState::Paid))
-            })
+            });
+            (paid, v.map(|v| v.reopened.clone()).unwrap_or_default())
         };
         if known_paid {
-            return Ok(Settled::All); // PayoutConfirmed already seen at the safe head
+            return Ok(vec![]);
         }
         let provider = ProviderBuilder::new().connect_http(self.cfg.base_rpc_url.parse()?);
         let registry = IRegistryClaims::new(self.cfg.registry, &provider);
@@ -1660,21 +2137,47 @@ impl Coordinator {
             let r = registry.claim(*c).call().await.context("Registry.claim")?;
             states.push((r.vaultId, r.status));
         }
-        Ok(inflight::settled(id, &states))
+        Ok(inflight::confirmable(id, claim_ids, &states, &reopened))
     }
 
-    async fn confirm_on_base(&self, id: &B256, inflight: &Inflight) -> Result<()> {
+    /// R-3: whether the slasher reports the vault frozen (an open F1/F2 case, or compromised), so
+    /// that the Registry refuses its confirmations. Unreadable: not frozen (the confirmation is
+    /// tried, and refused if it is).
+    async fn vault_frozen(&self, id: &B256) -> bool {
+        let read = async {
+            let slasher = self.v3().await?.slasher;
+            if slasher == Address::ZERO {
+                return anyhow::Ok(false);
+            }
+            let provider = ProviderBuilder::new().connect_http(self.cfg.base_rpc_url.parse()?);
+            IZecuredSlasher::new(slasher, &provider)
+                .vaultFrozen(*id)
+                .call()
+                .await
+                .context("slasher.vaultFrozen")
+        };
+        read.await.unwrap_or(false)
+    }
+
+    /// R-1: `confirmPayout(vaultId, payoutRef, claimIds, sigs)` for the payout's `claims` still
+    /// pending on Base, with three nodes' `PayoutConfirmation` over its payout reference.
+    async fn confirm_on_base(&self, id: &B256, inflight: &Inflight, claims: &[B256]) -> Result<()> {
         let path = format!("/v1/vaults/{id}/confirm");
         let body = ConfirmIn {
-            claim_ids: inflight.claim_ids.clone(),
+            claim_ids: claims.to_vec(),
             txid: inflight.txid.clone(),
+        };
+        let reference = match &inflight.spend_commit {
+            Some(kept) => kept.record.payout_ref,
+            None => {
+                let v = self.vault(id).await?;
+                let txid = TxId::from_hex(&inflight.txid).context("stored txid")?;
+                B256::from(payout_ref(&v.ufvk, txid.as_ref()))
+            }
         };
         let answers = self.nodes.post_many::<_, ConfirmResponse>(&self.nodes.indices(), &path, &body).await;
         let (answers, failed) = split(answers);
-        let msg = PayoutConfirmation {
-            vaultId: *id,
-            claimIdsHash: claim_ids_hash(&inflight.claim_ids),
-        };
+        let msg = payout_confirmation(*id, reference, claims);
         let need = usize::from(MIN_SIGNERS);
         let Some(sigs) = select::confirmation(&self.cfg.nodes, &self.domain(), &msg, &answers, need) else {
             return Err(if answers.len() >= need {
@@ -1687,7 +2190,7 @@ impl Coordinator {
             .wallet(EthereumWallet::from(self.gas.clone()))
             .connect_http(self.cfg.base_rpc_url.parse()?);
         let registry = IZecuredRegistry::new(self.cfg.registry, &provider);
-        let call = registry.confirmPayout(*id, inflight.claim_ids.clone(), sigs);
+        let call = registry.confirmPayout(*id, reference, claims.to_vec(), sigs);
         let gas = zecured_base::gas_with_headroom(call.estimate_gas().await.context("estimate confirmPayout")?);
         let receipt = call
             .gas(gas)
@@ -1884,6 +2387,8 @@ mod tests {
             state: ClaimState::Unpaid,
             refund_tag: None,
             bond_paid: false,
+            proven: false,
+            confirmed_at: 0,
         }
     }
 
@@ -2046,8 +2551,151 @@ mod tests {
         assert_eq!(v.outstanding, 600_000);
         assert_eq!(v.claims.len(), 1);
         apply_event(&mut v, &at(RegistryEvent::Claims(vec![claim(2, 600_000)])));
-        apply_event(&mut v, &at(RegistryEvent::PayoutConfirmed(vec![B256::repeat_byte(1), B256::repeat_byte(2)])));
+        apply_event(
+            &mut v,
+            &at(RegistryEvent::PayoutConfirmed {
+                payout_ref: B256::repeat_byte(0xaa),
+                claims: vec![B256::repeat_byte(1), B256::repeat_byte(2)],
+            }),
+        );
         assert_eq!(v.status, VaultStatus::Closed);
+    }
+
+    /// v4: the coordinator records the vault's commitments (to prove their delivery), its pending
+    /// refunds until they open or drop (R-12), the claims armed on the bond (R-5), when each claim
+    /// was confirmed and whether it is final, and the block of the vault's newest event (O-2).
+    #[test]
+    fn v4_events_move_the_coordinators_records() {
+        let mut v = vault(1);
+        v.status = VaultStatus::Active;
+        v.activated_tag = Some([0x7a; 32]);
+        v.outstanding = 1_000_000;
+        let ev = |block: u64, event: RegistryEvent| VaultEvent {
+            block,
+            timestamp: block * 2,
+            ..at(event)
+        };
+        apply_event(&mut v, &ev(10, RegistryEvent::Claims(vec![claim(1, 400_000)])));
+        assert!(v.last_event_block == 10 && v.last_event_at > 0);
+        let committed = RegistryEvent::SpendCommitted {
+            payout_ref: B256::repeat_byte(0xaa),
+            input_tag: B256::repeat_byte(0x7a),
+            claims: vec![B256::repeat_byte(1)],
+        };
+        apply_event(&mut v, &ev(11, committed.clone()));
+        apply_event(&mut v, &ev(11, committed));
+        assert_eq!(v.commitments.len(), 1, "once");
+        assert_eq!(v.to_prove(), vec![[1; 32]], "committed, not final: to prove");
+        let confirmed = RegistryEvent::PayoutConfirmed {
+            payout_ref: B256::repeat_byte(0xaa),
+            claims: vec![B256::repeat_byte(1)],
+        };
+        apply_event(&mut v, &ev(12, confirmed));
+        assert_eq!((v.claims[0].state, v.claims[0].confirmed_at), (ClaimState::Paid, 24));
+        let proven = RegistryEvent::ClaimChanged {
+            claim_id: B256::repeat_byte(1),
+            change: ClaimChange::Proven {
+                payout_ref: B256::repeat_byte(0xaa),
+            },
+        };
+        apply_event(&mut v, &ev(13, proven));
+        assert!(v.claims[0].is_final() && v.to_prove().is_empty());
+        // R-12: a pending refund waits until its claim opens (or it is dropped).
+        let pending = |tag: u8| RegistryEvent::RefundPending {
+            deposit_tag: B256::repeat_byte(tag),
+            reason: 0,
+            ready_height: 100,
+            ready_time: 200,
+        };
+        apply_event(&mut v, &ev(14, pending(0x51)));
+        apply_event(&mut v, &ev(14, pending(0x52)));
+        assert_eq!(v.pending_refunds.len(), 2);
+        assert!(!{
+            let mut idle = v.clone();
+            idle.status = VaultStatus::Cancelled;
+            idle.is_idle()
+        });
+        apply_event(
+            &mut v,
+            &ev(
+                15,
+                RegistryEvent::PendingRefundDropped {
+                    deposit_tag: B256::repeat_byte(0x51),
+                },
+            ),
+        );
+        let opened = Claim {
+            kind: ClaimKind::Refund,
+            commitment: [0; 32],
+            refund_tag: Some([0x52; 32]),
+            ..claim(2, 250_000)
+        };
+        apply_event(&mut v, &ev(16, RegistryEvent::Claims(vec![opened])));
+        assert!(v.pending_refunds.is_empty());
+        // R-5: an arming counts for the claim's commitment at the time only.
+        let mut c3 = claim(3, 100_000);
+        apply_event(&mut v, &ev(17, RegistryEvent::Claims(vec![c3.clone()])));
+        let armed = RegistryEvent::LivenessArmed {
+            claim_id: B256::repeat_byte(3),
+            commitment: B256::from(c3.commitment),
+            payable_at: 34,
+        };
+        apply_event(&mut v, &ev(18, armed));
+        assert!(v.armed(&v.claims[2].clone()));
+        c3.commitment = [9; 32];
+        assert!(!v.armed(&c3), "a changed destination voids the arming");
+        assert_eq!(v.last_event_block, 18);
+    }
+
+    /// O-2: a signing threshold of nodes must report a Base block at least as recent as the event.
+    #[test]
+    fn the_signers_catch_up_before_they_are_asked() {
+        let blocks = [(1, 100), (2, 99), (3, 100), (4, 50), (5, 101)];
+        assert!(caught_up(&blocks, 100, 3));
+        assert!(!caught_up(&blocks, 101, 3));
+        assert!(caught_up(&blocks, 99, 4));
+        assert!(!caught_up(&[], 1, 3));
+    }
+
+    /// R-5: a node's receipt counts only for the claim's current commitment, by that node's
+    /// attestation key under the bond's domain, and not dated ahead of the clock.
+    #[test]
+    fn receipts_are_checked_against_the_node_and_the_claim() {
+        let key = PrivateKeySigner::random();
+        let domain = bond_domain(84_532, Address::repeat_byte(0xcc));
+        let (claim_id, commitment) = (B256::repeat_byte(1), B256::repeat_byte(2));
+        let receipt = |at: u64, signer: &PrivateKeySigner, c: B256| ReceiptOut {
+            claim_id,
+            commitment: c,
+            received_at: at,
+            signature: sign_typed(signer, &domain, &destination_received(claim_id, c, at)).unwrap(),
+        };
+        let now = 1_800_000_000;
+        assert!(valid_receipt(
+            &receipt(now - 10, &key, commitment),
+            claim_id,
+            commitment,
+            &domain,
+            key.address(),
+            now
+        ));
+        // Another node's key, another commitment (a changed destination), the future, another domain.
+        let other = PrivateKeySigner::random();
+        assert!(!valid_receipt(&receipt(now, &other, commitment), claim_id, commitment, &domain, key.address(), now));
+        let old = receipt(now, &key, B256::repeat_byte(3));
+        assert!(!valid_receipt(&old, claim_id, commitment, &domain, key.address(), now));
+        let ahead = receipt(now + RECEIPT_CLOCK_SKEW_SECS + 1, &key, commitment);
+        assert!(!valid_receipt(&ahead, claim_id, commitment, &domain, key.address(), now));
+        let elsewhere = bond_domain(84_532, Address::repeat_byte(0xcd));
+        assert!(!valid_receipt(
+            &receipt(now, &key, commitment),
+            claim_id,
+            commitment,
+            &elsewhere,
+            key.address(),
+            now
+        ));
+        assert!(!valid_receipt(&receipt(now, &key, B256::ZERO), claim_id, B256::ZERO, &domain, key.address(), now));
     }
 
     #[test]
@@ -2100,6 +2748,7 @@ mod tests {
                 deadline,
                 signature: sign_typed(owner, &c.domain(), &msg).unwrap(),
                 stamp: 0,
+                invite: None,
             },
             c,
         )
@@ -2341,6 +2990,232 @@ mod tests {
         assert!(c.open_requests.lock().unwrap()[&far] <= now() + OPEN_REQUEST_MEMORY_SECS);
     }
 
+    /// Section 6: with an invite file, the operator's switch closes openings before anything else,
+    /// an invite-only opening needs a listed code with a use left, and a failed opening gives its
+    /// use back.
+    #[tokio::test]
+    async fn invite_codes_gate_vault_openings() {
+        let (c, dir) = offline_with_stamps("invites");
+        let file = dir.0.join("invites.json");
+        let write =
+            |config: &invites::InviteConfig| std::fs::write(&file, serde_json::to_vec(config).unwrap()).unwrap();
+        let config = invites::InviteConfig {
+            openings: true,
+            invite_only: true,
+            codes: vec![invites::InviteCode {
+                hash: invites::code_hash("beta-7f3k"),
+                uses: 1,
+            }],
+        };
+        write(&config);
+        let c = c.with_invites(&file, &dir.0).unwrap();
+        assert_eq!(
+            c.openings(),
+            OpeningsStatus {
+                open: true,
+                invite_only: true
+            }
+        );
+        let owner = PrivateKeySigner::random();
+        let e = c.open_vault(open_request(&owner, &c, now() + 600)).await.unwrap_err();
+        assert_eq!(public_error(&e), Some(PublicError::InviteRequired));
+        let invited = |code: &str| OpenVaultRequest {
+            invite: Some(code.into()),
+            ..open_request(&owner, &c, now() + 600)
+        };
+        let e = c.open_vault(invited("beta-wrong")).await.unwrap_err();
+        assert_eq!(public_error(&e), Some(PublicError::InviteRequired));
+        // Past the gate (then the unreachable light wallet server fails it, which gives the use
+        // back): the same code passes the gate again.
+        for _ in 0..2 {
+            let e = c.open_vault(invited("beta-7f3k")).await.unwrap_err();
+            assert_eq!(public_error(&e), Some(PublicError::ChainUnavailable));
+        }
+        // Closed: refused first, even an unsigned request without a stamp.
+        write(&invites::InviteConfig {
+            openings: false,
+            ..config
+        });
+        let mut unsigned = invited("beta-7f3k");
+        unsigned.signature = Bytes::new();
+        unsigned.stamp = u64::MAX;
+        let e = c.open_vault(unsigned).await.unwrap_err();
+        assert_eq!(public_error(&e), Some(PublicError::OpeningsClosed));
+        assert!(!c.openings().open);
+        // Without an invite file nothing is gated.
+        let (free, _dir2) = offline("no-invites");
+        assert_eq!(
+            free.openings(),
+            OpeningsStatus {
+                open: true,
+                invite_only: false
+            }
+        );
+    }
+
+    /// R-11.1: the owner's request to prove its deposit as a refund is refused, with a fixed code,
+    /// before anything reaches Base unless it makes sense: proofs configured, the owner's signature,
+    /// a fresh nonce, a vault still waiting for its deposit, a deposit seen.
+    #[tokio::test]
+    async fn a_refund_proof_request_is_checked_before_reaching_base() {
+        let (c, dir) = offline("prove-refund");
+        let owner = PrivateKeySigner::random();
+        let mut v = vault(1);
+        v.owner = owner.address();
+        c.store.lock().await.save(v).unwrap();
+        let id = B256::repeat_byte(1);
+        let domain = c.domain();
+        let sign = |key: &PrivateKeySigner, nonce: u64| {
+            let msg = ProveRefund {
+                vaultId: id,
+                nonce,
+                deadline: now() + 600,
+            };
+            sign_typed(key, &domain, &msg).unwrap()
+        };
+        let e = c.request_refund_proof(id, 1, now() + 600, &sign(&owner, 1)).await.unwrap_err();
+        assert_eq!(public_error(&e), Some(PublicError::NotConfigured), "no proofs on this coordinator");
+        let settings = proofs::DepositProofs {
+            host: std::path::PathBuf::from("zecured-tier2-host"),
+            mock: true,
+            headers: std::path::PathBuf::new(),
+            summaries: std::path::PathBuf::new(),
+            concurrency: 1,
+        };
+        let c = c.with_deposit_proofs(settings, &dir.0).unwrap();
+        let request = |key: &PrivateKeySigner, nonce: u64| {
+            let sig = sign(key, nonce);
+            let c = &c;
+            async move { c.request_refund_proof(id, nonce, now() + 600, &sig).await }
+        };
+        let e = request(&PrivateKeySigner::random(), 1).await.unwrap_err();
+        assert_eq!(public_error(&e), Some(PublicError::NotOwner));
+        let e = request(&owner, 1).await.unwrap_err();
+        assert_eq!(public_error(&e), Some(PublicError::NoDeposit), "no conforming deposit seen");
+        let position = NotePosition {
+            height: 4_486_100,
+            tx_index: 1,
+            action_index: 0,
+        };
+        c.store
+            .lock()
+            .await
+            .update(&id, |v| v.decisions.push((position, Classification::Conforming)))
+            .unwrap();
+        // Past the local checks: Base is unreachable here.
+        let e = request(&owner, 1).await.unwrap_err();
+        assert_eq!(public_error(&e), Some(PublicError::ChainUnavailable));
+        c.store.lock().await.update(&id, |v| v.used_request_nonces.push(2)).unwrap();
+        let e = request(&owner, 2).await.unwrap_err();
+        assert_eq!(public_error(&e), Some(PublicError::NonceUsed));
+        c.store.lock().await.update(&id, |v| v.status = VaultStatus::DepositSeen).unwrap();
+        let e = request(&owner, 3).await.unwrap_err();
+        assert_eq!(public_error(&e), Some(PublicError::AlreadyLanded));
+    }
+
+    /// A Base RPC stub answering `eth_call` by function selector (`returns`), every other method
+    /// with the chain id.
+    async fn rpc_stub(returns: Vec<([u8; 4], Vec<u8>)>) -> String {
+        use axum::{Json, Router, routing::post};
+        let returns = Arc::new(returns);
+        let app = Router::new().route(
+            "/",
+            post(move |Json(req): Json<serde_json::Value>| {
+                let returns = returns.clone();
+                async move {
+                    let result = match req["method"].as_str() {
+                        Some("eth_call") => {
+                            let call = &req["params"][0];
+                            let data = call["input"].as_str().or(call["data"].as_str()).unwrap_or_default();
+                            let selector =
+                                hex::decode(data.trim_start_matches("0x").get(..8).unwrap_or_default()).unwrap();
+                            let found = returns.iter().find(|(s, _)| s.as_slice() == selector.as_slice());
+                            match found {
+                                Some((_, ret)) => serde_json::json!(format!("0x{}", hex::encode(ret))),
+                                None => {
+                                    return Json(serde_json::json!({ "jsonrpc": "2.0", "id": req["id"],
+                                        "error": { "code": 3, "message": "execution reverted" } }));
+                                }
+                            }
+                        }
+                        _ => serde_json::json!("0x14a34"),
+                    };
+                    Json(serde_json::json!({ "jsonrpc": "2.0", "id": req["id"], "result": result }))
+                }
+            }),
+        );
+        crate::nodes::tests::serve(app).await
+    }
+
+    fn word(a: Address) -> Vec<u8> {
+        let mut w = vec![0u8; 12];
+        w.extend_from_slice(a.as_slice());
+        w
+    }
+
+    /// R-5: every node is asked; of the valid receipts (the node's own key, the claim's current
+    /// commitment) the earliest is served, then kept for that commitment; none valid is
+    /// `no_receipt`.
+    #[tokio::test]
+    async fn the_earliest_valid_receipt_is_served() {
+        use alloy::sol_types::SolCall;
+        use axum::{Json, Router, routing::post};
+        let bond = Address::repeat_byte(0xcc);
+        let rpc = rpc_stub(vec![
+            (IZecuredRegistry::intakeCall::SELECTOR, word(Address::repeat_byte(0xa1))),
+            (IZecuredRegistry::slasherCall::SELECTOR, word(Address::repeat_byte(0xa2))),
+            (IZecuredRegistry::signerBondCall::SELECTOR, word(bond)),
+        ])
+        .await;
+        let keys: Vec<PrivateKeySigner> = (0..5).map(|_| PrivateKeySigner::random()).collect();
+        let (claim_id, commitment) = (B256::repeat_byte(1), B256::from([1u8; 32]));
+        let domain = bond_domain(84_532, bond);
+        // Node 1 signs with a stranger's key; nodes 2 and 3 answer validly (3 earlier); node 4
+        // refuses; node 5 is down.
+        let mut urls = vec![];
+        for (received_at, key) in [
+            (1_000u64, PrivateKeySigner::random()),
+            (2_000, keys[1].clone()),
+            (1_500, keys[2].clone()),
+        ] {
+            let answer = ReceiptOut {
+                claim_id,
+                commitment,
+                received_at,
+                signature: sign_typed(&key, &domain, &destination_received(claim_id, commitment, received_at)).unwrap(),
+            };
+            let app = Router::new().route("/v1/receipts", post(move || async move { Json(answer) }));
+            urls.push(crate::nodes::tests::serve(app).await);
+        }
+        let refuse = Router::new().route(
+            "/v1/receipts",
+            post(|| async {
+                (axum::http::StatusCode::UNPROCESSABLE_ENTITY, Json(serde_json::json!({ "error": "no" })))
+            }),
+        );
+        urls.push(crate::nodes::tests::serve(refuse).await);
+        urls.push("http://127.0.0.1:9".into());
+        let mut cfg = config(&urls);
+        for (node, key) in cfg.nodes.iter_mut().zip(&keys) {
+            node.eth = key.address();
+        }
+        cfg.base_rpc_url = rpc;
+        let dir = TempDir::new("receipts");
+        let c = Coordinator::new(cfg, &dir.0, &hex::encode(PrivateKeySigner::random().to_bytes())).unwrap();
+        let e = c.claim_receipt(claim_id).await.unwrap_err();
+        assert_eq!(public_error(&e), Some(PublicError::NoReceipt), "an unknown claim");
+        let mut v = vault(1);
+        v.claims = vec![claim(1, 300_000)];
+        c.store.lock().await.save(v).unwrap();
+        let r = c.claim_receipt(claim_id).await.unwrap();
+        assert_eq!((r.received_at, r.signer, r.commitment), (1_500, keys[2].address(), commitment));
+        // Kept for that commitment; a changed destination is asked for anew (and none answers).
+        assert_eq!(c.claim_receipt(claim_id).await.unwrap(), r);
+        c.store.lock().await.update(&B256::repeat_byte(1), |v| v.claims[0].commitment = [9; 32]).unwrap();
+        let e = c.claim_receipt(claim_id).await.unwrap_err();
+        assert_eq!(public_error(&e), Some(PublicError::NoReceipt));
+    }
+
     /// H-11: the coordinator moves on to round 2 once the commitment is under Base's safe head or
     /// `commit_depth_secs` old (with the nodes' slack), and never before `commit_depth_blocks`.
     #[test]
@@ -2468,29 +3343,17 @@ mod tests {
         FullViewingKey::from(&sk).address_at(0u32, orchard::keys::Scope::External)
     }
 
-    /// A Base RPC stub whose Registry reports every claim of `vault` with `status`.
+    /// A Base RPC stub whose Registry reports every claim of `vault` with `status` (any other call
+    /// reverts).
     async fn registry_stub(vault: B256, status: u8) -> String {
-        use axum::{Json, Router, routing::post};
-        let app = Router::new().route(
-            "/",
-            post(move |Json(req): Json<serde_json::Value>| async move {
-                let result = match req["method"].as_str() {
-                    Some("eth_chainId") => serde_json::json!("0x14a34"),
-                    Some("eth_call") => {
-                        // claim(bytes32) returns (vaultId, kind, amount, commitment, status).
-                        let mut ret = vault.to_vec();
-                        ret.extend([0u8; 32]);
-                        ret.extend(alloy::primitives::U256::from(500_000u64).to_be_bytes::<32>());
-                        ret.extend([7u8; 32]);
-                        ret.extend(alloy::primitives::U256::from(status).to_be_bytes::<32>());
-                        serde_json::json!(format!("0x{}", hex::encode(ret)))
-                    }
-                    m => panic!("unexpected {m:?}"),
-                };
-                Json(serde_json::json!({ "jsonrpc": "2.0", "id": req["id"], "result": result }))
-            }),
-        );
-        crate::nodes::tests::serve(app).await
+        use alloy::sol_types::SolCall;
+        // claim(bytes32) returns (vaultId, kind, amount, commitment, status).
+        let mut ret = vault.to_vec();
+        ret.extend([0u8; 32]);
+        ret.extend(alloy::primitives::U256::from(500_000u64).to_be_bytes::<32>());
+        ret.extend([7u8; 32]);
+        ret.extend(alloy::primitives::U256::from(status).to_be_bytes::<32>());
+        rpc_stub(vec![(IRegistryClaims::claimCall::SELECTOR, ret)]).await
     }
 
     fn payout_in_flight(claims: &[u8]) -> Inflight {

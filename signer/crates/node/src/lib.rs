@@ -335,6 +335,17 @@ pub fn largest_tier(tiers: &[IZecuredIntake::WorkTier]) -> Result<u64> {
     tiers.iter().map(|t| t.maxAmountZat).max().context("the Intake has no work tier")
 }
 
+/// The claims Base has pending (a commitment may bind them, RT-3).
+pub fn unpaid_ids(claims: &[ledger::Claim]) -> Vec<ClaimId> {
+    claims.iter().filter(|c| c.state == ClaimState::Unpaid).map(|c| c.id).collect()
+}
+
+/// The claims confirmed paid and not proven: O-4 rule 3 counts those whose input is still unspent
+/// unpaid again.
+pub fn confirmed_ids(claims: &[ledger::Claim]) -> Vec<ClaimId> {
+    claims.iter().filter(|c| c.state == ClaimState::Paid && !c.proven).map(|c| c.id).collect()
+}
+
 /// Whether `wanted` is a non-empty subsequence of `all` (same order, each once): the claims of one
 /// payout a confirmation may name (R-1: the payout's claims still pending on Base).
 pub fn confirmable_subset(wanted: &[ClaimId], all: &[ClaimId]) -> bool {
@@ -668,35 +679,24 @@ impl Node {
     async fn planning(&self, v: &VaultRecord, notes: &mut VaultNotes, now: u64) -> Result<Planning> {
         let tag_of = |n: &zecured_zcash_ops::scan::ReceivedNote| B256::from(deposit_tag(&v.ufvk, &chain::note_cmx(n)));
         let candidates: Vec<B256> = notes.lineage.iter().map(tag_of).collect();
-        let open: Vec<ClaimId> = v
-            .claims
-            .iter()
-            .filter(|c| c.state == ClaimState::Unpaid || (c.state == ClaimState::Paid && !c.proven))
-            .map(|c| c.id)
-            .collect();
-        let mut agreed: Option<Vec<(ClaimId, B256)>> = None;
-        if !candidates.is_empty() {
-            for provider in self.base_providers()? {
-                let registry = IZecuredRegistry::new(self.cfg.registry, &provider);
-                let mut inputs = Vec::with_capacity(open.len());
-                for id in &open {
-                    inputs
-                        .push((*id, registry.claimInput(B256::from(*id)).call().await.context("Registry.claimInput")?));
-                }
-                match &agreed {
-                    Some(first) => ensure!(*first == inputs, "Base providers disagree on the claims' inputs"),
-                    None => agreed = Some(inputs),
-                }
-            }
-        }
-        let inputs = agreed.unwrap_or_default();
         let mut claims = v.claims.clone();
-        let unlanded: Vec<ClaimId> = inputs
-            .iter()
-            .filter(|(_, input)| *input != B256::ZERO && candidates.contains(input))
-            .map(|(id, _)| *id)
-            .collect();
-        let reverted = ledger::revert_unlanded(&mut claims, &unlanded);
+        let mut inputs = match candidates.is_empty() {
+            true => vec![],
+            false => self.claim_inputs(&unpaid_ids(&claims)).await?,
+        };
+        // Rule 3 only when the books do not add up as they are (an input still holds the value of
+        // claims Base shows paid): the confirmed claims' inputs are read then, not on every plan.
+        let mut reverted = vec![];
+        if !candidates.is_empty() && !notes.books_add_up(v.outstanding, &claims) {
+            let confirmed = self.claim_inputs(&confirmed_ids(&claims)).await?;
+            let unlanded: Vec<ClaimId> = confirmed
+                .iter()
+                .filter(|(_, input)| *input != B256::ZERO && candidates.contains(input))
+                .map(|(id, _)| *id)
+                .collect();
+            reverted = ledger::revert_unlanded(&mut claims, &unlanded);
+            inputs.extend(confirmed);
+        }
         if !reverted.is_empty() {
             warn!(
                 vault = %hex::encode(&v.vault_id[..4]),
@@ -729,6 +729,27 @@ impl Node {
             reverted,
             deferred,
         })
+    }
+
+    /// The lineage note each of `claims` is bound to on Base (`claimInput`; zero: none yet), read on
+    /// every Base provider, which must agree.
+    async fn claim_inputs(&self, claims: &[ClaimId]) -> Result<Vec<(ClaimId, B256)>> {
+        if claims.is_empty() {
+            return Ok(vec![]);
+        }
+        let mut agreed: Option<Vec<(ClaimId, B256)>> = None;
+        for provider in self.base_providers()? {
+            let registry = IZecuredRegistry::new(self.cfg.registry, &provider);
+            let mut inputs = Vec::with_capacity(claims.len());
+            for id in claims {
+                inputs.push((*id, registry.claimInput(B256::from(*id)).call().await.context("Registry.claimInput")?));
+            }
+            match &agreed {
+                Some(first) => ensure!(*first == inputs, "Base providers disagree on the claims' inputs"),
+                None => agreed = Some(inputs),
+            }
+        }
+        Ok(agreed.unwrap_or_default())
     }
 
     /// R-10: when the bonds may pay each payable claim (`livenessDue`; 0: never, or unreadable, as
