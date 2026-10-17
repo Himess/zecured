@@ -18,7 +18,9 @@ use axum::{
 use serde::{Deserialize, Serialize};
 use serde_json::json;
 
-use crate::{ConfirmIn, DestinationIn, Mode, ModeError, Node, RecipientIn, RefundIn, dkg, signing};
+use crate::{
+    ConfirmIn, DestinationIn, Mode, ModeError, Node, ReceiptIn, ReceiptOut, RecipientIn, RefundIn, dkg, signing,
+};
 
 /// An error returned to the coordinator. Messages describe the policy decision only and
 /// never echo addresses, keys or salts.
@@ -50,14 +52,25 @@ struct Health {
     index: u16,
     mode: Mode,
     vaults: usize,
+    /// O-2: the last Base block whose Registry events this node applied (its view is current up to
+    /// there): the coordinator waits for it before acting on a newer event.
+    base_block: u64,
 }
 
 async fn health(State(n): State<Arc<Node>>) -> Json<Health> {
+    let store = n.store.lock().await;
     Json(Health {
         index: n.id.index,
         mode: n.mode().await,
-        vaults: n.store.lock().await.vaults.len(),
+        vaults: store.vaults.len(),
+        base_block: store.base_cursor,
     })
+}
+
+/// R-5: this node's liveness receipt for a claim whose destination it holds.
+async fn receipt(State(n): State<Arc<Node>>, Json(b): Json<ReceiptIn>) -> ApiResult<ReceiptOut> {
+    online(&n).await?;
+    Ok(Json(n.receipt(b.claim_id).await?))
 }
 
 async fn round1(State(n): State<Arc<Node>>, Json(b): Json<dkg::VaultOpen>) -> ApiResult<dkg::Round1Out> {
@@ -188,6 +201,7 @@ pub fn router(node: Arc<Node>) -> Router {
         .route("/v1/vaults/{id}/destination", post(destination))
         .route("/v1/vaults/{id}/refund", post(refund))
         .route("/v1/vaults/{id}/confirm", post(confirm))
+        .route("/v1/receipts", post(receipt))
         .route("/v1/recipients", post(recipients))
         .route("/v1/sign/commit", post(commit))
         .route("/v1/sign/share", post(share))

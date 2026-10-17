@@ -3,13 +3,17 @@
 //! A deposit proof takes about 10 GB of RAM on a CPU, or 13 GB of GPU memory, for minutes to
 //! hours (docs/TESTING.md). Proofs used to start as soon as each vault's deposit was confirmed, all
 //! at once, so a few cheap deposits could exhaust the machine that also serves the API. Jobs now
-//! wait in one queue, first in first out, and run `concurrency` at a time; a vault has at most one
-//! job, queued or running, and asking again for its proof joins that job. A proof with a deadline,
-//! a disputed payout's inclusion (T-05 (a)), goes to the front of the queue instead (keyed by its
-//! payout); it never interrupts a running proof.
+//! wait in one queue and run `concurrency` at a time; a key (a vault, or a payout) has at most one
+//! job, queued or running, and asking again for its proof joins that job.
+//!
+//! v4 (section 3) proves every payout too, so jobs have a [`Priority`]: deposits first (a user
+//! waits for the mint), then disputed payouts (a deadline), then swap settlements (track SWAP's
+//! maker, through [`ProvingQueue::enqueue`]), then routine inclusion proofs; first in first out
+//! within a priority. Asking again at a higher priority moves a waiting job up; nothing ever
+//! interrupts a running proof.
 
 use std::{
-    collections::{HashSet, VecDeque},
+    collections::HashSet,
     future::Future,
     panic::AssertUnwindSafe,
     pin::Pin,
@@ -24,12 +28,28 @@ pub const MAX_CONCURRENCY: usize = 2;
 
 type Job = Pin<Box<dyn Future<Output = ()> + Send + 'static>>;
 
-/// What became of a request for a vault's proof.
+/// What a proof is for, most urgent first.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord, Hash, serde::Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum Priority {
+    /// A deposit, as collateral or as a refund: a user waits for it.
+    Deposit,
+    /// The inclusion of a payout whose confirmation is disputed, or a reopened claim's (T-05 (a),
+    /// D57): due within the Registry's inclusion window.
+    Dispute,
+    /// A swap's settlement (section 5), proven by the maker: due before the order's deadline.
+    SwapSettlement,
+    /// The routine proof of a payout's delivery (section 3): it makes the claims final.
+    RoutineInclusion,
+}
+
+/// What became of a request for a proof.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Enqueued {
-    /// A new job, at the end of the queue (or already started if a slot was free).
+    /// A new job, in its priority's line (or already started if a slot was free).
     Queued,
-    /// The vault already has a job, queued or running: this request joins it.
+    /// The key already has a job, queued or running: this request joins it (moving a waiting job
+    /// up if this request is more urgent).
     Joined,
 }
 
@@ -42,10 +62,27 @@ pub struct QueueCounts {
     pub concurrency: usize,
 }
 
+struct Waiting {
+    key: B256,
+    priority: Priority,
+    /// Order of arrival within a priority.
+    seq: u64,
+    job: Job,
+}
+
 #[derive(Default)]
 struct State {
-    waiting: VecDeque<(B256, Job)>,
+    waiting: Vec<Waiting>,
     running: HashSet<B256>,
+    next_seq: u64,
+}
+
+impl State {
+    /// The waiting job that runs next: the most urgent, the oldest of those.
+    fn next(&mut self) -> Option<Waiting> {
+        let i = self.waiting.iter().enumerate().min_by_key(|(_, w)| (w.priority, w.seq)).map(|(i, _)| i)?;
+        Some(self.waiting.remove(i))
+    }
 }
 
 pub struct ProvingQueue {
@@ -70,37 +107,43 @@ impl ProvingQueue {
         self.state.lock().unwrap_or_else(|p| p.into_inner())
     }
 
-    /// Queues `job` for `vault`, unless the vault already has a job queued or running. Jobs start
-    /// in the order they were queued, as slots free up. Needs a Tokio runtime.
-    pub fn enqueue(self: &Arc<Self>, vault: B256, job: impl Future<Output = ()> + Send + 'static) -> Enqueued {
-        self.add(vault, Box::pin(job), false)
-    }
-
-    /// As [`Self::enqueue`], but at the front of the queue: the next free slot runs it.
-    pub fn enqueue_urgent(self: &Arc<Self>, key: B256, job: impl Future<Output = ()> + Send + 'static) -> Enqueued {
-        self.add(key, Box::pin(job), true)
-    }
-
-    fn add(self: &Arc<Self>, key: B256, job: Job, urgent: bool) -> Enqueued {
+    /// Queues `job` for `key` at `priority`, unless the key already has a job queued or running
+    /// (a waiting one moves up to `priority` if that is more urgent). Jobs start as slots free up,
+    /// the most urgent first, in arrival order within a priority. Needs a Tokio runtime.
+    pub fn enqueue(
+        self: &Arc<Self>,
+        key: B256,
+        priority: Priority,
+        job: impl Future<Output = ()> + Send + 'static,
+    ) -> Enqueued {
         {
             let mut s = self.lock();
-            if s.running.contains(&key) || s.waiting.iter().any(|(v, _)| *v == key) {
+            if s.running.contains(&key) {
                 return Enqueued::Joined;
             }
-            if urgent {
-                s.waiting.push_front((key, job));
-            } else {
-                s.waiting.push_back((key, job));
+            if let Some(w) = s.waiting.iter_mut().find(|w| w.key == key) {
+                if priority < w.priority {
+                    w.priority = priority;
+                }
+                return Enqueued::Joined;
             }
+            let seq = s.next_seq;
+            s.next_seq += 1;
+            s.waiting.push(Waiting {
+                key,
+                priority,
+                seq,
+                job: Box::pin(job),
+            });
         }
         self.dispatch();
         Enqueued::Queued
     }
 
-    /// Whether `vault` has a job, queued or running.
-    pub fn contains(&self, vault: &B256) -> bool {
+    /// Whether `key` has a job, queued or running.
+    pub fn contains(&self, key: &B256) -> bool {
         let s = self.lock();
-        s.running.contains(vault) || s.waiting.iter().any(|(v, _)| v == vault)
+        s.running.contains(key) || s.waiting.iter().any(|w| w.key == *key)
     }
 
     pub fn counts(&self) -> QueueCounts {
@@ -112,20 +155,21 @@ impl ProvingQueue {
         }
     }
 
-    /// Starts the oldest waiting jobs while slots are free. A finished job, failed or panicked,
-    /// frees its slot and starts the next one.
+    /// Starts the most urgent waiting jobs while slots are free. A finished job, failed or
+    /// panicked, frees its slot and starts the next one.
     fn dispatch(self: &Arc<Self>) {
         let mut s = self.lock();
         while s.running.len() < self.concurrency {
-            let Some((vault, job)) = s.waiting.pop_front() else {
+            let Some(next) = s.next() else {
                 break;
             };
-            s.running.insert(vault);
+            s.running.insert(next.key);
             let queue = Arc::clone(self);
+            let (key, job) = (next.key, next.job);
             tokio::spawn(async move {
                 // A panic inside a job is the job's failure; the queue goes on.
                 let _ = AssertUnwindSafe(job).catch_unwind().await;
-                queue.lock().running.remove(&vault);
+                queue.lock().running.remove(&key);
                 queue.dispatch();
             });
         }
@@ -144,7 +188,7 @@ mod tests {
 
     use super::*;
 
-    fn vault(i: u8) -> B256 {
+    fn key(i: u8) -> B256 {
         B256::repeat_byte(i)
     }
 
@@ -200,13 +244,13 @@ mod tests {
         panic!("expected {queued} queued and {running} running, got {:?}", q.counts());
     }
 
-    /// Jobs start in the order they were queued, one at a time by default.
+    /// Jobs of one priority start in the order they were queued, one at a time by default.
     #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
     async fn jobs_run_first_in_first_out() {
         let q = ProvingQueue::new(1).unwrap();
         let (mut c, mut started) = Controlled::new();
         for i in 1..=4 {
-            assert_eq!(q.enqueue(vault(i), c.job(i)), Enqueued::Queued);
+            assert_eq!(q.enqueue(key(i), Priority::Deposit, c.job(i)), Enqueued::Queued);
         }
         assert_eq!(next_start(&mut started).await, 1);
         no_start(&mut started).await;
@@ -220,55 +264,85 @@ mod tests {
         settle(&q, 0, 0).await;
     }
 
-    /// T-05 (a): an urgent job (a disputed payout's inclusion) starts at the next free slot, ahead
-    /// of the jobs already waiting, without interrupting the running one.
+    /// Section 3: deposits first, then disputed payouts, then swap settlements, then routine
+    /// inclusion proofs, whatever order they were asked in; a running proof is never interrupted.
     #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
-    async fn an_urgent_job_goes_first() {
+    async fn the_most_urgent_job_goes_first() {
         let q = ProvingQueue::new(1).unwrap();
         let (mut c, mut started) = Controlled::new();
-        for i in 1..=3 {
-            assert_eq!(q.enqueue(vault(i), c.job(i)), Enqueued::Queued);
-        }
+        // Key 1 runs; then, in this order: a routine proof, a swap, a dispute, a deposit, another
+        // routine proof.
+        assert_eq!(q.enqueue(key(1), Priority::RoutineInclusion, c.job(1)), Enqueued::Queued);
         assert_eq!(next_start(&mut started).await, 1);
-        assert_eq!(q.enqueue_urgent(vault(9), c.job(9)), Enqueued::Queued);
-        assert_eq!(q.enqueue_urgent(vault(9), async {}), Enqueued::Joined);
-        no_start(&mut started).await;
-        c.finish(1);
-        assert_eq!(next_start(&mut started).await, 9);
-        for (done, next) in [(9, 2), (2, 3)] {
-            c.finish(done);
-            assert_eq!(next_start(&mut started).await, next);
+        let asked = [
+            (2, Priority::RoutineInclusion),
+            (3, Priority::SwapSettlement),
+            (4, Priority::Dispute),
+            (5, Priority::Deposit),
+            (6, Priority::RoutineInclusion),
+        ];
+        for (i, p) in asked {
+            assert_eq!(q.enqueue(key(i), p, c.job(i)), Enqueued::Queued);
         }
-        c.finish(3);
+        no_start(&mut started).await;
+        let mut order = vec![];
+        let mut running = 1;
+        for _ in 0..asked.len() {
+            c.finish(running);
+            running = next_start(&mut started).await;
+            order.push(running);
+        }
+        assert_eq!(order, vec![5, 4, 3, 2, 6]);
+        c.finish(running);
         settle(&q, 0, 0).await;
     }
 
-    /// A vault has one job at most: asking again while it waits or runs joins it; once it is over
-    /// (a failed proof), it can be queued again, at the end of the queue.
+    /// A routine proof that becomes a dispute's (the same payout) moves up; a less urgent request
+    /// never moves a job down.
     #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
-    async fn one_job_per_vault() {
+    async fn a_waiting_job_moves_up_to_a_more_urgent_request() {
         let q = ProvingQueue::new(1).unwrap();
         let (mut c, mut started) = Controlled::new();
-        assert_eq!(q.enqueue(vault(1), c.job(1)), Enqueued::Queued);
+        q.enqueue(key(1), Priority::Deposit, c.job(1));
         assert_eq!(next_start(&mut started).await, 1);
-        assert_eq!(q.enqueue(vault(2), c.job(2)), Enqueued::Queued);
+        q.enqueue(key(2), Priority::SwapSettlement, c.job(2));
+        q.enqueue(key(3), Priority::RoutineInclusion, c.job(3));
+        assert_eq!(q.enqueue(key(3), Priority::Dispute, async {}), Enqueued::Joined);
+        assert_eq!(q.enqueue(key(2), Priority::RoutineInclusion, async {}), Enqueued::Joined);
+        c.finish(1);
+        assert_eq!(next_start(&mut started).await, 3, "moved up to a dispute");
+        c.finish(3);
+        assert_eq!(next_start(&mut started).await, 2, "never moved down");
+        c.finish(2);
+        settle(&q, 0, 0).await;
+    }
+
+    /// A key has one job at most: asking again while it waits or runs joins it; once it is over
+    /// (a failed proof), it can be queued again, behind the jobs of its priority.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+    async fn one_job_per_key() {
+        let q = ProvingQueue::new(1).unwrap();
+        let (mut c, mut started) = Controlled::new();
+        assert_eq!(q.enqueue(key(1), Priority::Deposit, c.job(1)), Enqueued::Queued);
+        assert_eq!(next_start(&mut started).await, 1);
+        assert_eq!(q.enqueue(key(2), Priority::Deposit, c.job(2)), Enqueued::Queued);
         let ran = Arc::new(AtomicUsize::new(0));
         for v in [1, 2] {
             let ran = ran.clone();
             let duplicate = async move {
                 ran.fetch_add(1, Ordering::SeqCst);
             };
-            assert_eq!(q.enqueue(vault(v), duplicate), Enqueued::Joined, "vault {v}: running, then queued");
+            assert_eq!(q.enqueue(key(v), Priority::Deposit, duplicate), Enqueued::Joined, "key {v}");
         }
-        assert!(q.contains(&vault(1)) && q.contains(&vault(2)) && !q.contains(&vault(3)));
+        assert!(q.contains(&key(1)) && q.contains(&key(2)) && !q.contains(&key(3)));
         settle(&q, 1, 1).await;
         c.finish(1);
         assert_eq!(next_start(&mut started).await, 2);
         settle(&q, 0, 1).await;
-        assert!(!q.contains(&vault(1)));
-        // Vault 1's proof failed: the next pass queues it again, behind vault 3.
-        assert_eq!(q.enqueue(vault(3), c.job(3)), Enqueued::Queued);
-        assert_eq!(q.enqueue(vault(1), c.job(1)), Enqueued::Queued);
+        assert!(!q.contains(&key(1)));
+        // Key 1's proof failed: the next pass queues it again, behind key 3.
+        assert_eq!(q.enqueue(key(3), Priority::Deposit, c.job(3)), Enqueued::Queued);
+        assert_eq!(q.enqueue(key(1), Priority::Deposit, c.job(1)), Enqueued::Queued);
         c.finish(2);
         assert_eq!(next_start(&mut started).await, 3);
         c.finish(3);
@@ -286,7 +360,12 @@ mod tests {
             (Arc::new(AtomicUsize::new(0)), Arc::new(AtomicUsize::new(0)), Arc::new(AtomicUsize::new(0)));
         for i in 1..=12 {
             let (now, max, done) = (now.clone(), max.clone(), done.clone());
-            q.enqueue(vault(i), async move {
+            let priority = if i % 2 == 0 {
+                Priority::Deposit
+            } else {
+                Priority::RoutineInclusion
+            };
+            q.enqueue(key(i), priority, async move {
                 let running = now.fetch_add(1, Ordering::SeqCst) + 1;
                 max.fetch_max(running, Ordering::SeqCst);
                 tokio::time::sleep(Duration::from_millis(20)).await;
@@ -305,8 +384,8 @@ mod tests {
     async fn a_panicking_job_frees_its_slot() {
         let q = ProvingQueue::new(1).unwrap();
         let (mut c, mut started) = Controlled::new();
-        q.enqueue(vault(1), async { panic!("the job panics (test)") });
-        q.enqueue(vault(2), c.job(2));
+        q.enqueue(key(1), Priority::Deposit, async { panic!("the job panics (test)") });
+        q.enqueue(key(2), Priority::Deposit, c.job(2));
         assert_eq!(next_start(&mut started).await, 2);
         c.finish(2);
         settle(&q, 0, 0).await;

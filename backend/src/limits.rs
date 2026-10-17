@@ -140,6 +140,8 @@ pub struct Limits {
     pub recipients: Arc<TokenBucket>,
     /// Owner requests (destination, refund, viewing key): forwarded to five nodes.
     pub owner: Arc<TokenBucket>,
+    /// `POST /claims/:claimId/receipt` (R-5): public, asks five nodes unless the receipt is cached.
+    pub receipts: Arc<TokenBucket>,
     /// Close quotes and close requests relayed to the market maker.
     pub market_maker: Arc<TokenBucket>,
     /// `/proxy/*` (Base RPC, bundler, paymaster).
@@ -154,6 +156,7 @@ impl Default for Limits {
             open_vault: bucket(3, 60),
             recipients: bucket(10, 300),
             owner: bucket(20, 60),
+            receipts: bucket(20, 60),
             market_maker: bucket(10, 60),
             proxy: bucket(200, 10),
         }

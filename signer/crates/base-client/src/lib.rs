@@ -13,6 +13,7 @@ use anyhow::{Context, Result, anyhow, ensure};
 
 pub mod events;
 pub mod journal;
+pub mod operator;
 pub mod relay;
 pub mod stamp;
 pub mod theft_demo_guard;
@@ -22,11 +23,24 @@ pub mod verify;
 pub const BASE_SEPOLIA_CHAIN_ID: u64 = 84_532;
 
 sol! {
-    /// Signed by signer nodes; verified by the Registry.
+    /// Signed by signer nodes once the payout `payoutRef` (its commitment on Base) is mined;
+    /// verified by the Registry's `confirmPayout` (R-1: bound to the payout, so it can never be
+    /// replayed for a later payout of the same claims, and each payout is confirmed once).
     #[derive(Debug, PartialEq, Eq)]
     struct PayoutConfirmation {
         bytes32 vaultId;
+        bytes32 payoutRef;
         bytes32 claimIdsHash;
+    }
+
+    /// Off-chain, signed by the vault owner key, verified by the coordinator only (R-11.1): prove
+    /// the vault's deposit in Refund mode, because its activation cannot land (the coverage cap
+    /// is full). No signer is involved: a deposit proof needs none.
+    #[derive(Debug, PartialEq, Eq)]
+    struct ProveRefund {
+        bytes32 vaultId;
+        uint64 nonce;
+        uint64 deadline;
     }
 
     /// Off-chain, signed by the vault owner key; verified by every signer node.
@@ -155,6 +169,15 @@ pub fn claim_ids_hash(claim_ids: &[B256]) -> B256 {
         packed.extend_from_slice(id.as_slice());
     }
     keccak256(packed)
+}
+
+/// R-1: the confirmation of the payout `payout_ref` of `vault_id` for `claim_ids`, in that order.
+pub fn payout_confirmation(vault_id: B256, payout_ref: B256, claim_ids: &[B256]) -> PayoutConfirmation {
+    PayoutConfirmation {
+        vaultId: vault_id,
+        payoutRef: payout_ref,
+        claimIdsHash: claim_ids_hash(claim_ids),
+    }
 }
 
 /// `keccak256` of a string's UTF-8 bytes: `VaultOpened.addressHash` is this of the vault's unified
@@ -313,10 +336,12 @@ mod tests {
 
     #[test]
     fn type_strings_match_interfaces_md() {
+        // R-1 (v4 freeze § 1): the confirmation names the payout it confirms.
         assert_eq!(
             PayoutConfirmation::eip712_encode_type(),
-            "PayoutConfirmation(bytes32 vaultId,bytes32 claimIdsHash)"
+            "PayoutConfirmation(bytes32 vaultId,bytes32 payoutRef,bytes32 claimIdsHash)"
         );
+        assert_eq!(ProveRefund::eip712_encode_type(), "ProveRefund(bytes32 vaultId,uint64 nonce,uint64 deadline)");
         assert_eq!(
             OpenVault::eip712_encode_type(),
             "OpenVault(address owner,address account,uint64 amount,bytes32 requestId,uint64 deadline)"
@@ -524,6 +549,7 @@ mod tests {
         let domain = registry_domain(BASE_SEPOLIA_CHAIN_ID, Address::repeat_byte(0x11));
         let msg = PayoutConfirmation {
             vaultId: B256::repeat_byte(1),
+            payoutRef: B256::repeat_byte(2),
             claimIdsHash: B256::repeat_byte(3),
         };
         let signers: Vec<PrivateKeySigner> = (0..3).map(|_| PrivateKeySigner::random()).collect();
@@ -571,13 +597,33 @@ mod tests {
         assert_eq!(rd.separator(), b("0x489271068185e1811817d2dfae78e2be898ee5fc9768bf01d870981f667ef9f8"));
         assert_eq!(ad.separator(), b("0xb62551e236af33b3b84da5fe38134bcea7c80b912f8b172bb4020080457a9260"));
 
-        let payout = PayoutConfirmation {
-            vaultId: vault,
-            claimIdsHash: claim_ids_hash(&[claim_id_of(vault, 0), claim_id_of(vault, 1)]),
-        };
+        // R-1 (v4): the v3 confirmation's digest was 0xf166a019...; the payout reference is the
+        // Solidity vectors' `PAYOUT_REF` (0xaaaa..aa). Also computed with Foundry's `cast keccak` and
+        // `cast abi-encode` from the type string (independently of alloy).
+        let ids = [claim_id_of(vault, 0), claim_id_of(vault, 1)];
+        assert_eq!(claim_ids_hash(&ids), b("0x9c074d2027b21bd7be11f3564921d73e4752f546958f61851d8fc4f66ce146cb"));
+        let payout = payout_confirmation(vault, B256::repeat_byte(0xaa), &ids);
+        assert_eq!(
+            payout.eip712_hash_struct(),
+            b("0x41f02e902c6491cf8f012679768859e4d90420fec4740c9c02f5e2bdb1febcb5")
+        );
         assert_eq!(
             payout.eip712_signing_hash(&rd),
-            b("0xf166a0191609bbccd2b7aa9e7527b1553a418f7626902cc10099034b838e4973")
+            b("0xfc56db8989d0aac788a7784e03833e8cd73e42d08ce8f92d468bf0f3015420b3")
+        );
+        // Another payout of the same claims is another message (the replay R-1 closes).
+        let other = payout_confirmation(vault, B256::repeat_byte(0xab), &ids);
+        assert_ne!(other.eip712_signing_hash(&rd), payout.eip712_signing_hash(&rd));
+
+        // R-11.1's owner request (coordinator only): nonce 7, deadline as above.
+        let prove = ProveRefund {
+            vaultId: vault,
+            nonce: 7,
+            deadline: 1_800_000_000,
+        };
+        assert_eq!(
+            prove.eip712_signing_hash(&rd),
+            b("0xb1522edf19e997dfcba694e83f4b4547f831c977262371b3d57e17ca2bf5f5d5")
         );
 
         let close = CloseRequest {

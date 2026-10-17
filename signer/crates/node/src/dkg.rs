@@ -355,6 +355,7 @@ pub fn round3(
         confirmed: vec![],
         last_event: None,
         activated_tag: None,
+        reopened: vec![],
     })?;
     Ok(out)
 }
@@ -385,6 +386,7 @@ mod tests {
             commit_depth_secs: 120,
             local_fork: true,
             open_vault: Default::default(),
+            payout_lifetime_secs: None,
         }
     }
 

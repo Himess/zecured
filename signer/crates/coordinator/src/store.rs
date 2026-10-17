@@ -89,6 +89,31 @@ pub struct NodeSignature {
     pub signature: Bytes,
 }
 
+/// A payout committed on Base (`SpendCommitted`): the coordinator proves its delivery once the
+/// transaction that spends its input is deep enough (section 3).
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct CommittedPayout {
+    pub payout_ref: B256,
+    pub input_tag: B256,
+    pub claims: Vec<[u8; 32]>,
+}
+
+/// R-12: a refund proof waiting on the Intake until the relay has moved on.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct PendingRefund {
+    pub deposit_tag: [u8; 32],
+    pub ready_height: u64,
+    pub ready_time: u64,
+}
+
+/// R-5: a claim's liveness clock armed on the bond (`LivenessArmed`), for its commitment then.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct Armed {
+    pub claim_id: [u8; 32],
+    pub commitment: [u8; 32],
+    pub payable_at: u64,
+}
+
 /// An unspent deposit of a vault that has not landed on Base, as the app shows it: it is refunded
 /// once a proof lands it as a Refund claim (T-02), or, if no guest of the deployment can land it,
 /// off-chain at its owner's request (P5, I30).
@@ -160,6 +185,28 @@ pub struct CoordVault {
     /// When the vault was opened (Unix seconds; 0 for vaults opened before H-01).
     #[serde(default)]
     pub opened_at: u64,
+    /// Section 3: the vault's payouts committed on Base, whose delivery this coordinator proves.
+    #[serde(default)]
+    pub commitments: Vec<CommittedPayout>,
+    /// R-12: refund proofs of the vault's deposits pending on the Intake.
+    #[serde(default)]
+    pub pending_refunds: Vec<PendingRefund>,
+    /// R-5: the claims whose liveness clock their claimant armed.
+    #[serde(default)]
+    pub armed: Vec<Armed>,
+    /// O-2: the Base block of the last event applied to this vault, and when it was applied (Unix
+    /// seconds): the signers act on it once their own view reaches that block.
+    #[serde(default)]
+    pub last_event_block: u64,
+    #[serde(default)]
+    pub last_event_at: u64,
+    /// R-11.1: the owner asked to prove the vault's deposit in Refund mode (its activation cannot
+    /// land: the coverage cap is full).
+    #[serde(default)]
+    pub refund_requested: bool,
+    /// Nonces of the owner requests only the coordinator checks (`ProveRefund`).
+    #[serde(default)]
+    pub used_request_nonces: Vec<u64>,
 }
 
 impl CoordVault {
@@ -172,6 +219,7 @@ impl CoordVault {
             && self.to_uphold().is_empty()
             && !self.books().iter().any(|c| c.payable())
             && self.refunds.iter().all(|r| r.done)
+            && self.pending_refunds.is_empty()
     }
 
     /// Nothing is left to pay: no claim pending or disputed (written-off dust stays in the
@@ -180,8 +228,9 @@ impl CoordVault {
         !self.books().iter().any(|c| matches!(c.state, ClaimState::Unpaid | ClaimState::Disputed))
     }
 
-    /// T-05 (a): the claims whose payout this coordinator proves: those disputed on Base, and
-    /// those reopened there whose payout it saw mined (D57: a later proof still upholds them).
+    /// T-05 (a): the claims whose payout this coordinator proves with a deadline: those disputed
+    /// on Base, and those reopened there whose payout it saw mined (D57: a later proof still
+    /// upholds them).
     pub fn to_uphold(&self) -> Vec<[u8; 32]> {
         self.claims
             .iter()
@@ -193,6 +242,26 @@ impl CoordVault {
             })
             .map(|c| c.id)
             .collect()
+    }
+
+    /// Section 3: the committed claims not final on Base yet (pending, confirmed or disputed), whose
+    /// payout's delivery this coordinator proves once it is mined deep enough.
+    pub fn to_prove(&self) -> Vec<[u8; 32]> {
+        self.claims
+            .iter()
+            .filter(|c| {
+                !c.proven
+                    && matches!(c.state, ClaimState::Unpaid | ClaimState::Paid | ClaimState::Disputed)
+                    && self.commitments.iter().any(|p| p.claims.contains(&c.id))
+            })
+            .map(|c| c.id)
+            .collect()
+    }
+
+    /// R-5: whether the claim's liveness clock is armed for its current commitment.
+    pub fn armed(&self, claim: &Claim) -> bool {
+        claim.commitment != [0; 32]
+            && self.armed.iter().any(|a| a.claim_id == claim.id && a.commitment == claim.commitment)
     }
 
     /// The claims as this coordinator's books count them, and plans from: a claim it saw paid on
@@ -363,6 +432,13 @@ pub(crate) mod tests {
             activated_tag: None,
             pending_tag: None,
             opened_at: 0,
+            commitments: vec![],
+            pending_refunds: vec![],
+            armed: vec![],
+            last_event_block: 0,
+            last_event_at: 0,
+            refund_requested: false,
+            used_request_nonces: vec![],
         }
     }
 
@@ -379,6 +455,8 @@ pub(crate) mod tests {
             state: ClaimState::Unpaid,
             refund_tag: None,
             bond_paid: false,
+            proven: false,
+            confirmed_at: 0,
         }
     }
 
