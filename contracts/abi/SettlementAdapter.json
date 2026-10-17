@@ -53,6 +53,13 @@
   },
   {
     "type": "function",
+    "name": "clearPreLiquidation",
+    "inputs": [],
+    "outputs": [],
+    "stateMutability": "nonpayable"
+  },
+  {
+    "type": "function",
     "name": "closeWithCollateral",
     "inputs": [
       {
@@ -578,6 +585,91 @@
   },
   {
     "type": "function",
+    "name": "preLiquidate",
+    "inputs": [
+      {
+        "name": "account",
+        "type": "address",
+        "internalType": "address"
+      },
+      {
+        "name": "repaidShares",
+        "type": "uint256",
+        "internalType": "uint256"
+      },
+      {
+        "name": "mmCommitment",
+        "type": "bytes32",
+        "internalType": "bytes32"
+      }
+    ],
+    "outputs": [
+      {
+        "name": "repaidAssets",
+        "type": "uint256",
+        "internalType": "uint256"
+      },
+      {
+        "name": "seized",
+        "type": "uint64",
+        "internalType": "uint64"
+      }
+    ],
+    "stateMutability": "nonpayable"
+  },
+  {
+    "type": "function",
+    "name": "preLiquidationTerms",
+    "inputs": [
+      {
+        "name": "account",
+        "type": "address",
+        "internalType": "address"
+      }
+    ],
+    "outputs": [
+      {
+        "name": "",
+        "type": "tuple",
+        "internalType": "struct PreLiquidationTerms",
+        "components": [
+          {
+            "name": "preLltv",
+            "type": "uint256",
+            "internalType": "uint256"
+          },
+          {
+            "name": "preLcf1",
+            "type": "uint256",
+            "internalType": "uint256"
+          },
+          {
+            "name": "preLcf2",
+            "type": "uint256",
+            "internalType": "uint256"
+          },
+          {
+            "name": "preLif1",
+            "type": "uint256",
+            "internalType": "uint256"
+          },
+          {
+            "name": "preLif2",
+            "type": "uint256",
+            "internalType": "uint256"
+          },
+          {
+            "name": "expiry",
+            "type": "uint64",
+            "internalType": "uint64"
+          }
+        ]
+      }
+    ],
+    "stateMutability": "view"
+  },
+  {
+    "type": "function",
     "name": "registry",
     "inputs": [],
     "outputs": [
@@ -588,6 +680,51 @@
       }
     ],
     "stateMutability": "view"
+  },
+  {
+    "type": "function",
+    "name": "setPreLiquidation",
+    "inputs": [
+      {
+        "name": "t",
+        "type": "tuple",
+        "internalType": "struct PreLiquidationTerms",
+        "components": [
+          {
+            "name": "preLltv",
+            "type": "uint256",
+            "internalType": "uint256"
+          },
+          {
+            "name": "preLcf1",
+            "type": "uint256",
+            "internalType": "uint256"
+          },
+          {
+            "name": "preLcf2",
+            "type": "uint256",
+            "internalType": "uint256"
+          },
+          {
+            "name": "preLif1",
+            "type": "uint256",
+            "internalType": "uint256"
+          },
+          {
+            "name": "preLif2",
+            "type": "uint256",
+            "internalType": "uint256"
+          },
+          {
+            "name": "expiry",
+            "type": "uint64",
+            "internalType": "uint64"
+          }
+        ]
+      }
+    ],
+    "outputs": [],
+    "stateMutability": "nonpayable"
   },
   {
     "type": "function",
@@ -623,6 +760,107 @@
         "type": "uint256",
         "indexed": false,
         "internalType": "uint256"
+      }
+    ],
+    "anonymous": false
+  },
+  {
+    "type": "event",
+    "name": "PreLiquidated",
+    "inputs": [
+      {
+        "name": "vaultId",
+        "type": "bytes32",
+        "indexed": true,
+        "internalType": "bytes32"
+      },
+      {
+        "name": "account",
+        "type": "address",
+        "indexed": true,
+        "internalType": "address"
+      },
+      {
+        "name": "liquidator",
+        "type": "address",
+        "indexed": true,
+        "internalType": "address"
+      },
+      {
+        "name": "repaidAssets",
+        "type": "uint256",
+        "indexed": false,
+        "internalType": "uint256"
+      },
+      {
+        "name": "seized",
+        "type": "uint64",
+        "indexed": false,
+        "internalType": "uint64"
+      }
+    ],
+    "anonymous": false
+  },
+  {
+    "type": "event",
+    "name": "PreLiquidationCleared",
+    "inputs": [
+      {
+        "name": "account",
+        "type": "address",
+        "indexed": true,
+        "internalType": "address"
+      }
+    ],
+    "anonymous": false
+  },
+  {
+    "type": "event",
+    "name": "PreLiquidationSet",
+    "inputs": [
+      {
+        "name": "account",
+        "type": "address",
+        "indexed": true,
+        "internalType": "address"
+      },
+      {
+        "name": "terms",
+        "type": "tuple",
+        "indexed": false,
+        "internalType": "struct PreLiquidationTerms",
+        "components": [
+          {
+            "name": "preLltv",
+            "type": "uint256",
+            "internalType": "uint256"
+          },
+          {
+            "name": "preLcf1",
+            "type": "uint256",
+            "internalType": "uint256"
+          },
+          {
+            "name": "preLcf2",
+            "type": "uint256",
+            "internalType": "uint256"
+          },
+          {
+            "name": "preLif1",
+            "type": "uint256",
+            "internalType": "uint256"
+          },
+          {
+            "name": "preLif2",
+            "type": "uint256",
+            "internalType": "uint256"
+          },
+          {
+            "name": "expiry",
+            "type": "uint64",
+            "internalType": "uint64"
+          }
+        ]
       }
     ],
     "anonymous": false
@@ -684,6 +922,70 @@
     "type": "error",
     "name": "InconsistentInput",
     "inputs": []
+  },
+  {
+    "type": "error",
+    "name": "InvalidExpiry",
+    "inputs": [
+      {
+        "name": "expiry",
+        "type": "uint64",
+        "internalType": "uint64"
+      }
+    ]
+  },
+  {
+    "type": "error",
+    "name": "InvalidPreLcf",
+    "inputs": [
+      {
+        "name": "preLcf1",
+        "type": "uint256",
+        "internalType": "uint256"
+      },
+      {
+        "name": "preLcf2",
+        "type": "uint256",
+        "internalType": "uint256"
+      }
+    ]
+  },
+  {
+    "type": "error",
+    "name": "InvalidPreLif",
+    "inputs": [
+      {
+        "name": "preLif1",
+        "type": "uint256",
+        "internalType": "uint256"
+      },
+      {
+        "name": "preLif2",
+        "type": "uint256",
+        "internalType": "uint256"
+      },
+      {
+        "name": "maxLif",
+        "type": "uint256",
+        "internalType": "uint256"
+      }
+    ]
+  },
+  {
+    "type": "error",
+    "name": "InvalidPreLltv",
+    "inputs": [
+      {
+        "name": "preLltv",
+        "type": "uint256",
+        "internalType": "uint256"
+      },
+      {
+        "name": "lltv",
+        "type": "uint256",
+        "internalType": "uint256"
+      }
+    ]
   },
   {
     "type": "error",
@@ -783,8 +1085,83 @@
   },
   {
     "type": "error",
+    "name": "NotPreLiquidatable",
+    "inputs": [
+      {
+        "name": "borrowed",
+        "type": "uint256",
+        "internalType": "uint256"
+      },
+      {
+        "name": "preLiquidationBorrow",
+        "type": "uint256",
+        "internalType": "uint256"
+      }
+    ]
+  },
+  {
+    "type": "error",
     "name": "OnlyMorpho",
     "inputs": []
+  },
+  {
+    "type": "error",
+    "name": "PositionLiquidatable",
+    "inputs": [
+      {
+        "name": "borrowed",
+        "type": "uint256",
+        "internalType": "uint256"
+      },
+      {
+        "name": "maxBorrow",
+        "type": "uint256",
+        "internalType": "uint256"
+      }
+    ]
+  },
+  {
+    "type": "error",
+    "name": "PreLiquidationInactive",
+    "inputs": [
+      {
+        "name": "account",
+        "type": "address",
+        "internalType": "address"
+      }
+    ]
+  },
+  {
+    "type": "error",
+    "name": "PreLiquidationRemainderTooSmall",
+    "inputs": [
+      {
+        "name": "remaining",
+        "type": "uint256",
+        "internalType": "uint256"
+      },
+      {
+        "name": "minimum",
+        "type": "uint256",
+        "internalType": "uint256"
+      }
+    ]
+  },
+  {
+    "type": "error",
+    "name": "PreLiquidationTooLarge",
+    "inputs": [
+      {
+        "name": "repaidShares",
+        "type": "uint256",
+        "internalType": "uint256"
+      },
+      {
+        "name": "repayableShares",
+        "type": "uint256",
+        "internalType": "uint256"
+      }
+    ]
   },
   {
     "type": "error",
@@ -922,6 +1299,17 @@
         "name": "account",
         "type": "address",
         "internalType": "address"
+      }
+    ]
+  },
+  {
+    "type": "error",
+    "name": "VaultFrozen",
+    "inputs": [
+      {
+        "name": "vaultId",
+        "type": "bytes32",
+        "internalType": "bytes32"
       }
     ]
   },
