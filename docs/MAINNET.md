@@ -30,14 +30,14 @@ vault (a decision for 2026-10-22).
 |---|---|---|---|
 | `loanToken` | Circle's Base Sepolia USDC | Circle USDC `0x8335…2913` | |
 | `coverageBps` (k) | 10,000 | 5,000 | With independent operators the bonds should cover twice what is locked |
-| `maxTotalZat` | 1.5 ZEC | 100 ZEC | Start small. The cap is immutable: raising it means a new deployment; within it, the bonds decide |
+| `maxTotalZat` | 5 TAZ | 100 ZEC | Start small. The cap is immutable: raising it means a new deployment; within it, the bonds decide |
 | `minBond` | 100 USDC | 50,000 USDC | Five equal bonds that cover 100 ZEC at k = 50 % and about 1,265 USD per ZEC |
 | `bountyCap` | 50 USDC | 10,000 USDC | 10 % of a slash in both |
 | `tierMaxAmountZat` / `tierMinWork` | one tier, 3.5 M (about ten Testnet blocks) | up to 1 / 10 / 100 ZEC: the work of 6 / 20 / 190 Mainnet blocks | Faking a deposit should cost the attacker about three times its value in mining revenue; recompute the raw work from the difficulty at deployment |
 | `slashConfirmationWork` | 38 M | the work of 100 Mainnet blocks | at least `max(100 blocks, 3 x bountyCap / block value)`: a fake case gains at most the bounty |
 | `finalizeDelay` | 150 s | 30 min | Time for the honest feeders to replace a slow fake branch after a feeder outage |
 | `challengeWindow`, `livenessPeriod` | 24 h | 72 h | Time to notice and react, on both sides |
-| `commitGrace` | 2 h | 4 h | A payout's expiry (120 blocks of 75 s) plus a reorganisation margin, before NU7 |
+| `commitGrace` | 2 h | 6 h | At least twice a payout's lifetime of 136 blocks (target height, the 120-block expiry, the nodes' tip skew and reorganisation margin), which the deploy script checks: 6,800 s at 25 s blocks, 20,400 s at 75 s before NU7 |
 | `disputeWindow` / `inclusionWindow` | 24 h / 6 h | 72 h / 48 h | Within the challenge window plus the unbonding, which the deploy script checks |
 | `unbondingPeriod` | 54 h | 7 days | Outlasts the challenge window, the liveness period and the commit grace |
 | `incidentWindow` | 3 days | 7 days | Cases of one incident share one price |
@@ -46,6 +46,7 @@ vault (a decision for 2026-10-22).
 | `journalV2` / `branchIds` | v2 / NU7 `0x77190AD9` | v2 / NU6.3 `0x37A5165B`, NU7 `0x77190AD9` | The epoch of the deposit is part of what is proven; the Testnet build proves the NU7 epoch only |
 | `minRefundZat` | 20,000 | 100,000 | A refund must be worth its own payout |
 | `refundAbandonPeriod` | 30 days | 2 years | |
+| `refundDormancy` | 48 h | 7 days | A refund still without a destination stops counting against the cap after it (R-11) |
 | `minSeize` / `minSeizeBps` | 100,000 zat / 0 | 0.05 ZEC / 5 % | No liquidation small enough to grief a vault with dust claims |
 | `versionDepositDelay` / `versionViolationDelay` / `versionEstopDelay` | 10 min each | 14 / 7 / 1 days | A new verifier takes effect only after users had time to see it |
 | `zcashNetwork` | `zcash-testnet` | `zcash-mainnet` | The deploy script checks the relay's network |
@@ -125,6 +126,9 @@ name a public-good address instead of burning what no victim needs.
   Base: either the maker signs a receipt when it gets the salt and receiver (as the signers do for
   liveness), or the taker posts them encrypted to the maker's key with a proof that they open the
   order's commitment.
+- **Swap before it opens on mainnet.** The maker proves Testnet payments only today: it needs a
+  Mainnet witness builder, and payment-main must be an active Swap version. USDC's blocklist
+  applies: a blocklisted counterparty cannot be paid, and its order's USDC stays in the contract.
 - **Share refresh and repair through the nodes.** The threshold library refreshes every share of
   a vault and repairs a lost one, but no node runs either yet (docs/TIER3.md § 5). Mainnet needs
   both as node rounds, their private messages sealed node to node as in the DKG, and a runbook: a

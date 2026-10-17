@@ -51,7 +51,8 @@ Ironwood pool. This document describes the system as built; interfaces are in
    reserved, and `finalizeActivation` mints zZEC straight into the account's Morpho position once
    the relay has moved on (`finalizeDepth` headers, `finalizeDelay` seconds) and every gate is open.
    A proven deposit that cannot activate the vault (the vault already active, the account bound to
-   another vault, a halt, a full cap) lands as a Refund claim instead.
+   another vault, a halt) lands as a refund instead, which waits like an activation before its claim
+   opens; a new vault's proof that finds the coverage cap full waits for room.
 3. **Borrow.** The account's first UserOp (sponsored) deploys it, authorizes the Registry and
    the Adapter on Morpho, and borrows.
 4. **Exit.** One of:
