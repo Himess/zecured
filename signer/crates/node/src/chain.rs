@@ -586,7 +586,11 @@ pub fn apply(store: &mut Store, ev: &VaultEvent) -> Result<bool> {
         | RegistryEvent::RefundPending { .. }
         | RegistryEvent::PendingRefundDropped { .. }
         | RegistryEvent::LivenessArmed { .. }
-        | RegistryEvent::PreLiquidated { .. } => return Ok(false),
+        | RegistryEvent::PreLiquidated { .. }
+        | RegistryEvent::CaseExecuted { .. }
+        | RegistryEvent::VaultCompromised { .. }
+        | RegistryEvent::CollateralBurned { .. }
+        | RegistryEvent::VaultCompensated { .. } => return Ok(false),
         // R-16: a deposit took a tag that a commitment of this vault had registered as its change.
         // An honest commitment's change can never carry a deposit's tag (another note, or another
         // vault's key): the commitment's signers registered a false record. Only the vault's id

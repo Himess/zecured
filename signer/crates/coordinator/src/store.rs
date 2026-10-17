@@ -207,6 +207,28 @@ pub struct CoordVault {
     /// Nonces of the owner requests only the coordinator checks (`ProveRefund`).
     #[serde(default)]
     pub used_request_nonces: Vec<u64>,
+    /// R-2: executed F2 or F4 cases about the vault's payouts, whose journals prove those payouts'
+    /// inclusion (`proveInclusionByCase`), until the coordinator has used them.
+    #[serde(default)]
+    pub inclusion_cases: Vec<InclusionCase>,
+    /// T-04: an executed F1 or F2 case compromised the vault (`VaultCompromised`).
+    #[serde(default)]
+    pub compromised: bool,
+    /// R-19: the compensator burned the compromised vault's collateral (`CollateralBurned`).
+    #[serde(default)]
+    pub collateral_burned: bool,
+    /// R-20: the compensator settled the compromised vault while it stays active
+    /// (`VaultCompensated`).
+    #[serde(default)]
+    pub compensated: bool,
+}
+
+/// R-2: an executed case whose journal proved a committed payout of the vault in a block: an F2
+/// (a withheld change) or an F4 (a wrong claim reference) names the payout `payout_ref`.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct InclusionCase {
+    pub case_id: B256,
+    pub payout_ref: B256,
 }
 
 impl CoordVault {
@@ -439,6 +461,10 @@ pub(crate) mod tests {
             last_event_at: 0,
             refund_requested: false,
             used_request_nonces: vec![],
+            inclusion_cases: vec![],
+            compromised: false,
+            collateral_burned: false,
+            compensated: false,
         }
     }
 

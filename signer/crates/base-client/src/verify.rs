@@ -368,7 +368,11 @@ pub async fn check_event<R: RegistryReader>(reader: &R, ev: &VaultEvent, at: At)
         | RegistryEvent::RefundPending { .. }
         | RegistryEvent::PendingRefundDropped { .. }
         | RegistryEvent::LivenessArmed { .. }
-        | RegistryEvent::PreLiquidated { .. } => {
+        | RegistryEvent::PreLiquidated { .. }
+        | RegistryEvent::CaseExecuted { .. }
+        | RegistryEvent::VaultCompromised { .. }
+        | RegistryEvent::CollateralBurned { .. }
+        | RegistryEvent::VaultCompensated { .. } => {
             problems.push("signer nodes do not apply this event (the coordinator's only)".into());
         }
         RegistryEvent::ChangeTagOverridden { tag } => {

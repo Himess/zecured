@@ -151,6 +151,17 @@ async fn run(cfg: MakerConfig, signer: PrivateKeySigner) -> Result<()> {
         warn!("local fork: privacy delays may be zero and seals MOCK");
     }
     tokio::spawn(maker.clone().run());
+    // O-7: the operators' inventory endpoint, on a loopback address of its own (never proxied).
+    if let Some(status_bind) = maker.cfg.status_bind {
+        let listener = tokio::net::TcpListener::bind(status_bind).await.context("bind status_bind")?;
+        let status = api::status_router(maker.clone());
+        tokio::spawn(async move {
+            if axum::serve(listener, status).await.is_err() {
+                warn!("the operators' inventory endpoint stopped");
+            }
+        });
+        info!("operators' inventory endpoint on the loopback address of status_bind");
+    }
     let app = api::router(maker.clone());
     info!(maker = %maker.signer.address(), "swap maker listening");
     axum::serve(tokio::net::TcpListener::bind(bind).await?, app).await?;

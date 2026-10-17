@@ -101,6 +101,7 @@ sol! {
         event PayoutConfirmed(bytes32 indexed vaultId, bytes32 indexed payoutRef, bytes32[] claimIds);
         event PayoutProven(bytes32 indexed vaultId, bytes32 indexed claimId, bytes32 payoutRef);
         event ConfirmationExpired(bytes32 indexed vaultId, bytes32 indexed claimId);
+        event VaultCompensated(bytes32 indexed vaultId, uint64 outstanding);
         event RefundDormant(bytes32 indexed vaultId, bytes32 indexed claimId);
         event ChangeTagOverridden(bytes32 indexed tag, bytes32 indexed oldVaultId);
         event DustWrittenOff(bytes32 indexed vaultId, bytes32 indexed claimId, uint64 amount);
@@ -118,6 +119,8 @@ sol! {
         function confirmPayout(bytes32 vaultId, bytes32 payoutRef, bytes32[] claimIds, bytes[] sigs) external;
         function hashPayoutConfirmation(bytes32 vaultId, bytes32 payoutRef, bytes32[] claimIds) external view returns (bytes32);
         function payoutConfirmed(bytes32 payoutRef) external view returns (bool);
+        function unprovenConfirmations(bytes32 vaultId) external view returns (uint256);
+        function expireConfirmation(bytes32 claimId) external;
         function setReimburseDestination(bytes32 claimId, bytes32 commitment, uint64 deadline, bytes[] sigs) external;
         function hashReimburseDestination(bytes32 claimId, bytes32 commitment, uint64 deadline) external view returns (bytes32);
         function markRefundDormant(bytes32 claimId) external;
@@ -147,6 +150,7 @@ sol! {
         function openVaultCount() external view returns (uint256);
         function intake() external view returns (address);
         function slasher() external view returns (address);
+        function compensator() external view returns (address);
         function signerBond() external view returns (address);
         function signers() external view returns (address[5] memory);
     }
@@ -225,17 +229,59 @@ sol! {
 sol! {
     /// The slasher (contracts/src/interfaces/v3/IZecuredSlasher.sol, with v4's batch of inclusion
     /// proofs, section 3), as far as the signer network uses it: the compromised and frozen flags
-    /// (T-04) and inclusion proofs of payouts (T-05 (a), proven delivery).
+    /// (T-04), inclusion proofs of payouts (T-05 (a), proven delivery), and the executed cases whose
+    /// journals prove a payout's inclusion too (R-2). `kind` is the slasher's `ViolationKind`
+    /// (values below).
     #[sol(rpc)]
     interface IZecuredSlasher {
+        /// The contract's `ViolationCase`; its `ref` field is named `reference` here (a Rust keyword
+        /// otherwise; the ABI is positional).
+        #[derive(Debug, PartialEq, Eq)]
+        struct ViolationCase {
+            uint8 kind;
+            bytes32 anchor;
+            address beneficiary;
+            bytes32 reference;
+            bytes32 noteTag;
+            bytes32 vaultId;
+            uint8 signerBitmap;
+            uint64 executableAt;
+            bool executed;
+            uint64 value;
+        }
+
+        event ViolationExecuted(bytes32 indexed caseId, uint256 slashed);
+        event VaultCompromised(bytes32 indexed vaultId, bytes32 indexed caseId);
+
         function isCompromised(bytes32 vaultId) external view returns (bool);
         function vaultFrozen(bytes32 vaultId) external view returns (bool);
         function compromisedAt(bytes32 vaultId) external view returns (uint64);
+        function frozenSince(bytes32 vaultId) external view returns (uint64);
+        function caseOf(bytes32 caseId) external view returns (ViolationCase memory);
         function proveInclusion(bytes journal, bytes seal, bytes32 imageId, bytes32 claimId) external;
         function proveInclusionBatch(bytes journal, bytes seal, bytes32 imageId, bytes32[] claimIds) external returns (uint256 upheld);
+        function proveInclusionByCase(bytes32 caseId, bytes32[] claimIds) external returns (uint256 upheld);
         function slashConfirmationWork() external view returns (uint256);
         function relay() external view returns (address);
         function versions() external view returns (address);
+        function compensator() external view returns (address);
+    }
+}
+
+/// The slasher's `ViolationKind`: F2, a withheld change (the payout committed, its change missing).
+pub const VIOLATION_WITHHELD_CHANGE: u8 = 2;
+/// The slasher's `ViolationKind`: F4, a payout whose claim reference is wrong.
+pub const VIOLATION_WRONG_CLAIM_REF: u8 = 4;
+
+sol! {
+    /// The compensator (contracts/src/interfaces/v3/IZecuredCompensator.sol), as far as the
+    /// coordinator follows it: R-19's burn of a compromised vault's collateral down to the LLTV,
+    /// which anyone may run again when the one inside `executeSlash` failed.
+    #[sol(rpc)]
+    interface IZecuredCompensator {
+        event CollateralBurned(bytes32 indexed vaultId, uint64 retired);
+
+        function burnCollateral(bytes32 vaultId) external returns (uint64 retired);
     }
 }
 
@@ -437,6 +483,19 @@ pub enum RegistryEvent {
     /// The Adapter (section 4): a pre-liquidation seized `seized` zatoshi for `repaid_assets` of the
     /// debt; the Registry's `LiquidationRelease` creates the claim.
     PreLiquidated { repaid_assets: U256, seized: u64 },
+    /// The slasher: case `case_id` was executed. `ViolationExecuted` names neither the case's vault
+    /// nor its kind: as decoded, [`VaultEvent::vault_id`] is zero, `kind` 0 and `payout_ref` zero, and
+    /// the coordinator reads the case (`caseOf`) to fill them in. An executed F2 or F4 case proves
+    /// its committed payout `payout_ref` is in a block (R-2: `proveInclusionByCase`).
+    CaseExecuted { case_id: B256, kind: u8, payout_ref: B256 },
+    /// The slasher: an executed F1 or F2 case compromised the vault (T-04): the compensator settles
+    /// its claims, and burns its collateral down to the LLTV (R-19).
+    VaultCompromised { case_id: B256 },
+    /// The compensator (R-19): `retired` zatoshi of the compromised vault's collateral were burned.
+    CollateralBurned { retired: u64 },
+    /// The Registry (R-20): the compensator settled the compromised vault while it stays active; it
+    /// no longer counts as open or locked.
+    VaultCompensated { outstanding: u64 },
 }
 
 impl RegistryEvent {
@@ -452,6 +511,10 @@ impl RegistryEvent {
                 | RegistryEvent::PendingRefundDropped { .. }
                 | RegistryEvent::LivenessArmed { .. }
                 | RegistryEvent::PreLiquidated { .. }
+                | RegistryEvent::CaseExecuted { .. }
+                | RegistryEvent::VaultCompromised { .. }
+                | RegistryEvent::CollateralBurned { .. }
+                | RegistryEvent::VaultCompensated { .. }
         )
     }
 }
@@ -651,14 +714,23 @@ pub struct Contracts {
     pub intake: Address,
     pub bond: Address,
     pub adapter: Address,
+    pub slasher: Address,
+    pub compensator: Address,
 }
 
 impl Contracts {
     fn addresses(&self) -> Vec<Address> {
-        [self.registry, self.intake, self.bond, self.adapter]
-            .into_iter()
-            .filter(|a| *a != Address::ZERO)
-            .collect()
+        [
+            self.registry,
+            self.intake,
+            self.bond,
+            self.adapter,
+            self.slasher,
+            self.compensator,
+        ]
+        .into_iter()
+        .filter(|a| *a != Address::ZERO)
+        .collect()
     }
 }
 
@@ -777,6 +849,10 @@ pub fn decode_from(log: &Log, created_at: u64, contracts: &Contracts) -> Result<
         decode_bond(log, created_at)
     } else if address == contracts.adapter {
         decode_adapter(log, created_at)
+    } else if address == contracts.slasher {
+        decode_slasher(log, created_at)
+    } else if address == contracts.compensator {
+        decode_compensator(log, created_at)
     } else {
         Ok(None)
     }
@@ -852,6 +928,38 @@ pub fn decode_adapter(log: &Log, created_at: u64) -> Result<Option<VaultEvent>> 
         seized: e.seized,
     };
     vault_event(log, created_at, e.vaultId, event)
+}
+
+/// Decodes one slasher log: an executed case (vault, kind and payout left for the coordinator to
+/// read, see [`RegistryEvent::CaseExecuted`]) or a compromised vault; other slasher events are
+/// ignored.
+pub fn decode_slasher(log: &Log, created_at: u64) -> Result<Option<VaultEvent>> {
+    use IZecuredSlasher::IZecuredSlasherEvents as E;
+    let Ok(decoded) = E::decode_log(&log.inner) else {
+        return Ok(None);
+    };
+    let (vault_id, event) = match decoded.data {
+        E::ViolationExecuted(e) => (
+            B256::ZERO,
+            RegistryEvent::CaseExecuted {
+                case_id: e.caseId,
+                kind: 0,
+                payout_ref: B256::ZERO,
+            },
+        ),
+        E::VaultCompromised(e) => (e.vaultId, RegistryEvent::VaultCompromised { case_id: e.caseId }),
+    };
+    vault_event(log, created_at, vault_id, event)
+}
+
+/// Decodes one compensator log (R-19's `CollateralBurned`); other compensator events are ignored.
+pub fn decode_compensator(log: &Log, created_at: u64) -> Result<Option<VaultEvent>> {
+    use IZecuredCompensator::IZecuredCompensatorEvents as E;
+    let Ok(decoded) = E::decode_log(&log.inner) else {
+        return Ok(None);
+    };
+    let E::CollateralBurned(e) = decoded.data;
+    vault_event(log, created_at, e.vaultId, RegistryEvent::CollateralBurned { retired: e.retired })
 }
 
 /// Decodes one Registry log; `created_at` is its block's timestamp. Unknown logs are ignored. A Fee
@@ -963,6 +1071,12 @@ pub fn decode(log: &Log, created_at: u64) -> Result<Option<VaultEvent>> {
             ),
         ),
         E::ConfirmationExpired(e) => (e.vaultId, changed(e.claimId, ClaimChange::Expired)),
+        E::VaultCompensated(e) => (
+            e.vaultId,
+            RegistryEvent::VaultCompensated {
+                outstanding: e.outstanding,
+            },
+        ),
         E::RefundDormant(e) => (e.vaultId, changed(e.claimId, ClaimChange::Dormant)),
         E::PayoutConfirmed(e) => (
             e.vaultId,
@@ -1380,6 +1494,8 @@ mod tests {
             intake: Address::repeat_byte(0xa1),
             bond: Address::repeat_byte(0xa2),
             adapter: Address::repeat_byte(0xa3),
+            slasher: Address::repeat_byte(0xa4),
+            compensator: Address::repeat_byte(0xa5),
         };
         let at = |data: LogData, address: Address| {
             let mut log = rpc_log(data, 20, 1);
@@ -1450,6 +1566,49 @@ mod tests {
         // The same log from an address that is not the deployment's: ignored.
         assert!(at(pre.encode_log_data(), Address::repeat_byte(0xee)).is_none());
         assert!(at(armed.encode_log_data(), contracts.intake).is_none(), "a bond event from the Intake");
+        // The slasher: an executed case names no vault (the coordinator reads the case), a
+        // compromise does; the compensator's burn and the Registry's R-20 settlement.
+        let case = B256::repeat_byte(0xca);
+        let executed = IZecuredSlasher::ViolationExecuted {
+            caseId: case,
+            slashed: U256::from(1),
+        };
+        let got = at(executed.encode_log_data(), contracts.slasher).unwrap();
+        assert_eq!(
+            (got.vault_id, got.event.clone()),
+            (
+                B256::ZERO,
+                RegistryEvent::CaseExecuted {
+                    case_id: case,
+                    kind: 0,
+                    payout_ref: B256::ZERO
+                }
+            )
+        );
+        assert!(!got.event.for_signers());
+        let compromised = IZecuredSlasher::VaultCompromised {
+            vaultId: vault,
+            caseId: case,
+        };
+        let got = at(compromised.encode_log_data(), contracts.slasher).unwrap();
+        assert_eq!((got.vault_id, got.event), (vault, RegistryEvent::VaultCompromised { case_id: case }));
+        let burned = IZecuredCompensator::CollateralBurned {
+            vaultId: vault,
+            retired: 400_000,
+        };
+        let got = at(burned.encode_log_data(), contracts.compensator).unwrap();
+        assert_eq!((got.vault_id, got.event), (vault, RegistryEvent::CollateralBurned { retired: 400_000 }));
+        let compensated = IZecuredRegistry::VaultCompensated {
+            vaultId: vault,
+            outstanding: 600_000,
+        };
+        let got = at(compensated.encode_log_data(), contracts.registry).unwrap();
+        assert_eq!(
+            (got.vault_id, got.event.clone()),
+            (vault, RegistryEvent::VaultCompensated { outstanding: 600_000 })
+        );
+        assert!(!got.event.for_signers(), "the coordinator's only");
+        assert!(at(burned.encode_log_data(), contracts.slasher).is_none(), "a compensator event from the slasher");
     }
 
     #[test]
