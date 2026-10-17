@@ -33,6 +33,8 @@ use zecured_base::{
     verify::{CLAIM_DISPUTED, CLAIM_PENDING},
 };
 
+use crate::chain::NonceLock;
+
 /// The first wait after the backend has no receipt yet, doubled on every further miss up to
 /// [`RECEIPT_RETRY_MAX`] (the nodes hold the destination once they have seen the claim on Base).
 pub const RECEIPT_RETRY_FIRST: u64 = 30;
@@ -129,6 +131,10 @@ pub struct ProviderChain<'a, P> {
     pub p: &'a P,
     pub registry: Address,
     pub bond: Address,
+    /// The key's nonce lock when other transactions of the same key are sent concurrently (the
+    /// market maker's closes and deleverages); none when they are not (the liquidator's single
+    /// loop, whose provider fills the nonces).
+    pub nonces: Option<&'a NonceLock>,
 }
 
 /// A bot's receipt waits are bounded like its liquidations' (alloy's default is forever).
@@ -159,7 +165,14 @@ impl<P: Provider> ArmingChain for ProviderChain<'_, P> {
             let call = bond.armLiveness(claim_id, received_at, signature);
             call.call().await.context("armLiveness would revert")?;
             let gas = zecured_base::gas_with_headroom(call.estimate_gas().await?);
-            let receipt = call.gas(gas).send().await?.with_timeout(Some(ARM_RECEIPT_TIMEOUT)).get_receipt().await?;
+            let call = call.gas(gas);
+            let pending = match self.nonces {
+                Some(lock) => {
+                    lock.send_with(self.p, |nonce| async move { Ok(call.nonce(nonce).send().await?) }).await?
+                }
+                None => call.send().await?,
+            };
+            let receipt = pending.with_timeout(Some(ARM_RECEIPT_TIMEOUT)).get_receipt().await?;
             ensure!(receipt.status(), "armLiveness reverted");
             Ok(receipt.transaction_hash)
         }

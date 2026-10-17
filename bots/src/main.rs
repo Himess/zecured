@@ -18,7 +18,7 @@ use std::{collections::BTreeMap, future::IntoFuture, net::SocketAddr, path::Path
 use alloy::{
     network::EthereumWallet,
     primitives::{Address, B256, Bytes, U256},
-    providers::{Provider, ProviderBuilder},
+    providers::{DynProvider, Provider, ProviderBuilder},
     signers::local::PrivateKeySigner,
 };
 use anyhow::{Context, Result, anyhow, ensure};
@@ -242,7 +242,7 @@ async fn liquidator(
     let receiver = chain::ironwood_receiver(zaddr)?;
     let provider = ProviderBuilder::new().wallet(EthereumWallet::from(key)).connect_http(rpc.parse()?);
     chain::ensure_allowance(&provider, d.usdc, me, d.adapter).await?;
-    let mut armer = claim_armer(&provider, &d, backend, claims_file).await?;
+    let mut armer = claim_armer(&provider, &d, backend, claims_file, None).await?;
     let mut accounts: BTreeMap<B256, Address> = BTreeMap::new();
     let mut cursor = d.block;
     info!(pre_liquidation = pre.enabled, "liquidator running");
@@ -316,6 +316,7 @@ async fn claim_armer<'a, P: Provider>(
     d: &Deployment,
     backend: &str,
     claims_file: PathBuf,
+    nonces: Option<&'a chain::NonceLock>,
 ) -> Result<Option<liveness::Armer<liveness::ProviderChain<'a, P>, liveness::BackendReceipts>>> {
     let bond = events::IZecuredRegistry::new(d.registry, p)
         .signerBond()
@@ -330,6 +331,7 @@ async fn claim_armer<'a, P: Provider>(
         p,
         registry: d.registry,
         bond,
+        nonces,
     };
     Ok(Some(liveness::Armer::new(chain, liveness::BackendReceipts::new(backend)?, Some(claims_file))?))
 }
@@ -550,6 +552,10 @@ struct Mm {
     deleverage_quotes: std::sync::Mutex<std::collections::HashMap<B256, Quote>>,
     /// R-5: the market maker's claims of its closes and deleverages, for the arming loop.
     claims: tokio::sync::mpsc::UnboundedSender<B256>,
+    /// The executor key's provider, which every transaction of this process uses (`p`), and its
+    /// nonce lock: the API's closes and deleverages and the arming loop never pick the same nonce.
+    p: DynProvider,
+    nonces: Arc<chain::NonceLock>,
 }
 
 #[derive(Clone, Copy, Debug)]
@@ -653,9 +659,13 @@ async fn market_maker(
     claims_file: PathBuf,
 ) -> Result<()> {
     let receiver = chain::ironwood_receiver(&zaddr)?;
-    let provider = ProviderBuilder::new().wallet(EthereumWallet::from(key.clone())).connect_http(rpc.parse()?);
+    // One provider and one nonce lock for every transaction of this process: the API's closes and
+    // deleverages and the arming loop's `armLiveness` come from the same key, concurrently. (The
+    // allowance is set before either starts, and waited for.)
+    let provider = ProviderBuilder::new().wallet(EthereumWallet::from(key.clone())).connect_http(rpc.parse()?).erased();
     chain::ensure_allowance(&provider, d.usdc, key.address(), d.adapter).await?;
-    let armer = claim_armer(&provider, &d, &backend, claims_file).await?;
+    let nonces = Arc::new(chain::NonceLock::new(key.address()));
+    let armer = claim_armer(&provider, &d, &backend, claims_file, Some(nonces.as_ref())).await?;
     let (claims, new_claims) = tokio::sync::mpsc::unbounded_channel();
     let mm = Arc::new(Mm {
         d,
@@ -668,6 +678,8 @@ async fn market_maker(
         quotes: Default::default(),
         deleverage_quotes: Default::default(),
         claims,
+        p: provider.clone(),
+        nonces: nonces.clone(),
     });
     let app = Router::new()
         .route("/quote/{vault_id}", get(quote))
@@ -883,10 +895,7 @@ async fn deleverage(
         return Err(ApiError::QUOTE_MISMATCH);
     }
     let mm_commitment = chain::fresh_commitment(&mm.backend, &mm.zaddr, &mm.receiver).await?;
-    let p = ProviderBuilder::new()
-        .wallet(EthereumWallet::from(mm.key.clone()))
-        .connect_http(mm.rpc.parse().map_err(anyhow::Error::from)?);
-    let adapter = ISettlementAdapter::new(mm.d.adapter, &p);
+    let adapter = ISettlementAdapter::new(mm.d.adapter, &mm.p);
     let call =
         adapter.deleverageWithCollateral(req, b.signature.clone(), mm_commitment, min_mm_amount(quote.mm_amount));
     if let Err(e) = call.call().await {
@@ -894,11 +903,10 @@ async fn deleverage(
         return Err(ApiError::CLOSE_REJECTED);
     }
     let gas = zecured_base::gas_with_headroom(call.estimate_gas().await.map_err(anyhow::Error::from)?);
-    let receipt = call
-        .gas(gas)
-        .send()
-        .await
-        .map_err(anyhow::Error::from)?
+    let call = call.gas(gas);
+    // Through the key's nonce lock: the arming loop sends from the same key (R-5).
+    let pending = mm.nonces.send_with(&mm.p, |nonce| async move { Ok(call.nonce(nonce).send().await?) }).await?;
+    let receipt = pending
         .with_timeout(Some(Duration::from_secs(120)))
         .get_receipt()
         .await
@@ -978,9 +986,6 @@ async fn close(
     // executed share, not just the quoted one.
     check_user_amount(req.minUserAmount)?;
     let mm_commitment = chain::fresh_commitment(&mm.backend, &mm.zaddr, &mm.receiver).await?;
-    let p = ProviderBuilder::new()
-        .wallet(EthereumWallet::from(mm.key.clone()))
-        .connect_http(mm.rpc.parse().map_err(anyhow::Error::from)?);
     // Repay at most what we quoted for this vault (plus interest since), never what the borrower
     // may have borrowed after signing.
     let quoted = mm.quotes.lock().map_err(|_| anyhow!("quote book poisoned"))?.get(&r.vault_id).copied();
@@ -991,7 +996,7 @@ async fn close(
         return Err(ApiError::QUOTE_MISMATCH);
     }
     let max_repay = U256::from(quote.debt) * U256::from(10_000 + REPAY_SLACK_BPS) / U256::from(10_000u32);
-    let adapter = ISettlementAdapter::new(mm.d.adapter, &p);
+    let adapter = ISettlementAdapter::new(mm.d.adapter, &mm.p);
     let call =
         adapter.closeWithCollateral(req, b.signature.clone(), mm_commitment, max_repay, min_mm_amount(quote.mm_amount));
     if let Err(e) = call.call().await {
@@ -999,11 +1004,10 @@ async fn close(
         return Err(ApiError::CLOSE_REJECTED);
     }
     let gas = zecured_base::gas_with_headroom(call.estimate_gas().await.map_err(anyhow::Error::from)?);
-    let receipt = call
-        .gas(gas)
-        .send()
-        .await
-        .map_err(anyhow::Error::from)?
+    let call = call.gas(gas);
+    // Through the key's nonce lock: the arming loop sends from the same key (R-5).
+    let pending = mm.nonces.send_with(&mm.p, |nonce| async move { Ok(call.nonce(nonce).send().await?) }).await?;
+    let receipt = pending
         .with_timeout(Some(Duration::from_secs(120)))
         .get_receipt()
         .await

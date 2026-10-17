@@ -380,23 +380,31 @@ async fn liveness_arming_on_a_local_chain() -> Result<()> {
     let p = ProviderBuilder::new().wallet(EthereumWallet::from(bot)).connect_http(anvil.endpoint.parse()?);
     anvil.ready(&p).await?;
     let chain_id = p.get_chain_id().await?;
+    // The MOCKs are set up from another key: as in the market maker, every transaction of the bot's
+    // key goes through its nonce lock.
+    let admin: PrivateKeySigner = BORROWER_KEY.parse()?;
+    let admin_addr = admin.address();
+    let pa = ProviderBuilder::new().wallet(EthereumWallet::from(admin)).connect_http(anvil.endpoint.parse()?);
 
     // The bond over its unit tests' MOCKs, and five signers (test keys).
     let signers: Vec<PrivateKeySigner> = (0..5u8)
         .map(|i| PrivateKeySigner::from_bytes(&keccak256([b"zecured.bots.test.signer".as_slice(), &[i]].concat())))
         .collect::<Result<_, _>>()?;
     let signer_addresses: [Address; 5] = std::array::from_fn(|i| signers[i].address());
-    let usdc = deploy(&p, creation_code("MockUSDC.sol/MockUSDC.json")?, (bot_addr,).abi_encode_params()).await?;
-    let registry =
-        deploy(&p, creation_code("BondV2Mocks.sol/MockBondRegistry.json")?, (signer_addresses,).abi_encode_params())
-            .await?;
-    let slasher = deploy(&p, creation_code("BondV2Mocks.sol/MockBondSlasher.json")?, vec![]).await?;
-    let intake = deploy(&p, creation_code("BondV2Mocks.sol/MockBondIntake.json")?, vec![]).await?;
+    let usdc = deploy(&pa, creation_code("MockUSDC.sol/MockUSDC.json")?, (admin_addr,).abi_encode_params()).await?;
+    let registry = deploy(
+        &pa,
+        creation_code("BondV2Mocks.sol/MockBondRegistry.json")?,
+        (signer_addresses,).abi_encode_params(),
+    )
+    .await?;
+    let slasher = deploy(&pa, creation_code("BondV2Mocks.sol/MockBondSlasher.json")?, vec![]).await?;
+    let intake = deploy(&pa, creation_code("BondV2Mocks.sol/MockBondIntake.json")?, vec![]).await?;
     let compensator =
-        deploy(&p, creation_code("BondV2Mocks.sol/MockBondCompensator.json")?, (usdc,).abi_encode_params()).await?;
+        deploy(&pa, creation_code("BondV2Mocks.sol/MockBondCompensator.json")?, (usdc,).abi_encode_params()).await?;
     let price = U256::from(40u64) * U256::from(10u64).pow(U256::from(34u64));
     let oracle =
-        deploy(&p, creation_code("BondV2Mocks.sol/MockBondOracle.json")?, (price,).abi_encode_params()).await?;
+        deploy(&pa, creation_code("BondV2Mocks.sol/MockBondOracle.json")?, (price,).abi_encode_params()).await?;
     let config = BondConfigArgs {
         registry,
         slasher,
@@ -413,8 +421,8 @@ async fn liveness_arming_on_a_local_chain() -> Result<()> {
         commitGrace: 7_200,
         livenessPremiumBps: 500,
     };
-    let bond = deploy(&p, creation_code("SignerBondV2.sol/SignerBondV2.json")?, config.abi_encode()).await?;
-    let mock_registry = IMockBondRegistry::new(registry, &p);
+    let bond = deploy(&pa, creation_code("SignerBondV2.sol/SignerBondV2.json")?, config.abi_encode()).await?;
+    let mock_registry = IMockBondRegistry::new(registry, &pa);
     ensure!(mock_registry.setSignerBond(bond, usdc).send().await?.get_receipt().await?.status());
 
     // A pending Liquidation claim of the bot.
@@ -456,7 +464,13 @@ async fn liveness_arming_on_a_local_chain() -> Result<()> {
     let url = format!("http://{}", listener.local_addr()?);
     tokio::spawn(async move { axum::serve(listener, app).await.unwrap() });
 
-    let chain = ProviderChain { p: &p, registry, bond };
+    let nonces = crate::chain::NonceLock::new(bot_addr);
+    let chain = ProviderChain {
+        p: &p,
+        registry,
+        bond,
+        nonces: Some(&nonces),
+    };
     let mut armer = Armer::new(chain, BackendReceipts::new(&url)?, None)?;
     armer.track(claim_id)?;
     let bond_view = zecured_base::events::ISignerBond::new(bond, &p);
@@ -465,9 +479,17 @@ async fn liveness_arming_on_a_local_chain() -> Result<()> {
     let r = armer.pass(1_000).await;
     assert_eq!((r.waiting, r.armed), (1, 0), "404: no receipt yet");
     let before = nonce().await?;
-    let r = armer.pass(1_030).await;
+    // The arming and another transaction of the bot's key at once (the market maker's close; here
+    // a MOCK token approval), both through the key's nonce lock: both go through, at two nonces.
+    let token = IMockToken::new(usdc, &p);
+    let close = token.approve(bond, U256::from(1u8)).gas(100_000);
+    let (r, other) = tokio::join!(
+        armer.pass(1_030),
+        nonces.send_with(&p, |nonce| async move { Ok(close.nonce(nonce).send().await?) })
+    );
     assert_eq!(r.armed, 1, "armed once the receipt came: {r:?}");
-    assert_eq!(nonce().await?, before + 1, "one armLiveness from the bot's key");
+    ensure!(other?.get_receipt().await?.status(), "the concurrent transaction failed");
+    assert_eq!(nonce().await?, before + 2, "an armLiveness and a close from the bot's key, two nonces");
     let armed = bond_view.livenessArming(claim_id).call().await?;
     assert_eq!(
         (armed.commitment, armed.payableAt),
@@ -478,7 +500,7 @@ async fn liveness_arming_on_a_local_chain() -> Result<()> {
     // Armed for its commitment: nothing is sent.
     let r = armer.pass(1_030 + crate::liveness::ARMED_RECHECK).await;
     assert_eq!(r.already_armed, 1);
-    assert_eq!(nonce().await?, before + 1, "no transaction for an armed claim");
+    assert_eq!(nonce().await?, before + 2, "no transaction for an armed claim");
 
     // A new commitment voids the arming; the bot arms the claim again with a receipt for it.
     let second = keccak256(b"zecured.bots.test.commitment.2");

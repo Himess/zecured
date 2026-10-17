@@ -723,6 +723,61 @@ pub async fn fresh_commitment(backend: &str, zcash_address: &str, receiver: &[u8
     Ok(expected)
 }
 
+/// The nonces of one key whose transactions are sent concurrently in one process (the market
+/// maker's closes and deleverages, and its arming loop's `armLiveness`, R-5). Each send chooses its
+/// nonce under a lock held until the node has accepted the transaction, from a counter that starts
+/// at the node's pending count, advances with every accepted send and is forgotten after a refused
+/// one (read again from the node next time, so a refused send leaves no gap). Two sends through the
+/// same lock therefore never pick the same nonce. Every transaction of that key in the process must
+/// go through it: the provider's own nonce filler is bypassed (an explicit nonce is kept as is).
+#[derive(Debug)]
+pub struct NonceLock {
+    from: Address,
+    next: tokio::sync::Mutex<Option<u64>>,
+}
+
+impl NonceLock {
+    pub fn new(from: Address) -> Self {
+        Self {
+            from,
+            next: tokio::sync::Mutex::new(None),
+        }
+    }
+
+    /// Sends one transaction: `pending_count` reads the node's pending transaction count of the key
+    /// (awaited only while the counter is unknown), `send` broadcasts with the nonce it is given.
+    pub async fn send<T, C, S>(&self, pending_count: C, send: impl FnOnce(u64) -> S) -> Result<T>
+    where
+        C: Future<Output = Result<u64>>,
+        S: Future<Output = Result<T>>,
+    {
+        let mut next = self.next.lock().await;
+        let nonce = match *next {
+            Some(n) => n,
+            None => pending_count.await?,
+        };
+        match send(nonce).await {
+            Ok(sent) => {
+                *next = Some(nonce + 1);
+                Ok(sent)
+            }
+            Err(e) => {
+                *next = None;
+                Err(e)
+            }
+        }
+    }
+
+    /// [`Self::send`] with the pending count read through `p`.
+    pub async fn send_with<P: Provider, T, S>(&self, p: &P, send: impl FnOnce(u64) -> S) -> Result<T>
+    where
+        S: Future<Output = Result<T>>,
+    {
+        let from = self.from;
+        self.send(async move { Ok(p.get_transaction_count(from).pending().await?) }, send).await
+    }
+}
+
 /// Approves `spender` for unlimited USDC once.
 pub async fn ensure_allowance<P: Provider>(p: &P, usdc: Address, owner: Address, spender: Address) -> Result<()> {
     let token = IERC20::new(usdc, p);
@@ -1364,5 +1419,77 @@ mod tests {
             }
         );
         assert!(pre_liquidation_economics(&plan, m.price, 10u128.pow(18), 3_000, 1, 20).net < 0);
+    }
+
+    // ----- one key's concurrent transactions
+
+    /// A MOCK node: it accepts a transaction only at the key's next nonce (its pending count) and
+    /// refuses a reused or skipped one, as a node does.
+    struct MockNode {
+        start: u64,
+        accepted: std::sync::Mutex<Vec<(&'static str, u64)>>,
+    }
+
+    impl MockNode {
+        fn pending(&self) -> u64 {
+            self.start + self.accepted.lock().unwrap().len() as u64
+        }
+
+        fn accept(&self, what: &'static str, nonce: u64) -> Result<u64> {
+            let mut accepted = self.accepted.lock().unwrap();
+            ensure!(nonce == self.start + accepted.len() as u64, "nonce {nonce} refused");
+            accepted.push((what, nonce));
+            Ok(nonce)
+        }
+    }
+
+    /// The market maker's close and its arming loop's `armLiveness`, sent at once through one
+    /// `NonceLock`: distinct, consecutive nonces, both accepted. Without the lock both read the same
+    /// pending count and the node refuses one (the failure the lock prevents). A refused send leaves
+    /// no gap: the next send reads the node again.
+    #[tokio::test]
+    async fn concurrent_sends_get_distinct_nonces() {
+        let node = MockNode {
+            start: 7,
+            accepted: Default::default(),
+        };
+        let lock = NonceLock::new(Address::repeat_byte(0x0b));
+        let count = || async { Ok(node.pending()) };
+        // Both broadcasts take a while, so the two sends overlap.
+        let broadcast = |what: &'static str| {
+            let node = &node;
+            move |nonce: u64| async move {
+                tokio::time::sleep(std::time::Duration::from_millis(20)).await;
+                node.accept(what, nonce)
+            }
+        };
+        let (close, arming) =
+            tokio::join!(lock.send(count(), broadcast("close")), lock.send(count(), broadcast("armLiveness")));
+        let (close, arming) = (close.unwrap(), arming.unwrap());
+        assert_ne!(close, arming);
+        assert_eq!(close.min(arming), 7);
+        assert_eq!(close.max(arming), 8);
+
+        // Unlocked: both read the pending count (9) before either is accepted.
+        let unlocked = |what: &'static str| {
+            let node = &node;
+            async move {
+                let nonce = node.pending();
+                tokio::time::sleep(std::time::Duration::from_millis(20)).await;
+                node.accept(what, nonce)
+            }
+        };
+        let (a, b) = tokio::join!(unlocked("close"), unlocked("armLiveness"));
+        assert!(a.is_ok() != b.is_ok(), "one of two unlocked sends is refused");
+
+        // The lock's counter (9) is now behind the node (10): its send is refused, the counter is
+        // forgotten, and the next send reads the node again.
+        let refused = lock.send(count(), broadcast("close")).await;
+        assert!(refused.is_err());
+        assert_eq!(lock.send(count(), broadcast("armLiveness")).await.unwrap(), 10);
+        assert_eq!(lock.send(count(), broadcast("close")).await.unwrap(), 11);
+        let failing = lock.send(count(), |_| async { Result::<u64>::Err(anyhow!("the RPC failed")) }).await;
+        assert!(failing.is_err());
+        assert_eq!(lock.send(count(), broadcast("close")).await.unwrap(), 12, "no gap after a failed send");
     }
 }
