@@ -1,0 +1,19 @@
+[package]
+name = "zecured-payment-k4"
+description = "K4 for Zecured Swap: the synthetic payment fixture, the catalog of single changes to a payment witness and the outcome each must have, run natively by the payment statement's tests and in the zkVM executor by the host"
+version = "0.1.0"
+edition = "2024"
+license = "MIT"
+publish = false
+
+# Explicit versions, as in the statements (they are also built outside this workspace).
+[dependencies]
+zecured-payment-statement = { path = "../payment-statement" }
+zecured-deposit-statement = { path = "../statement" }
+# The deposit catalog's public helpers (another vault receiver).
+zecured-deposit-k4 = { path = "../k4" }
+orchard = { version = "0.16", default-features = false, features = ["std"] }
+zcash_history = "0.6"
+zcash_note_encryption = "0.5"
+zcash_primitives = { version = "=0.31.0-pre.1", default-features = false }
+zcash_protocol = "=0.11.0-pre.0"

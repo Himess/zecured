@@ -6131,6 +6131,34 @@ dependencies = [
 ]
 
 [[package]]
+name = "zecured-payment-k4"
+version = "0.1.0"
+dependencies = [
+ "orchard",
+ "zcash_history",
+ "zcash_note_encryption",
+ "zcash_primitives",
+ "zcash_protocol",
+ "zecured-deposit-k4",
+ "zecured-deposit-statement",
+ "zecured-payment-statement",
+]
+
+[[package]]
+name = "zecured-payment-statement"
+version = "0.1.0"
+dependencies = [
+ "orchard",
+ "serde",
+ "serde_json",
+ "zcash_note_encryption",
+ "zcash_primitives",
+ "zcash_protocol",
+ "zecured-deposit-statement",
+ "zecured-payment-k4",
+]
+
+[[package]]
 name = "zecured-tier2-host"
 version = "0.1.0"
 dependencies = [
