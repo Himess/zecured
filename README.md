@@ -1,31 +1,53 @@
 # Zecured
 
-> **Borrow against shielded ZEC. Sell nothing. Reveal nothing.**
+> **Use shielded ZEC on Base: borrow against it, or swap into it. It never leaves the shielded pool.**
 
 Using ZEC in DeFi today usually means taking it out of the shielded pool. Zecured doesn't.
-Holding ZEC shielded no longer means giving up liquidity: you can borrow dollars on Base without
-selling or unshielding it, and USDC lenders on Base gain a new market backed by Zcash collateral.
 
-Zecured lets ZEC holders borrow USDC on Base without selling their ZEC and without it ever
-leaving the shielded pool. Collateral sits in a fresh **3-of-5 FROST threshold vault** in
-Zcash's **Ironwood** pool; a **non-transferable receipt (zZEC)** is minted straight into a
-**Morpho Blue** position of a fresh, gasless smart account. Close the loan by repaying in USDC
-— or **close it from collateral**: a market maker repays the debt and takes ZEC for it, and
-the rest returns to a new shielded address, so no outside funds ever touch your account. If
-the price drops, a liquidator repays and receives the seized ZEC, shielded.
+Two products, one Zcash light client on Base:
 
-**Who you have to trust.** Every deposit of a vault's amount is brought onto Base by a
-zero-knowledge proof that the note is in a Zcash block whose header Base verified, as collateral or
-as a committed refund ([Tier 2](docs/TIER2.md)). Minting needs no signer, except that all five
-together can schedule a new verifier version, which takes effect only after a public delay. Signers
-must commit every payout on Base before they can sign it. Taking ZEC that backs loans — without a
-commitment or under a false one — or paying any claim to anyone but its owner is provable on Base
-with a zero-knowledge proof that reveals no Zcash transaction, note or address, and it slashes the
-signers' bonds ([Tier 3](docs/TIER3.md)); the bonds compensate the victims: liquidators and lenders
-before the borrower's own equity. New collateral is accepted only while the bonds cover its value.
-If the signers stop paying a claim for 24 hours (72 on mainnet), its claimant is paid from the
-bonds, and a payout they confirm but never send can be disputed. Three of five signers can pause new
-minting for up to 30 days at a time; withdrawals, repayments, liquidations and payouts never stop.
+- **Borrow.** Borrow USDC on Base against ZEC that stays in Zcash's shielded Ironwood pool. The ZEC
+  sits in a fresh **3-of-5 FROST threshold vault**; on a zero-knowledge proof of the deposit, a
+  **non-transferable collateral receipt (zZEC)** is minted straight into a **Morpho Blue** position of
+  a fresh, gasless smart account. Close by repaying in USDC, or **close from collateral**: a market
+  maker repays the debt and takes ZEC for it, and the rest returns to a new shielded address, so no
+  outside funds ever touch your account. A liquidation, or a pre-liquidation the borrower opted into,
+  pays in shielded ZEC too.
+- **Swap.** Swap USDC into shielded ZEC with no custodian, no signer and no wrapped ZEC. The USDC
+  waits in escrow on Base and is released by a zero-knowledge proof, made by whoever paid, that a
+  shielded payment for that very order is in the Zcash chain. Any Ironwood address can receive.
+  Selling ZEC for USDC works the same way, from the CLI ([docs/SWAP.md](docs/SWAP.md)).
+
+The shared core is a Zcash light client on Base: `ZcashHeaderRelay` verifies Zcash headers
+(Equihash) on-chain, ZIP 221 history commitments keep a proven block hidden among its epoch's, RISC
+Zero guests prove deposits, payments, payouts and violations, and `ZecuredVersions` lists the
+verifiers each proof is checked with.
+
+**Who you have to trust.** Base never takes the signers' word: deposits are proven, payouts are
+proven, misbehaviour is proven — and the same Zcash light client lets anyone swap USDC into shielded
+ZEC with no custodian.
+
+- **Deposits.** Every deposit of a vault's amount is brought onto Base by a zero-knowledge proof that
+  the note is in a Zcash block whose header Base verified, as collateral or as a refund
+  ([Tier 2](docs/TIER2.md)). Minting needs no signer, except that all five together can schedule a
+  new verifier version, which takes effect only after a public delay. New collateral is accepted
+  only while the bonds cover its value.
+- **Payouts.** Signers must commit every payout on Base before they can sign it, and a payout is
+  final on Base only once its inclusion in a Zcash block is proven in zero knowledge; the coordinator
+  proves every payout, and anyone can. A signed confirmation is a fast first step that its claimant
+  can dispute.
+- **Misbehaviour.** Taking ZEC that backs loans (without a commitment, or under a false one), or
+  paying any claim to anyone but its owner, is provable on Base with a zero-knowledge proof that
+  reveals no Zcash transaction, note or address, and it slashes the signers' bonds
+  ([Tier 3](docs/TIER3.md)); the bonds compensate the victims: liquidators and lenders before the
+  borrower's own equity.
+- **Liveness.** Once a signer has acknowledged a claim's destination, a claim left unpaid for 24
+  hours (72 on mainnet) is paid to its claimant from the bonds. Three of five signers can pause new
+  minting for up to 30 days at a time; withdrawals, repayments, liquidations and payouts never stop.
+- **Swap.** No signer and no bond take part in a trade: its USDC moves only on a payment proof,
+  checked against the relay with the same work and readiness rules as a deposit. A market maker that
+  never pays costs its taker only time.
+
 What the bonds cover and what they do not: [docs/ECONOMICS.md](docs/ECONOMICS.md).
 
 On Zcash testnet a single Equihash ASIC out-mines the whole network about 40 times over, so every
