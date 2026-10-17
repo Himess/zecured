@@ -321,6 +321,20 @@ contract V4PayRegressionsTest is V4PayBase {
         assertEq(_paidAt(claimId), 0);
     }
 
+    // ================================================================== R-4: a landed payout paid again by the bonds
+
+    /// A payout that landed but was never confirmed left its claim pending, so the bonds paid it again once overdue:
+    /// on v3 no proof could close a claim nobody disputed. Now the coordinator's routine proof pays it for good, and the
+    /// bonds refuse it.
+    function test_R4_aLandedPayoutIsProvenInsteadOfPaidTwice() public {
+        (, bytes32 claimId, SpendCommit memory c) = _partialCommitted();
+        _upholdWith(c.payoutRef, claimId); // on v3: NotDisputed
+        vm.warp(block.timestamp + LIVENESS_PERIOD + COMMIT_GRACE);
+        vm.prank(account);
+        vm.expectRevert(abi.encodeWithSelector(ISignerBond.NotLivenessEligible.selector, claimId));
+        bond.slashLiveness(claimId);
+    }
+
     // ================================================================== R-6: the Reimburse destination
 
     /// Three colluders pointed a bond-paid claim's reimbursement at themselves although all five bonds paid it.
