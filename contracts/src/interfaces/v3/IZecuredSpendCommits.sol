@@ -79,6 +79,8 @@ interface IZecuredSpendCommitsEvents is IZecuredSignerErrors {
     error ClaimNotCommitted(bytes32 claimId);
     error ClaimDestinationUnset(bytes32 claimId);
     error VaultPending(bytes32 vaultId);
+    /// @notice R-12: the input is a refunded deposit whose Refund claim is not open yet (its proof may still drop).
+    error RefundNotOpen(bytes32 inputTag);
 }
 
 interface IZecuredSpendCommits is IZecuredSpendCommitsEvents {

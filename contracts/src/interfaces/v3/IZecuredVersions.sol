@@ -1,18 +1,20 @@
 // SPDX-License-Identifier: MIT
 pragma solidity 0.8.28;
 
-/// @notice Which proofs a version verifies.
+/// @notice Which proofs a version verifies. Append-only (off-chain code reads them as numbers).
+/// - `Swap`: the payment proofs of `ZecuredSwap` (a shielded ZEC payment that releases escrowed USDC).
 enum VersionKind {
     Deposit,
     Violation,
     Swap
 }
 
-/// @notice A verifier version: a RISC Zero router selector, a guest image id and (deposits) the consensus branch ids a
-///         v2 journal may name. `versionId = keccak256(abi.encode(kind, selector, imageId))`.
-/// @param branches Deposit versions: the branch ids a v2 journal may name (zero entries unused); zero for violations.
+/// @notice A verifier version: a RISC Zero router selector, a guest image id and (deposits, swaps) the consensus branch
+///         ids a journal may name. `versionId = keccak256(abi.encode(kind, selector, imageId))`.
+/// @param branches Deposit and Swap versions: the branch ids a journal may name (zero entries unused); zero for
+///        violations.
 /// @param activeAt When the version starts verifying (zero: never scheduled).
-/// @param removed Removed by three signers; it verifies nothing any more.
+/// @param removed Removed by the signers; it verifies nothing any more.
 struct Version {
     VersionKind kind;
     bytes4 selector;
@@ -28,11 +30,21 @@ struct Version {
 ///         fix or a network upgrade would need a new deployment and a migration of every position, and an emergency
 ///         stop of the verifier by RISC Zero would end minting and slashing for good.
 /// @dev - Adding a version takes all five signers (one honest signer vetoes) and a public delay: `depositDelay` (14
-///        days on mainnet) or `violationDelay` (7 days on mainnet), `estopDelay` (1 day on mainnet) instead while every
-///        active violation version's verifier is stopped (`violationStopped`: the router refuses its selector, or its
-///        emergency-stop wrapper is paused, which only RISC Zero can do).
-///      - Removing one takes three signers and is immediate, except that the last active violation version stays:
-///        slashing always has a verifier.
+///        days on mainnet) for a deposit or swap guest, or `violationDelay` (7 days on mainnet), `estopDelay` (1 day on
+///        mainnet) instead while every active violation version's verifier is stopped (`violationStopped`: the router
+///        refuses its selector, or its emergency-stop wrapper is paused, which only RISC Zero can do).
+///      - Removing one is immediate. A version is working while it is active and its verifier is not stopped
+///        (`isWorking`). Removing a version that is not working (stopped, or not active yet) takes three signers.
+///        Removing a working one takes three signers, except:
+///        - a violation version goes only while another working violation version remains (R-22, I28): slashing and
+///          inclusion proofs always keep a working verifier;
+///        - the last working deposit version takes all five (R-23): without one, a deposit nobody proved yet could
+///          never be proven, nor its theft;
+///        - a swap version has no such rule (a swap releases USDC only to a proven payment, and slashing never
+///          depends on it).
+///        Whether a verifier is stopped is read with a fixed gas budget; a read that fails while it could not be given
+///        that budget reverts (`InsufficientGasForRouter`), so that nobody can make a working verifier look stopped, or
+///        a stopped one look working, by choosing the gas of the call.
 ///      - The initial versions are given to the constructor and are active at once.
 ///      - The registry holds no funds and touches no claim, vault or bond. Its signers are the Registry's.
 ///      - The Adapter registry of the design (T-07b, a second SettlementAdapter scheduled the same way should USDC
@@ -58,9 +70,14 @@ interface IZecuredVersions {
     error UnknownVersion(bytes32 versionId);
     error LastViolationVersion(bytes32 versionId);
     error VersionNotActive(bytes32 versionId);
+    /// @notice R-23: the last working deposit version is removed by all five signers only.
+    error LastDepositVersion(bytes32 versionId);
+    /// @notice A verifier read failed while less than its gas budget could be given to it: send the call with more gas.
+    error InsufficientGasForRouter();
 
-    /// @notice All five signers. Schedules a version, active `depositDelay` or `violationDelay` (`estopDelay` while
-    ///         `violationStopped()`) from now. A removed version may be scheduled again.
+    /// @notice All five signers. Schedules a version, active `depositDelay` (a deposit or swap guest) or
+    ///         `violationDelay` (`estopDelay` while `violationStopped()`) from now. A removed version may be scheduled
+    ///         again.
     function scheduleVersion(
         VersionKind kind,
         bytes4 selector,
@@ -71,14 +88,17 @@ interface IZecuredVersions {
         bytes[] calldata sigs
     ) external returns (bytes32 versionId);
 
-    /// @notice Three signers. Removes a version at once (also one not active yet); never the last active violation
-    ///         version.
+    /// @notice Three signers (all five for the last working deposit version). Removes a version at once (also one not
+    ///         active yet); never the last working violation version.
     function removeVersion(bytes32 versionId, uint256 nonce, uint64 deadline, bytes[] calldata sigs) external;
 
     function versionIdOf(VersionKind kind, bytes4 selector, bytes32 imageId) external pure returns (bytes32);
 
     /// @notice Scheduled, past `activeAt`, not removed.
     function isActive(bytes32 versionId) external view returns (bool);
+
+    /// @notice Active, and the router still verifies its selector's seals (R-22).
+    function isWorking(bytes32 versionId) external view returns (bool);
 
     /// @notice The version of `(kind, selector, imageId)`, which must be active (`VersionNotActive` otherwise): what
     ///         the Intake and the slasher call before they verify a seal.

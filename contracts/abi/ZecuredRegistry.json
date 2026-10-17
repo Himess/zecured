@@ -210,7 +210,7 @@
     "name": "abandonRefund",
     "inputs": [
       {
-        "name": "claimId",
+        "name": "",
         "type": "bytes32",
         "internalType": "bytes32"
       }
@@ -1033,40 +1033,6 @@
   },
   {
     "type": "function",
-    "name": "openRefund",
-    "inputs": [
-      {
-        "name": "vaultId",
-        "type": "bytes32",
-        "internalType": "bytes32"
-      },
-      {
-        "name": "account",
-        "type": "address",
-        "internalType": "address"
-      },
-      {
-        "name": "amount",
-        "type": "uint64",
-        "internalType": "uint64"
-      },
-      {
-        "name": "depositTag",
-        "type": "bytes32",
-        "internalType": "bytes32"
-      }
-    ],
-    "outputs": [
-      {
-        "name": "claimId",
-        "type": "bytes32",
-        "internalType": "bytes32"
-      }
-    ],
-    "stateMutability": "nonpayable"
-  },
-  {
-    "type": "function",
     "name": "openVaultCount",
     "inputs": [],
     "outputs": [
@@ -1280,6 +1246,34 @@
   },
   {
     "type": "function",
+    "name": "reserveRefund",
+    "inputs": [
+      {
+        "name": "vaultId",
+        "type": "bytes32",
+        "internalType": "bytes32"
+      },
+      {
+        "name": "account",
+        "type": "address",
+        "internalType": "address"
+      },
+      {
+        "name": "amount",
+        "type": "uint64",
+        "internalType": "uint64"
+      },
+      {
+        "name": "depositTag",
+        "type": "bytes32",
+        "internalType": "bytes32"
+      }
+    ],
+    "outputs": [],
+    "stateMutability": "nonpayable"
+  },
+  {
+    "type": "function",
     "name": "retireVault",
     "inputs": [
       {
@@ -1307,12 +1301,12 @@
     "name": "setRefundDestination",
     "inputs": [
       {
-        "name": "claimId",
+        "name": "",
         "type": "bytes32",
         "internalType": "bytes32"
       },
       {
-        "name": "destCommitment",
+        "name": "",
         "type": "bytes32",
         "internalType": "bytes32"
       }
@@ -1821,6 +1815,25 @@
         "name": "commitment",
         "type": "bytes32",
         "indexed": false,
+        "internalType": "bytes32"
+      }
+    ],
+    "anonymous": false
+  },
+  {
+    "type": "event",
+    "name": "RefundDormant",
+    "inputs": [
+      {
+        "name": "vaultId",
+        "type": "bytes32",
+        "indexed": true,
+        "internalType": "bytes32"
+      },
+      {
+        "name": "claimId",
+        "type": "bytes32",
+        "indexed": true,
         "internalType": "bytes32"
       }
     ],
@@ -2597,6 +2610,17 @@
     "inputs": [
       {
         "name": "claimId",
+        "type": "bytes32",
+        "internalType": "bytes32"
+      }
+    ]
+  },
+  {
+    "type": "error",
+    "name": "RefundNotOpen",
+    "inputs": [
+      {
+        "name": "inputTag",
         "type": "bytes32",
         "internalType": "bytes32"
       }

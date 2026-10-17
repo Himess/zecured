@@ -18,7 +18,7 @@
   ],
   "capPriceMaxAge": 90000,
   "challengeWindow": 259200,
-  "commitGrace": 14400,
+  "commitGrace": 21600,
   "coverageBps": 5000,
   "disputeWindow": 259200,
   "feeBps": 50,
@@ -42,6 +42,7 @@
   "pendingRefundDelay": 86400,
   "pricePrimary": "0x69e5BC4988a9AF30Ec827C5609c0D41028446ec0",
   "refundAbandonPeriod": 63072000,
+  "refundDormancy": 604800,
   "slashConfirmationWork": "179419338792700",
   "slashWorkFloor": "179419338792700",
   "tierMaxAmountZat": [

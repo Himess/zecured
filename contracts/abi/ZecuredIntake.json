@@ -293,6 +293,19 @@
   },
   {
     "type": "function",
+    "name": "dropPendingRefund",
+    "inputs": [
+      {
+        "name": "depositTag",
+        "type": "bytes32",
+        "internalType": "bytes32"
+      }
+    ],
+    "outputs": [],
+    "stateMutability": "nonpayable"
+  },
+  {
+    "type": "function",
     "name": "eip712Domain",
     "inputs": [],
     "outputs": [
@@ -372,6 +385,25 @@
       }
     ],
     "stateMutability": "view"
+  },
+  {
+    "type": "function",
+    "name": "finalizeRefund",
+    "inputs": [
+      {
+        "name": "depositTag",
+        "type": "bytes32",
+        "internalType": "bytes32"
+      }
+    ],
+    "outputs": [
+      {
+        "name": "claimId",
+        "type": "bytes32",
+        "internalType": "bytes32"
+      }
+    ],
+    "stateMutability": "nonpayable"
   },
   {
     "type": "function",
@@ -641,6 +673,72 @@
             "name": "readyTime",
             "type": "uint256",
             "internalType": "uint256"
+          },
+          {
+            "name": "versionId",
+            "type": "bytes32",
+            "internalType": "bytes32"
+          }
+        ]
+      }
+    ],
+    "stateMutability": "view"
+  },
+  {
+    "type": "function",
+    "name": "pendingRefund",
+    "inputs": [
+      {
+        "name": "depositTag",
+        "type": "bytes32",
+        "internalType": "bytes32"
+      }
+    ],
+    "outputs": [
+      {
+        "name": "",
+        "type": "tuple",
+        "internalType": "struct PendingRefund",
+        "components": [
+          {
+            "name": "vaultId",
+            "type": "bytes32",
+            "internalType": "bytes32"
+          },
+          {
+            "name": "account",
+            "type": "address",
+            "internalType": "address"
+          },
+          {
+            "name": "amount",
+            "type": "uint64",
+            "internalType": "uint64"
+          },
+          {
+            "name": "reason",
+            "type": "uint8",
+            "internalType": "enum RefundReason"
+          },
+          {
+            "name": "anchor",
+            "type": "bytes32",
+            "internalType": "bytes32"
+          },
+          {
+            "name": "readyHeight",
+            "type": "uint256",
+            "internalType": "uint256"
+          },
+          {
+            "name": "readyTime",
+            "type": "uint256",
+            "internalType": "uint256"
+          },
+          {
+            "name": "versionId",
+            "type": "bytes32",
+            "internalType": "bytes32"
           }
         ]
       }
@@ -650,6 +748,19 @@
   {
     "type": "function",
     "name": "pendingRefundDelay",
+    "inputs": [],
+    "outputs": [
+      {
+        "name": "",
+        "type": "uint64",
+        "internalType": "uint64"
+      }
+    ],
+    "stateMutability": "view"
+  },
+  {
+    "type": "function",
+    "name": "pendingRefundTotal",
     "inputs": [],
     "outputs": [
       {
@@ -950,6 +1061,62 @@
     "anonymous": false
   },
   {
+    "type": "event",
+    "name": "PendingRefundDropped",
+    "inputs": [
+      {
+        "name": "vaultId",
+        "type": "bytes32",
+        "indexed": true,
+        "internalType": "bytes32"
+      },
+      {
+        "name": "depositTag",
+        "type": "bytes32",
+        "indexed": true,
+        "internalType": "bytes32"
+      }
+    ],
+    "anonymous": false
+  },
+  {
+    "type": "event",
+    "name": "RefundPending",
+    "inputs": [
+      {
+        "name": "vaultId",
+        "type": "bytes32",
+        "indexed": true,
+        "internalType": "bytes32"
+      },
+      {
+        "name": "depositTag",
+        "type": "bytes32",
+        "indexed": true,
+        "internalType": "bytes32"
+      },
+      {
+        "name": "reason",
+        "type": "uint8",
+        "indexed": false,
+        "internalType": "uint8"
+      },
+      {
+        "name": "readyHeight",
+        "type": "uint256",
+        "indexed": false,
+        "internalType": "uint256"
+      },
+      {
+        "name": "readyTime",
+        "type": "uint256",
+        "indexed": false,
+        "internalType": "uint256"
+      }
+    ],
+    "anonymous": false
+  },
+  {
     "type": "error",
     "name": "ActivationNotReady",
     "inputs": [
@@ -1027,6 +1194,17 @@
         "name": "branchId",
         "type": "uint32",
         "internalType": "uint32"
+      }
+    ]
+  },
+  {
+    "type": "error",
+    "name": "CapExceeded",
+    "inputs": [
+      {
+        "name": "amount",
+        "type": "uint64",
+        "internalType": "uint64"
       }
     ]
   },
@@ -1145,6 +1323,17 @@
   },
   {
     "type": "error",
+    "name": "NoPendingRefund",
+    "inputs": [
+      {
+        "name": "depositTag",
+        "type": "bytes32",
+        "internalType": "bytes32"
+      }
+    ]
+  },
+  {
+    "type": "error",
     "name": "NotPendingAccount",
     "inputs": [
       {
@@ -1183,6 +1372,38 @@
         "name": "maxUntil",
         "type": "uint64",
         "internalType": "uint64"
+      }
+    ]
+  },
+  {
+    "type": "error",
+    "name": "RefundNotReady",
+    "inputs": [
+      {
+        "name": "depositTag",
+        "type": "bytes32",
+        "internalType": "bytes32"
+      },
+      {
+        "name": "readyHeight",
+        "type": "uint256",
+        "internalType": "uint256"
+      },
+      {
+        "name": "readyTime",
+        "type": "uint256",
+        "internalType": "uint256"
+      }
+    ]
+  },
+  {
+    "type": "error",
+    "name": "RefundStillValid",
+    "inputs": [
+      {
+        "name": "depositTag",
+        "type": "bytes32",
+        "internalType": "bytes32"
       }
     ]
   },
@@ -1248,6 +1469,17 @@
         "name": "recovered",
         "type": "address",
         "internalType": "address"
+      }
+    ]
+  },
+  {
+    "type": "error",
+    "name": "VersionNotActive",
+    "inputs": [
+      {
+        "name": "versionId",
+        "type": "bytes32",
+        "internalType": "bytes32"
       }
     ]
   },

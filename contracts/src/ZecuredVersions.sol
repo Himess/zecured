@@ -10,11 +10,18 @@ import {IRiscZeroVerifierRouter, IRiscZeroEmergencyStop} from "./interfaces/IRis
 
 /// @title ZecuredVersions
 /// @notice The verifier version registry (design notes T-07a; rules in `IZecuredVersions`): the Intake verifies deposit
-///         proofs, and the slasher violation proofs, only with an active version of their kind. No owner, no upgrade
-///         path: versions change only by the signers' signatures, a new one only by all five and after a public delay.
+///         proofs, the slasher violation proofs, and the swap payment proofs, only with an active version of their
+///         kind. No owner, no upgrade path: versions change only by the signers' signatures, a new one only by all five
+///         and after a public delay.
 contract ZecuredVersions is IZecuredVersions, EIP712 {
     uint256 private constant SIGNER_COUNT = 5;
     uint256 private constant REMOVE_THRESHOLD = 3;
+    /// @dev Gas a router or emergency-stop read gets: RISC Zero's router reads one mapping entry and its wrapper one
+    ///      flag, a few thousand gas each.
+    uint256 private constant ROUTER_GAS = 100_000;
+    /// @dev With at least this much gas left before a read, the read gets the whole `ROUTER_GAS` (EIP-150 keeps 1/64
+    ///      back; the margin covers the cold account access and the call's own cost).
+    uint256 private constant MIN_GAS_FOR_ROUTER = ROUTER_GAS * 64 / 63 + 5000;
     bytes32 private constant SCHEDULE_VERSION_TYPEHASH = keccak256(
         "ScheduleVersion(uint8 kind,bytes4 selector,bytes32 imageId,uint32[4] branches,uint256 nonce,uint64 deadline)"
     );
@@ -50,8 +57,8 @@ contract ZecuredVersions is IZecuredVersions, EIP712 {
     /// @param violationDelay_ Delay of a new violation version (7 days on mainnet).
     /// @param estopDelay_ Delay of a new violation version while `violationStopped()` (1 day on mainnet); at most
     ///        `violationDelay_`.
-    /// @param initial The versions active from the start (`activeAt` and `removed` ignored): at least one of each kind,
-    ///        every violation version running.
+    /// @param initial The versions active from the start (`activeAt` and `removed` ignored): at least one deposit and
+    ///        one violation version, every violation version running; swap versions are optional.
     constructor(
         address registry_,
         address router_,
@@ -87,7 +94,7 @@ contract ZecuredVersions is IZecuredVersions, EIP712 {
             if (v.kind == VersionKind.Violation) {
                 if (_stopped(router_, v.selector)) revert InvalidConfig();
                 violation = true;
-            } else {
+            } else if (v.kind == VersionKind.Deposit) {
                 deposit = true;
             }
             // A uint64 of seconds outlasts the chain.
@@ -119,7 +126,7 @@ contract ZecuredVersions is IZecuredVersions, EIP712 {
         Version storage existing = _versions[versionId];
         bool known = existing.activeAt != 0;
         if (known && !existing.removed) revert VersionExists(versionId);
-        uint64 delay = kind == VersionKind.Deposit ? depositDelay : (violationStopped() ? estopDelay : violationDelay);
+        uint64 delay = kind != VersionKind.Violation ? depositDelay : (violationStopped() ? estopDelay : violationDelay);
         // forge-lint: disable-next-line(unsafe-typecast)
         uint64 activeAt = uint64(block.timestamp) + delay;
         _store(versionId, kind, selector, imageId, branches, activeAt, !known);
@@ -133,10 +140,21 @@ contract ZecuredVersions is IZecuredVersions, EIP712 {
         nonce = nonce_ + 1;
         Version storage v = _versions[versionId];
         if (v.activeAt == 0 || v.removed) revert UnknownVersion(versionId);
+        // Only a working version's removal can leave its kind without a verifier: one only scheduled, or one the
+        // router stopped, goes freely (R-22).
+        bool working = _working(v);
         v.removed = true;
-        // I28: slashing always has a verifier (a version only scheduled does not count yet).
-        if (v.kind == VersionKind.Violation && !_anyActive(VersionKind.Violation)) {
-            revert LastViolationVersion(versionId);
+        if (working) {
+            VersionKind kind = v.kind;
+            if (kind == VersionKind.Violation) {
+                // R-22, I28: slashing and inclusion proofs always keep a working verifier.
+                if (!_anyWorking(VersionKind.Violation)) revert LastViolationVersion(versionId);
+            } else if (kind == VersionKind.Deposit) {
+                // R-23: without a working deposit version no deposit can be proven, nor the theft of an unproven one.
+                if (sigs.length < SIGNER_COUNT && !_anyWorking(VersionKind.Deposit)) {
+                    revert LastDepositVersion(versionId);
+                }
+            }
         }
         emit VersionRemoved(versionId);
     }
@@ -151,6 +169,11 @@ contract ZecuredVersions is IZecuredVersions, EIP712 {
     /// @inheritdoc IZecuredVersions
     function isActive(bytes32 versionId) external view returns (bool) {
         return _isActive(_versions[versionId]);
+    }
+
+    /// @inheritdoc IZecuredVersions
+    function isWorking(bytes32 versionId) external view returns (bool) {
+        return _working(_versions[versionId]);
     }
 
     /// @inheritdoc IZecuredVersions
@@ -242,7 +265,8 @@ contract ZecuredVersions is IZecuredVersions, EIP712 {
         if (isNew) _ids[kind].push(id);
     }
 
-    /// @dev A selector and an image id; a violation version names no branch (its journal has none).
+    /// @dev A selector and an image id; a violation version names no branch (its journal has none). Deposit and swap
+    ///      journals name the epoch's branch id, which must be one of their version's.
     function _checkShape(VersionKind kind, bytes4 selector, bytes32 imageId, uint32[4] memory branches) internal pure {
         if (selector == bytes4(0) || imageId == bytes32(0)) revert InvalidVersion();
         if (kind == VersionKind.Violation && (branches[0] | branches[1] | branches[2] | branches[3]) != 0) {
@@ -254,26 +278,42 @@ contract ZecuredVersions is IZecuredVersions, EIP712 {
         return v.activeAt != 0 && v.activeAt <= block.timestamp && !v.removed;
     }
 
-    function _anyActive(VersionKind kind) internal view returns (bool) {
+    /// @dev Active, and its verifier not stopped.
+    function _working(Version storage v) internal view returns (bool) {
+        return _isActive(v) && !_stopped(router, v.selector);
+    }
+
+    /// @dev Some version of `kind` is working (one being removed is already marked removed).
+    function _anyWorking(VersionKind kind) internal view returns (bool) {
         bytes32[] storage ids = _ids[kind];
         for (uint256 i; i < ids.length; ++i) {
-            if (_isActive(_versions[ids[i]])) return true;
+            if (_working(_versions[ids[i]])) return true;
         }
         return false;
     }
 
-    /// @dev The router no longer verifies `selector`'s seals: it refuses the selector (unknown or removed), or the
-    ///      emergency-stop wrapper it dispatches to is paused. Anything else counts as running.
+    /// @dev The router no longer verifies `selector`'s seals: it refuses the selector (unknown or removed, or an answer
+    ///      that is not an address), or the emergency-stop wrapper it dispatches to is paused (any non-zero answer).
+    ///      A wrapper without `paused()` counts as running. Each read gets `ROUTER_GAS` (`_read`).
     function _stopped(address router_, bytes4 selector) internal view returns (bool) {
-        try IRiscZeroVerifierRouter(router_).getVerifier(selector) returns (address wrapper) {
-            try IRiscZeroEmergencyStop(wrapper).paused() returns (bool paused) {
-                return paused;
-            } catch {
-                return false;
-            }
-        } catch {
-            return true;
+        (bool ok, uint256 word) = _read(router_, abi.encodeCall(IRiscZeroVerifierRouter.getVerifier, (selector)));
+        if (!ok || word >> 160 != 0) return true;
+        // forge-lint: disable-next-line(unsafe-typecast)
+        (ok, word) = _read(address(uint160(word)), abi.encodeCall(IRiscZeroEmergencyStop.paused, ())); // checked above
+        return ok && word != 0;
+    }
+
+    /// @dev A static call of `target` with `ROUTER_GAS` that returns at least one word, and that word. Reverts
+    ///      `InsufficientGasForRouter` if the call fails while it could not be given `ROUTER_GAS`. At most one word of
+    ///      return data is copied.
+    function _read(address target, bytes memory data) internal view returns (bool ok, uint256 word) {
+        bool enoughGas = gasleft() >= MIN_GAS_FOR_ROUTER;
+        assembly ("memory-safe") {
+            ok := staticcall(ROUTER_GAS, target, add(data, 0x20), mload(data), 0, 0x20)
+            if lt(returndatasize(), 0x20) { ok := 0 }
+            word := mload(0)
         }
+        if (!ok && !enoughGas) revert InsufficientGasForRouter();
     }
 
     function _checkMessage(uint256 nonce_, uint64 deadline) internal view {

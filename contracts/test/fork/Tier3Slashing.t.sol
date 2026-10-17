@@ -203,6 +203,7 @@ contract Tier3SlashingTest is ZecuredFixture {
         uint256 supply = zzec.totalSupply();
         _mockProof(_vaultIdFor(late), late, VAULT_001, _depositTagFor(late), keccak256("zecured.tier3.lateAnchor"));
         assertEq(zzec.totalSupply(), supply, "nothing minted after the slash");
+        _finalizeRefund(_depositTagFor(late)); // R-12: it waits for the relay, then opens
         assertEq(uint8(_status(_vaultIdFor(late))), uint8(VaultStatus.Cancelled));
         vm.prank(watcher);
         bond.claimBounty();

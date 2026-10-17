@@ -21,8 +21,10 @@ import {
     ClaimStatus,
     ClaimDetails
 } from "../../src/interfaces/v3/IZecuredRegistry.sol";
-import {IZecuredIntake, PendingActivation} from "../../src/interfaces/v3/IZecuredIntake.sol";
+import {IZecuredIntake, PendingActivation, PendingRefund} from "../../src/interfaces/v3/IZecuredIntake.sol";
 import {IZecuredDisputes} from "../../src/interfaces/v3/IZecuredDisputes.sol";
+import {IZecuredRefunds} from "../../src/interfaces/v3/IZecuredRefunds.sol";
+import {IZecuredSpendCommitsEvents} from "../../src/interfaces/v3/IZecuredSpendCommits.sol";
 import {CloseRequest, SpendCommit, DeleverageRequest} from "../../src/libraries/ZecuredEIP712.sol";
 import {PreLiquidationTerms} from "../../src/interfaces/ISettlementAdapter.sol";
 import {MockHeaderRelay} from "../mocks/MockHeaderRelay.sol";
@@ -95,6 +97,8 @@ contract ZecuredHandler is Test {
     uint8 public constant TAG_ACTIVATED = 2;
     uint8 public constant TAG_REFUND = 3;
     uint8 public constant TAG_DROPPED = 4;
+    /// R-12: a refund whose proof waits for the relay; its claim is not open yet.
+    uint8 public constant TAG_REFUND_PENDING = 5;
 
     /// Every vault a deposit landed on (reserved, activated or refunded).
     bytes32[] public vaultIds;
@@ -116,6 +120,12 @@ contract ZecuredHandler is Test {
     mapping(bytes32 tag => uint8) public tagState;
     mapping(bytes32 tag => bytes32) public tagVault;
     bytes32[] public pendingIds;
+    /// R-12: the tags of the pending refunds.
+    bytes32[] public pendingRefundTags;
+    /// R-12: the sum of a vault's pending refunds.
+    mapping(bytes32 vaultId => uint64) public pendingRefundOf;
+    /// R-11: Refund claims marked dormant and still so.
+    mapping(bytes32 claimId => bool) public dormant;
     Deposit[] internal dropped;
     uint256 internal vaultNonce;
     uint256 internal tagNonce;
@@ -164,6 +174,10 @@ contract ZecuredHandler is Test {
 
     function pendingCount() external view returns (uint256) {
         return pendingIds.length;
+    }
+
+    function pendingRefundCount() external view returns (uint256) {
+        return pendingRefundTags.length;
     }
 
     function liveNotesOf(bytes32 vaultId) external view returns (bytes32[] memory) {
@@ -252,6 +266,11 @@ contract ZecuredHandler is Test {
         pendingIds.pop();
     }
 
+    function _removePendingRefund(uint256 i) internal {
+        pendingRefundTags[i] = pendingRefundTags[pendingRefundTags.length - 1];
+        pendingRefundTags.pop();
+    }
+
     function _removeNote(bytes32 vaultId, bytes32 tag) internal {
         bytes32[] storage n = liveNotes[vaultId];
         for (uint256 i; i < n.length; ++i) {
@@ -279,8 +298,16 @@ contract ZecuredHandler is Test {
         // Mostly new vaults with a fresh cap price: second deposits and stale prices are the exception. Decisions use
         // a hash of the seed: the fuzzer favours values like 0, which would make every exception frequent.
         seed = _mix(seed);
-        second = second && seed % 3 == 0;
-        keepPrice = keepPrice && seed % 4 == 0;
+        _prove(seed, second && seed % 3 == 0, keepPrice && seed % 4 == 0);
+    }
+
+    /// R-12: another note to a vault Base knows, which lands as a pending refund (the refund lifecycle's traffic).
+    function proveSecond(uint256 seed) external {
+        if (vaultIds.length == 0) return;
+        _prove(_mix(seed), true, false);
+    }
+
+    function _prove(uint256 seed, bool second, bool keepPrice) internal {
         (Deposit memory d, bool fromDropped) = _nextDeposit(seed, second);
         if (!keepPrice) capPrice.set(oracle.price());
         bool stale = block.timestamp > capPrice.updatedAt() + intake.capPriceMaxAge();
@@ -288,8 +315,10 @@ contract ZecuredHandler is Test {
         string memory expected = _expectedLanding(d, capHeld);
         uint256 supply = zzec.totalSupply();
         (bytes memory journal, bytes memory seal, bytes[] memory sigs) = _proof(d);
+        bool capWait = keccak256(bytes(expected)) == keccak256("prove: cap full (waits)");
         try intake.attestDepositWithProof(journal, seal, imageId, sigs) {
             if (zzec.totalSupply() != supply) _flag("a deposit proof minted");
+            if (capWait) _flag("R-11: a new vault's proof landed past the coverage cap");
             _recordLanding(d, capHeld, expected);
         } catch (bytes memory reason) {
             bytes4 selector = bytes4(reason);
@@ -297,6 +326,8 @@ contract ZecuredHandler is Test {
                 calls["prove (stale cap price)"]++;
             } else if (selector == IZecuredRegistry.VaultCompromised.selector && gates.isCompromised(d.vaultId)) {
                 calls["prove (compromised vault)"]++;
+            } else if (capWait && selector == IZecuredIntake.CapExceeded.selector) {
+                calls[expected]++; // R-11: the vault stays new, the proof is sent again later
             } else {
                 _flag("a deposit proof reverted");
             }
@@ -351,7 +382,7 @@ contract ZecuredHandler is Test {
     /// T-01, computed independently: locked and pending zatoshi with `amount` within the absolute cap and, valued at
     /// the cap price (rounded up), within `coverageBps` of the effective bond.
     function _capHolds(uint64 amount) internal view returns (bool) {
-        uint256 locked = registry.lockedZatoshi() + intake.pendingTotal() + amount;
+        uint256 locked = registry.lockedZatoshi() + intake.pendingTotal() + intake.pendingRefundTotal() + amount;
         if (locked > intake.maxTotalZat()) return false;
         uint256 value = Math.mulDiv(locked, capPrice.price(), ORACLE_PRICE_SCALE, Math.Rounding.Ceil);
         return value * 10_000 <= gates.effectiveBond() * intake.coverageBps();
@@ -363,7 +394,7 @@ contract ZecuredHandler is Test {
         if (_status(d.vaultId) != VaultStatus.None) return "prove: refund (known vault)";
         if (registry.vaultOf(accounts[d.accountIndex]) != bytes32(0)) return "prove: refund (account bound)";
         if (gates.halted()) return "prove: refund (halted)";
-        if (!capHeld) return "prove: refund (cap)";
+        if (!capHeld) return "prove: cap full (waits)";
         return "prove: pending";
     }
 
@@ -385,9 +416,11 @@ contract ZecuredHandler is Test {
             pendingIds.push(d.vaultId);
         } else {
             if (expectPending) _flag("T-02: a deposit that should have been reserved was refunded");
-            _markTag(d.tag, d.vaultId, TAG_REFUND);
-            refunded[d.vaultId] += d.amount;
-            refundNoteOf[registry.claimIdOf(d.vaultId, registry.claimCount(d.vaultId) - 1)] = d.tag;
+            // R-12: a refund waits for the relay like an activation; no claim opens in the proof's transaction.
+            if (intake.pendingRefund(d.tag).vaultId != d.vaultId) _flag("R-12: a refund landed without pending");
+            _markTag(d.tag, d.vaultId, TAG_REFUND_PENDING);
+            pendingRefundTags.push(d.tag);
+            pendingRefundOf[d.vaultId] += d.amount;
         }
     }
 
@@ -401,8 +434,8 @@ contract ZecuredHandler is Test {
         if (block.timestamp < p.readyTime) vm.warp(p.readyTime);
         // Half the time the finalizer waits a pause out.
         if (seed % 2 == 0 && block.timestamp < intake.pausedUntil()) vm.warp(intake.pausedUntil());
-        bool closed =
-            gates.halted() || !gates.fullyBonded() || intake.mintingPaused() || gates.openCasesOf(vaultId) != 0;
+        bool closed = gates.halted() || !gates.fullyBonded() || intake.mintingPaused()
+            || gates.openCasesOf(vaultId) != 0 || !relay.isInBestChain(p.anchor);
         uint256 supply = zzec.totalSupply();
         try intake.finalizeActivation(vaultId) {
             if (closed) _flag("I23: minted through a closed gate");
@@ -426,7 +459,9 @@ contract ZecuredHandler is Test {
         bytes32 vaultId = pendingIds[i];
         PendingActivation memory p = intake.pendingActivation(vaultId);
         relay.setBlock(p.anchor, false, 0);
+        bool caseOpen = gates.openCasesOf(vaultId) != 0;
         try intake.dropPendingActivation(vaultId) {
+            if (caseOpen) _flag("R-17: a pending activation dropped while a case was open");
             _removePending(i);
             _removeNote(vaultId, p.depositTag);
             _markTag(p.depositTag, vaultId, TAG_DROPPED);
@@ -435,7 +470,8 @@ contract ZecuredHandler is Test {
             );
             calls["drop"]++;
         } catch {
-            _flag("a reservation off the best chain was not dropped");
+            if (!caseOpen) _flag("a reservation off the best chain was not dropped");
+            calls["drop (case open)"]++;
         }
     }
 
@@ -446,10 +482,18 @@ contract ZecuredHandler is Test {
         uint256 i = seed % pendingIds.length;
         bytes32 vaultId = pendingIds[i];
         PendingActivation memory p = intake.pendingActivation(vaultId);
-        bool allowed = gates.halted()
-            || (byAccount
-                && block.timestamp < intake.pausedUntil()
-                && block.timestamp >= uint256(intake.pausedSince()) + intake.pendingRefundDelay());
+        // Mostly ready (K3): the relay moved on and the delay passed; half of those wait out the account's delay too.
+        if (seed % 4 != 0) {
+            if (relay.tipHeight() < p.readyHeight) relay.setTipHeight(p.readyHeight);
+            if (block.timestamp < p.readyTime) vm.warp(p.readyTime);
+            if (seed % 2 == 0 && block.timestamp < p.readyTime + intake.pendingRefundDelay()) {
+                vm.warp(p.readyTime + intake.pendingRefundDelay());
+            }
+        }
+        bool ready =
+            relay.tipHeight() >= p.readyHeight && block.timestamp >= p.readyTime && relay.isInBestChain(p.anchor);
+        bool allowed =
+            ready && (gates.halted() || (byAccount && block.timestamp >= p.readyTime + intake.pendingRefundDelay()));
         vm.prank(byAccount ? p.account : stranger);
         try intake.refundPending(vaultId) returns (bytes32 claimId) {
             if (!allowed) _flag("a pending activation refunded without a halt or a long pause");
@@ -514,21 +558,24 @@ contract ZecuredHandler is Test {
 
     // ------------------------------------------------------------------ refunds (T-02)
 
-    /// A Refund claim without a destination (pending or abandoned) and not bound to a payout, of a vault picked by
-    /// `seed`.
+    /// A Refund claim without a destination (pending or abandoned) and not bound to a payout: the first of the vaults
+    /// from the one `seed` picks on.
     function _refundWithoutDestination(uint256 seed) internal view returns (bool, bytes32 vaultId, bytes32 claimId) {
-        if (vaultIds.length == 0) return (false, bytes32(0), bytes32(0));
-        vaultId = vaultIds[seed % vaultIds.length];
-        uint64 count = registry.claimCount(vaultId);
-        for (uint64 j; j < count; ++j) {
-            claimId = registry.claimIdOf(vaultId, j);
-            ClaimDetails memory c = registry.claimDetails(claimId);
-            if (
-                c.kind == ClaimKind.Refund && c.commitment == bytes32(0) && registry.claimInput(claimId) == bytes32(0)
-                    && (c.status == ClaimStatus.Pending || c.status == ClaimStatus.WrittenOff)
-            ) return (true, vaultId, claimId);
+        uint256 n = vaultIds.length;
+        for (uint256 k; k < n; ++k) {
+            vaultId = vaultIds[(seed % n + k) % n];
+            uint64 count = registry.claimCount(vaultId);
+            for (uint64 j; j < count; ++j) {
+                claimId = registry.claimIdOf(vaultId, j);
+                ClaimDetails memory c = registry.claimDetails(claimId);
+                if (
+                    c.kind == ClaimKind.Refund && c.commitment == bytes32(0)
+                        && registry.claimInput(claimId) == bytes32(0)
+                        && (c.status == ClaimStatus.Pending || c.status == ClaimStatus.WrittenOff)
+                ) return (true, vaultId, claimId);
+            }
         }
-        return (false, vaultId, bytes32(0));
+        return (false, bytes32(0), bytes32(0));
     }
 
     /// The vault's account names where its refund goes (reviving it if it was abandoned).
@@ -540,6 +587,7 @@ contract ZecuredHandler is Test {
         if (status == ClaimStatus.WrittenOff && gates.isCompromised(vaultId)) return;
         vm.prank(accountOf(vaultId));
         registry.setRefundDestination(claimId, keccak256(abi.encode("zecured.inv.refundDest", claimId)));
+        dormant[claimId] = false;
         calls["refund destination"]++;
     }
 
@@ -553,7 +601,106 @@ contract ZecuredHandler is Test {
         if (block.timestamp < at) vm.warp(at);
         vm.prank(stranger);
         registry.abandonRefund(claimId);
+        dormant[claimId] = false;
         calls["abandon"]++;
+    }
+
+    /// R-11: a refund nobody gave a destination leaves `lockedZatoshi` after `refundDormancy`, by anyone.
+    function markDormant(uint256 seed) external {
+        (bool found,, bytes32 claimId) = _refundWithoutDestination(seed);
+        if (!found) return;
+        ClaimDetails memory c = registry.claimDetails(claimId);
+        IZecuredRefunds refunds = IZecuredRefunds(address(registry));
+        if (c.status != ClaimStatus.Pending || c.bondPaid || refunds.isRefundDormant(claimId)) return;
+        uint256 at = uint256(c.createdAt) + refunds.refundDormancy();
+        if (block.timestamp < at) vm.warp(at);
+        uint256 locked = registry.lockedZatoshi();
+        vm.prank(stranger);
+        try refunds.markRefundDormant(claimId) {
+            dormant[claimId] = true;
+            if (registry.lockedZatoshi() != locked - c.amount) _flag("R-11: a dormant refund still counts");
+            calls["mark dormant"]++;
+        } catch {
+            _flag("R-11: a refund without a destination could not be marked dormant");
+        }
+    }
+
+    // ------------------------------------------------------------------ pending refunds (R-8, R-12)
+
+    /// R-12: the relay moves on, the delay passes, and anyone opens the refund's claim; it waits while the vault's
+    /// activation pends (R-8), and never opens on a compromised vault.
+    function finalizeRefund(uint256 seed) external {
+        if (pendingRefundTags.length == 0) return;
+        uint256 i = seed % pendingRefundTags.length;
+        bytes32 tag = pendingRefundTags[i];
+        PendingRefund memory p = intake.pendingRefund(tag);
+        if (relay.tipHeight() < p.readyHeight) relay.setTipHeight(p.readyHeight);
+        if (block.timestamp < p.readyTime) vm.warp(p.readyTime);
+        bool vaultPending = _status(p.vaultId) == VaultStatus.Pending;
+        bool compromised = gates.isCompromised(p.vaultId);
+        bool anchorGone = !relay.isInBestChain(p.anchor); // a drop R-17 refused
+        try intake.finalizeRefund(tag) returns (bytes32 claimId) {
+            if (anchorGone) _flag("R-12: a refund opened off the best chain");
+            if (vaultPending) _flag("R-8: a refund opened on a pending vault");
+            if (compromised) _flag("a refund opened on a compromised vault");
+            _removePendingRefund(i);
+            pendingRefundOf[p.vaultId] -= p.amount;
+            _markTag(tag, p.vaultId, TAG_REFUND);
+            refunded[p.vaultId] += p.amount;
+            refundNoteOf[claimId] = tag;
+            calls["finalize refund"]++;
+        } catch (bytes memory reason) {
+            bytes4 selector = bytes4(reason);
+            if (anchorGone && selector == IZecuredIntake.AnchorNotConfirmed.selector) {
+                calls["finalize refund (anchor gone)"]++;
+            } else if (vaultPending && selector == IZecuredSpendCommitsEvents.VaultPending.selector) {
+                calls["finalize refund (vault pending)"]++;
+            } else if (compromised && selector == IZecuredRegistry.VaultCompromised.selector) {
+                calls["finalize refund (compromised)"]++;
+            } else {
+                _flag("a ready refund could not be opened");
+            }
+        }
+    }
+
+    /// R-12: a reorganisation takes a pending refund's anchor off the best chain; anyone drops it (not while a case is
+    /// open on the vault, R-17), and the note may be proven again.
+    function dropRefund(uint256 seed) external {
+        if (pendingRefundTags.length == 0) return;
+        uint256 i = seed % pendingRefundTags.length;
+        bytes32 tag = pendingRefundTags[i];
+        PendingRefund memory p = intake.pendingRefund(tag);
+        relay.setBlock(p.anchor, false, 0);
+        bool caseOpen = gates.openCasesOf(p.vaultId) != 0;
+        try intake.dropPendingRefund(tag) {
+            if (caseOpen) _flag("R-17: a pending refund dropped while a case was open");
+            _removePendingRefund(i);
+            pendingRefundOf[p.vaultId] -= p.amount;
+            _removeNote(p.vaultId, tag);
+            _markTag(tag, p.vaultId, TAG_DROPPED);
+            dropped.push(
+                Deposit({vaultId: p.vaultId, accountIndex: accountIndexOf[p.vaultId], amount: p.amount, tag: tag})
+            );
+            calls["drop refund"]++;
+        } catch {
+            if (!caseOpen) _flag("a pending refund off the best chain was not dropped");
+            calls["drop refund (case open)"]++;
+        }
+    }
+
+    /// R-12: no payout spends a pending refund's note, even with valid signatures. Must always fail.
+    function attackSpendPendingRefund(uint256 seed) external {
+        if (pendingRefundTags.length == 0) return;
+        bytes32 tag = pendingRefundTags[seed % pendingRefundTags.length];
+        bytes32 vaultId = tagVault[tag];
+        (bool found, bytes32 claimId) = _payableClaim(vaultId, false);
+        if (!found) return;
+        (bool possible, SpendCommit memory c) = _reuseCommit(vaultId, tag, claimId);
+        if (!possible) return;
+        try registry.commitSpend(c, _threeSigs(registry.hashSpendCommit(c), seed)) {
+            attackSucceeded = true;
+        } catch {}
+        calls["attack: spend pending refund"]++;
     }
 
     /// RT-8: a closed vault's claim too small for any payout's fee is written off, by anyone.
@@ -938,12 +1085,17 @@ contract ZecuredHandler is Test {
     function _noteFor(bytes32 vaultId, uint64 amount, bytes32 preferred) internal view returns (bool, uint256) {
         bytes32[] storage n = liveNotes[vaultId];
         for (uint256 i; i < n.length; ++i) {
-            if (n[i] == preferred && registry.lineageOf(n[i]).value >= amount) return (true, i);
+            if (n[i] == preferred && registry.lineageOf(n[i]).value >= amount && _spendable(n[i])) return (true, i);
         }
         for (uint256 i; i < n.length; ++i) {
-            if (registry.lineageOf(n[i]).value >= amount) return (true, i);
+            if (registry.lineageOf(n[i]).value >= amount && _spendable(n[i])) return (true, i);
         }
         return (false, 0);
+    }
+
+    /// R-12: a pending refund's note is spent by no payout until its claim opens.
+    function _spendable(bytes32 tag) internal view returns (bool) {
+        return tagState[tag] != TAG_REFUND_PENDING;
     }
 
     /// Tier 3: the signers commit the payout of `ids` from a lineage note of the vault before they sign it; the rest

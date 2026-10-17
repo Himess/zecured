@@ -5,6 +5,8 @@ import {ERC20} from "@openzeppelin/contracts/token/ERC20/ERC20.sol";
 import {IERC20} from "@openzeppelin/contracts/token/ERC20/IERC20.sol";
 import {ClaimDetails, ClaimStatus} from "../../src/interfaces/v3/IZecuredRegistry.sol";
 import {ISignerBond} from "../../src/interfaces/v3/ISignerBond.sol";
+import {Entitlement} from "../../src/interfaces/v3/IZecuredCompensator.sol";
+import {IZecuredPriceFeed} from "../../src/interfaces/v3/IZecuredPriceFeed.sol";
 
 /// @notice MOCK (tests only): when armed, calls `target` with `data` from inside a hook and records the outcome, so that
 ///         a test can show that the bond refuses to be re-entered from that point.
@@ -32,8 +34,9 @@ abstract contract MockReentryProbe {
 }
 
 /// @notice MOCK (tests only): what SignerBondV2 reads and calls on ZecuredRegistry v3 (`signers`, `claimDetails`,
-///         `markBondPaid`) and on its IZecuredSpendCommits part (`openVaultCount`, `lastVaultSettledAt`, `claimInput`,
-///         `lastCommitAt`). The test sets every value. `markBondPaid` does what the real hook does (the bond only, a
+///         `markBondPaid`), on its IZecuredSpendCommits part (`openVaultCount`, `lastVaultSettledAt`, `claimInput`,
+///         `lastCommitAt`) and on its dispute path (`disputeWindow`, `inclusionWindow`, read by the constructor, R-18).
+///         The test sets every value. `markBondPaid` does what the real hook does (the bond only, a
 ///         pending claim not yet paid from the bonds: `bondPaid = true`, commitment zero), and records the bond's state
 ///         at that moment.
 contract MockBondRegistry is MockReentryProbe {
@@ -42,6 +45,8 @@ contract MockBondRegistry is MockReentryProbe {
 
     uint256 public openVaultCount;
     uint64 public lastVaultSettledAt;
+    uint64 public disputeWindow = 1 days;
+    uint64 public inclusionWindow = 6 hours;
     mapping(bytes32 claimId => bytes32) public claimInput;
     mapping(bytes32 inputTag => uint40) public lastCommitAt;
 
@@ -64,6 +69,11 @@ contract MockBondRegistry is MockReentryProbe {
 
     function setSigners(address[5] memory signers_) external {
         _signers = signers_;
+    }
+
+    function setDisputeWindows(uint64 dispute, uint64 inclusion) external {
+        disputeWindow = dispute;
+        inclusionWindow = inclusion;
     }
 
     function setOpenVaultCount(uint256 count) external {
@@ -137,10 +147,11 @@ contract MockBondIntake {
 }
 
 /// @notice MOCK (tests only): records what the bond hands over (`onFunds`), with its own USDC balance and the bond's
-///         state at that moment.
+///         state at that moment; answers `entitlement` with what the test set (R-7).
 contract MockBondCompensator is MockReentryProbe {
     IERC20 public immutable usdc;
     address public signerBond;
+    mapping(bytes32 claimId => Entitlement) internal _entitlements;
     uint256 public onFundsCalls;
     bytes32 public lastCaseId;
     uint256 public lastAmount;
@@ -156,6 +167,14 @@ contract MockBondCompensator is MockReentryProbe {
         signerBond = bond;
     }
 
+    function setEntitlement(bytes32 claimId, Entitlement memory e) external {
+        _entitlements[claimId] = e;
+    }
+
+    function entitlement(bytes32 claimId) external view returns (Entitlement memory) {
+        return _entitlements[claimId];
+    }
+
     function onFunds(bytes32 caseId, uint256 amount) external {
         require(msg.sender == signerBond, "MOCK compensator: only the bond");
         onFundsCalls += 1;
@@ -169,15 +188,30 @@ contract MockBondCompensator is MockReentryProbe {
 }
 
 /// @notice MOCK (tests only): an oracle whose Morpho-scaled price the test sets, zero included (`MockZecOracle` refuses
-///         zero).
+///         zero), and that reports a feed state like `ZecuredPriceFeed` (R-9; `BothFresh` unless the test says
+///         otherwise).
 contract MockBondOracle {
     uint256 public price;
+    IZecuredPriceFeed.FeedState public state;
 
     constructor(uint256 price_) {
         price = price_;
     }
 
     function setPrice(uint256 price_) external {
+        price = price_;
+    }
+
+    function setState(IZecuredPriceFeed.FeedState state_) external {
+        state = state_;
+    }
+}
+
+/// @notice MOCK (tests only): an oracle with a price and no feed state (the testnets' demo oracles).
+contract MockBondPlainOracle {
+    uint256 public price;
+
+    constructor(uint256 price_) {
         price = price_;
     }
 }
