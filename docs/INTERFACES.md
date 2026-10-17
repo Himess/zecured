@@ -277,7 +277,9 @@ event MintingUnpaused(uint8 signerBitmap, uint256 nonce);
   Registry then opens the Refund claim (`RefundOpened`) and the Intake emits `DepositRefunded`.
   `dropPendingRefund` (anyone) once the anchor left the best chain or the version is no longer
   active, never while a case is open. A pending refund's note is a lineage note that no payout may
-  spend (`RefundNotOpen`).
+  spend (`RefundNotOpen`). A refund reserved before its vault was compromised still opens on it, for the
+  compensator only (V-4, D80): the signers cannot pay it, and the vault's tally waits while
+  `reservedRefundCount` is not zero; a proof landing after the compromise is refused.
 - `pauseMinting`: three signers, `now < until <= now + maxPause` (30 days), renewable;
   `autoPauseOnCase` also pauses while an F1/F2 case is open. Withdrawals, repayments, liquidations
   and payouts never stop (I22).
@@ -313,6 +315,7 @@ function writeOffDust(bytes32 claimId) external;                                
 function setRefundDestination(bytes32 claimId, bytes32 destCommitment) external;           // the vault's account
 function abandonRefund(bytes32 claimId) external;                                          // anyone, after refundAbandonPeriod
 function markRefundDormant(bytes32 claimId) external;                                      // v4: anyone, after refundDormancy
+function reservedRefundCount(bytes32 vaultId) external view returns (uint256);             // v4: the vault's reserved refunds
 function isRefundDormant(bytes32 claimId) external view returns (bool);                    // v4
 function setReimburseDestination(bytes32 claimId, bytes32 commitment, uint64 deadline, bytes[] calldata sigs) external;  // 3 of 5
 // hooks
@@ -550,7 +553,8 @@ function sweepLeftover() external returns (uint256 amount);                  // 
   retries; equity is still that of the outstanding at the compromise, R-19); `tallyClaim` waits
   `compromisedAt + inclusionWindow` for a committed claim (`ProofWindowOpen`, R-2) and takes an
   abandoned refund until the incident is finalized (R-21); `tallyVault` waits for the vault's open
-  confirmations (`ConfirmationsUnsettled`, R-3).
+  confirmations (`ConfirmationsUnsettled`, R-3) and for its reserved refunds to open or fall
+  (`RefundsReserved`, V-4).
 
 ### 3.6 `ZecuredVersions` (T-07a)
 
@@ -743,3 +747,8 @@ beta) quotes need the header `X-Zecured-Invite`; the maker stores only the codes
 | `POST /swap/orders/:orderId/destination` | body `{ receiver, salt }` (a unified address or 43 raw bytes, and 32 bytes); 202 `{ orderId, status: "destination_received" }`, idempotent; errors `unknown_order`, `not_buy`, `not_awaiting`, `too_late`, `bad_destination` (a receiver that does not match the order's commitment) |
 | `GET /swap/orders/:orderId` | `{ orderId, side, status, zatoshi, usdc, payDeadline, note }`, status `awaiting_destination`, `destination_received`, `paid`, `proven`, `taker_pays`, `abandoned`, `settled` or `refunded` |
 | `GET /swap/status` | what the maker quotes now: `{ maker, swap, chainId, sides, payWindow, minOrderZat, maxOrderZat, maxOrderUsdc, spreadBps, inviteOnly, openOrders, maxOpenOrders }` |
+
+Operators only: with `status_bind` set (a loopback address other than `bind`, never added to the backend's
+proxy), the maker serves `GET /inventory` → `{ "zecFreeZat", "usdcFree" }` (decimal strings: the last scan's
+spendable ZEC less what open Buy orders reserved, and the USDC it can lock, capped at its allowance to
+`ZecuredSwap`), for the watchdog.

@@ -159,4 +159,21 @@ Besides the v3 checks: Base mainnet ETH and USDC (`MAINNET_RPC_URL`, `WATCH_ETH_
 demo wallet's TAZ (`WATCH_DEMO_TAZ=1`, `DEMO_STATUS_URL`, from the backend's demo status); balances
 only a service reports (`WATCH_JSON=name|url|field|floor`, for the market maker's inventory); and the
 coverage cap's fill (`REGISTRY`, `INTAKE`, `CAP_FILL_ALARM`, an alarm at 70 % by default, R-11). No
-alarm names an address, a key or a URL.
+alarm names an address, a key or a URL. The swap maker's inventory comes from its operators-only endpoint
+(`"status_bind": "127.0.0.1:8096"` in `maker.json`, a loopback address other than `bind`, never added to
+the backend's proxy):
+`WATCH_JSON=swap_maker_zec|http://127.0.0.1:8096/inventory|zecFreeZat|50000000,swap_maker_usdc|http://127.0.0.1:8096/inventory|usdcFree|100000000`
+(floors of 0.5 ZEC and 100 USDC; adjust them).
+
+## 11. The coordinator's keepers (v4)
+
+On every vault pass, before its scan, the coordinator: finalizes the refunds that are ready and drops
+the stale ones (R-12), also for a compromised vault, whose tally waits for them (V-4); expires
+confirmations whose dispute window has ended while the vault still has unproven ones (R-3); uses each
+executed F2 or F4 case to make its payout's claims final (`proveInclusionByCase`, R-2); and runs a
+compromised, still-active vault's collateral burn again when no `CollateralBurned` was seen (R-19).
+Each call is simulated first and sent only when it would change something; a refused one is retried
+after ten minutes, and none of them ever holds a payout back. Gas comes from the coordinator key:
+about one transaction per expiring confirmation, plus rare case and burn transactions. Logs name a
+vault by its id prefix only.
+

@@ -52,6 +52,7 @@ in `test/halmos`.
 | I40 | A claim is final only on a proof of its payout's inclusion (Paid with `paidAt == 0`); a final claim is never disputed, confirmed or paid by the bonds again, and each committed payout is confirmed at most once (R-1, D76) | `upholdPayout`, `confirmPayout`, `slashLiveness` | ProvenDelivery tests; handler `provePayout`, `attackReplayOrFinal`; Halmos PayoutRules P1 |
 | I41 | `unprovenConfirmations` counts exactly the confirmations that are neither proven nor expired, and a compromised vault's tally waits for zero (R-3) | spend logic, compensator | invariant `unprovenConfirmations`; compensation campaign `bookkeeping`; Halmos PayoutRules P2 |
 | I42 | A claim the compensator owes is never also payable on Zcash or by the bonds; the compensator's victims were frozen before their compromise; a settled victim left active is out of `openVaultCount` and `lockedZatoshi` (R-7, R-20) | compensator, spend logic, bond | compensation campaign `R7_R20_compensation`, `I19_compensatorBooks` |
+| I43 | A vault's reserved refunds are counted exactly; no victim is tallied while a refund of it is reserved; a refund opened on a compromised vault is only ever pending or compensated, with an entitlement equal to its amount owed to the vault's account (V-4) | spend logic, compensator | compensation campaign `R12_reservedRefunds`; `test_R12_*` |
 
 The attacks in the campaign (`invariant_attacksAlwaysFail`) must never succeed: reusing a claim
 against another note, confirming an uncommitted claim, committing a claim without a destination,
