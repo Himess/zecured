@@ -1,0 +1,35 @@
+[package]
+name = "zecured-swap-maker"
+description = "Zecured Swap's market maker: quotes, takes the taker's Ironwood destination, pays with the swap memo, proves the payment on Base and finalizes"
+version = "0.1.0"
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+publish.workspace = true
+
+[[bin]]
+name = "zecured-swap-maker"
+path = "src/main.rs"
+
+[dependencies]
+zecured-swap = { path = "../core" }
+zecured-zcash-ops = { path = "../../signer/crates/zcash-ops" }
+zecured-deposit-witness = { path = "../../signer/crates/deposit-witness" }
+zecured-base = { path = "../../signer/crates/base-client" }
+orchard.workspace = true
+zcash_protocol.workspace = true
+alloy.workspace = true
+axum.workspace = true
+tokio.workspace = true
+tracing.workspace = true
+tracing-subscriber.workspace = true
+anyhow.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+hex.workspace = true
+clap.workspace = true
+rand_core_06.workspace = true
+
+[dev-dependencies]
+# Already in the lockfile (axum depends on it); drives the router in tests.
+tower = { version = "0.5", features = ["util"] }
