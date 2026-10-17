@@ -118,6 +118,10 @@ name a public-good address instead of burning what no victim needs.
   liquidated on prices users could not react to. While the feed is stale the market keeps the last
   good price: Morpho goes on lending against it, new minting stops at the cap and the bonds pay no
   liveness claim. A haircut that grows with staleness is an option to evaluate during the beta.
+- **Share refresh and repair through the nodes.** The threshold library refreshes every share of
+  a vault and repairs a lost one, but no node runs either yet (docs/TIER3.md § 5). Mainnet needs
+  both as node rounds, their private messages sealed node to node as in the DKG, and a runbook: a
+  refresh after any suspected share leak, a repair when a signer loses its share.
 - **Fee schedule.** ZIP 317's marginal fee (5,000 zatoshi) and grace actions (2) are constants of
   the spend logic; a change of Zcash's fee rules would take a new deployment.
 

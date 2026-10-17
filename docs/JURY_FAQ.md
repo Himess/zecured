@@ -36,11 +36,12 @@ It reveals a recent Zcash header (the anchor, not the deposit's block), the vaul
 account, the denomination, a keyed tag and a hash that also depends on the vault's viewing key.
 The deposit's block, transaction, note and address stay inside the proof.
 
-**Isn't zZEC just wrapped ZEC like renZEC?**
-No. No account ever holds zZEC: it is minted straight into one Morpho position and can only
-move between Morpho, our registry and the settlement adapter (enforced per transfer with a
-one-shot transient expectation). Each position's zZEC equals exactly what its own vault holds,
-and the ZEC never leaves the shielded pool.
+**Is zZEC a wrapped ZEC?**
+No. Here zZEC is Zecured's non-transferable collateral receipt, minted only into Morpho; it is
+not a tradable wrapped ZEC. No account ever holds it: it can only move between Morpho, our
+registry and the settlement adapter (enforced per transfer with a one-shot transient
+expectation). Each position's zZEC equals exactly what its own vault holds, and the ZEC never
+leaves the shielded pool.
 
 **What happens after a partial liquidation?**
 The vault tracks an outstanding amount. The liquidator gets only the seized ZEC; the rest stays
