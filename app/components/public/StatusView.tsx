@@ -6,7 +6,6 @@ import type { MintBlock, StatusReport, VersionView } from "@/lib/api";
 import { formatUtc } from "@/lib/calls";
 import { config } from "@/lib/config";
 import { DEPLOYMENT } from "@/lib/deployment";
-import { orderedSections } from "@/lib/evidence";
 import { useEvidence, useProtocol, useStatusReport, useVaultStats } from "@/lib/hooks";
 import { short } from "@/lib/keys";
 import { formatBps, formatUsdc } from "@/lib/morpho";
@@ -73,7 +72,9 @@ export function StatusView() {
   const bonds = s?.bonds ? bondNumbers(s.bonds, s.lockedZat, s.price) : null;
   const sets = anonymitySets(config.denominations, stats.data ?? null);
   const lag = r && s ? relayLag(s.relayTip, r.zcashTip) : null;
-  const own = evidence.data ? orderedSections(evidence.data, DEPLOYMENT.kind === "mainnet-beta")[0] : undefined;
+  const mainnet = DEPLOYMENT.kind === "mainnet-beta";
+  // The evidence section of this build's own deployment, if one is published.
+  const own = evidence.data?.sections.find((x) => (x.base === "base") === mainnet);
   const commitMatches = own && r ? r.commit.startsWith(own.manifest.commit) || own.manifest.commit.startsWith(r.commit) : null;
 
   return (
