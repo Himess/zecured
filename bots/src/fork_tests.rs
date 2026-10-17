@@ -1,12 +1,18 @@
-//! R-24 end to end on a local fork: anvil forking Base Sepolia (the real Morpho Blue and
-//! AdaptiveCurveIRM), a fresh market with MOCK tokens and a MOCK price, a loan just inside the LLTV,
-//! then a year with no activity on the market. The bot's own reads (`market_state`, `position_in`)
-//! must see the interest and plan the liquidation, which then goes through on Morpho, which accrues
-//! exactly what the bot's accrual computes for the same rate and time.
+//! The bots against real contracts on local chains (anvil).
 //!
-//! Ignored by default: it needs `anvil` on PATH, the contracts built (`forge build` in `contracts/`,
-//! for the MOCK tokens' bytecode) and a Base Sepolia RPC (`BASE_SEPOLIA_RPC_URL`, default the
-//! public one). Run with `cargo test -p zecured-bots -- --ignored r24_on_a_fork`.
+//! - R-24 end to end on a local fork: anvil forking Base Sepolia (the real Morpho Blue and
+//!   AdaptiveCurveIRM), a fresh market with MOCK tokens and a MOCK price, a loan just inside the
+//!   LLTV, then a year with no activity on the market. The bot's own reads (`market_state`,
+//!   `position_in`) must see the interest and plan the liquidation, which then goes through on
+//!   Morpho, which accrues exactly what the bot's accrual computes for the same rate and time.
+//! - R-5 on a plain local chain: the real SignerBondV2 over the MOCKs of its own unit tests (Registry,
+//!   slasher, Intake, compensator, oracle) and a MOCK backend serving receipts a test signer signs;
+//!   the bot's armer arms a claim once the receipt arrives, sends nothing for an armed claim, arms it
+//!   again after its commitment changes, and drops it once paid.
+//!
+//! Ignored by default: they need `anvil` on PATH and the contracts built (`forge build` in
+//! `contracts/`, for the bytecode), and the fork a Base Sepolia RPC (`BASE_SEPOLIA_RPC_URL`, default
+//! the public one). Run with `cargo test -p zecured-bots -- --ignored`.
 
 use std::{
     net::TcpListener,
@@ -69,7 +75,11 @@ sol! {
     }
 }
 
-/// An anvil process forking Base Sepolia, killed on drop.
+/// The anvil tests run one at a time: two picking a free port at once can pick the same one, and
+/// then talk to each other's chain.
+static ANVIL_TESTS: std::sync::LazyLock<tokio::sync::Mutex<()>> = std::sync::LazyLock::new(Default::default);
+
+/// An anvil process (forking Base Sepolia, or a plain local chain), killed on drop.
 struct Anvil {
     child: Child,
     endpoint: String,
@@ -77,13 +87,21 @@ struct Anvil {
 
 impl Anvil {
     fn spawn() -> Result<Self> {
-        let port = TcpListener::bind("127.0.0.1:0")?.local_addr()?.port();
         let fork_url = std::env::var("BASE_SEPOLIA_RPC_URL")
             .ok()
             .filter(|u| !u.is_empty())
             .unwrap_or("https://sepolia.base.org".into());
+        Self::start(&["--fork-url", &fork_url, "--fork-block-number", &FORK_BLOCK.to_string()])
+    }
+
+    fn local() -> Result<Self> {
+        Self::start(&[])
+    }
+
+    fn start(args: &[&str]) -> Result<Self> {
+        let port = TcpListener::bind("127.0.0.1:0")?.local_addr()?.port();
         let child = Command::new("anvil")
-            .args(["--fork-url", &fork_url, "--fork-block-number", &FORK_BLOCK.to_string()])
+            .args(args)
             .args(["--port", &port.to_string(), "--silent"])
             .stdout(Stdio::null())
             .stderr(Stdio::null())
@@ -93,6 +111,17 @@ impl Anvil {
             child,
             endpoint: format!("http://127.0.0.1:{port}"),
         })
+    }
+
+    /// Waits until the chain answers (and fails at once if anvil exited, e.g. on a port taken).
+    async fn ready<P: Provider>(&mut self, p: &P) -> Result<()> {
+        let started = Instant::now();
+        while p.get_block_number().await.is_err() {
+            ensure!(self.child.try_wait()?.is_none(), "anvil exited");
+            ensure!(started.elapsed() < Duration::from_secs(60), "anvil did not come up");
+            tokio::time::sleep(Duration::from_millis(250)).await;
+        }
+        Ok(())
     }
 }
 
@@ -125,17 +154,15 @@ async fn deploy<P: Provider>(p: &P, code: Vec<u8>, args: Vec<u8>) -> Result<Addr
 #[tokio::test]
 #[ignore = "needs anvil, the contracts built and a Base Sepolia RPC"]
 async fn r24_on_a_fork() -> Result<()> {
-    let anvil = Anvil::spawn()?;
+    let _serial = ANVIL_TESTS.lock().await;
+    let mut anvil = Anvil::spawn()?;
     let lender: PrivateKeySigner = LENDER_KEY.parse()?;
     let borrower: PrivateKeySigner = BORROWER_KEY.parse()?;
     let (lender_addr, borrower_addr) = (lender.address(), borrower.address());
     let url = anvil.endpoint.parse()?;
     let p = ProviderBuilder::new().wallet(EthereumWallet::from(lender)).connect_http(url);
-    let started = Instant::now();
-    while p.get_block_number().await.is_err() {
-        ensure!(started.elapsed() < Duration::from_secs(60), "anvil did not come up");
-        tokio::time::sleep(Duration::from_millis(250)).await;
-    }
+    anvil.ready(&p).await?;
+    ensure!(p.get_chain_id().await? == 84_532, "not the Base Sepolia fork");
     let pb = ProviderBuilder::new().wallet(EthereumWallet::from(borrower)).connect_http(anvil.endpoint.parse()?);
 
     // A fresh zZEC-like market on the real Morpho Blue and AdaptiveCurveIRM: MOCK tokens and price.
@@ -258,5 +285,238 @@ async fn r24_on_a_fork() -> Result<()> {
     );
     let position = morpho.position(market_id, borrower_addr).call().await?;
     assert_eq!(position.borrowShares, 0, "every share repaid");
+    Ok(())
+}
+
+// ----------------------------------------------------------------------------- R-5 on a local chain
+
+sol! {
+    /// SignerBondV2's constructor argument (contracts/src/interfaces/v3/ISignerBond.sol).
+    struct BondConfigArgs {
+        address registry;
+        address slasher;
+        address intake;
+        address compensator;
+        address usdc;
+        address oracle;
+        uint256 minBond;
+        uint64 unbondingPeriod;
+        uint64 challengeWindow;
+        uint256 bountyBps;
+        uint256 bountyCap;
+        uint64 livenessPeriod;
+        uint64 commitGrace;
+        uint16 livenessPremiumBps;
+    }
+
+    struct MockClaimDetails {
+        bytes32 vaultId;
+        uint8 kind;
+        uint8 status;
+        uint64 amount;
+        bytes32 commitment;
+        uint40 createdAt;
+        bool bondPaid;
+        address claimant;
+    }
+
+    /// The MOCK Registry of the bond's unit tests (contracts/test/mocks/BondV2Mocks.sol).
+    #[sol(rpc)]
+    interface IMockBondRegistry {
+        function setSignerBond(address bond, address token) external;
+        function setClaim(bytes32 claimId, MockClaimDetails c) external;
+    }
+}
+
+/// A MOCK backend serving the receipt the test signer signs for the claim's `commitment` (after
+/// `misses` answers of `404 no_receipt`), as the coordinator would.
+#[derive(Clone)]
+struct ReceiptBackend {
+    signer: PrivateKeySigner,
+    bond: Address,
+    chain_id: u64,
+    received_at: u64,
+    commitment: std::sync::Arc<std::sync::Mutex<B256>>,
+    calls: std::sync::Arc<std::sync::atomic::AtomicUsize>,
+    misses: usize,
+}
+
+async fn serve_receipt(
+    axum::extract::State(b): axum::extract::State<ReceiptBackend>,
+    axum::extract::Path(claim_id): axum::extract::Path<B256>,
+) -> axum::response::Response {
+    use alloy::{signers::SignerSync, sol_types::SolStruct};
+    use axum::response::IntoResponse;
+    let n = b.calls.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+    if n < b.misses {
+        return (axum::http::StatusCode::NOT_FOUND, axum::Json(serde_json::json!({ "code": "no_receipt" })))
+            .into_response();
+    }
+    let commitment = *b.commitment.lock().unwrap();
+    let digest = zecured_base::operator::destination_received(claim_id, commitment, b.received_at)
+        .eip712_signing_hash(&zecured_base::operator::bond_domain(b.chain_id, b.bond));
+    let signature = Bytes::from(b.signer.sign_hash_sync(&digest).unwrap().as_bytes().to_vec());
+    axum::Json(serde_json::json!({
+        "claimId": claim_id,
+        "commitment": commitment,
+        "receivedAt": b.received_at,
+        "signer": b.signer.address(),
+        "signature": signature,
+    }))
+    .into_response()
+}
+
+#[tokio::test]
+#[ignore = "needs anvil and the contracts built"]
+async fn liveness_arming_on_a_local_chain() -> Result<()> {
+    use crate::liveness::{Armer, BackendReceipts, ProviderChain};
+
+    // The armer's warnings, in the test's output on a failure.
+    let _ = tracing_subscriber::fmt().with_test_writer().try_init();
+    let _serial = ANVIL_TESTS.lock().await;
+    let mut anvil = Anvil::local()?;
+    let bot: PrivateKeySigner = LENDER_KEY.parse()?;
+    let bot_addr = bot.address();
+    let p = ProviderBuilder::new().wallet(EthereumWallet::from(bot)).connect_http(anvil.endpoint.parse()?);
+    anvil.ready(&p).await?;
+    let chain_id = p.get_chain_id().await?;
+    // The MOCKs are set up from another key: as in the market maker, every transaction of the bot's
+    // key goes through its nonce lock.
+    let admin: PrivateKeySigner = BORROWER_KEY.parse()?;
+    let admin_addr = admin.address();
+    let pa = ProviderBuilder::new().wallet(EthereumWallet::from(admin)).connect_http(anvil.endpoint.parse()?);
+
+    // The bond over its unit tests' MOCKs, and five signers (test keys).
+    let signers: Vec<PrivateKeySigner> = (0..5u8)
+        .map(|i| PrivateKeySigner::from_bytes(&keccak256([b"zecured.bots.test.signer".as_slice(), &[i]].concat())))
+        .collect::<Result<_, _>>()?;
+    let signer_addresses: [Address; 5] = std::array::from_fn(|i| signers[i].address());
+    let usdc = deploy(&pa, creation_code("MockUSDC.sol/MockUSDC.json")?, (admin_addr,).abi_encode_params()).await?;
+    let registry = deploy(
+        &pa,
+        creation_code("BondV2Mocks.sol/MockBondRegistry.json")?,
+        (signer_addresses,).abi_encode_params(),
+    )
+    .await?;
+    let slasher = deploy(&pa, creation_code("BondV2Mocks.sol/MockBondSlasher.json")?, vec![]).await?;
+    let intake = deploy(&pa, creation_code("BondV2Mocks.sol/MockBondIntake.json")?, vec![]).await?;
+    let compensator =
+        deploy(&pa, creation_code("BondV2Mocks.sol/MockBondCompensator.json")?, (usdc,).abi_encode_params()).await?;
+    let price = U256::from(40u64) * U256::from(10u64).pow(U256::from(34u64));
+    let oracle =
+        deploy(&pa, creation_code("BondV2Mocks.sol/MockBondOracle.json")?, (price,).abi_encode_params()).await?;
+    let config = BondConfigArgs {
+        registry,
+        slasher,
+        intake,
+        compensator,
+        usdc,
+        oracle,
+        minBond: U256::from(100_000_000u64),
+        unbondingPeriod: 54 * 3_600,
+        challengeWindow: 86_400,
+        bountyBps: U256::from(1_000u64),
+        bountyCap: U256::from(50_000_000u64),
+        livenessPeriod: 86_400,
+        commitGrace: 7_200,
+        livenessPremiumBps: 500,
+    };
+    let bond = deploy(&pa, creation_code("SignerBondV2.sol/SignerBondV2.json")?, config.abi_encode()).await?;
+    let mock_registry = IMockBondRegistry::new(registry, &pa);
+    ensure!(mock_registry.setSignerBond(bond, usdc).send().await?.get_receipt().await?.status());
+
+    // A pending Liquidation claim of the bot.
+    let claim_id = keccak256(b"zecured.bots.test.claim");
+    let first = keccak256(b"zecured.bots.test.commitment.1");
+    let now = p
+        .get_block_by_number(alloy::eips::BlockNumberOrTag::Latest)
+        .await?
+        .context("no block")?
+        .header
+        .timestamp;
+    let created_at = now - 100;
+    let set_claim = |commitment: B256, status: u8| MockClaimDetails {
+        vaultId: keccak256(b"zecured.bots.test.vault"),
+        kind: 1, // Liquidation
+        status,
+        amount: 1_000_000,
+        commitment,
+        createdAt: alloy::primitives::Uint::from(created_at),
+        bondPaid: false,
+        claimant: bot_addr,
+    };
+    ensure!(mock_registry.setClaim(claim_id, set_claim(first, 1)).send().await?.get_receipt().await?.status());
+
+    // The backend has no receipt at first (the nodes have not seen the claim yet), then signer 2's.
+    let backend = ReceiptBackend {
+        signer: signers[2].clone(),
+        bond,
+        chain_id,
+        received_at: created_at + 50,
+        commitment: std::sync::Arc::new(std::sync::Mutex::new(first)),
+        calls: Default::default(),
+        misses: 1,
+    };
+    let app = axum::Router::new()
+        .route("/claims/{claim}/receipt", axum::routing::post(serve_receipt))
+        .with_state(backend.clone());
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await?;
+    let url = format!("http://{}", listener.local_addr()?);
+    tokio::spawn(async move { axum::serve(listener, app).await.unwrap() });
+
+    let nonces = crate::chain::NonceLock::new(bot_addr);
+    let chain = ProviderChain {
+        p: &p,
+        registry,
+        bond,
+        nonces: Some(&nonces),
+    };
+    let mut armer = Armer::new(chain, BackendReceipts::new(&url)?, None)?;
+    armer.track(claim_id)?;
+    let bond_view = zecured_base::events::ISignerBond::new(bond, &p);
+    let nonce = || p.get_transaction_count(bot_addr);
+
+    let r = armer.pass(1_000).await;
+    assert_eq!((r.waiting, r.armed), (1, 0), "404: no receipt yet");
+    let before = nonce().await?;
+    // The arming and another transaction of the bot's key at once (the market maker's close; here
+    // a MOCK token approval), both through the key's nonce lock: both go through, at two nonces.
+    let token = IMockToken::new(usdc, &p);
+    let close = token.approve(bond, U256::from(1u8)).gas(100_000);
+    let (r, other) = tokio::join!(
+        armer.pass(1_030),
+        nonces.send_with(&p, |nonce| async move { Ok(close.nonce(nonce).send().await?) })
+    );
+    assert_eq!(r.armed, 1, "armed once the receipt came: {r:?}");
+    ensure!(other?.get_receipt().await?.status(), "the concurrent transaction failed");
+    assert_eq!(nonce().await?, before + 2, "an armLiveness and a close from the bot's key, two nonces");
+    let armed = bond_view.livenessArming(claim_id).call().await?;
+    assert_eq!(
+        (armed.commitment, armed.payableAt),
+        (first, created_at + 50),
+        "payableAt = max(createdAt, receivedAt)"
+    );
+
+    // Armed for its commitment: nothing is sent.
+    let r = armer.pass(1_030 + crate::liveness::ARMED_RECHECK).await;
+    assert_eq!(r.already_armed, 1);
+    assert_eq!(nonce().await?, before + 2, "no transaction for an armed claim");
+
+    // A new commitment voids the arming; the bot arms the claim again with a receipt for it.
+    let second = keccak256(b"zecured.bots.test.commitment.2");
+    ensure!(mock_registry.setClaim(claim_id, set_claim(second, 1)).send().await?.get_receipt().await?.status());
+    *backend.commitment.lock().unwrap() = second;
+    let r = armer.pass(1_030 + 2 * crate::liveness::ARMED_RECHECK).await;
+    assert_eq!(r.armed, 1, "armed again: {r:?}");
+    let armed = bond_view.livenessArming(claim_id).call().await?;
+    assert_eq!(armed.commitment, second);
+
+    // Paid: dropped, nothing sent.
+    ensure!(mock_registry.setClaim(claim_id, set_claim(second, 2)).send().await?.get_receipt().await?.status());
+    let sent = nonce().await?;
+    let r = armer.pass(1_030 + 3 * crate::liveness::ARMED_RECHECK).await;
+    assert_eq!(r.done, 1);
+    assert!(armer.tracked().is_empty());
+    assert_eq!(nonce().await?, sent);
     Ok(())
 }

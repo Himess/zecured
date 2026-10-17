@@ -19,6 +19,14 @@
 #          BUNDLER_URL=http://127.0.0.1:4337 PAYMASTER_URL=http://127.0.0.1:4338
 #   scripts/signer-network.sh init && scripts/bond-signers.sh && scripts/signer-network.sh start
 #
+# v4: the deployment also starts a Swap version for the payment guest's id and deploys ZecuredSwap
+# (contracts/deployments/anvil.swap.json, MockUSDC); SWAP_MAKER_ADDRESS gets gas and MockUSDC for Sell
+# orders. With ANVIL_FEE_BPS (e.g. 50) and FEE_TREASURY_ADDRESS (a unified address) the opening fee is
+# on: tools/recipient draws the treasury's salt into data/local-fork/treasury-recipient.json (0600) and
+# its commitment becomes FEE_COMMITMENT; once the backend runs, register that file's receiver and salt
+# with it (`curl -sX POST http://127.0.0.1:8080/recipients -H 'content-type: application/json'
+# -d @data/local-fork/treasury-recipient.json`), or the Fee claims are never paid.
+#
 # Keys come from the repo-root .env (DEPLOYER_PRIVATE_KEY, SIGNER_ADDRESSES and the service
 # addresses). Nothing here touches a public network: anvil only reads Base Sepolia state.
 set -euo pipefail
@@ -68,7 +76,8 @@ cmd_start() {
   fi
 
   # Gas for every key that sends Base transactions. Smart accounts never get any (I2).
-  for var in DEPLOYER_ADDRESS COORDINATOR_ADDRESS RELAYER_ADDRESS BOT_LIQUIDATOR_ADDRESS BOT_MARKET_MAKER_ADDRESS; do
+  for var in DEPLOYER_ADDRESS COORDINATOR_ADDRESS RELAYER_ADDRESS BOT_LIQUIDATOR_ADDRESS BOT_MARKET_MAKER_ADDRESS \
+    SWAP_MAKER_ADDRESS SWAP_TAKER_ADDRESS; do
     if [[ -n "${!var:-}" ]]; then
       cast rpc --rpc-url "$RPC" anvil_setBalance "${!var}" 0x8ac7230489e80000 > /dev/null # 10 ETH
     fi
@@ -76,6 +85,7 @@ cmd_start() {
 
   if [[ ! -f "$STATE/deployed" ]]; then
     tier2_setup
+    fee_setup
   fi
 
   if [[ ! -f "$STATE/deployed" ]]; then
@@ -89,12 +99,25 @@ cmd_start() {
     local usdc
     usdc="$(python3 -I -c 'import json,sys; print(json.load(open(sys.argv[1]))["contracts"]["MockUSDC"])' \
       "$ROOT/contracts/deployments/anvil.json")"
-    for var in BOT_LIQUIDATOR_ADDRESS BOT_MARKET_MAKER_ADDRESS; do
+    for var in BOT_LIQUIDATOR_ADDRESS BOT_MARKET_MAKER_ADDRESS SWAP_MAKER_ADDRESS SWAP_TAKER_ADDRESS; do
       if [[ -n "${!var:-}" ]]; then
         cast send --rpc-url "$RPC" --private-key "$DEPLOYER_PRIVATE_KEY" "$usdc" "mint(address,uint256)" \
           "${!var}" 1000000000000 > /dev/null # 1,000,000 MockUSDC
       fi
     done
+    # Zecured Swap on the same fork: the lending deployment's versions (its initial Swap version is
+    # the payment guest's MOCK id), relay and MockUSDC.
+    local versions
+    versions="$(python3 -I -c 'import json,sys; print(json.load(open(sys.argv[1]))["contracts"]["ZecuredVersions"])' \
+      "$ROOT/contracts/deployments/anvil.json")"
+    (
+      cd "$ROOT/contracts"
+      DEPLOYMENT_NAME=anvil ZECURED_VERSIONS="$versions" SWAP_USDC="$usdc" \
+        FOUNDRY_BROADCAST="$STATE/broadcast-swap" \
+        forge script script/DeploySwap.s.sol --rpc-url "$RPC" --broadcast > "$STATE/deploy-swap.log" 2>&1
+    ) || { tail -30 "$STATE/deploy-swap.log" >&2; exit 1; }
+    echo "swap: $(python3 -I -c 'import json,sys; print(json.load(open(sys.argv[1]))["ZecuredSwap"])' \
+      "$ROOT/contracts/deployments/anvil.swap.json")"
     touch "$STATE/deployed"
     echo "deployed: $(python3 -I -c 'import json,sys; d=json.load(open(sys.argv[1])); print(d["contracts"]["ZecuredRegistry"])' \
       "$ROOT/contracts/deployments/anvil.json") (Registry)"
@@ -153,9 +176,32 @@ PY
     "$ROOT/contracts/deployments/anvil.relay.json")"
   DEPOSIT_IMAGE_ID="$("$host" image-id)"
   VIOLATION_IMAGE_ID="$("$host" violation image-id)"
+  PAYMENT_IMAGE_ID="$("$host" payment image-id)"
   # The work tiers and every other parameter: contracts/config/zecured-anvil.json.
-  export ZCASH_RELAY DEPOSIT_IMAGE_ID VIOLATION_IMAGE_ID RISC0_VERIFIER_MOCK=true
-  echo "relay $ZCASH_RELAY, deposit guest $DEPOSIT_IMAGE_ID, violation guest $VIOLATION_IMAGE_ID (MOCK verifier)"
+  export ZCASH_RELAY DEPOSIT_IMAGE_ID VIOLATION_IMAGE_ID PAYMENT_IMAGE_ID RISC0_VERIFIER_MOCK=true
+  echo "relay $ZCASH_RELAY, guests: deposit $DEPOSIT_IMAGE_ID, violation $VIOLATION_IMAGE_ID, payment $PAYMENT_IMAGE_ID (MOCK verifier)"
+}
+
+# The opening fee on the fork (optional): a copy of the anvil configuration with ANVIL_FEE_BPS, and the
+# treasury's commitment from tools/recipient. The salt never leaves its 0600 file.
+fee_setup() {
+  [[ -n "${ANVIL_FEE_BPS:-}" ]] || return 0
+  : "${FEE_TREASURY_ADDRESS:?FEE_TREASURY_ADDRESS: the unified address of the treasury (ANVIL_FEE_BPS is set)}"
+  # forge reads configurations only under contracts/config: the copy goes there, gitignored.
+  local recipient="$STATE/treasury-recipient.json" config="$ROOT/contracts/config/zecured-anvil-fee.local.json"
+  (cd "$ROOT" && cargo build -q -p zecured-recipient)
+  if [[ ! -f "$recipient" ]]; then
+    "$ROOT/target/debug/zecured-recipient" --address "$FEE_TREASURY_ADDRESS" --out "$recipient" > /dev/null
+  fi
+  FEE_COMMITMENT="$(python3 -I -c 'import json,sys; print(json.load(open(sys.argv[1]))["commitment"])' "$recipient")"
+  python3 -I - "$ROOT/contracts/config/zecured-anvil.json" "$config" "$ANVIL_FEE_BPS" <<'PY'
+import json, sys
+c = json.load(open(sys.argv[1]))
+c["feeBps"] = int(sys.argv[3])
+json.dump(c, open(sys.argv[2], "w"), indent=2)
+PY
+  export FEE_COMMITMENT ZECURED_CONFIG="config/zecured-anvil-fee.local.json"
+  echo "opening fee on: ${ANVIL_FEE_BPS} bps to the treasury's commitment (register $recipient with the backend)"
 }
 
 # The relay feeder, once the deployment is done: it sends transactions too, with RELAYER_PRIVATE_KEY

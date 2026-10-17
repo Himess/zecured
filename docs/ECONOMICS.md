@@ -59,7 +59,7 @@ unwanted note cannot hold the cap.
 | The signers spend a vault's ZEC without a commitment (F1), withhold a payout's change (F2) | After the challenge window (*judge*: 24 hours), all five bonds (F1) or the signing ones (F2) are slashed, minting halts, the vault is frozen and then compromised | The prover gets a bounty (10 %, capped at 50 USDC, *judge*); `ZecuredCompensator` pays the victims from the rest |
 | A payout misdirects a claim (F3) or hides it from its claimant (F4) | The signers who signed it are slashed | F3: the claimant's shortfall joins the compensation layers; F4: the slash only |
 | The signers stop paying a claim | Once a signer has acknowledged the claim's destination (a receipt), after `livenessPeriod` (*judge*: 24 hours, deferred by a payout in flight for 2 hours at most) the claimant takes the claim's value plus 5 % from the bonds, pro rata; never at a stale price | The claimant, in USDC; the claim's ZEC then goes to the bonds' Reimburse destination |
-| Three signers confirm a payout that never reached Zcash | The claimant disputes within 24 hours; unless the signers prove the payout's inclusion within 6 hours, the claim is payable again | The claimant, by a new payout or from the bonds |
+| Three signers confirm a payout that never reached Zcash | A confirmation is not final: only a proof of the payout's inclusion is. The claimant disputes within 24 hours; unless the payout's inclusion is proven within 6 hours, the claim is payable again | The claimant, by a new payout or from the bonds |
 | Signers go silent before a vault is active | A proof that cannot be activated lands as a refund; a pending activation can be refunded after a 24-hour pause or a halt | The borrower, in ZEC |
 
 **Compensation layers** (`ZecuredCompensator`). A theft's victims are paid from the slashed bonds in
@@ -67,8 +67,11 @@ layers, each in full before the next gets anything: (1) the prover's bounty; (2)
 liquidators and market makers, whose claims the vault owed; (3) the lenders: the victim vault's
 debt is repaid on Morpho, with a 1 % allowance for interest, and its unbacked zZEC is burned; (4) the
 owners: their own claims and their equity. Cases within one incident window (*judge*: 3 days) share
-one price. When the bonds cover only part of a vault's debt, the repayment is made and the vault's
-collateral is burned down to the LLTV, so the repayment cannot be borrowed again. What is left goes
+one price. A compromised vault's collateral is burned down to the LLTV as soon as its case is
+executed, so its owner cannot borrow against stolen collateral meanwhile; when the bonds cover only
+part of its debt, the repayment is made and the collateral stays burned down to the LLTV, so the
+repayment cannot be borrowed again. A payout in flight at the theft is proven rather than paid twice:
+the tally waits for proofs of committed payouts and of confirmations made just before the freeze. What is left goes
 to a fixed sink address, never back to the signers. Freezing a vault never stops anyone repaying its
 debt directly on Morpho.
 
