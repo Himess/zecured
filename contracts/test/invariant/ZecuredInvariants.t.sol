@@ -3,10 +3,11 @@ pragma solidity 0.8.28;
 
 import {console} from "forge-std/console.sol";
 import {MockRiscZeroVerifier} from "../../src/mocks/MockRiscZeroVerifier.sol";
-import {VaultStatus, ClaimKind, ClaimStatus} from "../../src/interfaces/v3/IZecuredRegistry.sol";
+import {VaultStatus, ClaimKind, ClaimStatus, ClaimDetails} from "../../src/interfaces/v3/IZecuredRegistry.sol";
 import {LineageNote} from "../../src/interfaces/v3/IZecuredSpendCommits.sol";
-import {PendingActivation} from "../../src/interfaces/v3/IZecuredIntake.sol";
+import {PendingActivation, PendingRefund} from "../../src/interfaces/v3/IZecuredIntake.sol";
 import {IZecuredDisputes} from "../../src/interfaces/v3/IZecuredDisputes.sol";
+import {IZecuredRefunds} from "../../src/interfaces/v3/IZecuredRefunds.sol";
 import {ZecuredFixture} from "../utils/ZecuredFixture.sol";
 import {MockHeaderRelay} from "../mocks/MockHeaderRelay.sol";
 import {MockSignerBond} from "../mocks/MockSignerBond.sol";
@@ -69,7 +70,7 @@ contract ZecuredInvariantsTest is ZecuredFixture {
         usdc.transferOwnership(address(handler)); // MOCK mint for the handler's actors
         oracle.transferOwnership(address(handler)); // MOCK price moves
 
-        bytes4[] memory selectors = new bytes4[](44);
+        bytes4[] memory selectors = new bytes4[](53);
         selectors[0] = ZecuredHandler.prove.selector;
         selectors[1] = ZecuredHandler.prove.selector; // weighted: deposits first
         selectors[2] = ZecuredHandler.prove.selector;
@@ -114,11 +115,53 @@ contract ZecuredInvariantsTest is ZecuredFixture {
         selectors[41] = ZecuredHandler.resolveDispute.selector;
         selectors[42] = ZecuredHandler.dispute.selector; // weighted: a dispute needs a confirmed claim first
         selectors[43] = ZecuredHandler.resolveDispute.selector;
+        selectors[44] = ZecuredHandler.finalizeRefund.selector;
+        selectors[45] = ZecuredHandler.finalizeRefund.selector; // weighted: most refunds open
+        selectors[46] = ZecuredHandler.dropRefund.selector;
+        selectors[47] = ZecuredHandler.markDormant.selector;
+        selectors[48] = ZecuredHandler.attackSpendPendingRefund.selector;
+        selectors[49] = ZecuredHandler.giveRefundDestination.selector;
+        selectors[50] = ZecuredHandler.proveSecond.selector;
+        selectors[51] = ZecuredHandler.proveSecond.selector;
+        selectors[52] = ZecuredHandler.markDormant.selector;
         targetSelector(FuzzSelector({addr: address(handler), selectors: selectors}));
         targetContract(address(handler));
         // The handler pranks its own actors, so the caller does not matter. A fixed caller matters on a fork: every
         // new random sender would be an RPC round trip.
         targetSender(makeAddr("zecured.inv.caller"));
+    }
+
+    /// The refund lifecycle's actions (R-8, R-11, R-12) run, in a fixed order, without a violation: the campaign
+    /// explores them at random, this shows each of them does what the handler checks.
+    function test_handlerSmoke_refundLifecycle() public {
+        handler.prove(1, false, false); // a vault, pending
+        handler.prove(2, false, false);
+        handler.proveSecond(3); // a second note: a pending refund, while the vault pends (R-8)
+        handler.finalizeRefund(0); // waits for the vault, or opens
+        handler.finalize(0);
+        handler.finalize(1);
+        handler.proveSecond(4);
+        handler.proveSecond(5);
+        handler.finalizeRefund(0);
+        handler.finalizeRefund(1);
+        handler.dropRefund(0);
+        handler.markDormant(0);
+        handler.giveRefundDestination(0);
+        handler.markDormant(1);
+        handler.abandon(1);
+        handler.giveRefundDestination(1);
+        handler.attackSpendPendingRefund(0);
+        handler.refundPending(0, true);
+        assertFalse(handler.violated(), handler.violation());
+        assertFalse(handler.attackSucceeded());
+        assertGt(handler.calls("finalize refund") + handler.calls("finalize refund (vault pending)"), 0);
+        assertGt(handler.calls("mark dormant"), 0, "a refund went dormant");
+        assertGt(handler.calls("refund destination"), 0, "a dormant refund was woken");
+        invariant_R11_dormantRefunds();
+        invariant_disputes_andLockedZatoshi();
+        invariant_I13_I20_eachNoteLandsOnce();
+        invariant_I15_liveNotesHoldWhatBaseOwes();
+        invariant_R8_noClaimOnAPendingVault();
     }
 
     // ------------------------------------------------------------------ supply and custody
@@ -212,7 +255,7 @@ contract ZecuredInvariantsTest is ZecuredFixture {
         for (uint256 i; i < handler.vaultCount(); ++i) {
             bytes32 vaultId = handler.vaultIds(i);
             (, uint64 outstanding, VaultStatus status) = registry.vault(vaultId);
-            uint256 owed = outstanding;
+            uint256 owed = outstanding + handler.pendingRefundOf(vaultId); // R-12: pending refunds' notes
             if (status == VaultStatus.Pending) owed += intake.pendingActivation(vaultId).amount;
             uint64 count = registry.claimCount(vaultId);
             for (uint64 j; j < count; ++j) {
@@ -276,11 +319,13 @@ contract ZecuredInvariantsTest is ZecuredFixture {
         }
     }
 
-    /// I13 and I20 (T-01, T-02): every note the Intake accepted lands exactly once: as a pending reservation, an
-    /// activation or a refund, its tag used and a lineage note of its vault for good; a reservation a reorganisation
-    /// dropped frees its tag. `pendingTotal` is the sum of the pending activations.
+    /// I13 and I20 (T-01, T-02, R-12): every note the Intake accepted lands exactly once: as a pending reservation, an
+    /// activation, a pending refund or a refund, its tag used and a lineage note of its vault for good; a reservation
+    /// or a pending refund a reorganisation dropped frees its tag. `pendingTotal` is the sum of the pending
+    /// activations, `pendingRefundTotal` the sum of the pending refunds, each reserved in the Registry for its account.
     function invariant_I13_I20_eachNoteLandsOnce() public view {
         uint256 pendingSum;
+        uint256 pendingRefundSum;
         for (uint256 i; i < handler.tagCount(); ++i) {
             bytes32 tag = handler.tags(i);
             uint8 state = handler.tagState(tag);
@@ -297,8 +342,53 @@ contract ZecuredInvariantsTest is ZecuredFixture {
                 assertEq(p.depositTag, tag, "I20: the vault's reservation");
                 pendingSum += p.amount;
             }
+            address reservedFor = IZecuredRefunds(address(registry)).reservedRefundOf(tag);
+            if (state == handler.TAG_REFUND_PENDING()) {
+                PendingRefund memory r = intake.pendingRefund(tag);
+                assertEq(r.vaultId, vaultId, "R-12: the pending refund's vault");
+                assertEq(reservedFor, r.account, "R-12: reserved in the Registry for its account");
+                pendingRefundSum += r.amount;
+            } else {
+                assertEq(reservedFor, address(0), "R-12: only a pending refund is reserved");
+            }
         }
         assertEq(intake.pendingTotal(), pendingSum, "I20: pendingTotal == sum of the pending activations");
+        assertEq(
+            intake.pendingRefundTotal(), pendingRefundSum, "R-12: pendingRefundTotal == sum of the pending refunds"
+        );
+    }
+
+    /// R-8: no claim ever exists on a pending vault (a refund proven meanwhile waits for it), so none accrues liveness
+    /// where no payout may be committed.
+    function invariant_R8_noClaimOnAPendingVault() public view {
+        for (uint256 i; i < handler.vaultCount(); ++i) {
+            bytes32 vaultId = handler.vaultIds(i);
+            (,, VaultStatus status) = registry.vault(vaultId);
+            if (status == VaultStatus.Pending) {
+                assertEq(registry.claimCount(vaultId), 0, "R-8: a claim on a pending vault");
+            }
+        }
+    }
+
+    /// R-11: a dormant claim is a pending Refund claim without a destination, not paid by the bonds, and exactly the
+    /// handler's dormant claims are.
+    function invariant_R11_dormantRefunds() public view {
+        IZecuredRefunds refunds = IZecuredRefunds(address(registry));
+        for (uint256 i; i < handler.vaultCount(); ++i) {
+            bytes32 vaultId = handler.vaultIds(i);
+            uint64 count = registry.claimCount(vaultId);
+            for (uint64 j; j < count; ++j) {
+                bytes32 claimId = registry.claimIdOf(vaultId, j);
+                bool isDormant = refunds.isRefundDormant(claimId);
+                assertEq(isDormant, handler.dormant(claimId), "R-11: dormant as the handler made it");
+                if (!isDormant) continue;
+                ClaimDetails memory c = registry.claimDetails(claimId);
+                assertEq(uint8(c.kind), uint8(ClaimKind.Refund), "R-11: only refunds go dormant");
+                assertEq(uint8(c.status), uint8(ClaimStatus.Pending), "R-11: a dormant refund is pending");
+                assertEq(c.commitment, bytes32(0), "R-11: a dormant refund has no destination");
+                assertFalse(c.bondPaid, "R-11: never one the bonds paid");
+            }
+        }
     }
 
     /// I14 (v3): Cancelled <=> never activated. A cancelled vault has no outstanding and only Refund claims; an
@@ -341,9 +431,10 @@ contract ZecuredInvariantsTest is ZecuredFixture {
 
     /// T-05 (a) and the cap's basis (T-01): a disputed claim has an inclusion deadline and no confirmation time; only
     /// a confirmed claim has a confirmation time; `lockedZatoshi` is the zZEC supply plus every pending or disputed
-    /// claim.
+    /// claim that is not a dormant refund (R-11).
     function invariant_disputes_andLockedZatoshi() public view {
         IZecuredDisputes disputes = IZecuredDisputes(address(registry));
+        IZecuredRefunds refunds = IZecuredRefunds(address(registry));
         uint256 unpaid;
         for (uint256 i; i < handler.vaultCount(); ++i) {
             bytes32 vaultId = handler.vaultIds(i);
@@ -358,7 +449,9 @@ contract ZecuredInvariantsTest is ZecuredFixture {
                     assertEq(dueAt, 0, "an inclusion deadline outside a dispute");
                 }
                 if (paidAt != 0) assertEq(uint8(s), uint8(ClaimStatus.Paid), "a confirmation time on an unpaid claim");
-                if (s == ClaimStatus.Pending || s == ClaimStatus.Disputed) unpaid += amount;
+                bool counted =
+                    (s == ClaimStatus.Pending || s == ClaimStatus.Disputed) && !refunds.isRefundDormant(claimId);
+                if (counted) unpaid += amount;
             }
         }
         assertEq(registry.lockedZatoshi(), zzec.totalSupply() + unpaid, "lockedZatoshi");
@@ -388,25 +481,33 @@ contract ZecuredInvariantsTest is ZecuredFixture {
     /// destination or redirected by a stranger, one note landing twice, a deposit without all five VaultOpened
     /// signatures, an early or direct activation, an account withdrawing its own collateral, a direct Morpho
     /// liquidation, a zZEC flash loan, a partial release by anyone but the account, a close or deleverage request
-    /// executed by a stranger or after its deadline.
+    /// executed by a stranger or after its deadline, a payout spending a pending refund's note (R-12).
     function invariant_attacksAlwaysFail() public view {
         assertFalse(handler.attackSucceeded(), "an attack succeeded");
     }
 
     function afterInvariant() external view {
-        string[52] memory names = [
+        string[61] memory names = [
             "prove: pending",
             "prove: refund (known vault)",
             "prove: refund (account bound)",
             "prove: refund (halted)",
-            "prove: refund (cap)",
+            "prove: cap full (waits)",
             "prove (stale cap price)",
             "prove (compromised vault)",
             "finalize",
             "finalize (gated)",
             "drop",
+            "drop (case open)",
             "refundPending",
             "refundPending (refused)",
+            "finalize refund",
+            "finalize refund (vault pending)",
+            "finalize refund (compromised)",
+            "finalize refund (anchor gone)",
+            "drop refund",
+            "drop refund (case open)",
+            "mark dormant",
             "pause",
             "unpause",
             "gates",
@@ -446,7 +547,8 @@ contract ZecuredInvariantsTest is ZecuredFixture {
             "attack: partial release",
             "attack: flash loan",
             "attack: deleverage",
-            "attack: close request"
+            "attack: close request",
+            "attack: spend pending refund"
         ];
         for (uint256 i; i < names.length; ++i) {
             console.log(names[i], handler.calls(names[i]));
