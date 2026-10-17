@@ -387,7 +387,12 @@ or recipient.
   vaults" are all vaults); a partial exit keeps `minBond` and the coverage cap.
 - **Liveness** (T-05). A claim left unpaid `livenessPeriod` after it became payable (deferred by a
   payout committed in flight for `commitGrace` at most) can be paid to its claimant from the bonds;
-  its ZEC then reimburses the bonds (D47).
+  its ZEC then reimburses the bonds (D47). It became payable only once a signer acknowledged its
+  destination: a node signs a receipt (`DestinationReceived`) when it holds the salt and receiver
+  and has checked them against the claim's commitment, and anyone arms the claim with it
+  (`armLiveness`, R-5). A claimant that never hands over its destination gets no liveness, and
+  one honest signer's receipt is enough. No liveness for a claim the compensator owes (R-7), nor
+  at a stale price (R-9).
 - **Consortium bond.** FROST hides who signed, so an uncommitted spend slashes all five, while a false
   record slashes exactly its signers. Any three colluders lose at least 3/5 of the effective bond.
 
@@ -401,7 +406,7 @@ or recipient.
 | `slashConfirmationWork` | ≥ 100 normal Testnet blocks of work (~3.8 × 10^7), the anchor rechecked at the end of the window | same |
 | Challenge window | 24 hours | 2 minutes (labelled DEMO) |
 | Bond per signer (`minBond`) | 100 USDC | 10 USDC |
-| Liveness period / commit grace | 24 hours / 2 hours | 10 minutes / 2 minutes |
+| Liveness period / commit grace | 24 hours / 2 hours | 10 minutes / 2 hours (a payout's lifetime, R-10) |
 | Dispute window / inclusion window | 24 hours / 6 hours | 10 minutes / 20 minutes |
 | Build | the judge build: no compromise mode beyond D18 | `demo-tier3` feature, its own Registry, bond and slasher, five demo keys, same relay |
 

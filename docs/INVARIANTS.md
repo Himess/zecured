@@ -3,7 +3,7 @@
 What must always hold in Zecured, where the code enforces it, and which tests check it. I1 to I10 date
 from the start of the project, I11 to I14 from the first security review, I15 to I17 from Tier 3
 (docs/TIER3.md), I18 to I31 from the contract round v3 (docs/DECISIONS.md D40 to D54, design items
-T-01 to T-09). Contract tests live in `contracts/test`; the invariant campaign is
+T-01 to T-09), I32 on from the v4 round (D58 on). Contract tests live in `contracts/test`; the invariant campaign is
 `test/invariant/ZecuredInvariants.t.sol` (random sequences of deposits, gates, exits, payouts,
 disputes and attacks against the real Morpho Blue on a Base Sepolia fork); the symbolic checks are
 in `test/halmos`.
@@ -27,7 +27,7 @@ in `test/halmos`.
 | I15 | A vault's lineage notes that no committed payout spent hold exactly its outstanding, its pending activation and its uncommitted pending or written-off claims | Spend commitments: conservation and claim binding (`ZecuredSpendLogic`) | invariant `I15` |
 | I16 | Every claim confirmed paid (or disputed) was committed against a lineage note of its own vault | `confirmPayout` requires the claim's input; commitments check the input's lineage | invariant `I16_I21` |
 | I17 | `openVaultCount` counts exactly the vaults that are pending or active, or closed or cancelled with a claim pending or disputed | `_newClaim`, `_closeClaim`, `_settle`, disputes | invariant `I17` |
-| I18 | A deposit is reserved only within the coverage cap: locked plus pending zatoshi within `maxTotalZat` and, at the high price, within `coverageBps` of the effective bond (`min(sum, 5/3 x the three smallest bonds)`) | Intake `_capRoom`; SignerBondV2 `effectiveBond` | invariant `I18_I22_I23_I24`; `IntakeGates.t.sol`; Halmos `check_effectiveBondNeverExceedsTheSum`, `check_cheapestThreeAreTheThreeSmallest` |
+| I18 | A deposit is reserved only within the coverage cap: locked plus pending zatoshi (activations and refunds; dormant refunds do not count) within `maxTotalZat` and, at the high price, within `coverageBps` of the effective bond (`min(sum, 5/3 x the three smallest bonds)`) | Intake `_capRoom`; SignerBondV2 `effectiveBond` | invariant `I18_I22_I23_I24`; `IntakeGates.t.sol`; Halmos `check_effectiveBondNeverExceedsTheSum`, `check_cheapestThreeAreTheThreeSmallest` |
 | I19 | The bond holds exactly the bonds, the unbondings and the unclaimed bounties; the compensator holds exactly its unassigned funds and what it set aside | SignerBondV2, ZecuredCompensator | `SignerBondV2.t.sol`, `ZecuredCompensator.t.sol`; Halmos `check_depositOnlyAddsItsAmountToItsSignersBond` |
 | I20 | `pendingTotal` is the sum of the pending activations; each tag is the note of exactly one reservation, activation or Refund claim | Intake, Registry | invariant `I13_I20` |
 | I21 | A claim without a destination is never committed or confirmed | `_commitClaim` (`ClaimDestinationUnset`) | invariant `I16_I21`; attacks `attackUnsetDestination`, `attackRefundDestination` |
@@ -37,10 +37,14 @@ in `test/halmos`.
 | I25 | Compensation pays its layers in order, each in full before the next, and never more than it received | `CompensationMath` | Halmos `check_takeFillsTheLayersInOrderWithinTheFunds`, `check_aWholeLayerIsPaidInFullAndAnUntouchedOneNothing`; `ZecuredCompensator.t.sol` |
 | I26 | The bonds pay a claim at most once; a bond-paid claim's destination is zero or the one three signers gave; never a frozen vault's claim or a Fee claim; the bonds lose exactly what is paid | `slashLiveness`, `markBondPaid`, `setReimburseDestination` | `SignerBondV2.t.sol`, `RegistryV3Hooks.t.sol`, `Disputes.t.sol` |
 | I27 | An activated vault owes exactly one Fee claim of `feeBps` of its deposit when that reaches `minFeeZat`, and none otherwise | `activate` | invariant `I27` |
-| I28 | Only an active version verifies a proof, and there is always an active violation version | ZecuredVersions, Intake, slasher | `Versions.t.sol`; `DepositProofs.t.sol`, `Tier3Slashing.t.sol`, `Disputes.t.sol` |
+| I28 | Only an active version verifies a proof, and there is always a working violation version (active, routed, not stopped); the last working deposit version goes only with all five signers | ZecuredVersions, Intake, slasher | `Versions.t.sol`; `DepositProofs.t.sol`, `Tier3Slashing.t.sol`, `Disputes.t.sol` |
 | I29 | The relay's best chain is valid under its network's consensus rules | ZcashHeaderRelay with per-network parameters | relay tests on real Testnet and Mainnet headers |
 | I30 | (Off-chain) a note that a deployed guest can make a lineage note is never spent except by a committed payout | Signer nodes' policy | node policy tests |
 | I31 | A disputed claim counts as unpaid until a proof of its payout upholds it or the inclusion window ends; `lockedZatoshi` is the zZEC supply plus every pending or disputed claim | `IZecuredDisputes` in `ZecuredSpendLogic` | invariant `disputes_andLockedZatoshi`; `Disputes.t.sol` |
+| I32 | No claim exists on a pending vault: a refund proven meanwhile waits for its vault, so no claim accrues liveness where no payout may be committed (R-8) | `openReservedRefund` (`VaultPending`) | invariant `R8_noClaimOnAPendingVault` |
+| I33 | A dormant claim is a pending Refund claim without a destination that the bonds did not pay; dormant claims are out of `lockedZatoshi` and the cap (R-11) | `markRefundDormant`, `_closeClaim` | invariant `R11_dormantRefunds`; `test_R11_*` |
+| I34 | The bonds pay only a claim armed by a signer's receipt for its current commitment, once, and only when it is due (R-5, I26) | `armLiveness`, `slashLiveness` | bond campaign `B3_bondPaidClaimsWereArmedOnce`; Halmos B4; `test_R5_*` |
+| I35 | The bond's USDC is exactly its books: every unit deposited is still slashable, paid as liveness, or withdrawn; a running unbonding has a ready time; `fullyBonded` means every signer holds `minBond` | SignerBondV2 | bond campaign `B1` (I19), `B2`, `B4`, `B5`, `B6` (I17) |
 
 The attacks in the campaign (`invariant_attacksAlwaysFail`) must never succeed: reusing a claim
 against another note, confirming an uncommitted claim, committing a claim without a destination,

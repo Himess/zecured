@@ -31,12 +31,15 @@ exiting amount can still pay it.
 ## The coverage cap
 
 New collateral is accepted only while the bonds cover its value. The Intake reserves a proven
-deposit only if the zatoshi locked on Base (zZEC supply, pending activations and unpaid claims)
-stay under `maxTotalZat` (*judge*: 1.5 ZEC) and, valued at the high side of the price, within
-`coverageBps` of the effective bond (*judge*: 100 %; mainnet at most 50 %). Otherwise the deposit
-lands as a refund: the borrower gets the ZEC back, nothing is minted. A stale cap price delays an
-activation (the proof is sent again) and never turns it into a refund. Refunds may push the locked
-total over the cap; only new mints stop.
+deposit only if the zatoshi locked on Base (zZEC supply, pending activations and refunds, and
+unpaid claims) stay under `maxTotalZat` (*judge*: 5 TAZ, so that the bonds set the capacity) and,
+valued at the high side of the price, within `coverageBps` of the effective bond (*judge*: 100 %;
+mainnet at most 50 %). Otherwise a new vault's proof waits: it is sent again once there is room,
+or its owner has it proven as a refund, and the vault stays open. A stale cap price delays an
+activation the same way and never turns it into a refund. Refunds may push the locked total over
+the cap; only new mints stop. A refund still without a destination after `refundDormancy`
+(*judge*: 48 hours) can be marked dormant and stops counting until its account gives one, so an
+unwanted note cannot hold the cap.
 
 ## Fees
 
@@ -55,7 +58,7 @@ total over the cap; only new mints stop.
 |---|---|---|
 | The signers spend a vault's ZEC without a commitment (F1), withhold a payout's change (F2) | After the challenge window (*judge*: 24 hours), all five bonds (F1) or the signing ones (F2) are slashed, minting halts, the vault is frozen and then compromised | The prover gets a bounty (10 %, capped at 50 USDC, *judge*); `ZecuredCompensator` pays the victims from the rest |
 | A payout misdirects a claim (F3) or hides it from its claimant (F4) | The signers who signed it are slashed | F3: the claimant's shortfall joins the compensation layers; F4: the slash only |
-| The signers stop paying a claim | After `livenessPeriod` (*judge*: 24 hours, deferred by a payout in flight for 2 hours at most) the claimant takes the claim's value plus 5 % from the bonds, pro rata | The claimant, in USDC; the claim's ZEC then goes to the bonds' Reimburse destination |
+| The signers stop paying a claim | Once a signer has acknowledged the claim's destination (a receipt), after `livenessPeriod` (*judge*: 24 hours, deferred by a payout in flight for 2 hours at most) the claimant takes the claim's value plus 5 % from the bonds, pro rata; never at a stale price | The claimant, in USDC; the claim's ZEC then goes to the bonds' Reimburse destination |
 | Three signers confirm a payout that never reached Zcash | The claimant disputes within 24 hours; unless the signers prove the payout's inclusion within 6 hours, the claim is payable again | The claimant, by a new payout or from the bonds |
 | Signers go silent before a vault is active | A proof that cannot be activated lands as a refund; a pending activation can be refunded after a 24-hour pause or a halt | The borrower, in ZEC |
 

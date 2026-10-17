@@ -156,7 +156,9 @@ depends on the tag key, which only the owner, the signers and whoever proves the
 
 then the deposit **lands**, once: if it can activate the vault, the Registry **reserves** the vault id, the tag and the
 account and the Intake records a pending activation (D26, review K3): nothing is minted yet. Otherwise (Refund mode, a
-vault that is not new, an account bound elsewhere, a halt, a full coverage cap) it lands as a Refund claim (§ 5).
+vault that is not new, an account bound elsewhere, a halt) it lands as a pending refund, whose Refund claim opens after
+the same wait (§ 5). A new vault's proof that finds the coverage cap full reverts and is sent again once there is room
+(R-11).
 `finalizeActivation(vaultId)` (anyone) mints and supplies once the relay's best chain has gained `finalizeDepth` (6)
 headers since the proof and `finalizeDelay` (150 s) has passed, with the anchor still on the best chain under the
 same work, no violation case open on the vault, and minting neither halted, paused nor short of bonds.
@@ -204,11 +206,16 @@ keccak256(K)`, § 2.3).
 ## 5. Deposits that do not activate: refunds by proof (D41, T-02)
 
 A proof needs no signer, so a deposit that cannot activate its vault is brought onto Base like any other: it lands as
-a Refund claim of the vault's account (`DepositRefunded`, with the reason), and its note is a lineage note from then
-on. The account gives the refund's destination (`setRefundDestination`, a salted commitment, by UserOp); the signers
-then pay it with a committed payout like any claim, and its theft is F1. A refund nobody claims is written off after
-`refundAbandonPeriod` and can be revived by its account. A pending activation becomes a refund after a halt, or after a
-pause by signatures has lasted `pendingRefundDelay` (`refundPending`). With journal v2, a note of any other amount, or
+a pending refund of the vault's account (`RefundPending`, with the reason), and its note is a lineage note from then
+on. Like an activation, the refund waits (v4, R-12): `finalizeRefund` opens its Refund claim (`DepositRefunded`) once
+the relay has moved on by `finalizeDepth` headers and `finalizeDelay` seconds with the anchor still on the best chain,
+and `dropPendingRefund` frees the note if the anchor leaves it, so a short fake branch cannot leave a refund claim for
+good; no payout may spend a pending refund's note, and no refund opens while its vault is pending. The account gives
+the refund's destination (`setRefundDestination`, a salted commitment, by UserOp); the signers then pay it with a
+committed payout like any claim, and its theft is F1. A refund without a destination for `refundDormancy` can be
+marked dormant and stops counting against the cap; one nobody claims is written off after `refundAbandonPeriod` and
+can be revived by its account. A pending activation becomes a refund after a halt, or at its account's request once
+`pendingRefundDelay` has passed since it was ready, whatever gate holds it (`refundPending`, R-13). With journal v2, a note of any other amount, or
 paid after the vault's expiry, is proven in Refund mode and lands the same way. There is no `cancelVault` any more:
 it could not authenticate the vault's owner on Base without publishing `VaultOpened`'s hashes, and an off-chain refund
 of a note a later proof could make a lineage note would look exactly like an F1 theft (I30, D42). Notes no deployed
