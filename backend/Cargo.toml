@@ -18,6 +18,14 @@ demo-tier3 = ["zecured-coordinator/demo-tier3"]
 zecured-coordinator = { path = "../signer/crates/coordinator" }
 zecured-base = { path = "../signer/crates/base-client" }
 zecured-node = { path = "../signer/crates/node" }
+# P-1: the demo wallet's Ironwood payments (DEMO, the judge deployment only).
+zecured-zcash-ops = { path = "../signer/crates/zcash-ops" }
+orchard.workspace = true
+pczt.workspace = true
+zcash_protocol.workspace = true
+rand_010.workspace = true
+# P-1: the demo payment's stamp (already in the lock file, through zecured-base).
+sha2 = "0.10"
 alloy.workspace = true
 axum.workspace = true
 tokio.workspace = true

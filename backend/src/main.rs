@@ -39,16 +39,24 @@ use zecured_coordinator::{
 use zecured_node::config::NetworkConfig;
 
 mod allowlist;
+mod app_routes;
+mod demo;
+mod evidence;
 mod limits;
 mod minting;
 mod onchain;
 mod paymaster;
 mod proxy;
+mod stats;
+mod swap_relay;
 mod versions;
 
 #[derive(Parser)]
 #[command(about = "Zecured backend: coordinator + public API")]
 struct Cli {
+    /// The v4 app's routes (demo wallet, evidence, anonymity sets, swap relay): app_routes.rs.
+    #[command(flatten)]
+    app: app_routes::AppArgs,
     #[arg(long, env = "ZECURED_NETWORK_CONFIG", default_value = "signer/data/network.json")]
     config: PathBuf,
     #[arg(long, env = "ZECURED_COORDINATOR_DATA", default_value = "signer/data/coordinator")]
@@ -1087,7 +1095,13 @@ fn cors_layer(origins: &str) -> Result<CorsLayer> {
     Ok(CorsLayer::new()
         .allow_origin(AllowOrigin::list(list))
         .allow_methods([Method::GET, Method::POST])
-        .allow_headers([CONTENT_TYPE, ACCEPT, HeaderName::from_static("x-admin-token")])
+        .allow_headers([
+            CONTENT_TYPE,
+            ACCEPT,
+            HeaderName::from_static("x-admin-token"),
+            // The swap maker's invite code on the mainnet beta (swap_relay.rs).
+            HeaderName::from_static(swap_relay::INVITE_HEADER),
+        ])
         .max_age(Duration::from_secs(600)))
 }
 
@@ -1297,7 +1311,13 @@ async fn main() -> Result<()> {
             http: reqwest::Client::builder().timeout(Duration::from_secs(180)).build()?,
         },
     };
-    let app = router(coordinator, proxy, wiring, &limits::Limits::default(), cors);
+    let app_wiring = app_routes::AppWiring::new(&cli.app, coordinator.clone(), &cli.data)?;
+    let limits = limits::Limits::default();
+    let app = router(coordinator, proxy, wiring, &limits, cors.clone()).merge(app_routes::router(
+        app_wiring,
+        &limits.global,
+        cors,
+    ));
     let listener = tokio::net::TcpListener::bind(cli.bind).await?;
     info!(bind = %cli.bind, "backend listening");
     axum::serve(listener, app).await.map_err(|e| anyhow!("server: {e}"))?;
@@ -1611,8 +1631,20 @@ mod tests {
             .header("access-control-request-method", "POST")
             .body(HttpBody::empty())
             .unwrap();
-        let r = app.oneshot(preflight).await.unwrap();
+        let r = app.clone().oneshot(preflight).await.unwrap();
         assert_eq!(r.headers().get("access-control-allow-origin").unwrap(), "http://127.0.0.1:3000");
+        // The swap maker's invite code (mainnet beta) is the one custom header the app adds.
+        let invite = axum::http::Request::builder()
+            .method(Method::OPTIONS)
+            .uri("/health")
+            .header("origin", "http://127.0.0.1:3000")
+            .header("access-control-request-method", "GET")
+            .header("access-control-request-headers", "x-zecured-invite")
+            .body(HttpBody::empty())
+            .unwrap();
+        let r = app.oneshot(invite).await.unwrap();
+        let allowed = r.headers().get("access-control-allow-headers").unwrap().to_str().unwrap().to_ascii_lowercase();
+        assert!(allowed.contains("x-zecured-invite"), "{allowed}");
 
         assert!(cors_layer("*").is_err());
         assert!(cors_layer("").is_err());

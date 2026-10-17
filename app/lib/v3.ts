@@ -61,7 +61,7 @@ export interface MintingNotice {
   body: string[];
 }
 
-/** The denominations a proof of would land as a refund now because of the cap, and whether that is all of them. */
+/** The denominations whose proofs the cap holds back now (R-11: they wait), and whether that is all of them. */
 function capFull(s: MintingStatus, denominations: readonly bigint[]): { all: boolean; some: bigint[] } {
   const exceeded = denominations.filter((d) => s.mintBlock.get(d) === "CapExceeded");
   return { all: denominations.length > 0 && exceeded.length === denominations.length, some: exceeded };
@@ -112,9 +112,9 @@ export function mintingNotices(s: MintingStatus, denominations: readonly bigint[
   if (cap.all) {
     out.push({
       tone: "warn",
-      title: "The coverage cap is full: new deposits land as refunds",
+      title: "The coverage cap is full: new deposits wait for room",
       body: [
-        "New collateral is accepted only while the signers' bonds cover its value. A deposit proven now does not back a loan: it comes back as a refund, minus the payout's network fee. Wait until there is room again before you open a vault.",
+        "New collateral is accepted only while the signers' bonds cover its value. A deposit made now is not lost: its proof waits until there is room, and zZEC is minted then; or you have it proven as a refund instead. Wait until there is room again before you open a vault.",
         EXITS_NEVER_STOP,
       ],
     });
@@ -123,7 +123,7 @@ export function mintingNotices(s: MintingStatus, denominations: readonly bigint[
       tone: "info",
       title: `Room left under the coverage cap: ${formatTaz(s.capRoom)}`,
       body: [
-        `A deposit of ${cap.some.map(formatTaz).join(" or ")} would land as a refund now; the smaller sizes still fit.`,
+        `A deposit of ${cap.some.map(formatTaz).join(" or ")} would wait for room now (or come back as a refund if you ask); the smaller sizes still fit.`,
       ],
     });
   }
@@ -139,7 +139,7 @@ export function mintingNotices(s: MintingStatus, denominations: readonly bigint[
   return out;
 }
 
-/** Whether to open a vault of `amount` now (the app does not open one whose deposit would land as a refund). */
+/** Whether to open a vault of `amount` now (the app opens none whose deposit would land as a refund, or wait for room). */
 export interface OpenGate {
   allowed: boolean;
   /** What happens to a deposit proven now, or null when it would be activated as usual. */
@@ -153,9 +153,10 @@ export function openGate(s: MintingStatus | null, amount: bigint): OpenGate {
     case "Halted":
       return { allowed: false, message: "Minting has stopped for good: a deposit proven now would only come back as a refund." };
     case "CapExceeded":
+      // R-11: the proof of a new vault's deposit reverts while the cap has no room, and is sent again later.
       return {
         allowed: false,
-        message: `The coverage cap has room for ${formatTaz(s.capRoom)} only: a deposit of ${formatTaz(amount)} proven now would only come back as a refund. Try a smaller size, or later.`,
+        message: `The coverage cap has room for ${formatTaz(s.capRoom)} only: a deposit of ${formatTaz(amount)} made now would wait, unminted, until there is room (or come back as a refund if you ask). Try a smaller size, or later.`,
       };
     case "Paused":
       // A pause by signatures runs until `pausedUntil`; past it (as the backend read it), an open theft case pauses.
@@ -261,8 +262,17 @@ export interface ClaimView {
   detail: string;
 }
 
-/** A claim of the vault, in plain words. */
-export function claimView(c: LedgerClaim, ctx: { refundAbandonPeriod: number; nowSeconds: number }): ClaimView {
+/**
+ * A claim of the vault, in plain words. Section 3 of the v4 design: a pending claim whose payout
+ * the signers committed on Base is "Sent"; one they confirmed paid is "Signers confirmed —
+ * disputable until …" (`disputeWindow` after the confirmation, when known); a final one (`paidAt`
+ * 0: its delivery proven on Base, or its confirmation undisputed through the window) is "Final on
+ * Base ✓". R-11: a Refund claim without a destination may be set aside as dormant.
+ */
+export function claimView(
+  c: LedgerClaim,
+  ctx: { refundAbandonPeriod: number; nowSeconds: number; disputeWindow?: number; refundDormancy?: number | null },
+): ClaimView {
   const label = CLAIM_KIND_LABEL[c.kind];
   if (c.kind === "Retired") {
     return {
@@ -283,18 +293,56 @@ export function claimView(c: LedgerClaim, ctx: { refundAbandonPeriod: number; no
     case "Pending":
       if (c.kind === "Refund" && c.commitment.toLowerCase() === ZERO32) {
         const at = abandonableAt(c, ctx.refundAbandonPeriod);
+        const writeOff = at !== null ? ` Without one, it can be written off after ${formatUtc(at)} (you can revive it later).` : "";
+        if (c.dormant) {
+          return {
+            label,
+            badge: { tone: "warn", text: "Dormant: needs your destination" },
+            detail: `No destination was given in time, so it was set aside: it no longer counts against the coverage cap, and it is still yours. Giving it an Ironwood destination wakes it, and it is paid.${writeOff}`,
+          };
+        }
+        const dormantAt = ctx.refundDormancy ? c.createdAt + ctx.refundDormancy : null;
         return {
           label,
           badge: { tone: "warn", text: "Needs your destination" },
-          detail: `Give it an Ironwood destination to be paid.${at !== null ? ` Without one, it can be written off after ${formatUtc(at)} (you can revive it later).` : ""}`,
+          detail: `Give it an Ironwood destination to be paid.${dormantAt !== null ? ` Without one, it is set aside as dormant after ${formatUtc(dormantAt)} (still yours, outside the coverage cap).` : ""}${writeOff}`,
         };
       }
       if (c.kind === "Fee") {
         return { label, badge: { tone: "neutral", text: "Pending" }, detail: "Paid out of the vault with its next payout, to the signers' treasury." };
       }
+      if (c.committed) {
+        return {
+          label,
+          badge: { tone: "info", text: "Sent" },
+          detail: "The signers committed its payout on Base and are sending it on Zcash. It is final once its delivery is proven on Base.",
+        };
+      }
       return { label, badge: { tone: "warn", text: "Pending" }, detail: "The signers pay it in their payout queue." };
     case "Paid":
-      return { label, badge: { tone: "ok", text: "Paid" }, detail: "Confirmed paid on Zcash by the signers." };
+      // `paidAt` 0: a proof of the payout's inclusion, or `expireConfirmation` once a confirmation
+      // stood undisputed through its window (R-3); Base keeps no trace of which in the claim itself.
+      if (c.paidAt === 0) {
+        return {
+          label,
+          badge: { tone: "ok", text: "Final on Base ✓" },
+          detail:
+            "Its delivery was proven on Base (a zero-knowledge proof that the payout is in a Zcash block, which the coordinator makes for every payout), or the signers' confirmation stood undisputed through its dispute window: this claim is final.",
+        };
+      }
+      if (ctx.disputeWindow !== undefined && ctx.nowSeconds <= c.paidAt + ctx.disputeWindow) {
+        return {
+          label,
+          badge: { tone: "info", text: `Signers confirmed — disputable until ${formatUtc(c.paidAt + ctx.disputeWindow)}` },
+          detail:
+            "The signers confirmed on Base that they paid it on Zcash. The coordinator proves every payout's delivery on Base; until then, its claimant can dispute the confirmation.",
+        };
+      }
+      return {
+        label,
+        badge: { tone: "ok", text: "Signers confirmed" },
+        detail: "Confirmed paid on Zcash by the signers; its delivery proof has not reached Base yet.",
+      };
     case "WrittenOff":
       return c.kind === "Refund"
         ? {

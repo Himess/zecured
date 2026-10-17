@@ -6,24 +6,28 @@ import { BorrowForm } from "@/components/BorrowForm";
 import { CopyButton, Qr, useMounted } from "@/components/client";
 import { KeyBackup } from "@/components/KeyBackup";
 import { Badge, Button, buttonClass, Card, cx, KeyValue, Mono, Notice, Steps } from "@/components/ui";
-import type { Vault } from "@/lib/api";
+import { apiErrorCode, type Vault } from "@/lib/api";
 import { config } from "@/lib/config";
+import { DEPLOYMENT } from "@/lib/deployment";
 import {
   notifyLoansChanged,
   useAction,
   useLoans,
   useMintingStatus,
   usePosition,
+  useTypicalDurations,
   useVault,
   useVaultLedger,
   useVaultProof,
 } from "@/lib/hooks";
 import { createLoan, loanStore, short, type StoredLoan } from "@/lib/keys";
-import { checkVaultAddress, openVault } from "@/lib/owner";
+import { checkVaultAddress, openVault, requestRefundProof } from "@/lib/owner";
 import { vaultHref } from "@/lib/routes";
 import { vaultCheckUnavailable, VaultProofError, type VaultCheck } from "@/lib/signers";
-import { feeNotice, openGate } from "@/lib/v3";
+import { feeNotice, formatPeriod, openGate } from "@/lib/v3";
+import { capWait, openingsNotice, openRefusal, refundProofRefusal } from "@/lib/v4";
 import { blocksToDuration, formatTaz } from "@/lib/zcash";
+import { DemoPayment } from "./DemoPayment";
 
 const STEPS = ["Amount", "Back up key", "Deposit", "Borrow"];
 
@@ -162,20 +166,26 @@ function AmountStep({
   const groupId = useId();
   const [amount, setAmount] = useState<bigint>(loan ? BigInt(loan.amount) : config.denominations[0]!);
   const [ready, setReady] = useState(false);
-  // T-01, T-03: a vault whose deposit would only come back as a refund is not opened.
+  // T-01, T-03, R-11: a vault whose deposit would only come back as a refund, or wait for room under the cap, is not opened.
   const minting = useMintingStatus();
   const gate = openGate(minting.data, amount);
   const fee = feeNotice(amount, config.v3);
   // The signers did not vouch for the vault the backend returned (C-4).
   const [unvouched, setUnvouched] = useState(false);
+  // The mainnet beta opens vaults by invitation only; the backend's refusal code, if any.
+  const [invite, setInvite] = useState("");
+  const invitesOn = DEPLOYMENT.invites || config.openings?.inviteOnly === true;
+  const [refusalCode, setRefusalCode] = useState<string | null>(null);
+  const inviteId = useId();
   const cannotCheck = vaultCheckUnavailable();
   const open = useAction(async (current: StoredLoan | null) => {
     setUnvouched(false);
+    setRefusalCode(null);
     // The key is saved *before* the backend is contacted, so a crash never loses it.
     const l = current ?? createLoan(amount);
     if (!current) onLoan(l);
     try {
-      const res = await openVault(l);
+      const res = await openVault(l, invitesOn ? { invite } : {});
       // Stored as payable only now that every signer vouches for the address (lib/signers.ts).
       onLoan({
         ...l,
@@ -188,10 +198,16 @@ function AmountStep({
       return res;
     } catch (e) {
       if (e instanceof VaultProofError) setUnvouched(true);
+      setRefusalCode(apiErrorCode(e));
       throw e;
     }
   });
   const alreadyBound = open.error?.includes("already has a vault");
+  const refusal = openRefusal(refusalCode);
+  const needsInvite = invitesOn && !invite.trim();
+  // P-8: the operator's switch on new vaults (never on existing vaults' exits and payouts).
+  const openings = openingsNotice(config.openings);
+  const openingsClosed = config.openings?.open === false;
 
   return (
     <Card title="How much ZEC do you want to lock?">
@@ -211,7 +227,7 @@ function AmountStep({
                 <span className="block text-lg font-semibold">{formatTaz(d)}</span>
                 <span className="block text-xs text-muted">Standard vault size (everyone uses the same amounts)</span>
                 {!openGate(minting.data, d).allowed ? (
-                  <span className="block text-xs text-warn">A deposit of this size would come back as a refund now.</span>
+                  <span className="block text-xs text-warn">A deposit of this size cannot back a loan right now.</span>
                 ) : null}
               </span>
             </label>
@@ -238,6 +254,13 @@ function AmountStep({
           </Notice>
         </div>
       ) : null}
+      {openings ? (
+        <div className="mt-4">
+          <Notice tone={openingsClosed ? "warn" : "info"} title={openings.title}>
+            <p>{openings.body}</p>
+          </Notice>
+        </div>
+      ) : null}
       <div className="mt-4">
         <Notice tone="warn" title="Get your ZEC into Ironwood well before this step">
           <p>
@@ -256,6 +279,22 @@ function AmountStep({
           <Link href="/prepare">why this matters</Link>).
         </span>
       </label>
+      {invitesOn ? (
+        <div className="mt-4 space-y-1">
+          <label htmlFor={inviteId} className="block text-sm font-medium">
+            Invite code
+          </label>
+          <input
+            id={inviteId}
+            value={invite}
+            onChange={(e) => setInvite(e.target.value)}
+            autoComplete="off"
+            spellCheck={false}
+            className="w-full max-w-sm rounded-lg border border-border bg-bg px-3 py-2 font-mono text-sm text-text focus:border-accent"
+          />
+          <p className="text-xs text-muted">The mainnet beta opens vaults by invitation only; each code opens one vault.</p>
+        </div>
+      ) : null}
       {!config.ownerSigning ? (
         <div className="mt-4">
           <Notice tone="danger" title="Opening a vault is disabled">
@@ -273,7 +312,7 @@ function AmountStep({
         <Button
           onClick={() => open.run(loan)}
           busy={open.busy}
-          disabled={(!ready && !loan) || !config.ownerSigning || cannotCheck !== null || !gate.allowed}
+          disabled={(!ready && !loan) || !config.ownerSigning || cannotCheck !== null || !gate.allowed || needsInvite || openingsClosed}
         >
           {loan ? "Retry opening the vault" : "Create loan and open vault"}
         </Button>
@@ -289,7 +328,14 @@ function AmountStep({
           spammed), then the five signer nodes generate the vault&apos;s threshold key. This can take a little while.
         </p>
       ) : null}
-      {open.error ? (
+      {open.error && refusal ? (
+        <div className="mt-4">
+          <Notice tone={refusal.openingsClosed ? "info" : "warn"} title={refusal.title} live>
+            <p>{refusal.body}</p>
+            <p>Your new key is saved in this browser; you can retry.</p>
+          </Notice>
+        </div>
+      ) : open.error ? (
         <div className="mt-4">
           <Notice tone="danger" title="The vault could not be opened" live>
             <p>{open.error}</p>
@@ -320,10 +366,10 @@ function confirmationsText(seen: number | undefined): string {
 }
 
 const STATUS_STEPS = [
-  { status: "awaiting_deposit", label: "Waiting for your Ironwood deposit" },
-  { status: "deposit_seen", label: "Deposit seen; it is being proven for Base" },
-  { status: "pending", label: "Proven on Base; waiting to be activated" },
-  { status: "active", label: "zZEC minted into your Morpho position" },
+  { status: "awaiting_deposit", label: "Waiting for your Ironwood deposit", duration: null },
+  { status: "deposit_seen", label: "Deposit on Zcash; its zero-knowledge proof is being made for Base", duration: "deposit-to-proof" },
+  { status: "pending", label: "Proven on Base; waiting to be activated", duration: "proof-to-activation" },
+  { status: "active", label: "zZEC minted into your Morpho position", duration: null },
 ] as const;
 
 /** Where the deposit is: the signers' status, and Base's pending activation (K3) between proof and mint. */
@@ -352,10 +398,35 @@ function DepositStep({ loan, vault, vaultError }: { loan: StoredLoan; vault: Vau
   const l = ledger.data;
   const statusIndex = statusStep(vault, Boolean(l?.pending));
   const refunded = Boolean(l && l.claims.some((c) => c.kind === "Refund"));
+  // R-12: proven as a refund, its claim not open yet.
+  const refundPending = (l?.pendingRefunds?.length ?? 0) > 0;
   // Paying again after the deposit was seen, or after expiry, does not back the loan.
-  const awaiting = (!vault || vault.status === "awaiting_deposit" || vault.status === "unknown") && !l?.pending && !refunded;
+  const awaiting =
+    (!vault || vault.status === "awaiting_deposit" || vault.status === "unknown") && !l?.pending && !refunded && !refundPending;
   const expiry = vault?.expiryHeight ?? loan.expiryHeight;
   const blocksLeft = vault?.tipHeight !== undefined && expiry !== undefined ? expiry - vault.tipHeight : null;
+  // R-11.1: the deposit is on Zcash but its proof waits for room under the coverage cap.
+  const minting = useMintingStatus();
+  const cap = capWait({
+    vaultStatus: vault?.status,
+    depositSeen: vault?.depositSeen,
+    baseStatus: l?.status,
+    pending: Boolean(l?.pending),
+    refunding: refunded || refundPending,
+    mintBlock: minting.data?.mintBlock.get(amount),
+  });
+  const refundInstead = useAction(async () => {
+    try {
+      await requestRefundProof(loan, loan.vaultId!);
+    } catch (e) {
+      const why = refundProofRefusal(apiErrorCode(e));
+      if (why) throw new Error(why);
+      throw e;
+    }
+    return true;
+  });
+  // P-8: typical durations measured on the deployment (the evidence file), when published.
+  const durations = useTypicalDurations();
 
   return (
     <div className="grid gap-6 lg:grid-cols-[minmax(0,1fr)_18rem] [&>*]:min-w-0">
@@ -386,12 +457,45 @@ function DepositStep({ loan, vault, vaultError }: { loan: StoredLoan; vault: Vau
             Checking the signers&apos; signatures on this vault…
           </p>
         ) : null}
-        {!awaiting && vault?.status === "deposit_seen" && !l?.pending ? (
-          <Notice tone="ok" title="Deposit received" live>
+        {!awaiting && vault?.status === "deposit_seen" && !l?.pending && cap === "none" ? (
+          <Notice tone="ok" title="Deposit received on Zcash" live>
             <p>
-              The signers saw your deposit; its zero-knowledge proof is being made and sent to Base. Do not pay again: a
-              second payment does not back the loan (it can only come back as a refund).
+              A zero-knowledge proof that your deposit is in a Zcash block is being made and sent to Base; nothing is
+              minted on anyone&apos;s word. Do not pay again: a second payment does not back the loan (it can only come back
+              as a refund).
             </p>
+          </Notice>
+        ) : null}
+        {cap !== "none" ? (
+          <Notice
+            tone="warn"
+            title={cap === "confirmed" ? "Your deposit waits for room under the coverage cap" : "The coverage cap is full right now"}
+            live
+          >
+            <p>
+              {cap === "confirmed" ? "Your deposit is on Zcash, but the" : "If you already paid this vault, your deposit is on Zcash, but the"}{" "}
+              signers&apos; bonds cover no more collateral right now, so its proof cannot land yet. Nothing is lost and the vault
+              stays yours: the proof is sent again once there is room, and zZEC is minted then.
+            </p>
+            {cap === "possible" ? <p>If you have not paid yet, wait until there is room before you pay.</p> : null}
+            {refundInstead.result ? (
+              <p>
+                Refund requested: the coordinator proves your deposit as a refund instead. It then appears on the{" "}
+                <Link href={vaultHref("refund", loan.vaultId!)} prefetch={false}>
+                  refunds page
+                </Link>
+                , pending for a few Zcash blocks until its claim opens; you then give it an Ironwood destination there (the
+                payout&apos;s network fee is deducted).
+              </p>
+            ) : (
+              <>
+                <p>If you would rather not wait, have it proven as a refund: it then comes back to an Ironwood address you give.</p>
+                <Button variant="secondary" onClick={() => void refundInstead.run()} busy={refundInstead.busy}>
+                  Refund my deposit instead
+                </Button>
+              </>
+            )}
+            {refundInstead.error ? <p className="text-danger">{refundInstead.error}</p> : null}
           </Notice>
         ) : null}
         {l?.pending ? (
@@ -401,6 +505,18 @@ function DepositStep({ loan, vault, vaultError }: { loan: StoredLoan; vault: Vau
               into your position.{" "}
               <Link href={vaultHref("position", loan.vaultId!)} prefetch={false}>
                 See when
+              </Link>
+              .
+            </p>
+          </Notice>
+        ) : null}
+        {refundPending && !refunded ? (
+          <Notice tone="info" title="Your deposit was proven as a refund" live>
+            <p>
+              Its proof is on Base and waits a few Zcash blocks, like an activation, before its refund opens (pending until
+              then). The backend&apos;s keeper opens it; you then give it an Ironwood destination on the{" "}
+              <Link href={vaultHref("refund", loan.vaultId!)} prefetch={false}>
+                refunds page
               </Link>
               .
             </p>
@@ -424,6 +540,7 @@ function DepositStep({ loan, vault, vaultError }: { loan: StoredLoan; vault: Vau
         ) : null}
         {awaiting && vouched && check?.ok && check.uri ? (
           <div className="space-y-4">
+            <DemoPayment loan={loan} />
             {vouched !== "pinned" ? (
               <Notice tone="warn" title="Development build: the signer set is not pinned">
                 <p>
@@ -498,7 +615,12 @@ function DepositStep({ loan, vault, vaultError }: { loan: StoredLoan; vault: Vau
               <span aria-hidden="true" className={i < statusIndex ? "text-ok" : i === statusIndex ? "text-accent" : "text-faint"}>
                 {i < statusIndex ? "●" : i === statusIndex ? "◐" : "○"}
               </span>
-              <span className={i <= statusIndex ? "text-text" : "text-faint"}>{s.label}</span>
+              <span className={i <= statusIndex ? "text-text" : "text-faint"}>
+                {s.label}
+                {s.duration && durations.get(s.duration) !== undefined ? (
+                  <span className="block text-xs text-muted">Typically {formatPeriod(durations.get(s.duration)!)} (measured)</span>
+                ) : null}
+              </span>
             </li>
           ))}
         </ol>

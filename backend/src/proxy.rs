@@ -7,8 +7,9 @@
 //! allowlist, name EntryPoint v0.7, come from a Zecured account (`Registry.vaultOf(sender)
 //! != 0`, or for a call about a claim, the claim's own claimant; once deployed, still the
 //! canonical SafeProxy), refund only its own pending activation, have the bonds pay a claim
-//! only when they can pay it now, and stay within a per-sender rate (M-3). Refusals are fixed
-//! messages with a short code (L-2).
+//! only when they can pay it now, arm a claim's liveness (R-5) and set or clear its own
+//! pre-liquidation terms only when the contract takes the call now (simulated from the sender),
+//! and stay within a per-sender rate (M-3). Refusals are fixed messages with a short code (L-2).
 
 use std::{
     collections::HashMap,
@@ -177,11 +178,19 @@ const NOT_OWN_REFUND: Refusal =
     Refusal::new("not_own_refund", "Not sponsored: only the refunded vault's account gives the refund's destination.");
 const NOT_OWN_CLAIM: Refusal = Refusal::new(
     "not_own_claim",
-    "Not sponsored: only a claim's own claimant disputes it, reopens it or has the bonds pay it.",
+    "Not sponsored: only a claim's own claimant disputes it, reopens it, arms its liveness or has the bonds pay it.",
 );
 const NOT_PAYABLE_NOW: Refusal = Refusal::new(
     "not_payable_now",
     "Not sponsored: the bonds cannot pay this claim now (not overdue yet, not eligible, or more than the bonds hold).",
+);
+const NOT_ARMABLE: Refusal = Refusal::new(
+    "not_armable",
+    "Not sponsored: the bonds would refuse this receipt now (not a signer's, not for the claim's current destination, or not yet valid).",
+);
+const PRE_LIQUIDATION_REFUSED: Refusal = Refusal::new(
+    "pre_liquidation_refused",
+    "Not sponsored: the Settlement Adapter would refuse these pre-liquidation terms now.",
 );
 const NOT_A_SAFE: Refusal =
     Refusal::new("not_a_safe", "Not sponsored: the sender is not a standard Zecured Safe account.");
@@ -339,8 +348,10 @@ impl Proxy {
     /// refund's destination (T-02; a Refund claim, which a deposit that landed only as a refund
     /// leaves without binding the account), a dispute of a payout confirmation and the reopening
     /// of a disputed claim (T-05 (a)), and the bonds paying an overdue claim (T-05; only when they
-    /// can pay it now). `Intake.refundPending` (T-03) only for the sender's own vault. Fails
-    /// closed if the chain cannot be read.
+    /// can pay it now), and arming a claim's liveness with a signer's receipt (R-5).
+    /// `Intake.refundPending` (T-03) only for the sender's own vault. Every call the allowlist
+    /// marks for simulation (an arming, the account's pre-liquidation terms) must succeed when the
+    /// sender makes it now. Fails closed if the chain cannot be read.
     async fn check_sender(&self, allowlist: &Allowlist, op: &UserOpView, bindings: &Bindings) -> Result<(), Refusal> {
         let cached = self.recently_verified(op.sender);
         let vault = match cached {
@@ -358,6 +369,7 @@ impl Proxy {
             .iter()
             .chain(&bindings.own_claims)
             .chain(&bindings.liveness_claims)
+            .chain(&bindings.arm_claims)
             .copied()
             .collect();
         claims.sort_unstable();
@@ -375,6 +387,18 @@ impl Proxy {
         }
         if !bindings.liveness_claims.is_empty() {
             self.check_payable_now(allowlist, &bindings.liveness_claims).await?;
+        }
+        if !bindings.arm_claims.is_empty() {
+            // The receipt's EIP-712 domain is the bond's: it must be the Registry's.
+            self.check_bond(allowlist).await?;
+        }
+        for (to, data) in &bindings.simulated {
+            let refusal = if *to == allowlist.bond {
+                NOT_ARMABLE
+            } else {
+                PRE_LIQUIDATION_REFUSED
+            };
+            self.check_succeeds(op.sender, *to, data, refusal).await?;
         }
         if cached.is_none() {
             // An undeployed sender is checked by the allowlist: its factory data CREATE2-derives it.
@@ -466,6 +490,24 @@ impl Proxy {
         let call = json!([{ "to": to, "data": format!("0x{}", hex::encode(data)) }, "latest"]);
         let out = self.chain_read("eth_call", call).await?;
         hex_bytes(&out).ok_or(CHECK_UNAVAILABLE)
+    }
+
+    /// The call `from` would make succeeds at the latest block (an `eth_call` with `from` set, so
+    /// `msg.sender` is the account, deployed or not): a revert is `refusal`, no usable answer is
+    /// [`CHECK_UNAVAILABLE`].
+    async fn check_succeeds(&self, from: Address, to: Address, data: &[u8], refusal: Refusal) -> Result<(), Refusal> {
+        let call = json!([{ "from": from, "to": to, "data": format!("0x{}", hex::encode(data)) }, "latest"]);
+        let body = json!({ "jsonrpc": "2.0", "id": 1, "method": "eth_call", "params": call });
+        let resp = self.http.post(&self.check_rpc_url).timeout(CHECK_TIMEOUT).json(&body).send().await;
+        let v: Value = resp.map_err(|_| CHECK_UNAVAILABLE)?.json().await.map_err(|_| CHECK_UNAVAILABLE)?;
+        if v.get("result").is_some_and(Value::is_string) {
+            return Ok(());
+        }
+        // A JSON-RPC error answer is the node's verdict: the call reverts.
+        if v.get("error").is_some_and(Value::is_object) {
+            return Err(refusal);
+        }
+        Err(CHECK_UNAVAILABLE)
     }
 
     /// One JSON-RPC read on the backend's own RPC.
@@ -574,8 +616,12 @@ mod tests {
     use axum::{Router, routing::post};
 
     use super::*;
-    use crate::allowlist::tests::{
-        batch, dispute, list, liveness, op, refund_destination, refund_pending, reopen, single,
+    use crate::allowlist::{
+        self,
+        tests::{
+            arm, batch, clear_pre_liquidation, dispute, list, liveness, op, refund_destination, refund_pending, reopen,
+            set_pre_liquidation, single, standard_terms,
+        },
     };
 
     /// A Base RPC stub: `bound` senders have a vault (0x07…, or the one in `vaults`); `claims`
@@ -593,6 +639,12 @@ mod tests {
         bond: Option<Address>,
         now: u64,
         deployed: HashMap<Address, (Vec<u8>, Address, Address)>,
+        /// R-5: the claims whose arming the bond takes (any other reverts).
+        armable: Vec<B256>,
+        /// The senders whose pre-liquidation calls the Adapter takes (any other reverts).
+        pre_liquidation_ok: Vec<Address>,
+        /// The `from` of every simulated call, in order.
+        simulated_from: std::sync::Mutex<Vec<Address>>,
         calls: AtomicUsize,
         bond_reads: AtomicUsize,
     }
@@ -606,7 +658,32 @@ mod tests {
             "eth_call" => {
                 let to: Address = params[0]["to"].as_str().unwrap().parse().unwrap();
                 let data = hex_bytes(&params[0]["data"]).unwrap();
-                let out = match <[u8; 4]>::try_from(&data[..4]).unwrap() {
+                let selector = <[u8; 4]>::try_from(&data[..4]).unwrap();
+                // Simulated calls: an empty result when the contract takes them, a revert otherwise.
+                let simulated = match selector {
+                    allowlist::armLivenessCall::SELECTOR => {
+                        assert_eq!(to, l.bond);
+                        let id = allowlist::armLivenessCall::abi_decode(&data).unwrap().claimId;
+                        Some(c.armable.contains(&id))
+                    }
+                    allowlist::setPreLiquidationCall::SELECTOR | allowlist::clearPreLiquidationCall::SELECTOR => {
+                        assert_eq!(to, l.adapter);
+                        let from: Address = params[0]["from"].as_str().unwrap().parse().unwrap();
+                        Some(c.pre_liquidation_ok.contains(&from))
+                    }
+                    _ => None,
+                };
+                if let Some(ok) = simulated {
+                    let from: Address = params[0]["from"].as_str().unwrap().parse().unwrap();
+                    c.simulated_from.lock().unwrap().push(from);
+                    return Json(if ok {
+                        json!({ "jsonrpc": "2.0", "id": req["id"], "result": "0x" })
+                    } else {
+                        let error = json!({ "code": 3, "message": "execution reverted", "data": "0x3ee5aeb5" });
+                        json!({ "jsonrpc": "2.0", "id": req["id"], "error": error })
+                    });
+                }
+                let out = match selector {
                     vaultOfCall::SELECTOR => {
                         assert_eq!(to, l.registry);
                         let account = vaultOfCall::abi_decode(&data).unwrap().account;
@@ -918,6 +995,80 @@ mod tests {
         chain.liveness.insert(B256::repeat_byte(5), (now - 1, U256::from(400_000u64)));
         let (p, _) = proxy_with(chain).await;
         assert_eq!(sponsor(&p, bound, single(l.bond, liveness(5))).await, Err(NOT_CONFIGURED));
+    }
+
+    /// R-5: an arming is sponsored only for the claim's own claimant (the claim binds the account,
+    /// as for a dispute), and only when the bond takes the receipt now: the simulation runs from the
+    /// sender, after the claimant check.
+    #[tokio::test]
+    async fn armings_only_for_the_claimant_and_only_when_the_bond_takes_them() {
+        let l = list();
+        let bound = Address::repeat_byte(0x91);
+        let refund_only = Address::repeat_byte(0x92);
+        let liquidator = Address::repeat_byte(0x94);
+        let mut chain = Chain::default();
+        chain.vaults.insert(bound, B256::repeat_byte(0x0b));
+        for a in [bound, refund_only] {
+            chain.deployed.insert(a, safe(SAFE_SINGLETON, SAFE_4337_MODULE));
+        }
+        chain.claims.insert(B256::repeat_byte(5), (0, bound)); // a Release
+        chain.claims.insert(B256::repeat_byte(3), (CLAIM_KIND_REFUND, refund_only));
+        chain.claims.insert(B256::repeat_byte(8), (1, liquidator)); // the liquidator's Liquidation
+        chain.claims.insert(B256::repeat_byte(6), (0, bound)); // a stale receipt: the bond refuses it
+        chain.armable = vec![B256::repeat_byte(5), B256::repeat_byte(3), B256::repeat_byte(8)];
+        let (p, chain) = proxy_with(chain).await;
+        let arming = |claim: u8| single(l.bond, arm(claim));
+        assert_eq!(sponsor(&p, bound, arming(5)).await, Ok(()));
+        assert_eq!(sponsor(&p, refund_only, arming(3)).await, Ok(()), "a refund-only account arms its refund");
+        assert_eq!(sponsor(&p, bound, arming(8)).await, Err(NOT_OWN_CLAIM), "the liquidator's claim");
+        assert_eq!(sponsor(&p, bound, arming(9)).await, Err(NOT_OWN_CLAIM), "an unknown claim");
+        assert_eq!(sponsor(&p, bound, arming(6)).await, Err(NOT_ARMABLE), "a receipt the bond refuses");
+        // Only the claimant's armings reached the simulation, each from the claimant itself.
+        assert_eq!(*chain.simulated_from.lock().unwrap(), vec![bound, refund_only, bound]);
+        // The Registry's bond is read once: it is immutable.
+        assert_eq!(chain.bond_reads.load(Ordering::SeqCst), 1);
+    }
+
+    /// The bond a receipt arms must be the pinned Registry's `signerBond()`.
+    #[tokio::test]
+    async fn armings_only_on_the_registrys_bond() {
+        let l = list();
+        let bound = Address::repeat_byte(0x91);
+        let mut chain = Chain {
+            bond: Some(Address::repeat_byte(0xbb)),
+            ..Default::default()
+        };
+        chain.vaults.insert(bound, B256::repeat_byte(0x0b));
+        chain.deployed.insert(bound, safe(SAFE_SINGLETON, SAFE_4337_MODULE));
+        chain.claims.insert(B256::repeat_byte(5), (0, bound));
+        chain.armable = vec![B256::repeat_byte(5)];
+        let (p, chain) = proxy_with(chain).await;
+        assert_eq!(sponsor(&p, bound, single(l.bond, arm(5))).await, Err(NOT_CONFIGURED));
+        assert!(chain.simulated_from.lock().unwrap().is_empty(), "nothing simulated on a stranger's bond");
+    }
+
+    /// v4 pre-liquidation: the account's own terms, only from an account bound to a vault, and only
+    /// when the Adapter takes them now (simulated with `msg.sender` the account).
+    #[tokio::test]
+    async fn pre_liquidation_terms_only_from_a_bound_account_the_adapter_takes() {
+        let l = list();
+        let bound = Address::repeat_byte(0x91);
+        let refund_only = Address::repeat_byte(0x92);
+        let refused = Address::repeat_byte(0x93);
+        let mut chain = Chain::default();
+        chain.vaults.insert(bound, B256::repeat_byte(0x0b));
+        chain.vaults.insert(refused, B256::repeat_byte(0x0c));
+        for a in [bound, refund_only, refused] {
+            chain.deployed.insert(a, safe(SAFE_SINGLETON, SAFE_4337_MODULE));
+        }
+        chain.pre_liquidation_ok = vec![bound];
+        let (p, chain) = proxy_with(chain).await;
+        let set = || single(l.adapter, set_pre_liquidation(standard_terms()));
+        assert_eq!(sponsor(&p, bound, set()).await, Ok(()));
+        assert_eq!(sponsor(&p, bound, single(l.adapter, clear_pre_liquidation())).await, Ok(()));
+        assert_eq!(sponsor(&p, refused, set()).await, Err(PRE_LIQUIDATION_REFUSED), "the Adapter refuses");
+        assert_eq!(sponsor(&p, refund_only, set()).await, Err(UNKNOWN_SENDER), "not bound to a vault");
+        assert_eq!(*chain.simulated_from.lock().unwrap(), vec![bound, bound, refused]);
     }
 
     /// T-03: only a vault's own account has its pending activation refunded (the Intake also lets

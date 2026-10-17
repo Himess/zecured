@@ -52,6 +52,9 @@ function claim(patch: Partial<LedgerClaim>): LedgerClaim {
     paidAt: 0,
     disputeDueAt: 0,
     liveness: null,
+    committed: null,
+    arming: null,
+    dormant: null,
     ...patch,
   };
 }
@@ -122,10 +125,11 @@ describe("the minting banner", () => {
     expect(byCase[0]!.title).toBe("New minting is paused while a theft case is open");
   });
 
-  it("bonds short, the cap full (deposits land as refunds), room for the small sizes only, a stale cap price", () => {
+  it("bonds short, the cap full (R-11: deposits wait, or are refunded on request), room for the small sizes only, a stale cap price", () => {
     expect(mintingNotices(minting({ fullyBonded: false }), DENOMINATIONS, NOW)[0]!.title).toBe("Not every signer holds its full bond");
     const full = mintingNotices(minting({ capRoom: 0n }, DENOMINATIONS.map((d) => [d, "CapExceeded"])), DENOMINATIONS, NOW);
-    expect(full[0]!.title).toBe("The coverage cap is full: new deposits land as refunds");
+    expect(full[0]!.title).toBe("The coverage cap is full: new deposits wait for room");
+    expect(full[0]!.body[0]).toMatch(/not lost: its proof waits until there is room.*proven as a refund instead/);
     expect(full[0]!.body).toContain(EXITS_NEVER_STOP);
     const some = mintingNotices(
       minting({ capRoom: 3_000_000n }, [
@@ -137,13 +141,15 @@ describe("the minting banner", () => {
       NOW,
     );
     expect(some[0]).toMatchObject({ tone: "info", title: "Room left under the coverage cap: 0.03 TAZ" });
-    expect(some[0]!.body[0]).toBe("A deposit of 0.05 TAZ or 0.125 TAZ would land as a refund now; the smaller sizes still fit.");
+    expect(some[0]!.body[0]).toBe(
+      "A deposit of 0.05 TAZ or 0.125 TAZ would wait for room now (or come back as a refund if you ask); the smaller sizes still fit.",
+    );
     const stale = mintingNotices(minting({ capRoom: 0n }, DENOMINATIONS.map((d) => [d, null])), DENOMINATIONS, NOW);
     expect(stale.map((n) => n.title)).toEqual(["The coverage cap's price is stale"]);
   });
 });
 
-describe("opening a vault (no deposit that would only come back as a refund)", () => {
+describe("opening a vault (no deposit that would only come back as a refund, or wait for room)", () => {
   const at = (block: MintBlock | null, patch: Partial<MintingStatus> = {}) => openGate(minting(patch, [[5_000_000n, block]]), 5_000_000n);
 
   it("refuses a halt and a full cap; warns of a pause, short bonds and a stale price; says nothing otherwise", () => {
@@ -151,7 +157,7 @@ describe("opening a vault (no deposit that would only come back as a refund)", (
     expect(at("CapExceeded", { capRoom: 1_000_000n })).toEqual({
       allowed: false,
       message:
-        "The coverage cap has room for 0.01 TAZ only: a deposit of 0.05 TAZ proven now would only come back as a refund. Try a smaller size, or later.",
+        "The coverage cap has room for 0.01 TAZ only: a deposit of 0.05 TAZ made now would wait, unminted, until there is room (or come back as a refund if you ask). Try a smaller size, or later.",
     });
     expect(at("Paused", { pausedUntil: NOW + 60 })).toEqual({
       allowed: true,
@@ -265,7 +271,7 @@ describe("claims in plain words", () => {
     expect(view({ kind: "Refund", commitment: NONE32, createdAt: NOW }).badge.text).toBe("Needs your destination");
     expect(view({ kind: "Refund", commitment: NONE32, createdAt: NOW }).detail).toContain(formatUtc(NOW + 2_592_000));
     expect(view({ kind: "Fee", claimant: ZERO }).detail).toMatch(/next payout, to the signers' treasury/);
-    expect(view({ status: "Paid" }).badge).toEqual({ tone: "ok", text: "Paid" });
+    expect(view({ status: "Paid", paidAt: NOW - 60 }).badge).toEqual({ tone: "ok", text: "Signers confirmed" });
     expect(view({ kind: "Refund", status: "WrittenOff", commitment: NONE32 }).badge.text).toBe("Abandoned");
     expect(view({ status: "WrittenOff", amount: 9_000n }).detail).toMatch(/dust/);
     expect(view({ status: "Compensated" }).detail).toBe("This vault was compromised: the compensator pays this claim in USDC instead.");
@@ -273,6 +279,41 @@ describe("claims in plain words", () => {
     expect(view({ status: "Disputed", disputeDueAt: NOW + 60 }).detail).toContain(formatUtc(NOW + 60));
     expect(view({ status: "Disputed", disputeDueAt: NOW - 60 }).detail).toMatch(/can be reopened/);
     expect(view({ bondPaid: true, commitment: NONE32 }).badge.text).toBe("Paid from the bonds");
+  });
+});
+
+describe("delivery badges (section 3 of the v4 design) and dormant refunds (R-11)", () => {
+  const ctx = { refundAbandonPeriod: 2_592_000, nowSeconds: NOW, disputeWindow: 86_400, refundDormancy: 172_800 };
+  const view = (patch: Partial<LedgerClaim>) => claimView(claim(patch), ctx);
+
+  it("queued, sent, confirmed and disputable, proven", () => {
+    expect(view({ committed: false }).badge).toEqual({ tone: "warn", text: "Pending" });
+    expect(view({ committed: null }).badge).toEqual({ tone: "warn", text: "Pending" });
+    expect(view({ committed: true }).badge).toEqual({ tone: "info", text: "Sent" });
+    expect(view({ committed: true }).detail).toMatch(/committed its payout on Base/);
+    expect(view({ status: "Paid", paidAt: NOW - 60 }).badge).toEqual({
+      tone: "info",
+      text: `Signers confirmed — disputable until ${formatUtc(NOW - 60 + 86_400)}`,
+    });
+    expect(view({ status: "Paid", paidAt: NOW - 86_401 }).badge).toEqual({ tone: "ok", text: "Signers confirmed" });
+    // paidAt 0: the payout's inclusion proven, or (R-3, expireConfirmation) a confirmation undisputed through its window.
+    expect(view({ status: "Paid", paidAt: 0 }).badge).toEqual({ tone: "ok", text: "Final on Base ✓" });
+    expect(view({ status: "Paid", paidAt: 0 }).detail).toMatch(/delivery was proven on Base .* or the signers' confirmation stood undisputed/);
+    expect(view({ status: "Paid", paidAt: 0 }).detail).toMatch(/final/);
+    // A Fee claim stays a bookkeeping line, committed or not.
+    expect(view({ kind: "Fee", claimant: ZERO, committed: true }).badge).toEqual({ tone: "neutral", text: "Pending" });
+  });
+
+  it("a refund without a destination: when it is set aside, and once it is", () => {
+    const refund = { kind: "Refund" as const, commitment: NONE32, createdAt: NOW - 3_600 };
+    expect(view(refund).badge.text).toBe("Needs your destination");
+    expect(view(refund).detail).toContain(`dormant after ${formatUtc(NOW - 3_600 + 172_800)}`);
+    expect(view({ ...refund, dormant: true }).badge.text).toBe("Dormant: needs your destination");
+    expect(view({ ...refund, dormant: true }).detail).toMatch(/no longer counts against the coverage cap/);
+    // L-INTAKE: a dormant refund wakes when its account gives a destination.
+    expect(view({ ...refund, dormant: true }).detail).toMatch(/Ironwood destination wakes it/);
+    // Before v4 (no dormancy), only the write-off is announced.
+    expect(claimView(claim(refund), { refundAbandonPeriod: 2_592_000, nowSeconds: NOW }).detail).not.toMatch(/dormant/);
   });
 });
 

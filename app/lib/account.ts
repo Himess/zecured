@@ -15,14 +15,19 @@
 import { createClient, getAddress, http, HttpRequestError, type Address, type Hex, type PublicClient, type Transport } from "viem";
 import { createBundlerClient, createPaymasterClient } from "viem/account-abstraction";
 import { privateKeyToAccount } from "viem/accounts";
-import { baseSepolia } from "viem/chains";
 import { toSafeSmartAccount } from "permissionless/accounts";
 import { getUserOperationGasPrice } from "permissionless/actions/pimlico";
 import { api as defaultApi, type Api } from "./api";
 import { assertAllowlisted, pinnedTargets, type Call, type NamedTargets } from "./calls";
 import { ContractsNotDeployedError, isDeployedAt, publicClient, readLinks, type ChainDeps } from "./chain";
 import { config as defaultConfig, type AppConfig } from "./config";
-import { signCloseRequestAsSafe, type CloseRequestMessage } from "./eip712";
+import { viemChain } from "./deployment";
+import {
+  signCloseRequestAsSafe,
+  signDeleverageRequestAsSafe,
+  type CloseRequestMessage,
+  type DeleverageRequestMessage,
+} from "./eip712";
 import { predictAccountAddress, SAFE } from "./safe";
 
 export interface SentUserOp {
@@ -43,6 +48,8 @@ export interface LoanAccount {
    * the Adapter does not unwrap ERC-6492.
    */
   signCloseRequest(req: CloseRequestMessage): Promise<Hex>;
+  /** P-7: the same for a DeleverageRequest (S18: repay part of the debt from collateral). */
+  signDeleverageRequest(req: DeleverageRequestMessage): Promise<Hex>;
   /** Sends `calls` as one sponsored UserOp and waits for inclusion. */
   send(calls: readonly Call[]): Promise<SentUserOp>;
 }
@@ -69,7 +76,7 @@ function proxyFailure(e: unknown): string {
 async function checkBundler(transport: Transport): Promise<void> {
   let entryPoints: readonly string[];
   try {
-    entryPoints = (await createClient({ chain: baseSepolia, transport }).request({
+    entryPoints = (await createClient({ chain: viemChain(), transport }).request({
       method: "eth_supportedEntryPoints",
     } as never)) as readonly string[];
   } catch (e) {
@@ -133,6 +140,12 @@ export function loanAccount(ownerKey: Hex, deps: AccountDeps = {}): LoanAccount 
       return signCloseRequestAsSafe(ownerKey, config.adapter, address, req);
     },
 
+    async signDeleverageRequest(req) {
+      if (!config.contractsDeployed) throw new ContractsNotDeployedError();
+      if (!(await isDeployedAt(address, chain()))) throw new AccountNotDeployedError();
+      return signDeleverageRequestAsSafe(ownerKey, config.adapter, address, req);
+    },
+
     async send(calls) {
       if (!config.contractsDeployed) throw new ContractsNotDeployedError();
       // GET /config says whether the backend can sponsor at all: refuse before signing anything.
@@ -188,7 +201,7 @@ export function loanAccount(ownerKey: Hex, deps: AccountDeps = {}): LoanAccount 
           // RPC's fees. A failing proxy is reported as such, not hidden behind the fallback.
           async estimateFeesPerGas() {
             try {
-              return (await getUserOperationGasPrice(createClient({ chain: baseSepolia, transport: bundlerTransport }))).fast;
+              return (await getUserOperationGasPrice(createClient({ chain: viemChain(), transport: bundlerTransport }))).fast;
             } catch (e) {
               if (e instanceof HttpRequestError) throw new SponsorshipUnavailableError(`bundler: ${proxyFailure(e)}`);
               return client.estimateFeesPerGas();

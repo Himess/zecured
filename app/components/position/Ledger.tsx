@@ -9,8 +9,9 @@ import { PayoutNotice } from "@/components/PayoutNotice";
 import { TxResult } from "@/components/TxResult";
 import { Badge, Button, Card, cx, KeyValue, Mono, Notice } from "@/components/ui";
 import { loanAccount, type SentUserOp } from "@/lib/account";
-import { describeError, type Vault } from "@/lib/api";
+import { api, describeError, type Vault } from "@/lib/api";
 import {
+  armLivenessCalls,
   describeRevert,
   disputePayoutCalls,
   formatUtc,
@@ -23,8 +24,9 @@ import {
 import { readCompensation, type Compensation, type LedgerClaim, type VaultLedger } from "@/lib/chain";
 import { config } from "@/lib/config";
 import { notifyLoansChanged, useAction, useRefundReason } from "@/lib/hooks";
-import { loanStore, short, type StoredLoan } from "@/lib/keys";
+import { browserStorage, loanStore, short, type StoredLoan } from "@/lib/keys";
 import { formatUsdc } from "@/lib/morpho";
+import { armedNote, armingState, checkReceipt, rememberArming, rememberedArmings, wasArmedHere } from "@/lib/receipt";
 import {
   bondPayment,
   bondPaymentExplainer,
@@ -158,6 +160,45 @@ export function PendingActivationCard({
   );
 }
 
+// ------------------------------------------------------------------ R-12: pending refunds
+
+/**
+ * Deposits proven as refunds whose claims have not opened yet (R-12): each waits a few Zcash blocks,
+ * like an activation, before anyone (the backend's keeper) opens its Refund claim; only then can it
+ * take a destination.
+ */
+export function PendingRefundsCard({ ledger }: { ledger: VaultLedger }) {
+  const list = ledger.pendingRefunds ?? [];
+  if (list.length === 0) return null;
+  const t = now();
+  return (
+    <Card
+      title={list.length === 1 ? "A deposit was proven as a refund" : `${list.length} deposits were proven as refunds`}
+      action={<Badge tone="info">Pending refund</Badge>}
+    >
+      <p className="mb-4 text-sm text-muted">
+        The proof is on Base. Like an activation, it waits until the Zcash header relay has seen a few more blocks and a
+        short delay has passed; then its Refund claim opens (the backend&apos;s keeper does it) and you give it an Ironwood
+        destination here. Until then it is pending.
+      </p>
+      <ul className="space-y-3">
+        {list.map((r) => (
+          <li key={r.depositTag} className="rounded-lg border border-border p-4">
+            <KeyValue
+              rows={[
+                ["Deposit", formatTaz(r.amount)],
+                ["Why", r.reason ? REFUND_REASON_TEXT[r.reason] : "Not readable from Base."],
+                ["Claim opens from Zcash height", `#${r.readyHeight.toLocaleString("en-US")}`],
+                ["Not before", `${formatUtc(r.readyTime)}${t >= r.readyTime ? " (passed)" : ""}`],
+              ]}
+            />
+          </li>
+        ))}
+      </ul>
+    </Card>
+  );
+}
+
 // ------------------------------------------------------------------ T-02: refunds
 
 /** Every Refund claim of the vault: why it landed, and its destination (given, needed, or revived). */
@@ -198,7 +239,12 @@ function RefundItem({
   loan: StoredLoan | null;
   onChanged: () => void;
 }) {
-  const view = claimView(claim, { refundAbandonPeriod: ledger.links.refundAbandonPeriod, nowSeconds: now() });
+  const view = claimView(claim, {
+    refundAbandonPeriod: ledger.links.refundAbandonPeriod,
+    nowSeconds: now(),
+    disputeWindow: ledger.links.disputeWindow,
+    refundDormancy: ledger.links.refundDormancy,
+  });
   const needs = needsRefundDestination(claim);
   // The creation time is the claim's `createdAt` only until a destination is given.
   const reason = useRefundReason(ledger.vaultId, claim.claimId, claim.createdAt, needs && claim.status === "Pending");
@@ -324,7 +370,12 @@ function ClaimRow({
   onChanged: () => void;
 }) {
   const t = now();
-  const view = claimView(claim, { refundAbandonPeriod: ledger.links.refundAbandonPeriod, nowSeconds: t });
+  const view = claimView(claim, {
+    refundAbandonPeriod: ledger.links.refundAbandonPeriod,
+    nowSeconds: t,
+    disputeWindow: ledger.links.disputeWindow,
+    refundDormancy: ledger.links.refundDormancy,
+  });
   const mine = ownsVault(loan, ledger);
   // The vault's account is the claimant of its owner's claims (Release, CloseUser, Refund).
   const d = disputeState(claim, {
@@ -365,6 +416,7 @@ function ClaimRow({
         </span>
       </div>
       {view.detail ? <p className="text-xs text-muted">{view.detail}</p> : null}
+      <LivenessGuarantee ledger={ledger} claim={claim} loan={mine ? loan : null} onChanged={onChanged} />
       {mine && d.canDispute ? (
         <div className="space-y-2">
           {!confirming ? (
@@ -456,6 +508,108 @@ function ClaimRow({
       ) : null}
       {fromBonds.result ? <TxResult result={fromBonds.result} what="Claim paid from the bonds" /> : null}
     </li>
+  );
+}
+
+// ------------------------------------------------------------------ R-5: the bonds' guarantee, armed with a receipt
+
+/** How often, and how many times, an open page asks for a receipt the signers have not given yet. */
+const RECEIPT_RETRY_MS = 30_000;
+const RECEIPT_ATTEMPTS = 10;
+
+class NoReceiptYet extends Error {
+  constructor() {
+    super("No signer has confirmed this destination yet: it usually takes a few minutes after the claim appears on Base.");
+    this.name = "NoReceiptYet";
+  }
+}
+
+/**
+ * R-5: the bonds pay an overdue claim only once a signer's receipt for its destination is on Base
+ * (`armLiveness`). For the account's own unpaid claims with a destination, this fetches a receipt
+ * (`POST /claims/:id/receipt`), checks it against the claim and the pinned signers, and sends it in
+ * one sponsored UserOp: on its own once per claim and destination in this browser, or on a click.
+ */
+function LivenessGuarantee({
+  ledger,
+  claim,
+  loan,
+  onChanged,
+}: {
+  ledger: VaultLedger;
+  claim: LedgerClaim;
+  loan: StoredLoan | null;
+  onChanged: () => void;
+}) {
+  const state = armingState(claim, { account: ledger.account, frozen: ledger.frozen, compromised: ledger.compromised });
+  const bond = ledger.links.bond;
+  const [attempts, setAttempts] = useState(0);
+  const arm = useAction(async () => {
+    if (!loan || !bond) throw new Error("This browser does not hold the loan's key.");
+    const receipt = await api.getLivenessReceipt(claim.claimId);
+    if (!receipt) throw new NoReceiptYet();
+    const check = await checkReceipt(receipt, claim, { bond, signers: config.signers, chainTime: ledger.blockTime });
+    if (!check.ok) throw new Error(`The receipt was not sent: ${check.reason}.`);
+    const sent = await send(
+      loan,
+      armLivenessCalls({ claimId: claim.claimId, receivedAt: receipt.receivedAt, signature: receipt.signature, bond }),
+    );
+    if (sent.success) rememberArming(browserStorage(), claim.claimId, claim.commitment);
+    onChanged();
+    return sent;
+  });
+  const runArm = arm.run;
+  const auto =
+    state.kind === "unarmed" &&
+    loan !== null &&
+    bond !== null &&
+    config.sponsorship &&
+    !wasArmedHere(rememberedArmings(browserStorage()), claim.claimId, claim.commitment);
+  // On its own: right away, then again while no signer has a receipt, a bounded number of times.
+  useEffect(() => {
+    if (!auto || arm.busy || arm.result || attempts >= RECEIPT_ATTEMPTS) return;
+    const timer = setTimeout(
+      () => {
+        setAttempts((n) => n + 1);
+        void runArm();
+      },
+      attempts === 0 ? 0 : RECEIPT_RETRY_MS,
+    );
+    return () => clearTimeout(timer);
+  }, [auto, attempts, arm.busy, arm.result, runArm]);
+
+  if (state.kind === "none" || !bond) return null;
+  if (state.kind === "armed") {
+    return <p className="text-xs text-muted">{armedNote(state, formatUtc)}</p>;
+  }
+  if (!loan) {
+    return (
+      <p className="text-xs text-muted">
+        The bonds&apos; guarantee for this payout is not armed yet. It is armed from the loan&apos;s browser, with its key.
+      </p>
+    );
+  }
+  const waiting = arm.error !== null && attempts < RECEIPT_ATTEMPTS && auto;
+  return (
+    <div className="space-y-1">
+      <p className="text-xs text-muted">
+        {arm.busy
+          ? "Arming the bonds' guarantee for this payout (one sponsored transaction)…"
+          : "The signers' bonds guarantee this payout once a signer confirms its destination on Base."}
+      </p>
+      {arm.error && !arm.busy ? (
+        <p className="text-xs text-warn" role="status">
+          {arm.error}
+          {waiting ? " Trying again shortly." : ""}
+        </p>
+      ) : null}
+      {!arm.busy && (!auto || attempts >= RECEIPT_ATTEMPTS || arm.result?.success === false) ? (
+        <Button variant="ghost" onClick={() => void arm.run()}>
+          Arm the bonds&apos; guarantee (sponsored)
+        </Button>
+      ) : null}
+      {arm.result ? <TxResult result={arm.result} what="Bonds' guarantee armed" /> : null}
+    </div>
   );
 }
 

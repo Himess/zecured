@@ -11,6 +11,7 @@ import {
   parseLoan,
   short,
   STORAGE_KEY,
+  verifyBackup,
   type KeyValueStorage,
 } from "./keys";
 import { predictAccountAddress } from "./safe";
@@ -213,5 +214,27 @@ describe("short", () => {
   it("shortens long hex only", () => {
     expect(short("0x1234567890abcdef1234")).toBe("0x1234…1234");
     expect(short("0x1234")).toBe("0x1234");
+  });
+});
+
+describe("P-8: the backup's restore test", () => {
+  const VAULT = `0x${"ab".repeat(32)}` as const;
+
+  it("passes only for a file that restores this very loan, vault included", () => {
+    const loan = { ...createLoan(config.denominations[0]!), vaultId: VAULT };
+    expect(verifyBackup(exportLoan(loan), loan)).toEqual({ ok: true });
+    // A bare record (pasted) restores too.
+    expect(verifyBackup(JSON.stringify(loan), loan)).toEqual({ ok: true });
+    const other = createLoan(config.denominations[0]!);
+    expect(verifyBackup(exportLoan({ ...other, vaultId: VAULT }), loan)).toMatchObject({ ok: false, reason: expect.stringMatching(/another loan/) });
+    const early = { ...loan, vaultId: undefined };
+    expect(verifyBackup(exportLoan(early), loan)).toMatchObject({ ok: false, reason: expect.stringMatching(/before the vault opened/) });
+    expect(verifyBackup("not json", loan)).toMatchObject({ ok: false, reason: expect.stringMatching(/does not restore a loan/) });
+  });
+
+  it("keeps the demo and verified flags of a loan record", () => {
+    const loan = { ...createLoan(config.denominations[0]!), demo: true, backupVerified: true };
+    expect(parseLoan(JSON.parse(JSON.stringify(loan)))).toMatchObject({ demo: true, backupVerified: true });
+    expect(parseLoan({ ...loan, demo: "yes" }).demo).toBeUndefined();
   });
 });

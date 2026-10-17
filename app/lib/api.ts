@@ -22,6 +22,7 @@ import {
   type V3Params,
 } from "./config";
 import type { CloseRequestMessage } from "./eip712";
+import { parseEvidence, type Evidence } from "./evidence";
 import { STAMP_MAX_BITS } from "./stamp";
 
 // ------------------------------------------------------------------ types
@@ -41,6 +42,13 @@ export interface Claim {
   /** zatoshi */
   amount: bigint;
   status: ClaimStatus;
+  // v4 (track OFF), absent from older backends:
+  /** Its payout's delivery is proven on Base: final. */
+  proven?: boolean;
+  /** Confirmed paid by the signers, disputable until then (Unix seconds). */
+  disputableUntil?: number;
+  /** R-5: its liveness clock is armed for its current destination. */
+  livenessArmed?: boolean;
 }
 
 /** A payment to the vault that cannot back the loan, as the signers saw it on Zcash. */
@@ -72,6 +80,8 @@ export interface Vault {
   birthdayHeight?: number;
   /** Zcash tip at the coordinator's last pass (lets the app show blocks remaining). */
   tipHeight?: number;
+  /** R-11.1: a confirmed deposit of the vault's amount was seen (a newer backend's flag; absent otherwise). */
+  depositSeen?: boolean;
   // Earlier INTERFACES.md variant:
   confirmations?: number;
   deposit?: { attested: boolean; txHash?: Hex };
@@ -86,6 +96,8 @@ export interface OpenVaultBody {
   signature: Hex;
   /** Nonce of the request's hashcash stamp (review H-01; lib/stamp.ts). */
   stamp: bigint;
+  /** The mainnet beta's invite code (refused without one there: `invite_required`). */
+  invite?: string;
 }
 
 /** One signer node's signature, by node index. */
@@ -203,10 +215,17 @@ export class ApiError extends Error {
     readonly kind: ApiErrorKind,
     message: string,
     readonly status?: number,
+    /** The backend's fixed refusal code (`{ error, code }`, L-2), when it gave one. */
+    readonly code?: string,
   ) {
     super(message);
     this.name = "ApiError";
   }
+}
+
+/** The backend's refusal code of `e`, if `e` is one of its answers. */
+export function apiErrorCode(e: unknown): string | null {
+  return e instanceof ApiError && e.code ? e.code : null;
 }
 
 /** A short, user-facing description of any error thrown by this module (or anything else). */
@@ -316,12 +335,17 @@ export function parseVault(raw: unknown): Vault {
     }),
     claims: claimsRaw.map((c) => {
       const o = obj(c, "claim");
-      return {
+      const claim: Claim = {
         claimId: hex32(o.claimId, "claimId"),
         kind: claimKind(o.kind),
         amount: big(o.amount, "claim amount"),
         status: claimStatus(o),
       };
+      if (o.proven === true) claim.proven = true;
+      const until = optional(o.disputableUntil, (x) => uint(x, "claim disputableUntil"));
+      if (until) claim.disputableUntil = until;
+      if (typeof o.livenessArmed === "boolean") claim.livenessArmed = o.livenessArmed;
+      return claim;
     }),
   };
   const confirmations = optional(r.confirmations, (x) => int(x, "confirmations"));
@@ -335,6 +359,7 @@ export function parseVault(raw: unknown): Vault {
   const outstanding = optional(r.outstanding, (x) => big(x, "outstanding"));
   if (outstanding !== undefined) vault.outstanding = outstanding;
   if (typeof r.payoutInFlight === "boolean") vault.payoutInFlight = r.payoutInFlight;
+  if (typeof r.depositSeen === "boolean") vault.depositSeen = r.depositSeen;
   // 0 means "not known yet" (the coordinator reports tip 0 before its first pass).
   const birthday = optional(r.birthdayHeight, (x) => uint(x, "birthdayHeight"));
   if (birthday) vault.birthdayHeight = birthday;
@@ -368,13 +393,23 @@ export function parseRemoteConfig(raw: unknown): RemoteConfig {
     const c = obj(r.contracts, "config.contracts");
     // RQ-06: LoanToken and the market's oracle (MarketOracle; the DemoShockOracle, MOCK / DEMO, on
     // testnets); deployments made before them name only the DemoShockOracle, or only the mocks.
+    const loanToken = addr(c.LoanToken ?? c.MockUSDC, "config.contracts.LoanToken");
+    const marketOracle = addr(c.MarketOracle ?? c.DemoShockOracle ?? c.MockZecOracle, "config.contracts.MarketOracle");
+    const named = (k: string) => optional(c[k], (x) => addr(x, `config.contracts.${k}`)) ?? null;
+    const mockUsdc = named("MockUSDC");
+    const demoOracle = named("DemoShockOracle");
     contracts = {
-      LoanToken: addr(c.LoanToken ?? c.MockUSDC, "config.contracts.LoanToken"),
-      MarketOracle: addr(c.MarketOracle ?? c.DemoShockOracle ?? c.MockZecOracle, "config.contracts.MarketOracle"),
+      LoanToken: loanToken,
+      MarketOracle: marketOracle,
       SettlementAdapter: addr(c.SettlementAdapter, "config.contracts.SettlementAdapter"),
       ZZEC: addr(c.ZZEC, "config.contracts.ZZEC"),
       ZecuredRegistry: addr(c.ZecuredRegistry, "config.contracts.ZecuredRegistry"),
-      ZecuredIntake: optional(c.ZecuredIntake, (x) => addr(x, "config.contracts.ZecuredIntake")) ?? null,
+      ZecuredIntake: named("ZecuredIntake"),
+      ZecuredSwap: named("ZecuredSwap"),
+      // Section 9.3 of the v4 design: what the UI calls the token and the price comes from the deployment file.
+      loanTokenIsMock: mockUsdc !== null && mockUsdc === loanToken,
+      oracleIsDemo: demoOracle !== null && demoOracle === marketOracle,
+      baseOracleIsMock: named("MockZecOracle") !== null,
     };
   }
   let market: RemoteMarket | null = null;
@@ -411,6 +446,12 @@ export function parseRemoteConfig(raw: unknown): RemoteConfig {
     vaultExpiryBlocks,
     openVaultStampBits,
     sponsorship: r.sponsorship,
+    // v4, section 6: absent from older backends.
+    openings: optional(r.openings, (x) => {
+      const o = obj(x, "config.openings");
+      if (typeof o.open !== "boolean" || typeof o.inviteOnly !== "boolean") throw invalid("config.openings");
+      return { open: o.open, inviteOnly: o.inviteOnly };
+    }) ?? null,
   };
 }
 
@@ -532,6 +573,355 @@ export function parseDrainReport(raw: unknown): DrainReport {
   };
 }
 
+// ------------------------------------------------------------------ v4
+
+/**
+ * R-5: a signer's receipt for a claim's destination (`POST /claims/:claimId/receipt`, served by
+ * the coordinator from the first node that holds and validated the destination's preimage):
+ * `DestinationReceived(claimId, commitment, receivedAt)` signed under the bond's EIP-712 domain.
+ */
+export interface LivenessReceipt {
+  claimId: Hex;
+  commitment: Hex;
+  /** When the node received and validated the destination (Unix seconds). */
+  receivedAt: bigint;
+  /** The node's attestation address (one of `Registry.signers()`). */
+  signer: Address;
+  signature: Hex;
+}
+
+export function parseLivenessReceipt(raw: unknown): LivenessReceipt {
+  const r = obj(raw, "receipt");
+  const receivedAt = big(r.receivedAt, "receipt.receivedAt");
+  if (receivedAt >= 1n << 64n) throw invalid("receipt.receivedAt");
+  return {
+    claimId: hex32(r.claimId, "receipt.claimId"),
+    commitment: hex32(r.commitment, "receipt.commitment"),
+    receivedAt,
+    signer: addr(r.signer, "receipt.signer"),
+    signature: sig65(r.signature, "receipt.signature"),
+  };
+}
+
+/** R-11: `POST /vaults/:id/prove-refund`, signed by the vault's owner key (lib/owner.ts). */
+export interface ProveRefundBody {
+  nonce: bigint;
+  deadline: bigint;
+  signature: Hex;
+}
+
+/** P-7 (S18): a market maker's quote for repaying part of the debt from collateral. */
+export interface DeleverageQuote {
+  executor: Address;
+  marginBps: number;
+  /** Loan-token units the market maker repays (exactly the amount asked for). */
+  repayAssets: bigint;
+  /** zatoshi of collateral the market maker takes for it. */
+  mmAmount: bigint;
+  /** zatoshi left in the vault after it. */
+  remaining: bigint;
+  /** Unix seconds. */
+  expiresAt: number;
+}
+
+export function parseDeleverageQuote(raw: unknown): DeleverageQuote {
+  const r = obj(raw, "deleverage quote");
+  const marginBps = int(r.marginBps, "marginBps");
+  if (marginBps < 0 || marginBps > 65_535) throw invalid("marginBps");
+  return {
+    executor: addr(r.executor, "executor"),
+    marginBps,
+    repayAssets: big(r.repayAssets, "repayAssets"),
+    mmAmount: big(r.mmAmount, "mmAmount"),
+    remaining: big(r.remaining, "remaining"),
+    expiresAt: int(r.expiresAt, "expiresAt"),
+  };
+}
+
+/** The DeleverageRequest the account signs (docs/INTERFACES.md § 2.4), as `POST /deleverages` carries it. */
+export interface DeleverageRequestBody {
+  vaultId: Hex;
+  account: Address;
+  executor: Address;
+  marginBps: number;
+  repayAssets: bigint;
+  maxCollateral: bigint;
+  nonce: bigint;
+  deadline: bigint;
+}
+
+/** `SwapQuote.side`: the taker buys ZEC with USDC (on-ramp) or sells ZEC for USDC. */
+export const SWAP_SIDE = { buy: 0, sell: 1 } as const;
+
+/** The maker's signed EIP-712 `SwapQuote` (the v4 design's section 5.4). */
+export interface SwapQuote {
+  maker: Address;
+  /** The zero address: anyone may take it; otherwise only this address. */
+  taker: Address;
+  side: number;
+  zatoshi: bigint;
+  /** USDC units (6 decimals). */
+  usdc: bigint;
+  makerReceiverCommitment: Hex;
+  /** Seconds the maker has, after `open`, to pay and prove. */
+  payWindow: number;
+  /** The quote is good until (Unix seconds). */
+  quoteDeadline: bigint;
+  nonce: bigint;
+}
+
+export interface SignedSwapQuote {
+  quote: SwapQuote;
+  signature: Hex;
+  /** The swap contract the quote is for: must be this build's pin. */
+  swap: Address;
+}
+
+export function parseSignedSwapQuote(raw: unknown): SignedSwapQuote {
+  const r = obj(raw, "swap quote");
+  const q = obj(r.quote, "swap quote.quote");
+  const side = uint(q.side, "quote.side");
+  if (side > 1) throw invalid("quote.side");
+  const payWindow = uint(q.payWindow, "quote.payWindow");
+  if (payWindow > 0xffff_ffff) throw invalid("quote.payWindow");
+  const zatoshi = big(q.zatoshi, "quote.zatoshi");
+  if (zatoshi >= 1n << 64n || zatoshi === 0n) throw invalid("quote.zatoshi");
+  const usdc = big(q.usdc, "quote.usdc");
+  if (usdc === 0n) throw invalid("quote.usdc");
+  const signature = r.signature;
+  if (typeof signature !== "string" || !isHex(signature) || signature.length < 4) throw invalid("quote.signature");
+  return {
+    quote: {
+      maker: addr(q.maker, "quote.maker"),
+      taker: addr(q.taker, "quote.taker"),
+      side,
+      zatoshi,
+      usdc,
+      makerReceiverCommitment: hex32(q.makerReceiverCommitment, "quote.makerReceiverCommitment"),
+      payWindow,
+      quoteDeadline: big(q.quoteDeadline, "quote.quoteDeadline"),
+      nonce: big(q.nonce, "quote.nonce"),
+    },
+    signature: signature.toLowerCase() as Hex,
+    swap: addr(r.swap, "quote.swap"),
+  };
+}
+
+/** The header that carries the swap maker's invite code (swap/maker's `INVITE_HEADER`), relayed by the backend. */
+export const SWAP_INVITE_HEADER = "x-zecured-invite";
+
+/**
+ * What the maker says about an order it serves (its own view; the contract's events decide): the
+ * statuses of swap/maker's `MakerStatus` (`taker_pays` is the Sell side's; `abandoned`: the maker
+ * will not pay or cannot prove any more, and the order waits for its refund).
+ */
+export const MAKER_ORDER_STATUSES = [
+  "awaiting_destination",
+  "destination_received",
+  "paid",
+  "proven",
+  "taker_pays",
+  "abandoned",
+  "settled",
+  "refunded",
+] as const;
+export type MakerOrderStatus = (typeof MAKER_ORDER_STATUSES)[number] | "unknown";
+
+export function parseMakerOrder(raw: unknown): MakerOrderStatus {
+  const r = obj(raw, "swap order");
+  return typeof r.status === "string" && (MAKER_ORDER_STATUSES as readonly string[]).includes(r.status)
+    ? (r.status as MakerOrderStatus)
+    : "unknown";
+}
+
+/** P-1: `GET /demo/status`, the demo wallet as the judge deployment's backend runs it (DEMO). */
+export interface DemoStatus {
+  enabled: boolean;
+  /** The demo wallet's Ironwood-only address: where a demo vault's exits go back when the user gives none. */
+  returnAddress: string | null;
+  dailyCapZat: bigint;
+  paidTodayZat: bigint;
+  /** The demo wallet runs low: the operators are alerted; new demo payments may fail. */
+  lowBalance: boolean;
+  /** Zero bits of the demo payment's stamp (lib/stamp.ts). */
+  stampBits: number;
+}
+
+export function parseDemoStatus(raw: unknown): DemoStatus {
+  const r = obj(raw, "demo status");
+  if (r.enabled !== true) {
+    return { enabled: false, returnAddress: null, dailyCapZat: 0n, paidTodayZat: 0n, lowBalance: false, stampBits: 0 };
+  }
+  const stampBits = uint(r.stampBits, "demo.stampBits");
+  if (stampBits > STAMP_MAX_BITS) throw invalid("demo.stampBits");
+  return {
+    enabled: true,
+    returnAddress: typeof r.returnAddress === "string" && r.returnAddress ? r.returnAddress : null,
+    dailyCapZat: big(r.dailyCapZat, "demo.dailyCapZat"),
+    paidTodayZat: big(r.paidTodayZat, "demo.paidTodayZat"),
+    lowBalance: r.lowBalance === true,
+    stampBits,
+  };
+}
+
+/** P-1: `POST /demo/vaults/:id/pay`: the vault as all five signers vouched for it (C-4), and the stamp. */
+export interface DemoPayBody {
+  owner: Address;
+  account: Address;
+  amount: bigint;
+  expiryHeight: number;
+  address: string;
+  tagKeyHash: Hex;
+  signatures: VaultSignature[];
+  stamp: bigint;
+}
+
+export interface DemoPayResult {
+  /** The demo payment's Zcash transaction id (display order). */
+  txid: string;
+  amount: bigint;
+}
+
+export function parseDemoPay(raw: unknown): DemoPayResult {
+  const r = obj(raw, "demo payment");
+  const txid = str(r.txid, "demo.txid");
+  if (!/^[0-9a-f]{64}$/.test(txid)) throw invalid("demo.txid");
+  return { txid, amount: big(r.amount, "demo.amount") };
+}
+
+/** A verifier version as `GET /status` lists it (T-07a; v4 adds the Swap kind). */
+export interface VersionView {
+  versionId: Hex;
+  selector: Hex;
+  imageId: Hex;
+  branches: number[];
+  activeAt: number;
+  active: boolean;
+  removed: boolean;
+}
+
+/** `GET /status` in full: what the status page shows (P-2). Nothing about any vault or user. */
+export interface StatusReport {
+  commit: string;
+  treeClean: boolean;
+  startedAt: number;
+  zcashTip: number;
+  nodes: { index: number; mode: NodeHealth["mode"] }[];
+  depositProofs: { queued: number; running: number; concurrency: number } | null;
+  minting: MintingStatus | null;
+  versions: Record<string, VersionView[]> | null;
+  /** The deployment file's view (`deployment`): chain, contracts and the initial image ids. */
+  deployment: {
+    chainId: number | null;
+    registry: Address | null;
+    intake: Address | null;
+    signerBond: Address | null;
+    mintMode: string | null;
+    verifierIsMock: boolean | null;
+    depositImageId: Hex | null;
+    violationImageId: Hex | null;
+  } | null;
+}
+
+function optAddr(v: unknown): Address | null {
+  return typeof v === "string" && isAddress(v, { strict: false }) ? getAddress(v) : null;
+}
+
+function optHex32(v: unknown): Hex | null {
+  return typeof v === "string" && isHex(v) && v.length === 66 ? (v.toLowerCase() as Hex) : null;
+}
+
+export function parseStatusReport(raw: unknown): StatusReport {
+  const r = obj(raw, "status");
+  const nodes = (Array.isArray(r.nodes) ? r.nodes : []).map((n) => {
+    const o = obj(n, "status.node");
+    const mode = typeof o.mode === "string" && ["normal", "compromised", "offline", "unreachable"].includes(o.mode)
+      ? (o.mode as NodeHealth["mode"])
+      : "unreachable";
+    return { index: uint(o.index, "status.node.index"), mode };
+  });
+  let depositProofs: StatusReport["depositProofs"] = null;
+  if (r.depositProofs && typeof r.depositProofs === "object") {
+    const d = obj(r.depositProofs, "status.depositProofs");
+    depositProofs = {
+      queued: uint(d.queued, "depositProofs.queued"),
+      running: uint(d.running, "depositProofs.running"),
+      concurrency: uint(d.concurrency, "depositProofs.concurrency"),
+    };
+  }
+  let versions: StatusReport["versions"] = null;
+  if (r.versions && typeof r.versions === "object" && !Array.isArray(r.versions)) {
+    versions = {};
+    for (const [kind, list] of Object.entries(r.versions as Json)) {
+      if (!Array.isArray(list)) continue;
+      versions[kind] = list.map((v) => {
+        const o = obj(v, "status.version");
+        const selector = o.selector;
+        if (typeof selector !== "string" || !isHex(selector) || selector.length !== 10) throw invalid("version.selector");
+        return {
+          versionId: hex32(o.versionId, "version.versionId"),
+          selector: selector.toLowerCase() as Hex,
+          imageId: hex32(o.imageId, "version.imageId"),
+          branches: Array.isArray(o.branches) ? o.branches.map((b) => uint(b, "version.branches")) : [],
+          activeAt: uint(o.activeAt, "version.activeAt"),
+          active: o.active === true,
+          removed: o.removed === true,
+        };
+      });
+    }
+  }
+  let deployment: StatusReport["deployment"] = null;
+  if (r.deployment && typeof r.deployment === "object") {
+    const d = r.deployment as Json;
+    deployment = {
+      chainId: typeof d.chainId === "number" ? d.chainId : null,
+      registry: optAddr(d.registry),
+      intake: optAddr(d.intake),
+      signerBond: optAddr(d.signerBond),
+      mintMode: typeof d.mintMode === "string" ? d.mintMode : null,
+      verifierIsMock: typeof d.verifierIsMock === "boolean" ? d.verifierIsMock : null,
+      depositImageId: optHex32(d.depositImageId),
+      violationImageId: optHex32(d.violationImageId),
+    };
+  }
+  return {
+    commit: typeof r.commit === "string" ? r.commit : "unknown",
+    treeClean: r.treeClean === true,
+    startedAt: typeof r.startedAt === "number" ? r.startedAt : 0,
+    zcashTip: typeof r.zcashTip === "number" ? r.zcashTip : 0,
+    nodes,
+    depositProofs,
+    minting: parseMintingStatus(raw),
+    versions,
+    deployment,
+  };
+}
+
+/** P-2: `GET /stats/vaults`: open vaults per denomination on Base (the anonymity sets). */
+export interface VaultStats {
+  /** zatoshi → open vaults of that deposit size. */
+  byAmount: Map<bigint, number>;
+  total: number;
+  /** The scan reached the latest block (false while it catches up). */
+  complete: boolean;
+  readAt: number | null;
+}
+
+export function parseVaultStats(raw: unknown): VaultStats {
+  const r = obj(raw, "vault stats");
+  const byAmount = new Map<bigint, number>();
+  for (const [amount, count] of Object.entries(obj(r.byAmount, "stats.byAmount"))) {
+    if (!/^\d+$/.test(amount)) throw invalid("stats.byAmount");
+    byAmount.set(BigInt(amount), uint(count, "stats.byAmount"));
+  }
+  return {
+    byAmount,
+    total: uint(r.total, "stats.total"),
+    complete: r.complete === true,
+    readAt: optional(r.readAt, (x) => uint(x, "stats.readAt")) ?? null,
+  };
+}
+
 export function parseNodes(raw: unknown): NodeHealth[] {
   const r = obj(raw, "nodes");
   const list = Array.isArray(r.nodes) ? r.nodes : [];
@@ -601,7 +991,13 @@ export function createApi(options: ApiOptions = {}) {
     }
     if (!res.ok) {
       const err = json && typeof json === "object" ? (json as Json).error : undefined;
-      throw new ApiError("http", typeof err === "string" && err ? err : `Backend error (HTTP ${res.status})`, res.status);
+      const code = json && typeof json === "object" ? (json as Json).code : undefined;
+      throw new ApiError(
+        "http",
+        typeof err === "string" && err ? err : `Backend error (HTTP ${res.status})`,
+        res.status,
+        typeof code === "string" && /^[a-z_]{1,64}$/.test(code) ? code : undefined,
+      );
     }
     return json;
   }
@@ -642,10 +1038,158 @@ export function createApi(options: ApiOptions = {}) {
           deadline: b.deadline.toString(),
           signature: b.signature,
           stamp: b.stamp.toString(),
+          ...(b.invite ? { invite: b.invite } : {}),
         },
         { timeoutMs: TIMEOUT.open },
       );
       return parseOpenVault(r);
+    },
+
+    // -------------------------------------------------------------- v4
+
+    /**
+     * R-5: POST /claims/:claimId/receipt — the first valid `DestinationReceived` receipt a signer
+     * gives for the claim's destination; null while none has one (`404 no_receipt`).
+     */
+    async getLivenessReceipt(claimId: Hex): Promise<LivenessReceipt | null> {
+      try {
+        return parseLivenessReceipt(await call("POST", `/claims/${segment(claimId)}/receipt`, {}, { timeoutMs: TIMEOUT.owner }));
+      } catch (e) {
+        if (e instanceof ApiError && e.status === 404) return null;
+        throw e;
+      }
+    },
+
+    /**
+     * R-11: POST /vaults/:id/prove-refund — the coordinator proves the vault's deposit as a refund
+     * (Refund mode) instead of waiting for room under the coverage cap. Owner-signed.
+     */
+    async proveRefund(vaultId: Hex, b: ProveRefundBody): Promise<void> {
+      const r = obj(
+        await call(
+          "POST",
+          `/vaults/${segment(vaultId)}/prove-refund`,
+          { nonce: b.nonce.toString(), deadline: b.deadline.toString(), signature: b.signature },
+          { timeoutMs: TIMEOUT.owner },
+        ),
+        "prove refund",
+      );
+      if (r.queued !== true) throw invalid("prove refund");
+    },
+
+    /** P-7 (S18): GET /quotes/deleverage/:vaultId?repay= — repay `repay` loan-token units from collateral. */
+    async getDeleverageQuote(vaultId: Hex, repay: bigint): Promise<DeleverageQuote> {
+      if (repay <= 0n) throw new ApiError("invalid", "The repayment must be positive");
+      return parseDeleverageQuote(await call("GET", `/quotes/deleverage/${segment(vaultId)}?repay=${repay.toString()}`));
+    },
+
+    /** P-7: POST /deleverages — hands the signed DeleverageRequest to the market maker, who executes it. */
+    async submitDeleverage(req: DeleverageRequestBody, signature: Hex): Promise<Hex | null> {
+      const r = obj(
+        await call(
+          "POST",
+          "/deleverages",
+          {
+            request: {
+              vaultId: req.vaultId,
+              account: req.account,
+              executor: req.executor,
+              marginBps: req.marginBps,
+              repayAssets: req.repayAssets.toString(),
+              maxCollateral: req.maxCollateral.toString(),
+              nonce: req.nonce.toString(),
+              deadline: req.deadline.toString(),
+            },
+            signature,
+          },
+          { timeoutMs: TIMEOUT.owner },
+        ),
+        "deleverage request",
+      );
+      return typeof r.txHash === "string" && isHex(r.txHash) ? (r.txHash as Hex) : null;
+    },
+
+    /**
+     * Swap: GET /swap/quote — the maker's signed quote, relayed by the backend (the browser never
+     * contacts the maker). `usdc` (units to spend) or `zatoshi` (ZEC to buy); `taker` binds the
+     * quote to that address so nobody else can take it first.
+     */
+    /**
+     * Swap: GET /swap/quote, relayed to the maker. `invite`: the mainnet beta maker's invite code, sent
+     * as the `x-zecured-invite` header (never in the URL, which ends up in logs).
+     */
+    async getSwapQuote(p: { usdc?: bigint; zatoshi?: bigint; taker?: Address; invite?: string }): Promise<SignedSwapQuote> {
+      const q = new URLSearchParams({ side: "buy" });
+      if (p.usdc !== undefined) q.set("usdc", p.usdc.toString());
+      if (p.zatoshi !== undefined) q.set("zatoshi", p.zatoshi.toString());
+      if (p.taker) q.set("taker", getAddress(p.taker));
+      const invite = p.invite?.trim();
+      const headers = invite ? { [SWAP_INVITE_HEADER]: invite } : undefined;
+      return parseSignedSwapQuote(await call("GET", `/swap/quote?${q.toString()}`, undefined, { headers }));
+    },
+
+    /**
+     * Swap (section 5.5): POST /swap/orders/:orderId/destination — the receiver and the salt behind
+     * the order's commitment, for the maker only (relayed, never logged); Base only has the commitment.
+     */
+    async postSwapDestination(orderId: Hex, receiver: string, salt: Hex): Promise<void> {
+      await call("POST", `/swap/orders/${segment(orderId)}/destination`, { receiver, salt }, { timeoutMs: TIMEOUT.owner });
+    },
+
+    /** Swap: GET /swap/orders/:orderId — what the maker says of the order (paid, proven, abandoned…). */
+    async getSwapOrder(orderId: Hex): Promise<MakerOrderStatus> {
+      return parseMakerOrder(await call("GET", `/swap/orders/${segment(orderId)}`));
+    },
+
+    /** P-1: GET /demo/status (DEMO). */
+    async getDemoStatus(): Promise<DemoStatus> {
+      return parseDemoStatus(await call("GET", "/demo/status"));
+    },
+
+    /** P-1: POST /demo/vaults/:id/pay — the demo wallet pays the vault its full amount, once (DEMO). */
+    async demoPay(vaultId: Hex, b: DemoPayBody): Promise<DemoPayResult> {
+      return parseDemoPay(
+        await call(
+          "POST",
+          `/demo/vaults/${segment(vaultId)}/pay`,
+          {
+            owner: b.owner,
+            account: b.account,
+            amount: b.amount.toString(),
+            expiryHeight: b.expiryHeight,
+            address: b.address,
+            tagKeyHash: b.tagKeyHash,
+            signatures: b.signatures.map((s) => ({ index: s.index, signature: s.signature })),
+            stamp: b.stamp.toString(),
+          },
+          { timeoutMs: TIMEOUT.prove },
+        ),
+      );
+    },
+
+    /** P-2: GET /status in full. */
+    async getStatus(): Promise<StatusReport> {
+      return parseStatusReport(await call("GET", "/status"));
+    },
+
+    /** P-2: GET /stats/vaults; null when the backend has none. */
+    async getVaultStats(): Promise<VaultStats | null> {
+      try {
+        return parseVaultStats(await call("GET", "/stats/vaults"));
+      } catch (e) {
+        if (e instanceof ApiError && (e.status === 404 || e.status === 503)) return null;
+        throw e;
+      }
+    },
+
+    /** P-3: GET /evidence; null when the backend serves none. */
+    async getEvidence(): Promise<Evidence | null> {
+      try {
+        return parseEvidence(await call("GET", "/evidence"));
+      } catch (e) {
+        if (e instanceof ApiError && (e.status === 404 || e.status === 503)) return null;
+        throw e;
+      }
     },
 
     /** GET /vaults/:id */

@@ -4,8 +4,19 @@
  */
 import { useCallback, useEffect, useRef, useState } from "react";
 import type { Address, Hex } from "viem";
-import { api, describeError, type MintingStatus, type Vault } from "./api";
-import { readPosition, readRefundReason, readVaultLedger, type PositionSnapshot, type RefundReason, type VaultLedger } from "./chain";
+import { api, describeError, type DemoStatus, type MintingStatus, type StatusReport, type Vault, type VaultStats } from "./api";
+import type { Evidence } from "./evidence";
+import {
+  readPosition,
+  readPreLiquidationTerms,
+  readRefundReason,
+  readVaultLedger,
+  type PositionSnapshot,
+  type RefundReason,
+  type VaultLedger,
+} from "./chain";
+import type { PreLiquidationTerms } from "./preliq";
+import { readProtocol, type ProtocolSnapshot } from "./public";
 import { config } from "./config";
 import { loanStore, type StoredLoan } from "./keys";
 import { storedVault, verifyVaultOpened, type VaultCheck } from "./signers";
@@ -320,6 +331,85 @@ export function useRefundReason(vaultId: Hex, claimId: Hex, createdAt: number, e
     };
   }, [vaultId, claimId, createdAt, enabled]);
   return reason;
+}
+
+// ------------------------------------------------------------------ v4: public pages and the demo wallet
+
+let evidenceOnce: Promise<Evidence | null> | null = null;
+
+/** The evidence file (P-3), fetched once per page load; null when the backend serves none or it is unreadable. */
+export function loadEvidenceOnce(): Promise<Evidence | null> {
+  evidenceOnce ??= api.getEvidence().catch(() => null);
+  return evidenceOnce;
+}
+
+/** P-8: typical durations measured on the deployment (the evidence file's `durations`), empty until known. */
+export function useTypicalDurations(): Map<string, number> {
+  const [durations, setDurations] = useState<Map<string, number>>(() => new Map());
+  useEffect(() => {
+    let live = true;
+    void loadEvidenceOnce().then((e) => {
+      if (live && e) setDurations(e.durations);
+    });
+    return () => {
+      live = false;
+    };
+  }, []);
+  return durations;
+}
+
+/** A backend read polled every `intervalMs` (0: once), with the usual busy and error states. */
+function useRemote<T>(read: () => Promise<T>, intervalMs: number, enabled = true): Remote<T> {
+  const [data, setData] = useState<T | null>(null);
+  const [error, setError] = useState<string | null>(null);
+  const [loading, setLoading] = useState(enabled);
+  const readRef = useRef(read);
+  readRef.current = read;
+  const refresh = useCallback(async () => {
+    try {
+      setData(await readRef.current());
+      setError(null);
+    } catch (e) {
+      setError(describeError(e));
+    } finally {
+      setLoading(false);
+    }
+  }, []);
+  usePolling(refresh, intervalMs, enabled);
+  return { data, error, loading, refresh };
+}
+
+/**
+ * v4: the account's pre-liquidation terms on the Settlement Adapter, polled through the RPC proxy;
+ * data null when the Adapter has none (v3).
+ */
+export function usePreLiquidation(account: Address | undefined, intervalMs = 60_000): Remote<PreLiquidationTerms | null> {
+  return useRemote(() => readPreLiquidationTerms(account!), intervalMs, Boolean(account) && config.contractsDeployed);
+}
+
+/** P-1: the demo wallet (GET /demo/status), read once; only in a build with the demo path. */
+export function useDemoStatus(): Remote<DemoStatus> {
+  return useRemote(() => api.getDemoStatus(), 0, config.demoPath);
+}
+
+/** P-2: GET /status in full, polled. */
+export function useStatusReport(intervalMs = 30_000): Remote<StatusReport> {
+  return useRemote(() => api.getStatus(), intervalMs);
+}
+
+/** P-2: open vaults per denomination (GET /stats/vaults), polled; null data when the backend has none. */
+export function useVaultStats(intervalMs = 120_000): Remote<VaultStats | null> {
+  return useRemote(() => api.getVaultStats(), intervalMs);
+}
+
+/** P-2, P-4: the protocol's public numbers on Base (lib/public.ts), polled through the proxy. */
+export function useProtocol(intervalMs = 60_000): Remote<ProtocolSnapshot> {
+  return useRemote(() => readProtocol(), intervalMs, config.contractsDeployed);
+}
+
+/** P-3: the evidence file, read once; null data when the backend publishes none, an error when it is malformed. */
+export function useEvidence(): Remote<Evidence | null> {
+  return useRemote(() => api.getEvidence(), 0);
 }
 
 // ------------------------------------------------------------------ actions

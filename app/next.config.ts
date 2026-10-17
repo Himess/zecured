@@ -46,7 +46,8 @@ const nextConfig: NextConfig = {
           { key: "Cross-Origin-Opener-Policy", value: "same-origin" },
           {
             key: "Permissions-Policy",
-            value: "camera=(), microphone=(), geolocation=(), payment=(), usb=(), browsing-topics=()",
+            // The camera only for this app itself: reading an Ironwood address from a QR code (Buy shielded ZEC).
+            value: "camera=(self), microphone=(), geolocation=(), payment=(), usb=(), browsing-topics=()",
           },
         ],
       },

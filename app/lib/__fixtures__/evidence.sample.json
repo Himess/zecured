@@ -1,0 +1,76 @@
+{
+  "schema": "zecured-evidence/1",
+  "updatedAt": "2026-10-22T12:00:00Z",
+  "explorers": {
+    "base-sepolia": "https://sepolia.basescan.org/tx/",
+    "base": "https://basescan.org/tx/",
+    "zcash-testnet": "https://testnet.cipherscan.app/tx/"
+  },
+  "durations": {
+    "deposit-to-proof": 900,
+    "proof-to-activation": 600,
+    "payout": 900,
+    "proven-delivery": 3600
+  },
+  "sections": [
+    {
+      "id": "judge",
+      "title": "Judge deployment (Base Sepolia, Zcash testnet) — TEST FIXTURE, not real transactions",
+      "base": "base-sepolia",
+      "zcash": "zcash-testnet",
+      "manifest": {
+        "commit": "0123456789abcdef0123456789abcdef01234567",
+        "tag": "v4-judge-fixture",
+        "deployedAtBlock": 48198682,
+        "contracts": {
+          "ZecuredRegistry": "0x2849a4FA18C4bD42687bD9B8eBDC2F4D89ECfB2F",
+          "ZecuredIntake": "0x5197D7051ac19aD80dbD8829E46062B8d6d451aE",
+          "SettlementAdapter": "0x3074AcAEa758A41C42f6EbCf5686f4a7f24ac957"
+        },
+        "imageIds": {
+          "deposit-test": "0x1111111111111111111111111111111111111111111111111111111111111111",
+          "violation-test": "0x2222222222222222222222222222222222222222222222222222222222222222"
+        },
+        "router": "0x0b144E07A0826182B6b59788c34b32Bfa86Fb711",
+        "relay": null,
+        "oracle": "0x6065991f617AF84f4BC48B9B42A14c2CEfFfBF58",
+        "mocks": [
+          { "name": "DemoShockOracle", "address": "0x6065991f617AF84f4BC48B9B42A14c2CEfFfBF58", "label": "DEMO", "why": "An owner-set shock, in public steps, to show a liquidation." },
+          { "name": "MockZecOracle", "address": null, "label": "MOCK", "why": "An owner-set ZEC/USD price below the demo shock." }
+        ]
+      },
+      "flows": [
+        {
+          "id": "deposit",
+          "title": "Deposit → proof → activation",
+          "note": "A disposable demo vault.",
+          "durationSeconds": 1500,
+          "steps": [
+            { "label": "Deposit on Zcash", "chain": "zcash", "tx": "00000000000000000000000000000000000000000000000000000000000000a1", "at": "2026-10-22T10:00:00Z" },
+            { "label": "Deposit proof (attestDepositWithProof)", "chain": "base", "tx": "0x00000000000000000000000000000000000000000000000000000000000000b1", "at": null }
+          ]
+        }
+      ],
+      "leakScan": { "result": "0 matches", "fromBlock": 48198682, "toBlock": 48300000, "identifiers": 120, "at": "2026-10-22T11:00:00Z" }
+    },
+    {
+      "id": "mainnet-beta",
+      "title": "Mainnet beta (Base, Zcash mainnet) — TEST FIXTURE",
+      "base": "base",
+      "zcash": "zcash-mainnet",
+      "manifest": {
+        "commit": "89abcdef0123456789abcdef0123456789abcdef",
+        "tag": null,
+        "deployedAtBlock": null,
+        "contracts": {},
+        "imageIds": {},
+        "router": null,
+        "relay": null,
+        "oracle": null,
+        "mocks": []
+      },
+      "flows": [],
+      "leakScan": null
+    }
+  ]
+}
