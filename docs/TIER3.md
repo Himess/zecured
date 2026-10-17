@@ -108,7 +108,9 @@ against Foundry's EIP-712 implementation) and `zecured-base` `spend_commit_golde
 - at least 3 sorted signatures of distinct signers (I6);
 - `payoutRef` never committed;
 - `inputTag` a lineage note of the vault;
-- 1 to 8 distinct claims, each of the vault, `Pending` and bound to no other input;
+- 1 to 8 distinct claims, each of the vault, `Pending` and bound to no other input; a new commitment
+  of an input also names its claims once confirmed or disputed (D57): every commitment of an input
+  carries the same claims, so while that input is unspent none of its payouts landed;
 - unused claim refs, one per claim;
 - distinct output indexes, one per claim (E1), and distinct recipient commitments (a payout never
   names two claims of one commitment, so `claimRefOf` is unambiguous);
@@ -232,6 +234,16 @@ EOA as the account; the app sends the same call by UserOp).
 deployment can land on Base (I30, docs/TIER2.md § 5): those never become lineage notes, so no zZEC
 rests on them (§ 10). Every other non-conforming deposit lands as a Refund claim and is paid as above.
 
+**Share refresh and repair (C04).** Both keep a vault's group key, hence its address and viewing
+keys. A refresh gives every signer a new share, so that a share stolen before it is useless after it;
+a repair rebuilds one signer's lost share from three others, none of whom learns it.
+
+| Level | State |
+|---|---|
+| Library (`zecured-threshold`) | Built and tested: `refresh_part1`, `refresh_part2` and `refresh_finish` (refused unless the group key is unchanged and the new share matches the public key package), `repair_deltas`, `repair_sigma` and `repair_finish`. Tests refresh all five shares, sign with the new ones and show that an old share no longer combines with new ones, and rebuild a lost share from three helpers (two are not enough) |
+| Node API | Not built: no node endpoint runs a refresh or a repair round, and nothing carries their sealed messages between nodes |
+| Operations | Not built: no runbook, never run on a live vault. A share lost today leaves four, still above the threshold of three; with three lost, the vault's claims can only be paid by the bonds (§ 7) |
+
 ## 6. The violation statements: one guest, one entry point (T3-3)
 
 There is one RISC Zero guest per Zcash network (image ids violation-test and violation-main: the
@@ -347,6 +359,16 @@ included` builds an `Included` witness).
 F1, F2 and F3 proofs are made on the prover's own machine, because their witnesses hold a viewing key.
 F4 and `Included` witnesses hold only K, which links the vault's notes and payouts but shows no amount
 or recipient.
+
+**Per kind, in short (C05).** Every slash pays the prover its bounty and the rest to the victims (§ 7).
+
+| Kind | What it shows | Bonds slashed | Who can prove it | The witness holds |
+|---|---|---|---|---|
+| F1 Uncommitted | a lineage note spent by a transaction Base has no commitment for | all five (FROST hides which three signed) | any holder of the vault's viewing key: the borrower, a watcher it chose, any signer | the viewing key |
+| F2 WithheldChange | a committed payout without the change its record names | the record's signers | any holder of the vault's viewing key | the viewing key |
+| F3 Misdirected | a claim's committed output paying less than the claim expects | the record's signers | the claimant: the borrower, a liquidator or a market maker | the claimant's salt, receiver and incoming viewing key |
+| F4 WrongClaimRef | a commitment naming a claim under a reference that hides the payout from its claimant | the record's signers | holders of K and the claim's salt: the borrower for its own claims, any signer for every claim | K, the claim's salt and receiver |
+| `Included` (not a violation) | a committed payout is in a Zcash block | none | holders of K: the coordinator, any signer, the borrower | K |
 
 ## 7. Bonds: `SignerBondV2` (S5, S6; D43 to D47)
 

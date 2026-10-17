@@ -1,0 +1,27 @@
+{
+  "_comment": "ZecuredSwap on Base Sepolia, the judge deployment (work order 5.9, judge column). Amounts in USDC units (6 decimals) or zatoshi, times in seconds. The work tiers are the Intake's judge values; the branch ids are the Swap version's (NU7). script/DeploySwap.s.sol checks it; test/script/SwapDeployConfig.t.sol pins it.",
+  "network": "base-sepolia",
+  "chainId": 84532,
+  "zcashNetwork": "zcash-testnet",
+  "localFork": false,
+  "usdc": "0x036CbD53842c5426634e7929541eC2318f3dCF7e",
+  "riscZeroRouter": "0x0b144E07A0826182B6b59788c34b32Bfa86Fb711",
+  "branchIds": [
+    1998129881
+  ],
+  "tierMaxAmountZat": [
+    "18446744073709551615"
+  ],
+  "tierMinWork": [
+    "3500000"
+  ],
+  "minWorkFloor": "1000000",
+  "finalizeDepth": 6,
+  "finalizeDelay": 150,
+  "maxOrderUsdc": "200000000",
+  "maxOrderZat": "1000000000",
+  "minPayWindow": 7200,
+  "maxPayWindow": 21600,
+  "feeBps": 0,
+  "feeRecipient": "0x0000000000000000000000000000000000000000"
+}

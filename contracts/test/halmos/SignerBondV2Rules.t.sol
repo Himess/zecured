@@ -6,10 +6,41 @@ import {IERC20} from "@openzeppelin/contracts/token/ERC20/IERC20.sol";
 import {IOracle} from "morpho-blue/src/interfaces/IOracle.sol";
 import {SignerBondV2} from "../../src/SignerBondV2.sol";
 import {BondConfig} from "../../src/interfaces/v3/ISignerBond.sol";
+import {ClaimDetails, ClaimKind, ClaimStatus} from "../../src/interfaces/v3/IZecuredRegistry.sol";
+import {Entitlement} from "../../src/interfaces/v3/IZecuredCompensator.sol";
 import {MockUSDC} from "../../src/mocks/MockUSDC.sol";
 
-/// @notice MOCK (tests only): the Registry's sorted signer set, the only part of it a deposit reads.
+/// @notice MOCK (tests only): the Registry's sorted signer set, the only part of it a deposit reads, the dispute
+///         windows the bond's constructor reads (R-18), and one claim whose details the check sets (R-5).
 contract SignerSetForHalmos {
+    ClaimDetails internal _claim;
+
+    function setClaim(ClaimDetails memory c) external {
+        _claim = c;
+    }
+
+    function claimDetails(bytes32) external view returns (ClaimDetails memory) {
+        return _claim;
+    }
+
+    function claimInput(bytes32) external pure returns (bytes32) {
+        return bytes32(0);
+    }
+
+    function lastCommitAt(bytes32) external pure returns (uint40) {
+        return 0;
+    }
+
+    function markBondPaid(bytes32) external pure {}
+
+    function disputeWindow() external pure returns (uint64) {
+        return 1 days;
+    }
+
+    function inclusionWindow() external pure returns (uint64) {
+        return 6 hours;
+    }
+
     function signers() external pure returns (address[5] memory s) {
         s[0] = address(0x5101);
         s[1] = address(0x5102);
@@ -19,12 +50,31 @@ contract SignerSetForHalmos {
     }
 }
 
-/// @notice Test harness: the real bond, with the first step of its effective bond callable on its own.
+/// @notice MOCK (tests only): the slasher, the compensator and the oracle a liveness payment reads: no vault frozen, no
+///         entitlement, a fixed price ($1,200 per ZEC) and no feed state.
+contract BondPeersForHalmos {
+    function vaultFrozen(bytes32) external pure returns (bool) {
+        return false;
+    }
+
+    function entitlement(bytes32) external pure returns (Entitlement memory e) {}
+
+    function price() external pure returns (uint256) {
+        return 1_200e34;
+    }
+}
+
+/// @notice Test harness: the real bond, with the first step of its effective bond callable on its own, and any arming
+///         settable (any state of the receipts' map).
 contract SignerBondV2HalmosHarness is SignerBondV2 {
     constructor(BondConfig memory cfg) SignerBondV2(cfg) {}
 
     function sumAndCheapestThree(uint256[5] memory bonds) external pure returns (uint256, uint256) {
         return _sumAndCheapestThree(bonds);
+    }
+
+    function setArming(bytes32 claimId, bytes32 commitment, uint64 payableAt) external {
+        _armings[claimId] = Arming({commitment: commitment, payableAt: payableAt});
     }
 }
 
@@ -36,7 +86,10 @@ contract SignerBondV2HalmosHarness is SignerBondV2 {
 ///             which exceeds either of the other two. Any other three signers hold at least as much (they swap some of
 ///             these for bonds at least as large), so three colluders lose at least 3/5 of the effective bond (T-01);
 ///         B3  a deposit adds exactly its amount to its signer's bond and changes no other bond and no unbonding, from
-///             ANY state.
+///             ANY state;
+///         B4  (R-5) whatever the claim and whatever its arming: no liveness is due, nor paid, unless the claim is armed
+///             for its current commitment; and when it is due, it is a liveness period after the later of the claim's
+///             creation and the receipt, at the earliest.
 ///         Together: a deposit never lowers the effective bond. It raises one bond (B3). Raising one bond raises the
 ///         sum by as much and, S3 being the sum of the three smallest (B2), never lowers S3; and `min(sum, 5 * S3 / 3)`
 ///         is monotone in both.
@@ -52,18 +105,23 @@ contract SignerBondV2RulesCheck is Test {
     SignerSetForHalmos internal registry;
     MockUSDC internal usdc;
     SignerBondV2HalmosHarness internal bond;
+    BondPeersForHalmos internal peers;
+
+    bytes32 internal constant CLAIM = keccak256("halmos.claim");
+    address internal constant CLAIMANT = address(0xC1A1);
 
     function setUp() public {
         registry = new SignerSetForHalmos();
         usdc = new MockUSDC(address(this));
+        peers = new BondPeersForHalmos();
         bond = new SignerBondV2HalmosHarness(
             BondConfig({
                 registry: address(registry),
-                slasher: address(0x6001),
+                slasher: address(peers),
                 intake: address(0x6002),
-                compensator: address(0x6003),
+                compensator: address(peers),
                 usdc: IERC20(address(usdc)),
-                oracle: IOracle(address(0x6004)),
+                oracle: IOracle(address(peers)),
                 minBond: 100e6,
                 unbondingPeriod: 2 days + 6 hours,
                 challengeWindow: 1 days,
@@ -178,5 +236,105 @@ contract SignerBondV2RulesCheck is Test {
             }
         }
         assert(ok == 1);
+    }
+
+    /// The claim and its arming, symbolic; the bonds hold enough for any claim below 2^64 zatoshi at $1,200.
+    function _armedClaim(
+        uint8 kind,
+        bytes32 commitment,
+        uint40 createdAt,
+        uint64 amount,
+        bytes32 armedFor,
+        uint64 armedAt
+    ) internal {
+        vm.assume(kind <= uint8(type(ClaimKind).max));
+        registry.setClaim(
+            ClaimDetails({
+                vaultId: keccak256("halmos.vault"),
+                kind: ClaimKind(kind),
+                status: ClaimStatus.Pending,
+                amount: amount,
+                commitment: commitment,
+                createdAt: createdAt,
+                bondPaid: false,
+                claimant: CLAIMANT
+            })
+        );
+        bond.setArming(CLAIM, armedFor, armedAt);
+    }
+
+    /// B4, the view.
+    function check_noLivenessDueWithoutAMatchingReceipt(
+        uint8 kind,
+        bytes32 commitment,
+        uint40 createdAt,
+        uint64 amount,
+        bytes32 armedFor,
+        uint64 armedAt
+    ) public {
+        _armedClaim(kind, commitment, createdAt, amount, armedFor, armedAt);
+        (uint64 dueAt,) = bond.livenessDue(CLAIM);
+        if (armedAt == 0 || armedFor != commitment) {
+            assert(dueAt == 0);
+        } else if (dueAt != 0) {
+            uint256 from = armedAt > createdAt ? armedAt : createdAt;
+            assert(uint256(dueAt) >= from + 1 days); // the livenessPeriod of setUp
+        }
+    }
+
+    /// Funds every bond with 10^30 USDC units: no claim below 2^64 zatoshi outgrows them.
+    function _fundBonds() internal {
+        address[5] memory s = registry.signers();
+        for (uint256 i; i < 5; ++i) {
+            usdc.mint(s[i], 1e30);
+            vm.startPrank(s[i]);
+            usdc.approve(address(bond), 1e30);
+            bond.deposit(1e30);
+            vm.stopPrank();
+        }
+    }
+
+    /// B4, the payment, unarmed: a claim the bonds could pay (an eligible kind, a destination, not dust), with the
+    /// bonds funded and any time past, is refused unless armed for its current commitment.
+    function check_noLivenessPaidWithoutAMatchingReceipt(
+        uint8 kind,
+        bytes32 commitment,
+        uint40 createdAt,
+        uint64 amount,
+        bytes32 armedFor,
+        uint64 armedAt,
+        uint40 late
+    ) public {
+        vm.assume(kind <= uint8(ClaimKind.Refund) && commitment != bytes32(0) && amount >= 100_000);
+        vm.assume(armedAt == 0 || armedFor != commitment);
+        vm.assume(armedAt < 2 ** 40);
+        _armedClaim(kind, commitment, createdAt, amount, armedFor, armedAt);
+        _fundBonds();
+        uint256 from = armedAt > createdAt ? armedAt : createdAt;
+        vm.warp(from + 1 days + late);
+        vm.prank(CLAIMANT);
+        (bool ok,) = address(bond).call(abi.encodeCall(SignerBondV2.slashLiveness, (CLAIM)));
+        assert(!ok);
+    }
+
+    /// B4, the payment, armed: the same claim (0.01 ZEC: a concrete amount keeps the payment's 512-bit arithmetic out
+    /// of the solver), armed for its current commitment at any time, is paid once due, whatever the kind, the commitment,
+    /// the creation, the receipt's time and the delay.
+    function check_livenessPaidWithAMatchingReceipt(
+        uint8 kind,
+        bytes32 commitment,
+        uint40 createdAt,
+        uint64 armedAt,
+        uint40 late
+    ) public {
+        vm.assume(kind <= uint8(ClaimKind.Refund) && commitment != bytes32(0));
+        vm.assume(armedAt != 0 && armedAt < 2 ** 40);
+        _armedClaim(kind, commitment, createdAt, 1_000_000, commitment, armedAt);
+        _fundBonds();
+        uint256 from = armedAt > createdAt ? armedAt : createdAt;
+        vm.warp(from + 1 days + late);
+        vm.prank(CLAIMANT);
+        (bool ok,) = address(bond).call(abi.encodeCall(SignerBondV2.slashLiveness, (CLAIM)));
+        assert(ok);
     }
 }

@@ -1,0 +1,27 @@
+[package]
+name = "payment"
+version = "0.1.0"
+edition = "2024"
+license = "MIT"
+publish = false
+
+[workspace]
+
+[dependencies]
+risc0-zkvm = { version = "=3.0.6", default-features = false, features = ["std"] }
+zecured-payment-statement = { path = "../../payment-statement" }
+bincode = "1"
+
+[features]
+# The network the guest proves on is a build parameter (as for the deposit and violation guests):
+# Testnet by default, Mainnet with this feature (tier2/methods passes it when built with its own
+# `mainnet`).
+mainnet = ["zecured-payment-statement/mainnet"]
+
+[profile.release]
+lto = true
+
+# Pallas / Vesta field arithmetic through RISC Zero's bigint2 accelerator (see the vendored
+# crate's ZECURED_PATCH.md).
+[patch.crates-io]
+pasta_curves = { path = "../../vendor/pasta_curves" }

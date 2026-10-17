@@ -174,19 +174,13 @@ contract ZecuredRegistry is IZecuredRegistry, IZecuredSpendCommits, ZecuredRegis
     /// @inheritdoc IZecuredRegistry
     function releaseDeposit(bytes32 vaultId, address account, bytes32 depositTag) external {
         _only(intake, OnlyIntake.selector);
-        Vault storage v = _reservation(vaultId, account, depositTag);
+        _reservation(vaultId, account, depositTag);
         delete _lineage[depositTag];
         _depositTagUsed[depositTag] = false;
         delete _vaultOf[account];
-        // A refund opened while the proof was pending keeps the vault (cancelled) and its account.
-        if (v.claimCount == 0) {
-            v.account = address(0);
-            v.status = VaultStatus.None;
-            _settle();
-        } else {
-            v.status = VaultStatus.Cancelled;
-            if (v.unpaidClaims == 0) _settle();
-        }
+        // A pending vault has no claim (a refund proven meanwhile waits for it, R-8): it is unknown again.
+        delete _vaults[vaultId];
+        _settle();
         emit VaultReservationReleased(vaultId);
     }
 
@@ -211,26 +205,17 @@ contract ZecuredRegistry is IZecuredRegistry, IZecuredSpendCommits, ZecuredRegis
     }
 
     /// @inheritdoc IZecuredRegistry
-    function openRefund(bytes32 vaultId, address account, uint64 amount, bytes32 depositTag)
-        external
-        returns (bytes32 claimId)
-    {
+    function reserveRefund(bytes32 vaultId, address account, uint64 amount, bytes32 depositTag) external {
         _only(intake, OnlyIntake.selector);
         if (vaultId == bytes32(0)) revert ZeroVaultId();
         if (account == address(0)) revert ZeroAccount();
         // A compromised vault's claims are the compensator's; a late deposit must not add one it never tallies (and
-        // that, unpayable, would keep the vault open for good).
+        // that, unpayable, would keep the vault open for good). `openReservedRefund` checks it again.
         _checkNotCompromised(vaultId);
         Vault storage v = _vaults[vaultId];
-        if (v.status == VaultStatus.None) {
-            v.account = account;
-            v.status = VaultStatus.Cancelled;
-        } else if (v.account != account) {
-            revert ReservationMismatch(vaultId);
-        }
+        if (v.status != VaultStatus.None && v.account != account) revert ReservationMismatch(vaultId);
         _addLineage(vaultId, amount, depositTag);
-        claimId = _newClaim(vaultId, v, ClaimKind.Refund, amount, bytes32(0));
-        emit RefundOpened(vaultId, claimId, account, amount, depositTag);
+        _reservedRefund[depositTag] = account;
     }
 
     /// @inheritdoc IZecuredRegistry
@@ -427,42 +412,15 @@ contract ZecuredRegistry is IZecuredRegistry, IZecuredSpendCommits, ZecuredRegis
     // ------------------------------------------------------------------ T-02: refunds
 
     /// @inheritdoc IZecuredRegistry
-    function setRefundDestination(bytes32 claimId, bytes32 destCommitment) external {
-        Claim storage c = _claims[claimId];
-        if (c.kind != ClaimKind.Refund || c.status == ClaimStatus.None) revert NotARefund(claimId);
-        Vault storage v = _vaults[c.vaultId];
-        if (msg.sender != v.account) revert NotVaultAccount(c.vaultId, msg.sender);
-        if (destCommitment == bytes32(0)) revert ZeroCommitment();
-        // Bound to a payout, or paid by the bonds (its ZEC now reimburses them, T-05): no longer the account's to move.
-        if (_claimInput[claimId] != bytes32(0) || c.bondPaid) revert RefundBound(claimId);
-        ClaimStatus status = c.status;
-        if (status == ClaimStatus.WrittenOff) {
-            // Revives an abandoned refund (its note is still a lineage note of the vault); not on a compromised vault,
-            // whose claims the compensator has tallied.
-            _checkNotCompromised(c.vaultId);
-            if (_settled(v)) _openVaults += 1;
-            c.status = ClaimStatus.Pending;
-            v.unpaidClaims += 1;
-            _pendingClaimZat += c.amount;
-        } else if (status != ClaimStatus.Pending) {
-            revert RefundBound(claimId);
-        }
-        c.commitment = destCommitment;
-        c.createdAt = uint40(block.timestamp);
-        emit RefundDestinationSet(c.vaultId, claimId, destCommitment);
+    /// @dev Runs `ZecuredSpendLogic.setRefundDestination` on this contract's storage (R-11 made it outgrow the Registry).
+    function setRefundDestination(bytes32, bytes32) external {
+        _delegate();
     }
 
     /// @inheritdoc IZecuredRegistry
-    function abandonRefund(bytes32 claimId) external {
-        Claim storage c = _claims[claimId];
-        if (c.kind != ClaimKind.Refund || c.status != ClaimStatus.Pending || c.commitment != bytes32(0) || c.bondPaid) {
-            revert NotARefund(claimId);
-        }
-        uint64 at = uint64(c.createdAt) + refundAbandonPeriod;
-        if (block.timestamp < at) revert NotAbandonable(claimId, at);
-        _checkNotCompromised(c.vaultId); // the compensator settles a compromised vault's claims
-        emit RefundAbandoned(c.vaultId, claimId);
-        _closeClaim(c, ClaimStatus.WrittenOff);
+    /// @dev Runs `ZecuredSpendLogic.abandonRefund` on this contract's storage.
+    function abandonRefund(bytes32) external {
+        _delegate();
     }
 
     // ------------------------------------------------------------------ T-05: claims the bonds paid
@@ -501,15 +459,7 @@ contract ZecuredRegistry is IZecuredRegistry, IZecuredSpendCommits, ZecuredRegis
     /// @notice Every other call, the dispute path (`IZecuredDisputes`) above all, runs `ZecuredSpendLogic`'s code on this
     ///         contract's storage (T-11), which refuses what it does not implement. Not payable.
     fallback() external {
-        address logic = spendLogic;
-        // Never returns to Solidity code, so it may use memory from zero.
-        assembly {
-            calldatacopy(0, 0, calldatasize())
-            let ok := delegatecall(gas(), logic, 0, calldatasize(), 0, 0)
-            returndatacopy(0, 0, returndatasize())
-            if iszero(ok) { revert(0, returndatasize()) }
-            return(0, returndatasize())
-        }
+        _delegate();
     }
 
     // ------------------------------------------------------------------ views
@@ -660,6 +610,19 @@ contract ZecuredRegistry is IZecuredRegistry, IZecuredSpendCommits, ZecuredRegis
 
     // ------------------------------------------------------------------ internal
 
+    /// @dev Runs `ZecuredSpendLogic`'s code for this call on this contract's storage and ends the call with its result
+    ///      (T-11). Never returns to Solidity code, so it may use memory from zero.
+    function _delegate() internal {
+        address logic = spendLogic;
+        assembly {
+            calldatacopy(0, 0, calldatasize())
+            let ok := delegatecall(gas(), logic, 0, calldatasize(), 0, 0)
+            returndatacopy(0, 0, returndatasize())
+            if iszero(ok) { revert(0, returndatasize()) }
+            return(0, returndatasize())
+        }
+    }
+
     /// @dev Reverts with `err(msg.sender)` unless the caller is `role`; a role that is not deployed (zero) admits nobody.
     function _only(address role, bytes4 err) internal view {
         if (msg.sender != role || role == address(0)) {
@@ -744,29 +707,5 @@ contract ZecuredRegistry is IZecuredRegistry, IZecuredSpendCommits, ZecuredRegis
             MarketParams({
                 loanToken: _loanToken, collateralToken: address(zzec), oracle: _oracle, irm: _irm, lltv: _lltv
             });
-    }
-
-    /// @dev A new pending claim. A closed or cancelled vault with no pending claim is settled: a new claim reopens it.
-    function _newClaim(bytes32 vaultId, Vault storage v, ClaimKind kind, uint64 amount, bytes32 commitment)
-        internal
-        returns (bytes32 claimId)
-    {
-        if (_settled(v)) _openVaults += 1;
-        uint64 sequence = v.claimCount;
-        claimId = claimIdOf(vaultId, sequence);
-        v.claimCount = sequence + 1;
-        v.unpaidClaims += 1;
-        _pendingClaimZat += amount;
-        _claims[claimId] = Claim({
-            vaultId: vaultId,
-            commitment: commitment,
-            amount: amount,
-            kind: kind,
-            status: ClaimStatus.Pending,
-            createdAt: uint40(block.timestamp),
-            bondPaid: false,
-            paidAt: 0,
-            disputeDueAt: 0
-        });
     }
 }

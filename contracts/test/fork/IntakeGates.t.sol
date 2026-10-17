@@ -2,7 +2,7 @@
 pragma solidity 0.8.28;
 
 import {MessageHashUtils} from "@openzeppelin/contracts/utils/cryptography/MessageHashUtils.sol";
-import {VaultStatus} from "../../src/interfaces/v3/IZecuredRegistry.sol";
+import {IZecuredRegistry, VaultStatus, ClaimStatus} from "../../src/interfaces/v3/IZecuredRegistry.sol";
 import {
     IZecuredIntake,
     MintBlock,
@@ -10,6 +10,7 @@ import {
     WorkTier,
     PendingActivation
 } from "../../src/interfaces/v3/IZecuredIntake.sol";
+import {IZecuredRefunds, IZecuredRefundsErrors} from "../../src/interfaces/v3/IZecuredRefunds.sol";
 import {MockRiscZeroVerifier} from "../../src/mocks/MockRiscZeroVerifier.sol";
 import {MockHeaderRelay} from "../mocks/MockHeaderRelay.sol";
 import {MockSignerBond} from "../mocks/MockSignerBond.sol";
@@ -17,8 +18,9 @@ import {MockCapPrice} from "../mocks/MockCapPrice.sol";
 import {ZecuredFixture} from "../utils/ZecuredFixture.sol";
 
 /// @notice The Intake's gates of minting: the coverage cap (T-01) at the high price with its absolute maximum, the bonds,
-///         the halt and the automatic pause on an open case (T-03); its work tiers (T-08) and refund floor (T-02). With
-///         the MOCK relay and verifier, a MOCK bond and slasher, and a MOCK cap price.
+///         the halt and the automatic pause on an open case (T-03); its work tiers (T-08) and refund floor (T-02); v4: a
+///         full cap delays a new vault's proof instead of cancelling the vault, and unclaimed refunds leave the cap
+///         once dormant (R-11). With the MOCK relay and verifier, a MOCK bond and slasher, and a MOCK cap price.
 contract IntakeGatesTest is ZecuredFixture {
     uint64 internal constant BIG = 5_000_000; // 0.05 ZEC
     uint64 internal constant SMALL = 1_000_000; // 0.01 ZEC
@@ -100,6 +102,14 @@ contract IntakeGatesTest is ZecuredFixture {
         intake.pauseMinting(until, nonce, deadline, _threeSigs(intake.hashPauseMinting(until, nonce, deadline)));
     }
 
+    /// A second deposit `tag` to `name`'s known vault: it lands as a pending refund (R-12), opened here.
+    function _refundOf(string memory name, bytes32 vaultId, uint64 amount, bytes32 tag) internal returns (bytes32) {
+        (bytes memory journal, bytes memory seal, bytes[] memory sigs) =
+            _proof(vaultId, makeAddr(name), amount, tag, intake.minConfirmationWorkFor(amount));
+        intake.attestDepositWithProof(journal, seal, proofs.imageId, sigs);
+        return _finalizeRefund(tag);
+    }
+
     function _release(string memory name, bytes32 vaultId) internal returns (bytes32 claimId) {
         address account = makeAddr(name);
         vm.startPrank(account);
@@ -122,8 +132,9 @@ contract IntakeGatesTest is ZecuredFixture {
     }
 
     /// Locked and pending zatoshi, valued at the cap price, stay within k times the effective bond: two 0.05 ZEC
-    /// deposits fill 4 USDC exactly at $40; a third deposit lands as a refund, and the room reads zero.
-    function test_cap_admitsUpToTheEffectiveBond_thenRefunds() public {
+    /// deposits fill 4 USDC exactly at $40; a third new vault's proof waits (R-11: it reverts and is sent again once
+    /// there is room, instead of cancelling the vault for good), and the room reads zero.
+    function test_cap_admitsUpToTheEffectiveBond_thenNewVaultsWait() public {
         assertEq(intake.capRoom(), 10_000_000);
         assertEq(uint8(intake.mintBlock(BIG)), uint8(MintBlock.None));
         bytes32 a = _deposit("gates.a", BIG);
@@ -136,14 +147,17 @@ contract IntakeGatesTest is ZecuredFixture {
 
         address c = makeAddr("gates.c");
         bytes32 cVault = _vaultIdFor(c);
-        bytes32 claimId = registry.claimIdOf(cVault, 0);
         (bytes memory journal, bytes memory seal, bytes[] memory sigs) =
             _proof(cVault, c, SMALL, _depositTagFor(c), MIN_WORK);
-        vm.expectEmit(address(intake));
-        emit IZecuredIntake.DepositRefunded(cVault, claimId, RefundReason.CapExceeded);
+        vm.expectRevert(abi.encodeWithSelector(IZecuredIntake.CapExceeded.selector, SMALL));
         intake.attestDepositWithProof(journal, seal, proofs.imageId, sigs);
-        assertEq(uint8(_status(cVault)), uint8(VaultStatus.Cancelled));
-        assertEq(registry.lockedZatoshi() + intake.pendingTotal(), 2 * BIG + SMALL, "the refund is locked too");
+        assertEq(uint8(_status(cVault)), uint8(VaultStatus.None), "R-11: the vault is not cancelled");
+        assertFalse(registry.depositTagUsed(_depositTagFor(c)));
+
+        // Room again (the bonds grew): the same proof lands, pending.
+        gates.setEffectiveBond(BOND_FOR_A_TENTH + 1e6);
+        intake.attestDepositWithProof(journal, seal, proofs.imageId, sigs);
+        assertEq(uint8(_status(cVault)), uint8(VaultStatus.Pending));
     }
 
     /// The cap counts what the vaults hold for Base: the zZEC supply, pending activations and pending claims. A payout
@@ -187,8 +201,11 @@ contract IntakeGatesTest is ZecuredFixture {
         }
         assertEq(intake.pendingTotal(), ABSOLUTE_CAP);
         assertEq(intake.capRoom(), 0);
-        bytes32 seventh = _deposit("gates.big6", SMALL);
-        assertEq(uint8(_status(seventh)), uint8(VaultStatus.Cancelled), "a refund");
+        address seventh = makeAddr("gates.big6");
+        (bytes memory journal, bytes memory seal, bytes[] memory sigs) =
+            _proof(_vaultIdFor(seventh), seventh, SMALL, _depositTagFor(seventh), MIN_WORK);
+        vm.expectRevert(abi.encodeWithSelector(IZecuredIntake.CapExceeded.selector, SMALL));
+        intake.attestDepositWithProof(journal, seal, proofs.imageId, sigs);
     }
 
     /// A stale cap price delays an activatable proof (it reverts and can be sent again later), never turns it into a
@@ -210,14 +227,16 @@ contract IntakeGatesTest is ZecuredFixture {
         vm.expectRevert(abi.encodeWithSelector(IZecuredIntake.CapPriceStale.selector, updatedAt));
         intake.attestDepositWithProof(journal, seal, proofs.imageId, sigs);
 
-        // A second deposit to a known vault lands as a refund regardless.
+        // A second deposit to a known vault lands as a (pending, R-12) refund regardless.
         (journal, seal, sigs) = _proof(a, makeAddr("gates.a"), SMALL, keccak256("gates.second"), MIN_WORK);
         intake.attestDepositWithProof(journal, seal, proofs.imageId, sigs);
-        assertEq(registry.claimCount(a), 1);
+        assertEq(intake.pendingRefund(keccak256("gates.second")).amount, SMALL);
 
-        // The pending activation finalizes regardless of the cap price.
+        // The pending activation finalizes regardless of the cap price, and so does the refund.
         _finalize(a);
         assertEq(uint8(_status(a)), uint8(VaultStatus.Active));
+        _finalizeRefund(keccak256("gates.second"));
+        assertEq(registry.claimCount(a), 1);
 
         // Once the price is fresh again, the waiting proof lands.
         capPrice.set(PRICE_40);
@@ -248,13 +267,97 @@ contract IntakeGatesTest is ZecuredFixture {
         (bytes memory journal, bytes memory seal, bytes[] memory sigs) =
             _proof(a, makeAddr("gates.a"), BIG, keccak256("gates.extra"), 4 * MIN_WORK);
         intake.attestDepositWithProof(journal, seal, proofs.imageId, sigs);
+        assertEq(registry.lockedZatoshi() + intake.pendingRefundTotal(), 3 * BIG, "over the cap, pending already");
+        _finalizeRefund(keccak256("gates.extra"));
         assertEq(registry.lockedZatoshi(), 3 * BIG, "over the cap");
         assertEq(intake.capRoom(), 0);
-        bytes32 c = _deposit("gates.c", SMALL);
-        assertEq(uint8(_status(c)), uint8(VaultStatus.Cancelled), "a new deposit: a refund");
+        address c = makeAddr("gates.c");
+        (journal, seal, sigs) = _proof(_vaultIdFor(c), c, SMALL, _depositTagFor(c), MIN_WORK);
+        vm.expectRevert(abi.encodeWithSelector(IZecuredIntake.CapExceeded.selector, SMALL));
+        intake.attestDepositWithProof(journal, seal, proofs.imageId, sigs);
 
         _release("gates.a", a);
         assertEq(uint8(_status(a)), uint8(VaultStatus.Closed), "the account still leaves");
+    }
+
+    // ------------------------------------------------------------------ R-11: refunds and the cap
+
+    /// R-11 (the review's finding): a full cap used to turn a new vault's proof into a refund, which cancelled the
+    /// vault for good; that refund then counted against the cap until it was abandoned (30 days on the judge
+    /// deployment), so one unwanted note filled the cap cheaply. Now the proof waits, and a refund nobody claims leaves
+    /// the cap after `refundDormancy`, until its account gives a destination.
+    function test_R11_anUnclaimedRefundLeavesTheCapOnceDormant() public {
+        bytes32 a = _deposit("gates.a", BIG);
+        _finalize(a);
+        // An unwanted 0.05 ZEC note to the vault: a refund that fills the rest of the cap.
+        bytes32 refundId = _refundOf("gates.a", a, BIG, keccak256("gates.unwanted"));
+        assertEq(intake.capRoom(), 0, "the refund fills the cap");
+        assertEq(registry.lockedZatoshi(), 2 * BIG);
+
+        IZecuredRefunds refunds = IZecuredRefunds(address(registry));
+        uint64 at = uint64(block.timestamp) + REFUND_DORMANCY;
+        vm.expectRevert(abi.encodeWithSelector(IZecuredRefundsErrors.NotDormantYet.selector, refundId, at));
+        refunds.markRefundDormant(refundId);
+        vm.warp(at);
+        capPrice.set(PRICE_40); // a fresh cap price
+        vm.expectEmit(address(registry));
+        emit IZecuredRegistry.RefundDormant(a, refundId);
+        vm.prank(stranger); // anyone
+        refunds.markRefundDormant(refundId);
+        assertTrue(refunds.isRefundDormant(refundId));
+        assertEq(registry.lockedZatoshi(), BIG, "out of lockedZatoshi");
+        assertEq(intake.capRoom(), 10_000_000 - BIG, "and of the cap: a new vault fits again");
+        (,,,, ClaimStatus status) = registry.claim(refundId);
+        assertEq(uint8(status), uint8(ClaimStatus.Pending), "still pending: its account can claim it");
+        assertEq(registry.openVaultCount(), 1, "and still owed: the vault stays open");
+        vm.expectRevert(abi.encodeWithSelector(IZecuredRefundsErrors.NotDormantable.selector, refundId));
+        refunds.markRefundDormant(refundId);
+        bytes32 b = _deposit("gates.b", BIG);
+        assertEq(uint8(_status(b)), uint8(VaultStatus.Pending));
+
+        // Its account gives a destination: it counts again (refunds may exceed the cap, D44).
+        vm.prank(makeAddr("gates.a"));
+        registry.setRefundDestination(refundId, keccak256("gates.dest"));
+        assertFalse(refunds.isRefundDormant(refundId));
+        assertEq(registry.lockedZatoshi() + intake.pendingTotal(), 3 * BIG, "over the cap, as refunds may be");
+        assertEq(intake.capRoom(), 0);
+        // With a destination it is no longer dormantable.
+        vm.warp(block.timestamp + REFUND_DORMANCY);
+        vm.expectRevert(abi.encodeWithSelector(IZecuredRefundsErrors.NotDormantable.selector, refundId));
+        refunds.markRefundDormant(refundId);
+    }
+
+    /// R-11: a dormant refund still keeps its other ways out: abandoned after `refundAbandonPeriod` (written off, out
+    /// of the books once), or revived by its account later.
+    function test_R11_aDormantRefundCanStillBeAbandonedAndRevived() public {
+        bytes32 a = _deposit("gates.a", SMALL);
+        _finalize(a);
+        bytes32 refundId = _refundOf("gates.a", a, SMALL, keccak256("gates.unwanted"));
+        IZecuredRefunds refunds = IZecuredRefunds(address(registry));
+        vm.warp(block.timestamp + REFUND_DORMANCY);
+        refunds.markRefundDormant(refundId);
+        assertEq(registry.lockedZatoshi(), SMALL);
+        vm.warp(block.timestamp + ABANDON_PERIOD);
+        registry.abandonRefund(refundId);
+        assertFalse(refunds.isRefundDormant(refundId), "closed: no longer dormant");
+        assertEq(registry.lockedZatoshi(), SMALL, "taken out of the books once only");
+        assertEq(registry.vaultDetails(a).unpaidClaims, 0);
+        vm.prank(makeAddr("gates.a"));
+        registry.setRefundDestination(refundId, keccak256("gates.dest"));
+        assertEq(registry.lockedZatoshi(), 2 * SMALL, "revived: it counts again, once");
+    }
+
+    /// R-11, R-12: pending refunds count against the cap like pending activations.
+    function test_R11_pendingRefundsCountInTheCap() public {
+        bytes32 a = _deposit("gates.a", BIG);
+        _finalize(a);
+        (bytes memory journal, bytes memory seal, bytes[] memory sigs) =
+            _proof(a, makeAddr("gates.a"), BIG, keccak256("gates.extra"), 4 * MIN_WORK);
+        intake.attestDepositWithProof(journal, seal, proofs.imageId, sigs);
+        assertEq(intake.pendingRefundTotal(), BIG);
+        assertEq(intake.capRoom(), 0, "the pending refund takes the rest of the room");
+        assertFalse(intake.coverageHoldsWith(4e6 - 1));
+        assertTrue(intake.coverageHoldsWith(4e6));
     }
 
     // ------------------------------------------------------------------ the other gates
@@ -355,6 +458,8 @@ contract IntakeGatesTest is ZecuredFixture {
         intake.attestDepositWithProof(journal, seal, proofs.imageId, sigs);
         (journal, seal, sigs) = _proof(a, account, MIN_REFUND, keccak256("gates.dust"), MIN_WORK);
         intake.attestDepositWithProof(journal, seal, proofs.imageId, sigs);
+        _finalize(a);
+        _finalizeRefund(keccak256("gates.dust"));
         assertEq(registry.claimCount(a), 1);
     }
 }

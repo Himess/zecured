@@ -151,12 +151,17 @@ interface IZecuredRegistry is IZecuredSignerErrors {
     event VaultReserved(bytes32 indexed vaultId, address indexed account, uint64 amount, bytes32 depositTag);
     /// @notice K3: the reservation was released (the proof's anchor left the relay's best chain).
     event VaultReservationReleased(bytes32 indexed vaultId);
-    /// @notice T-02: a deposit landed as a refund. `destination` is set later by the vault's account.
+    /// @notice T-02: a deposit landed as a refund. `destination` is set later by the vault's account. R-12: emitted
+    ///         when the Refund claim opens (`ZecuredIntake.finalizeRefund`, or a converted pending activation), not
+    ///         when the proof lands (the Intake's `RefundPending`).
     event RefundOpened(
         bytes32 indexed vaultId, bytes32 indexed claimId, address account, uint64 amount, bytes32 depositTag
     );
     event RefundDestinationSet(bytes32 indexed vaultId, bytes32 indexed claimId, bytes32 commitment);
     event RefundAbandoned(bytes32 indexed vaultId, bytes32 indexed claimId);
+    /// @notice R-11: a Refund claim without a destination for `refundDormancy` no longer counts in `lockedZatoshi` (nor
+    ///         in the coverage cap) until its account gives one (`IZecuredRefunds.markRefundDormant`).
+    event RefundDormant(bytes32 indexed vaultId, bytes32 indexed claimId);
     /// @notice T-06: the opening fee was charged as a Fee claim.
     event FeeCharged(bytes32 indexed vaultId, bytes32 indexed claimId, uint64 fee);
     event ReleaseRequested(bytes32 indexed vaultId, bytes32 indexed claimId, uint64 amount, bytes32 destCommitment);
@@ -273,7 +278,8 @@ interface IZecuredRegistry is IZecuredSignerErrors {
 
     /// @notice The vault's account gives the destination of its Refund claim. Allowed while the claim is pending (or
     ///         written off by `abandonRefund`, which this revives) and not yet bound to a payout input; restarts the
-    ///         claim's liveness clock (`createdAt = now`).
+    ///         claim's liveness clock (`createdAt = now`; a new commitment also voids the bond's liveness arming, R-5)
+    ///         and counts a dormant claim in `lockedZatoshi` again (R-11).
     function setRefundDestination(bytes32 claimId, bytes32 destCommitment) external;
 
     /// @notice Anyone. Writes off a Refund claim without a destination once `refundAbandonPeriod` has passed since it
@@ -298,23 +304,24 @@ interface IZecuredRegistry is IZecuredSignerErrors {
     ///         lineage note (from now on, spending it without a commitment is F1) and opens the vault.
     function reserveDeposit(bytes32 vaultId, address account, uint64 amount, bytes32 depositTag) external;
 
-    /// @notice K3: releases a reservation whose anchor left the relay's best chain: vault `None` again, tag unused,
-    ///         account unbound, lineage note removed, vault settled.
+    /// @notice K3: releases a reservation whose anchor left the relay's best chain (or whose verifier version was
+    ///         removed, R-14): vault `None` again, tag unused, account unbound, lineage note removed, vault settled. A
+    ///         pending vault never has a claim (a refund proven meanwhile waits for it, R-8).
     function releaseDeposit(bytes32 vaultId, address account, bytes32 depositTag) external;
 
     /// @notice Pending -> Active for the reservation `(account, amount, depositTag)`; charges the fee (T-06), mints the
     ///         zZEC and supplies it to Morpho on behalf of the account (I1).
     function activate(bytes32 vaultId, address account, uint64 amount, bytes32 depositTag) external;
 
-    /// @notice T-02: a proven deposit that cannot activate the vault (or a Refund-mode proof): makes the note a lineage
-    ///         note and creates a Refund claim of `amount` for the vault's account, without a destination. A `None`
-    ///         vault becomes `Cancelled` with this account; an existing vault must have this account and must not be
-    ///         compromised (`VaultCompromised`: its claims are the compensator's, and an unpayable late refund would
+    /// @notice T-02, R-12: a proven deposit that cannot activate the vault (or a Refund-mode proof) waits like an
+    ///         activation (K3) before its Refund claim opens. This reserves it: the tag is used, the note is a lineage
+    ///         note of the vault (spending it without a commitment is F1), but no payout may spend it and no claim
+    ///         exists until `IZecuredRefunds.openReservedRefund`; `IZecuredRefunds.releaseRefund` frees both if the
+    ///         proof is dropped. The vault itself is untouched. An existing vault must have this account and must not
+    ///         be compromised (`VaultCompromised`: its claims are the compensator's, and an unpayable late refund would
     ///         keep it open for good). `convertToRefund` has no such rule: the compensator needs a compromised pending
     ///         activation converted before it can tally the vault.
-    function openRefund(bytes32 vaultId, address account, uint64 amount, bytes32 depositTag)
-        external
-        returns (bytes32 claimId);
+    function reserveRefund(bytes32 vaultId, address account, uint64 amount, bytes32 depositTag) external;
 
     /// @notice T-02, T-03: Pending -> Cancelled for the reservation `(account, amount, depositTag)`, whose lineage note
     ///         stays; creates its Refund claim.
@@ -334,8 +341,8 @@ interface IZecuredRegistry is IZecuredSignerErrors {
 
     // ------------------------------------------------------------------ hooks: SignerBond only (T-05)
 
-    /// @notice The bonds paid this pending claim's claimant: `bondPaid = true`, commitment zero until three signers
-    ///         give its Reimburse destination.
+    /// @notice The bonds paid this pending claim's claimant: `bondPaid = true`, commitment zero until all five signers
+    ///         give its Reimburse destination (R-6).
     function markBondPaid(bytes32 claimId) external;
 
     // ------------------------------------------------------------------ views
@@ -349,9 +356,9 @@ interface IZecuredRegistry is IZecuredSignerErrors {
         returns (bytes32 vaultId, ClaimKind kind, uint64 amount, bytes32 commitment, ClaimStatus status);
     function claimDetails(bytes32 claimId) external view returns (ClaimDetails memory);
     /// @notice T-01: zatoshi the vaults hold for Base: the zZEC supply (every active vault's outstanding, I1) plus every
-    ///         pending or disputed claim, less the outstanding of the compromised vaults the compensator settled while
-    ///         they stayed active (R-20: their ZEC was taken and they are compensated as far as the bonds went). The
-    ///         Intake adds its pending activations.
+    ///         pending or disputed claim but a dormant refund (R-11), less the outstanding of the compromised vaults the
+    ///         compensator settled while they stayed active (R-20: their ZEC was taken and they are compensated as far
+    ///         as the bonds went). The Intake adds its pending activations.
     function lockedZatoshi() external view returns (uint256);
     function marketParams() external view returns (MarketParams memory);
     function signers() external view returns (address[5] memory);

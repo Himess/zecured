@@ -3,6 +3,7 @@ pragma solidity 0.8.28;
 
 import {ZecuredIntake} from "../../src/ZecuredIntake.sol";
 import {IntakeConfig} from "../../src/interfaces/v3/IZecuredIntake.sol";
+import {IZecuredRefunds} from "../../src/interfaces/v3/IZecuredRefunds.sol";
 
 /// @notice TEST ONLY. The production Intake plus shortcuts that call the Registry's deposit hooks without a proof, so
 ///         that suites about everything after activation can open vaults in one line. Nothing like it is ever deployed:
@@ -16,11 +17,18 @@ contract IntakeHarness is ZecuredIntake {
         _registry.activate(vaultId, account, amount, depositTag);
     }
 
-    /// @notice Opens a refund for a deposit without a proof.
+    /// @notice Reserves a refund for a deposit without a proof and opens its claim at once (R-12's wait skipped; the
+    ///         Registry's own checks still apply, so a pending vault refuses it).
     function harnessRefund(bytes32 vaultId, address account, uint64 amount, bytes32 depositTag)
         external
         returns (bytes32 claimId)
     {
-        return _registry.openRefund(vaultId, account, amount, depositTag);
+        _registry.reserveRefund(vaultId, account, amount, depositTag);
+        return IZecuredRefunds(address(_registry)).openReservedRefund(vaultId, depositTag);
+    }
+
+    /// @notice Only reserves a refund for a deposit without a proof (its claim is opened by `openReservedRefund`).
+    function harnessReserveRefund(bytes32 vaultId, address account, uint64 amount, bytes32 depositTag) external {
+        _registry.reserveRefund(vaultId, account, amount, depositTag);
     }
 }

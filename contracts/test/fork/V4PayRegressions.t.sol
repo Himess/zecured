@@ -7,6 +7,7 @@ import {MorphoBalancesLib} from "morpho-blue/src/libraries/periphery/MorphoBalan
 import {IZecuredRegistry, VaultStatus, ClaimStatus} from "../../src/interfaces/v3/IZecuredRegistry.sol";
 import {IZecuredDisputes, IZecuredDisputesEvents} from "../../src/interfaces/v3/IZecuredDisputes.sol";
 import {IZecuredPayoutsEvents} from "../../src/interfaces/v3/IZecuredPayouts.sol";
+import {IZecuredRefunds} from "../../src/interfaces/v3/IZecuredRefunds.sol";
 import {IZecuredSlasher, ViolationKind} from "../../src/interfaces/v3/IZecuredSlasher.sol";
 import {IZecuredSignerErrors} from "../../src/interfaces/v3/IZecuredSignerErrors.sol";
 import {IZecuredSpendCommitsEvents} from "../../src/interfaces/v3/IZecuredSpendCommits.sol";
@@ -62,7 +63,8 @@ abstract contract V4PayBase is DisputesBase {
 }
 
 /// @notice The v4 review's findings on the payout, dispute and compensation paths, each reproduced as it was found
-///         (every test here failed on the v3 code) and now refused: R-1, R-2, R-3, R-6, R-7, R-16, R-19, R-20, R-21.
+///         (every test here failed on the v3 code) and now refused: R-1, R-2, R-3, R-6, R-7, R-16, R-19, R-20, R-21;
+///         and how the compensation settles a dormant refund (R-11, which v3 did not have).
 ///         Real Registry, spend logic, slasher, bond and compensator, MOCK verifier and relay, real Morpho Blue.
 contract V4PayRegressionsTest is V4PayBase {
     using MorphoBalancesLib for IMorpho;
@@ -686,5 +688,28 @@ contract V4PayRegressionsTest is V4PayBase {
         compensator.finalizeIncident(id);
         vm.expectRevert(abi.encodeWithSelector(IZecuredCompensator.AlreadyFinalized.selector, id));
         compensator.tallyClaim(refundId);
+    }
+
+    // ================================================================== a dormant refund (R-11) meets the compensation
+
+    /// A dormant refund is already out of `lockedZatoshi` (R-11). On a compromised vault the compensator tallies it like
+    /// any pending claim, and its closure must not take its amount off the books a second time.
+    function test_R11_aDormantRefundOfACompromisedVaultIsCompensatedOnce() public {
+        bytes32 vaultId = _attest(account, VAULT_005);
+        bytes32 refundId = intake.harnessRefund(vaultId, account, VAULT_001, keccak256("v4.refund"));
+        IZecuredRefunds refunds = IZecuredRefunds(address(registry));
+        vm.warp(block.timestamp + REFUND_DORMANCY);
+        uint256 locked = registry.lockedZatoshi();
+        refunds.markRefundDormant(refundId);
+        assertEq(registry.lockedZatoshi(), locked - VAULT_001, "dormant: out of lockedZatoshi");
+        _compromise(_depositTagFor(account)); // no debt: retired at once (R-19)
+        locked = registry.lockedZatoshi();
+        compensator.tallyClaim(refundId);
+        assertEq(uint8(_claimStatus(refundId)), uint8(ClaimStatus.Compensated));
+        assertFalse(refunds.isRefundDormant(refundId), "no longer dormant");
+        assertEq(compensator.entitlement(refundId).zat, VAULT_001);
+        assertEq(compensator.entitlement(refundId).to, account);
+        assertEq(registry.lockedZatoshi(), locked, "taken off the books once");
+        compensator.tallyVault(vaultId);
     }
 }

@@ -17,7 +17,7 @@
   ],
   "capPriceMaxAge": 3600,
   "challengeWindow": 120,
-  "commitGrace": 120,
+  "commitGrace": 7200,
   "coverageBps": 10000,
   "disputeWindow": 600,
   "feeBps": 0,
@@ -40,6 +40,7 @@
   "minWorkFloor": "1000000",
   "pendingRefundDelay": 300,
   "refundAbandonPeriod": 86400,
+  "refundDormancy": 3600,
   "slashConfirmationWork": "38000000",
   "slashWorkFloor": "30000000",
   "tierMaxAmountZat": [
@@ -48,7 +49,7 @@
   "tierMinWork": [
     "3500000"
   ],
-  "unbondingPeriod": 1800,
+  "unbondingPeriod": 10800,
   "versionDepositDelay": 600,
   "versionEstopDelay": 600,
   "versionViolationDelay": 600,

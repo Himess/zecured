@@ -115,6 +115,7 @@ nodes' stores freezes the affected vaults; three leaked stores are enough to ste
 - Changing the signer set: the Registry's five signers are immutable, and FROST shares of
   existing vaults cannot be re-shared to a new party yet. Replacing an operator means a new
   deployment for new vaults.
-- Bonds and slashing for misbehaving operators are on the roadmap ([TIER2.md](TIER2.md) § 9).
-  Base-side verification of deposits is implemented (Tier 2): a MOCK verifier on the local fork,
-  real Groth16 seals through RISC Zero's router in the fork tests (`RealGroth16Seal.t.sol`).
+- Bonds, slashing and compensation are implemented ([TIER3.md](TIER3.md) § 7): each signer bonds
+  USDC, a proven violation slashes the signers it names, and the compensator pays the victims.
+  What remains roadmap: a per-signer reimbursement destination for liveness payments and a
+  dispute bond ([MAINNET.md](MAINNET.md)).

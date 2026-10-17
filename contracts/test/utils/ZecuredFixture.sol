@@ -24,7 +24,7 @@ import {BondConfig} from "../../src/interfaces/v3/ISignerBond.sol";
 import {CloseRequest, SpendCommit} from "../../src/libraries/ZecuredEIP712.sol";
 import {VaultStatus, ClaimKind, ClaimStatus, RegistryConfig} from "../../src/interfaces/v3/IZecuredRegistry.sol";
 import {IZecuredPayouts} from "../../src/interfaces/v3/IZecuredPayouts.sol";
-import {IntakeConfig, WorkTier} from "../../src/interfaces/v3/IZecuredIntake.sol";
+import {IntakeConfig, WorkTier, PendingRefund} from "../../src/interfaces/v3/IZecuredIntake.sol";
 import {IRiscZeroVerifier} from "../../src/interfaces/IRiscZeroVerifier.sol";
 import {IZcashHeaderRelay} from "../../src/relay/IZcashHeaderRelay.sol";
 import {MockHeaderRelay} from "../mocks/MockHeaderRelay.sol";
@@ -99,6 +99,8 @@ abstract contract ZecuredFixture is Test {
     // Disputes (T-05 (a)), as on the judge deployment.
     uint64 internal constant DISPUTE_WINDOW = 1 days;
     uint64 internal constant INCLUSION_WINDOW = 6 hours;
+    /// R-11: a Refund claim without a destination leaves `lockedZatoshi` after this long (the judge deployment's).
+    uint64 internal constant REFUND_DORMANCY = 48 hours;
     // Verifier versions (T-07a), as on the judge deployment.
     uint64 internal constant VERSION_DELAY = 10 minutes;
     address internal constant LEFTOVER_SINK = 0x000000000000000000000000000000000000dEaD;
@@ -151,6 +153,8 @@ abstract contract ZecuredFixture is Test {
     ProofSetup internal proofs;
     /// The compensator the Registry names (`_compensator`).
     address internal compensatorAddress;
+    /// The market's oracle: `oracle` (the MOCK price) unless a suite's `_marketOracle()` wraps it.
+    address internal marketOracle;
     MarketParams internal params;
     Id internal marketId;
 
@@ -241,6 +245,12 @@ abstract contract ZecuredFixture is Test {
     /// T-04: the compensator the Registry names (none unless a suite names one).
     function _compensator() internal virtual returns (address) {}
 
+    /// The market's oracle: the MOCK price itself unless a suite wraps it (in the DemoShockOracle, as the testnet
+    /// deployments do). Runs right after the MOCK price is deployed, before the addresses are predicted.
+    function _marketOracle() internal virtual returns (address) {
+        return address(oracle);
+    }
+
     /// T-08: the deposit-proof work tiers (one tier for every amount unless a suite sets more).
     function _workTiers() internal view virtual returns (WorkTier[] memory tiers) {
         tiers = new WorkTier[](1);
@@ -269,6 +279,7 @@ abstract contract ZecuredFixture is Test {
     function _deploySystem() internal {
         usdc = new MockUSDC(address(this));
         oracle = new MockZecOracle(address(this), PRICE_40);
+        marketOracle = _marketOracle();
         proofs = _proofSetup();
         headerRelay = IZcashHeaderRelay(proofs.relay);
         proofVerifier = IRiscZeroVerifier(proofs.verifier);
@@ -282,7 +293,7 @@ abstract contract ZecuredFixture is Test {
         Predicted memory p = _predict(bonded, mockBond, otherCompensator);
         compensatorAddress = p.compensator;
         zzec = new ZZEC(p.registry, p.adapter, address(MORPHO));
-        spendLogic = new ZecuredSpendLogic(p.registry, signerSet, DISPUTE_WINDOW, INCLUSION_WINDOW);
+        spendLogic = new ZecuredSpendLogic(p.registry, signerSet, DISPUTE_WINDOW, INCLUSION_WINDOW, REFUND_DORMANCY);
         registry = new ZecuredRegistry(_registryConfig(p, fee));
         adapter = new SettlementAdapter(registry, MIN_SEIZE, 0, 500);
         intake = new IntakeHarness(_intakeConfig(p, cap));
@@ -357,7 +368,7 @@ abstract contract ZecuredFixture is Test {
             zzec: zzec,
             adapter: p.adapter,
             loanToken: address(usdc),
-            oracle: address(oracle),
+            oracle: marketOracle,
             irm: ADAPTIVE_CURVE_IRM,
             lltv: LLTV,
             signers: signerSet,
@@ -497,6 +508,31 @@ abstract contract ZecuredFixture is Test {
     function _attest(address account, uint64 amount) internal returns (bytes32 vaultId) {
         vaultId = _vaultIdFor(account);
         intake.harnessActivate(vaultId, account, amount, _depositTagFor(account));
+    }
+
+    /// R-12: lets the MOCK relay reach a pending refund's ready height and time.
+    function _readyRefund(bytes32 depositTag) internal {
+        PendingRefund memory p = intake.pendingRefund(depositTag);
+        MockHeaderRelay mockRelay = MockHeaderRelay(address(headerRelay));
+        if (mockRelay.tipHeight() < p.readyHeight) mockRelay.setTipHeight(p.readyHeight);
+        if (block.timestamp < p.readyTime) vm.warp(p.readyTime);
+    }
+
+    /// R-12: `_readyRefund`, then finalizes the refund (anyone may).
+    function _finalizeRefund(bytes32 depositTag) internal returns (bytes32 claimId) {
+        _readyRefund(depositTag);
+        claimId = intake.finalizeRefund(depositTag);
+    }
+
+    /// R-5: signer `index`'s `DestinationReceived` receipt for the claim's current commitment, received at `receivedAt`.
+    function _receipt(bytes32 claimId, uint64 receivedAt, uint256 index) internal view returns (bytes memory) {
+        (,,, bytes32 commitment,) = registry.claim(claimId);
+        return _sign(signerKeys[index], bond.hashDestinationReceived(claimId, commitment, receivedAt));
+    }
+
+    /// R-5: arms the claim's liveness with signer 0's receipt, as if its node had the destination at `receivedAt`.
+    function _armLivenessAt(bytes32 claimId, uint64 receivedAt) internal {
+        bond.armLiveness(claimId, receivedAt, _receipt(claimId, receivedAt, 0));
     }
 
     /// A deposit proof through the Intake with the fixture's default MOCK relay and MOCK verifier (v1 journal): the

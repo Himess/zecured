@@ -61,7 +61,7 @@ contract PayoutRulesCheck is Test {
     uint256 internal constant CLAIM_INPUT_SLOT = 10;
     uint256 internal constant PENDING_CLAIM_ZAT_SLOT = 16;
     uint256 internal constant REOPENED_SLOT = 17;
-    uint256 internal constant UNPROVEN_SLOT = 19;
+    uint256 internal constant UNPROVEN_SLOT = 21; // after `_reservedRefund` (18), `_dormant` (19), `_payoutConfirmed`
     // ClaimStatus values.
     uint8 internal constant PENDING = 1;
     uint8 internal constant PAID = 2;
@@ -98,7 +98,7 @@ contract PayoutRulesCheck is Test {
             })
         );
         vm.etch(token, address(new ZZEC(address(registry), ADAPTER, address(morpho))).code);
-        vm.etch(logic, address(new ZecuredSpendLogic(address(registry), signers, DISPUTE_WINDOW, 6 hours)).code);
+        vm.etch(logic, address(new ZecuredSpendLogic(address(registry), signers, DISPUTE_WINDOW, 6 hours, 2 days)).code);
     }
 
     // ------------------------------------------------------------------ P1: proven delivery

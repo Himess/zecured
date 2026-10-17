@@ -12,6 +12,7 @@ import {IZecuredSpendCommitsEvents} from "../../src/interfaces/v3/IZecuredSpendC
 import {IZecuredDisputes} from "../../src/interfaces/v3/IZecuredDisputes.sol";
 import {IZecuredSignerErrors} from "../../src/interfaces/v3/IZecuredSignerErrors.sol";
 import {SpendCommit, CloseRequest} from "../../src/libraries/ZecuredEIP712.sol";
+import {IZecuredRefunds} from "../../src/interfaces/v3/IZecuredRefunds.sol";
 import {MockSignerBond} from "../mocks/MockSignerBond.sol";
 import {ZecuredFixture} from "../utils/ZecuredFixture.sol";
 
@@ -459,25 +460,39 @@ contract RegistryV3HooksTest is ZecuredFixture {
 
     // ================================================================== K3: nothing is paid from a pending vault
 
-    function test_commitSpend_refusesAPendingVault() public {
+    /// K3 and R-8: a refund proven while the vault's activation is pending waits for it (no claim on a pending vault,
+    /// so none accrues liveness there), and its note is spent by no payout until its claim is open (R-12).
+    function test_commitSpend_refusesAPendingVault_andAReservedRefund() public {
         bytes32 vaultId = _vaultIdFor(account);
         bytes32 secondTag = keccak256("zecured.hooks.second");
+        bytes32 refundId = registry.claimIdOf(vaultId, 0);
+        IZecuredRefunds refunds = IZecuredRefunds(address(registry));
         vm.startPrank(address(intake));
         registry.reserveDeposit(vaultId, account, VAULT_001, _depositTagFor(account));
-        bytes32 refundId = registry.openRefund(vaultId, account, VAULT_005, secondTag);
-        vm.stopPrank();
-        vm.prank(account);
-        registry.setRefundDestination(refundId, keccak256("zecured.hooks.dest"));
-
-        SpendCommit memory c = _spendCommit(vaultId, secondTag, _ids(refundId), "zecured.hooks.pending");
-        bytes[] memory sigs = _threeSigs(registry.hashSpendCommit(c));
+        registry.reserveRefund(vaultId, account, VAULT_005, secondTag);
+        assertEq(refunds.reservedRefundOf(secondTag), account);
         vm.expectRevert(abi.encodeWithSelector(IZecuredSpendCommitsEvents.VaultPending.selector, vaultId));
-        registry.commitSpend(c, sigs);
+        refunds.openReservedRefund(vaultId, secondTag);
+        vm.stopPrank();
+        assertEq(registry.claimCount(vaultId), 0, "no claim on a pending vault");
 
-        // Once the vault activates, the refund is paid from its own note.
+        // Once the vault activates (0.01 ZEC: its fee is waived, so the refund will be claim 0) ...
         vm.prank(address(intake));
         registry.activate(vaultId, account, VAULT_001, _depositTagFor(account));
-        registry.commitSpend(c, sigs);
+        assertEq(registry.claimCount(vaultId), 0);
+        // ... the reserved note is still spent by no payout (refused before its claims are even read) ...
+        SpendCommit memory early = _spendCommit(vaultId, secondTag, _ids(refundId), "early");
+        bytes[] memory earlySigs = _threeSigs(registry.hashSpendCommit(early));
+        vm.expectRevert(abi.encodeWithSelector(IZecuredSpendCommitsEvents.RefundNotOpen.selector, secondTag));
+        registry.commitSpend(early, earlySigs);
+        // ... until its claim opens; then it pays the refund.
+        vm.prank(address(intake));
+        assertEq(refunds.openReservedRefund(vaultId, secondTag), refundId);
+        assertEq(refunds.reservedRefundOf(secondTag), address(0));
+        vm.prank(account);
+        registry.setRefundDestination(refundId, keccak256("zecured.hooks.dest"));
+        SpendCommit memory c = _spendCommit(vaultId, secondTag, _ids(refundId), "zecured.hooks.pending");
+        registry.commitSpend(c, _threeSigs(registry.hashSpendCommit(c)));
         assertEq(registry.claimInput(refundId), secondTag);
     }
 }

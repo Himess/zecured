@@ -26,6 +26,7 @@ contracts/out/
 contracts/cache/
 contracts/broadcast/*/31337/
 contracts/broadcast/**/dry-run/
+contracts/broadcast/**/*.recovery.lock
 
 # Node / Next.js
 node_modules/
