@@ -45,6 +45,7 @@ fn node(dir: &std::path::Path) -> Node {
         commit_depth_secs: 120,
         local_fork: true,
         open_vault: Default::default(),
+        payout_lifetime_secs: None,
     };
     let id = Identity {
         index: 1,
@@ -84,6 +85,7 @@ fn vault(owner: Address) -> (VaultRecord, FullViewingKey) {
         confirmed: vec![],
         last_event: None,
         activated_tag: None,
+        reopened: vec![],
     };
     (record, fvk)
 }

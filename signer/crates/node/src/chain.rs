@@ -183,6 +183,11 @@ impl VaultNotes {
     }
 }
 
+/// The note commitment (`cmx`) of a scanned note: what its tag is keyed over (D24).
+pub fn note_cmx(n: &ReceivedNote) -> [u8; 32] {
+    ExtractedNoteCommitment::from(n.note.commitment()).to_bytes()
+}
+
 /// The tags of the vault's refunded deposits, from its Refund claims.
 pub fn refund_tags(claims: &[ledger::Claim]) -> Vec<[u8; 32]> {
     claims.iter().filter(|c| c.kind == ClaimKind::Refund).filter_map(|c| c.refund_tag).collect()
@@ -559,8 +564,25 @@ pub fn apply(store: &mut Store, ev: &VaultEvent) -> Result<bool> {
         return Ok(false);
     }
     match &ev.event {
-        // K3: nothing is paid from a pending vault, and its reservation can still be released.
-        RegistryEvent::Reserved { .. } | RegistryEvent::ReservationReleased => return Ok(false),
+        // K3: nothing is paid from a pending vault, and its reservation can still be released. The
+        // other contracts' events and the Tier 3 commitments are the coordinator's.
+        RegistryEvent::Reserved { .. }
+        | RegistryEvent::ReservationReleased
+        | RegistryEvent::SpendCommitted { .. }
+        | RegistryEvent::RefundPending { .. }
+        | RegistryEvent::PendingRefundDropped { .. }
+        | RegistryEvent::LivenessArmed { .. }
+        | RegistryEvent::PreLiquidated { .. } => return Ok(false),
+        // R-16: a deposit took a tag that a commitment of this vault had registered as its change.
+        // An honest commitment's change can never carry a deposit's tag (another note, or another
+        // vault's key): the commitment's signers registered a false record. Only the vault's id
+        // prefix is logged.
+        RegistryEvent::ChangeTagOverridden { .. } => {
+            tracing::error!(
+                vault = %hex::encode(&ev.vault_id[..4]),
+                "a deposit of another vault took a change tag of this vault's commitment (R-16): that commitment's signers registered a false change; its payout cannot be continued from that tag"
+            );
+        }
         RegistryEvent::VaultActivated {
             account,
             amount,
@@ -591,6 +613,9 @@ pub fn apply(store: &mut Store, ev: &VaultEvent) -> Result<bool> {
         }
         RegistryEvent::ClaimChanged { claim_id, change } => {
             let paid_here = confirmed_here(&v, &claim_id.0);
+            if *change == ClaimChange::Reopened && !v.reopened.contains(&claim_id.0) {
+                v.reopened.push(claim_id.0);
+            }
             let claim = v.claims.iter_mut().find(|c| c.id == claim_id.0).context("change of an unknown claim")?;
             match change {
                 ClaimChange::RefundDestination(c) => {
@@ -627,17 +652,26 @@ pub fn apply(store: &mut Store, ev: &VaultEvent) -> Result<bool> {
                         claim.state = ClaimState::Disputed;
                     }
                 }
-                ClaimChange::Upheld { .. } => claim.state = ClaimState::Paid,
+                // Section 3: a proof makes the claim paid and final, whatever this node saw.
+                ClaimChange::Upheld { .. } | ClaimChange::Proven { .. } => {
+                    claim.state = ClaimState::Paid;
+                    claim.proven = true;
+                }
                 ClaimChange::Reopened => {
                     if claim.state == ClaimState::Disputed {
                         claim.state = ClaimState::Unpaid;
                     }
                 }
+                // R-11: out of the coverage cap until a destination is given; nothing to pay yet.
+                ClaimChange::Dormant => {}
             }
         }
-        RegistryEvent::PayoutConfirmed(ids) => {
-            for c in v.claims.iter_mut().filter(|c| ids.iter().any(|i| i.0 == c.id)) {
+        RegistryEvent::PayoutConfirmed { claims, .. } => {
+            for c in v.claims.iter_mut().filter(|c| claims.iter().any(|i| i.0 == c.id)) {
                 c.state = ClaimState::Paid;
+                if !c.proven {
+                    c.confirmed_at = ev.timestamp;
+                }
             }
         }
     }
@@ -701,6 +735,7 @@ mod tests {
             confirmed: vec![],
             last_event: None,
             activated_tag: None,
+            reopened: vec![],
         })
         .unwrap();
         (s, dir)
@@ -734,6 +769,8 @@ mod tests {
             state: ClaimState::Unpaid,
             refund_tag: None,
             bond_paid: false,
+            proven: false,
+            confirmed_at: 0,
         }
     }
 
@@ -844,7 +881,7 @@ mod tests {
     /// address of the vault. A second payment of the vault's amount lands as a Refund claim.
     #[test]
     fn under_v1_only_what_activate_mode_cannot_prove_is_refunded_off_chain() {
-        let v1 = Some(Landing::ActivateOnly);
+        let v1 = Some(Landing::ActivateOnly { largest_tier: u64::MAX });
         assert!(refundable_offchain(&deposit(200, 1_234_567, 1, WRONG_AMOUNT), v1, &RULES, 209));
         assert!(!refundable_offchain(&deposit(200, 1_000_000, 1, SECOND), v1, &RULES, 1_000), "provable");
         let late = deposit(300, 1_000_000, 1, LATE);
@@ -867,7 +904,10 @@ mod tests {
     /// Unknown deployments, undecided notes, P1's deposit and change refund nothing off-chain.
     #[test]
     fn under_v2_almost_everything_lands_as_a_refund_claim() {
-        let v2 = Some(Landing::WithRefunds { min_refund: 20_000 });
+        let v2 = Some(Landing::WithRefunds {
+            min_refund: 20_000,
+            largest_tier: u64::MAX,
+        });
         for n in [
             deposit(200, 1_234_567, 1, WRONG_AMOUNT),
             deposit(300, 1_000_000, 1, LATE),
@@ -884,7 +924,14 @@ mod tests {
         assert!(refundable_offchain(&elsewhere, v2, &RULES, 1_000));
         let other = deposit(200, 1_234_567, 1, WRONG_AMOUNT);
         assert!(!refundable_offchain(&other, None, &RULES, 1_000), "the deployment is unknown");
-        let v1 = Some(Landing::ActivateOnly);
+        // R-15: above the Intake's largest work tier no proof lands: refunded off-chain.
+        let capped = Some(Landing::WithRefunds {
+            min_refund: 20_000,
+            largest_tier: 1_000_000,
+        });
+        assert!(refundable_offchain(&other, capped, &RULES, 1_000), "above the largest tier");
+        assert!(!refundable_offchain(&deposit(200, 999_999, 1, WRONG_AMOUNT), capped, &RULES, 1_000));
+        let v1 = Some(Landing::ActivateOnly { largest_tier: u64::MAX });
         assert!(!refundable_offchain(&deposit(200, 1_234_567, 1, None), v1, &RULES, 1_000), "undecided");
         assert!(!refundable_offchain(&deposit(200, 1_000_000, 1, CONFORMING), v1, &RULES, 1_000));
         let change = NoteFacts {
@@ -1017,7 +1064,14 @@ mod tests {
     fn disputes_follow_what_this_node_saw() {
         let (mut store, dir) = store();
         apply_all(&mut store, &[activation(10), liquidation(20, 7, 300_000), liquidation(21, 8, 200_000)]);
-        let confirmed = event(30, 0, RegistryEvent::PayoutConfirmed(vec![B256::repeat_byte(7), B256::repeat_byte(8)]));
+        let confirmed = event(
+            30,
+            0,
+            RegistryEvent::PayoutConfirmed {
+                payout_ref: B256::repeat_byte(0xaa),
+                claims: vec![B256::repeat_byte(7), B256::repeat_byte(8)],
+            },
+        );
         apply_all(&mut store, &[confirmed]);
         // This node confirmed the payout of claim 8 itself.
         let mut v = store.vaults[&VAULT].clone();
@@ -1056,6 +1110,74 @@ mod tests {
             )],
         );
         assert_eq!(state(&store, 7), ClaimState::Paid);
+        std::fs::remove_dir_all(&dir).unwrap();
+    }
+
+    /// v4: a confirmation records when the dispute window opens; a proof (routine or after a
+    /// dispute) makes the claim final; a reopening is remembered (R-1: no signed confirmation for
+    /// it any more); dormant refunds and overridden change tags change no claim.
+    #[test]
+    fn proofs_finalize_claims_and_reopenings_are_remembered() {
+        let (mut store, dir) = store();
+        apply_all(&mut store, &[activation(10), liquidation(20, 7, 300_000), liquidation(21, 8, 200_000)]);
+        let confirmed = event(
+            30,
+            0,
+            RegistryEvent::PayoutConfirmed {
+                payout_ref: B256::repeat_byte(0xaa),
+                claims: vec![B256::repeat_byte(7)],
+            },
+        );
+        apply_all(&mut store, &[confirmed]);
+        let claim =
+            |store: &Store, id: u8| store.vaults[&VAULT].claims.iter().find(|c| c.id == [id; 32]).unwrap().clone();
+        let c7 = claim(&store, 7);
+        assert_eq!((c7.state, c7.confirmed_at, c7.proven), (ClaimState::Paid, 30, false));
+        // Proven: final. Claim 8 is proven straight from pending (its confirmation never came).
+        let proven = |block: u64, id: u8| {
+            change(
+                block,
+                id,
+                ClaimChange::Proven {
+                    payout_ref: B256::repeat_byte(0xaa),
+                },
+            )
+        };
+        apply_all(&mut store, &[proven(40, 7), proven(41, 8)]);
+        assert!(claim(&store, 7).is_final() && claim(&store, 8).is_final());
+        // A reopened claim is remembered; a dormant refund or an overridden tag changes nothing.
+        apply_all(&mut store, &[liquidation(50, 9, 100_000)]);
+        apply_all(
+            &mut store,
+            &[
+                change(60, 9, ClaimChange::Disputed { due_at: 1 }),
+                change(61, 9, ClaimChange::Reopened),
+            ],
+        );
+        assert_eq!(store.vaults[&VAULT].reopened, vec![[9; 32]]);
+        let before = store.vaults[&VAULT].claims.clone();
+        let overridden = event(
+            70,
+            0,
+            RegistryEvent::ChangeTagOverridden {
+                tag: B256::repeat_byte(0x7a),
+            },
+        );
+        assert_eq!(apply_all(&mut store, &[overridden]), 1);
+        apply_all(&mut store, &[change(71, 9, ClaimChange::Dormant)]);
+        assert_eq!(store.vaults[&VAULT].claims, before);
+        // The coordinator's events are not the signers'.
+        let pending = event(
+            80,
+            0,
+            RegistryEvent::RefundPending {
+                deposit_tag: B256::repeat_byte(0x7b),
+                reason: 0,
+                ready_height: 1,
+                ready_time: 1,
+            },
+        );
+        assert_eq!(apply_all(&mut store, &[pending]), 0);
         std::fs::remove_dir_all(&dir).unwrap();
     }
 

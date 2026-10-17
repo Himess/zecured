@@ -35,15 +35,16 @@ use tokio::sync::{Mutex, MutexGuard, OnceCell};
 use tracing::{debug, warn};
 use zcash_protocol::TxId;
 use zecured_base::{
-    Destination, PayoutConfirmation, RefundRequest, claim_ids_hash,
+    Destination, RefundRequest,
     events::{self, ISignerBond, IZecuredIntake, IZecuredRegistry, IZecuredSlasher, VaultEvent},
-    recover_typed, registry_domain, sign_typed, signer_bitmap,
+    operator::{bond_domain, destination_received},
+    payout_confirmation, recover_typed, registry_domain, sign_typed, signer_bitmap,
     verify::{VAULT_PENDING, Verdict},
 };
 use zecured_policy::{
     classify::Landing,
-    derive::deposit_tag,
-    ledger::{self, ClaimState, Recipient, commitment},
+    derive::{deposit_tag, payout_ref},
+    ledger::{self, ClaimId, ClaimState, Recipient, commitment},
 };
 
 use crate::{
@@ -173,6 +174,38 @@ pub struct Node {
     liveness_warned: Mutex<HashMap<B256, std::time::Instant>>,
     /// I30: what the deployment's guests can land on Base, read once (every provider agreeing).
     landing: OnceCell<Landing>,
+    /// R-5: the Registry's bond contract (`signerBond()`, immutable), read once; zero without bonds.
+    bond: OnceCell<Address>,
+}
+
+/// What a node plans a vault's payout from (O-4): the vault's claims as the planner counts them, the
+/// unpaid claims a commitment on Base binds to the main lineage note (RT-3), the confirmed claims
+/// counted unpaid again (rule 3) and the claims set aside near their liveness due time (rules 1 and
+/// 2, R-10).
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct Planning {
+    pub claims: Vec<ledger::Claim>,
+    pub bound: Vec<ClaimId>,
+    pub reverted: Vec<ClaimId>,
+    pub deferred: Vec<ClaimId>,
+}
+
+/// R-5: the coordinator asks for a claim's liveness receipt (`POST /v1/receipts`).
+#[derive(Clone, Debug, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ReceiptIn {
+    pub claim_id: B256,
+}
+
+/// R-5: `DestinationReceived(claimId, commitment, receivedAt)` signed by this node's attestation
+/// key under the bond's domain.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ReceiptOut {
+    pub claim_id: B256,
+    pub commitment: B256,
+    pub received_at: u64,
+    pub signature: Bytes,
 }
 
 pub fn now() -> u64 {
@@ -296,6 +329,22 @@ fn settle_payout(v: &mut VaultRecord, paid: &Inflight, txid: [u8; 32]) {
     }
 }
 
+/// R-15: the largest amount the Intake's work tiers admit (its last tier's `maxAmountZat`; tiers
+/// ascend, the largest is taken whatever the order).
+pub fn largest_tier(tiers: &[IZecuredIntake::WorkTier]) -> Result<u64> {
+    tiers.iter().map(|t| t.maxAmountZat).max().context("the Intake has no work tier")
+}
+
+/// Whether `wanted` is a non-empty subsequence of `all` (same order, each once): the claims of one
+/// payout a confirmation may name (R-1: the payout's claims still pending on Base).
+pub fn confirmable_subset(wanted: &[ClaimId], all: &[ClaimId]) -> bool {
+    if wanted.is_empty() {
+        return false;
+    }
+    let mut rest = all.iter();
+    wanted.iter().all(|w| rest.any(|a| a == w))
+}
+
 /// D18: the nodes that may be started with `--demo-allow-compromise`. The demo build allows two
 /// (4 and 5), never a signing threshold; only the separate theft demo's build (`demo-tier3`,
 /// T3-6) allows a third (3), so that a theft can really be signed there.
@@ -354,6 +403,7 @@ impl Node {
             liveness_period: OnceCell::new(),
             liveness_warned: Mutex::new(HashMap::new()),
             landing: OnceCell::new(),
+            bond: OnceCell::new(),
         })
     }
 
@@ -367,7 +417,9 @@ impl Node {
 
     /// Scans a vault without holding the store lock (M-7: a slow light wallet server must not
     /// freeze the node), then records new P1 decisions and returns the store, locked, with the
-    /// vault's current record and its notes (main lineage restricted to the planned change, H-2).
+    /// vault's current record and its notes. The main lineage is every unspent lineage member: the
+    /// planning step ([`Node::planning`]) keeps only the planned change (H-2), once it knows which
+    /// claims count unpaid (O-4 rule 3).
     async fn scan_vault(&self, vault_id: &B256) -> Result<(MutexGuard<'_, Store>, VaultRecord, VaultNotes)> {
         // I30: unknown (Base unreachable), nothing is refundable off-chain; payouts go on.
         let landing = match self.landing().await {
@@ -378,13 +430,12 @@ impl Node {
             }
         };
         let mut snapshot = self.store.lock().await.vaults.get(vault_id).context("unknown vault")?.clone();
-        let mut notes = self.zcash.lock().await.vault_notes(&mut snapshot, self.cfg.confirmations, landing).await?;
+        let notes = self.zcash.lock().await.vault_notes(&mut snapshot, self.cfg.confirmations, landing).await?;
         let mut store = self.store.lock().await;
         let mut v = store.vaults.get(vault_id).context("unknown vault")?.clone();
         if chain::merge_decisions(&mut v.decisions, &snapshot.decisions)? {
             store.save_vault(v.clone())?;
         }
-        notes.retain_planned_change(ledger::book_value(v.outstanding, &v.claims));
         Ok((store, v, notes))
     }
 
@@ -498,8 +549,9 @@ impl Node {
     }
 
     /// I30: what the deployment's guests can land on Base, from the Intake the Registry names: its
-    /// journal version and, for v2, its refund floor. Read once, on every Base provider, which
-    /// must agree: a lying provider must never make a note look unprovable.
+    /// journal version, for v2 its refund floor, and its largest work tier (R-15: nothing above it
+    /// lands). Read once, on every Base provider, which must agree: a lying provider must never
+    /// make a note look unprovable.
     pub async fn landing(&self) -> Result<Landing> {
         let landing = self
             .landing
@@ -513,12 +565,14 @@ impl Node {
                         .context("Registry.intake")?;
                     ensure!(intake != Address::ZERO, "the Registry names no Intake");
                     let intake = IZecuredIntake::new(intake, &provider);
+                    let largest_tier = largest_tier(&intake.workTiers().call().await.context("Intake.workTiers")?)?;
                     let landing = if intake.journalV2().call().await.context("Intake.journalV2")? {
                         Landing::WithRefunds {
                             min_refund: intake.minRefundZat().call().await.context("Intake.minRefundZat")?,
+                            largest_tier,
                         }
                     } else {
-                        Landing::ActivateOnly
+                        Landing::ActivateOnly { largest_tier }
                     };
                     match agreed {
                         Some(first) => ensure!(first == landing, "Base providers disagree on what the Intake takes"),
@@ -561,14 +615,14 @@ impl Node {
             return self.start_session(&req, session, &commitments, None).await;
         }
 
-        let (store, v, notes) = self.scan_vault(&req.vault_id).await?;
+        let (store, v, mut notes) = self.scan_vault(&req.vault_id).await?;
         drop(store);
         if let SignKind::Refund { .. } = &req.kind {
             // P5 (I30): a deposit no guest can land is no lineage note, so there is nothing to
             // commit on Base; it is checked there again, on every provider, before signing.
             let (plan, inputs) = {
                 let store = self.store.lock().await;
-                signing::expected_plan(&store, &v, &notes, &req.kind, now(), &[])?
+                signing::expected_plan(&store, &v, &v.claims, &notes, &req.kind, now(), &[])?
             };
             for note in &inputs {
                 self.check_refund_on_base(&v, note).await?;
@@ -577,11 +631,13 @@ impl Node {
                 signing::commit(&v, &plan, &inputs, notes.tip, &req, v.inflight.as_ref(), &notes.unspent)?;
             return self.start_session(&req, session, &commitments, None).await;
         }
-        // RT-3: the claims a commitment on Base binds to the main lineage note come first (Base
-        // calls never hold the store lock, M-7).
-        let bound = self.bound_claims(&v, &notes).await?;
+        // O-4 and RT-3: the claims as every node and the coordinator plan from them, the claims a
+        // commitment on Base binds to the main lineage note first (Base calls never hold the store
+        // lock, M-7).
+        let planning = self.planning(&v, &mut notes, now()).await?;
         let store = self.store.lock().await;
-        let (plan, inputs) = signing::expected_plan(&store, &v, &notes, &req.kind, now(), &bound)?;
+        let (plan, inputs) =
+            signing::expected_plan(&store, &v, &planning.claims, &notes, &req.kind, now(), &planning.bound)?;
         // Tier 3: the salts of the plan's recipients, for the claim refs.
         let claims = plan_salts(&store, &v, &plan.claims)?;
         drop(store);
@@ -601,32 +657,122 @@ impl Node {
         self.start_session(&req, session, &commitments, spend_commit).await
     }
 
-    /// RT-3: the unpaid claims that a commitment on Base binds to the vault's main lineage note
-    /// (the payout from it carries exactly those), read from every Base provider, which must agree.
-    async fn bound_claims(&self, v: &VaultRecord, notes: &VaultNotes) -> Result<Vec<[u8; 32]>> {
-        let [input] = notes.lineage.as_slice() else {
-            return Ok(vec![]); // no single lineage note: the plan is refused anyway
-        };
-        let cmx = orchard::note::ExtractedNoteCommitment::from(input.note.commitment()).to_bytes();
-        let tag = B256::from(zecured_policy::derive::deposit_tag(&v.ufvk, &cmx));
-        let unpaid: Vec<[u8; 32]> = v.claims.iter().filter(|c| c.state == ClaimState::Unpaid).map(|c| c.id).collect();
-        let mut agreed: Option<Vec<[u8; 32]>> = None;
-        for provider in self.base_providers()? {
-            let registry = IZecuredRegistry::new(self.cfg.registry, &provider);
-            let mut bound = vec![];
-            for id in &unpaid {
-                if registry.claimInput(B256::from(*id)).call().await.context("Registry.claimInput")? == tag {
-                    bound.push(*id);
+    /// The claims this node plans the vault's next payout from, and the claims a commitment on Base
+    /// binds to its main lineage note (RT-3), read from every Base provider, which must agree, and
+    /// planned by the rules every node and the coordinator apply alike (O-4):
+    /// - rule 3: claims confirmed paid (not proven) whose input is still an unspent lineage note of
+    ///   the vault count unpaid again ([`ledger::revert_unlanded`]); then the lineage is restricted
+    ///   to the planned change of that book value (H-2);
+    /// - rules 1 and 2 (R-10): a claim the bonds may pay within one payout lifetime is not committed
+    ///   ([`ledger::defer_near_due`], with the bond's `livenessDue`).
+    async fn planning(&self, v: &VaultRecord, notes: &mut VaultNotes, now: u64) -> Result<Planning> {
+        let tag_of = |n: &zecured_zcash_ops::scan::ReceivedNote| B256::from(deposit_tag(&v.ufvk, &chain::note_cmx(n)));
+        let candidates: Vec<B256> = notes.lineage.iter().map(tag_of).collect();
+        let open: Vec<ClaimId> = v
+            .claims
+            .iter()
+            .filter(|c| c.state == ClaimState::Unpaid || (c.state == ClaimState::Paid && !c.proven))
+            .map(|c| c.id)
+            .collect();
+        let mut agreed: Option<Vec<(ClaimId, B256)>> = None;
+        if !candidates.is_empty() {
+            for provider in self.base_providers()? {
+                let registry = IZecuredRegistry::new(self.cfg.registry, &provider);
+                let mut inputs = Vec::with_capacity(open.len());
+                for id in &open {
+                    inputs
+                        .push((*id, registry.claimInput(B256::from(*id)).call().await.context("Registry.claimInput")?));
+                }
+                match &agreed {
+                    Some(first) => ensure!(*first == inputs, "Base providers disagree on the claims' inputs"),
+                    None => agreed = Some(inputs),
                 }
             }
+        }
+        let inputs = agreed.unwrap_or_default();
+        let mut claims = v.claims.clone();
+        let unlanded: Vec<ClaimId> = inputs
+            .iter()
+            .filter(|(_, input)| *input != B256::ZERO && candidates.contains(input))
+            .map(|(id, _)| *id)
+            .collect();
+        let reverted = ledger::revert_unlanded(&mut claims, &unlanded);
+        if !reverted.is_empty() {
+            warn!(
+                vault = %hex::encode(&v.vault_id[..4]),
+                claims = reverted.len(),
+                "claims confirmed paid whose input is still unspent: their payout is planned again, to be proven (O-4)"
+            );
+        }
+        notes.retain_planned_change(ledger::book_value(v.outstanding, &claims));
+        let bound = match notes.lineage.as_slice() {
+            [input] => {
+                let tag = tag_of(input);
+                let unpaid = |id: &ClaimId| claims.iter().any(|c| c.id == *id && c.state == ClaimState::Unpaid);
+                inputs.iter().filter(|(id, input)| *input == tag && unpaid(id)).map(|(id, _)| *id).collect()
+            }
+            _ => vec![], // no single lineage note: the plan is refused anyway
+        };
+        let dues = self.liveness_dues(&claims).await?;
+        let due_of = |id: &ClaimId| dues.iter().find(|(c, _)| c == id).map_or(0, |(_, d)| *d);
+        let deferred = ledger::defer_near_due(&mut claims, now, self.cfg.payout_lifetime(), due_of);
+        if !deferred.is_empty() {
+            debug!(
+                vault = %hex::encode(&v.vault_id[..4]),
+                claims = deferred.len(),
+                "claims within one payout lifetime of their liveness due time are not committed (R-10)"
+            );
+        }
+        Ok(Planning {
+            claims,
+            bound,
+            reverted,
+            deferred,
+        })
+    }
+
+    /// R-10: when the bonds may pay each payable claim (`livenessDue`; 0: never, or unreadable, as
+    /// every node and the coordinator count it), on every Base provider, which must agree. Nothing
+    /// without bonds.
+    async fn liveness_dues(&self, claims: &[ledger::Claim]) -> Result<Vec<(ClaimId, u64)>> {
+        let bond = self.bond().await?;
+        let payable: Vec<ClaimId> =
+            claims.iter().filter(|c| c.payable() && c.kind.liveness_covered()).map(|c| c.id).collect();
+        if bond == Address::ZERO || payable.is_empty() {
+            return Ok(vec![]);
+        }
+        let mut agreed: Option<Vec<(ClaimId, u64)>> = None;
+        for provider in self.base_providers()? {
+            let bond = ISignerBond::new(bond, &provider);
+            let mut dues = Vec::with_capacity(payable.len());
+            for id in &payable {
+                // A claim the bond cannot price now (a stale feed, R-9) cannot be paid from the bonds
+                // either: 0, as everywhere.
+                let due = bond.livenessDue(B256::from(*id)).call().await.map(|d| d.dueAt).unwrap_or(0);
+                dues.push((*id, due));
+            }
             match &agreed {
-                Some(first) => {
-                    ensure!(*first == bound, "Base providers disagree on the claims bound to the lineage note")
-                }
-                None => agreed = Some(bound),
+                Some(first) => ensure!(*first == dues, "Base providers disagree on the claims' liveness due times"),
+                None => agreed = Some(dues),
             }
         }
         Ok(agreed.unwrap_or_default())
+    }
+
+    /// The Registry's bond contract (`signerBond()`, immutable), read once; zero without bonds.
+    async fn bond(&self) -> Result<Address> {
+        let bond = self
+            .bond
+            .get_or_try_init(|| async {
+                let provider = chain::base_provider(&self.cfg.base_rpc_url)?;
+                IZecuredRegistry::new(self.cfg.registry, &provider)
+                    .signerBond()
+                    .call()
+                    .await
+                    .context("Registry.signerBond")
+            })
+            .await?;
+        Ok(*bond)
     }
 
     /// Tier 3 checks before signing a commitment, on every Base provider: the vault is neither
@@ -786,21 +932,29 @@ impl Node {
         })
     }
 
-    /// Signs `PayoutConfirmation` once the payout this node signed is mined and confirmed.
+    /// Signs `PayoutConfirmation(vaultId, payoutRef, claimIdsHash)` once the payout this node signed
+    /// is mined and confirmed (R-1: the payout reference is this node's own, derived from the very
+    /// transaction it signed). It names some or all of the payout's claims, in the payout's order:
+    /// the coordinator leaves out those Base no longer has pending, and never a reopened claim,
+    /// which only a proof of its payout settles again.
     pub async fn confirm(&self, vault_id: B256, c: ConfirmIn) -> Result<ConfirmResponse> {
         let wanted: Vec<[u8; 32]> = c.claim_ids.iter().map(|x| x.0).collect();
         // The coordinator sends the display form (byte-reversed hex); compare internal bytes.
         let txid = TxId::from_hex(&c.txid).context("invalid txid")?;
         let txid_bytes = *txid.as_ref();
-        let inflight = {
+        let (inflight, ufvk) = {
             let store = self.store.lock().await;
             let v = store.vaults.get(&vault_id).context("unknown vault")?;
+            ensure!(
+                !wanted.iter().any(|c| v.reopened.contains(c)),
+                "a reopened claim is settled only by a proof of its payout, never by a confirmation (R-1)"
+            );
             // H-5: a confirmation already given is given again (submitting it to Base may
             // have failed after the payout was cleared here).
-            if v.confirmed.iter().any(|p| p.claim_ids == wanted && p.txid == txid_bytes) {
-                return self.payout_confirmation(vault_id, &c.claim_ids);
+            if v.confirmed.iter().any(|p| p.txid == txid_bytes && confirmable_subset(&wanted, &p.claim_ids)) {
+                return self.payout_confirmation(vault_id, &v.ufvk, &txid_bytes, &c.claim_ids);
             }
-            v.inflight.clone().context("no payout in flight for this vault")?
+            (v.inflight.clone().context("no payout in flight for this vault")?, v.ufvk.clone())
         };
         // H-1: only the very transaction this node signed confirms its claims.
         signing::check_confirmation(&inflight, &wanted, &txid_bytes)?;
@@ -816,17 +970,65 @@ impl Node {
         settle_payout(&mut v, &inflight, txid_bytes);
         store.save_vault(v)?;
         drop(store);
-        self.payout_confirmation(vault_id, &c.claim_ids)
+        self.payout_confirmation(vault_id, &ufvk, &txid_bytes, &c.claim_ids)
     }
 
-    fn payout_confirmation(&self, vault_id: B256, claim_ids: &[B256]) -> Result<ConfirmResponse> {
-        let msg = PayoutConfirmation {
-            vaultId: vault_id,
-            claimIdsHash: claim_ids_hash(claim_ids),
-        };
+    fn payout_confirmation(
+        &self,
+        vault_id: B256,
+        ufvk: &str,
+        txid: &[u8; 32],
+        claim_ids: &[B256],
+    ) -> Result<ConfirmResponse> {
+        let msg = payout_confirmation(vault_id, B256::from(payout_ref(ufvk, txid)), claim_ids);
         Ok(ConfirmResponse {
             index: self.id.index,
             signature: sign_typed(&self.id.eth, &self.domain(), &msg)?,
+        })
+    }
+
+    /// R-5: this node's liveness receipt for a claim: `DestinationReceived(claimId, commitment,
+    /// receivedAt)` under the bond's domain, once it holds the claim's destination preimage and has
+    /// validated it (a valid Ironwood receiver that is none of the vault's own addresses, whose
+    /// commitment is the claim's current one in this node's books). `receivedAt` is when it first
+    /// held that recipient. A changed destination (a refund's, given again) needs a new receipt:
+    /// the bond checks the receipt against the claim's current commitment.
+    pub async fn receipt(&self, claim_id: B256) -> Result<ReceiptOut> {
+        let bond = self.bond().await?;
+        ensure!(bond != Address::ZERO, "this deployment has no bonds: no liveness, no receipt");
+        let mut store = self.store.lock().await;
+        self.issue_receipt(&mut store, claim_id, bond)
+    }
+
+    /// [`Node::receipt`] once the bond's address is known.
+    pub fn issue_receipt(&self, store: &mut Store, claim_id: B256, bond: Address) -> Result<ReceiptOut> {
+        let v = store
+            .vaults
+            .values()
+            .find(|v| v.claims.iter().any(|c| c.id == claim_id.0))
+            .context("unknown claim")?
+            .clone();
+        let claim = v.claims.iter().find(|c| c.id == claim_id.0).context("unknown claim")?;
+        ensure!(claim.kind.liveness_covered(), "the bonds do not cover this kind of claim");
+        ensure!(claim.state == ClaimState::Unpaid && !claim.bond_paid, "the claim is not pending");
+        ensure!(claim.commitment != [0; 32], "the claim has no destination yet");
+        let recipient =
+            store.recipient(&claim.commitment).context("this node does not hold the claim's destination")?;
+        ensure!(recipient.commitment() == claim.commitment, "the destination does not match the claim's commitment");
+        ensure!(
+            bool::from(orchard::Address::from_raw_address_bytes(&recipient.receiver).is_some()),
+            "the destination is not a valid Ironwood receiver"
+        );
+        ensure_not_own_receiver(&v, &recipient.receiver)?;
+        let received_at = store.held_since(&claim.commitment, now())?;
+        let commitment = B256::from(claim.commitment);
+        let msg = destination_received(claim_id, commitment, received_at);
+        let signature = sign_typed(&self.id.eth, &bond_domain(self.cfg.chain_id, bond), &msg)?;
+        Ok(ReceiptOut {
+            claim_id,
+            commitment,
+            received_at,
+            signature,
         })
     }
 
@@ -935,11 +1137,7 @@ impl Node {
             .liveness_period
             .get_or_try_init(|| async {
                 let provider = chain::base_provider(&self.cfg.base_rpc_url)?;
-                let bond = IZecuredRegistry::new(self.cfg.registry, &provider)
-                    .signerBond()
-                    .call()
-                    .await
-                    .context("Registry.signerBond")?;
+                let bond = self.bond().await?;
                 if bond == Address::ZERO {
                     return anyhow::Ok(None);
                 }
@@ -1140,6 +1338,8 @@ mod tests {
                     state: ClaimState::Unpaid,
                     refund_tag: None,
                     bond_paid: false,
+                    proven: false,
+                    confirmed_at: 0,
                 })
                 .collect(),
             refunds: vec![],
@@ -1148,6 +1348,7 @@ mod tests {
             confirmed: vec![],
             last_event: None,
             activated_tag: None,
+            reopened: vec![],
         }
     }
 

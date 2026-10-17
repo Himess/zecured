@@ -76,7 +76,19 @@ pub struct NetworkConfig {
     /// Review H-01: the cost of opening a vault and the vaults that may wait for a deposit.
     #[serde(default)]
     pub open_vault: OpenVaultLimits,
+    /// O-4 rule 2 (R-10): seconds from a payout's commitment until it is either confirmed on Base
+    /// or provably dead (its expiry window, the reorganisation margin and the confirmations, plus a
+    /// margin for Base). No claim is committed closer than this to the time the bonds may pay its
+    /// claimant. Unset: [`NetworkConfig::payout_lifetime`]'s default for 25-second Zcash blocks
+    /// (NU7); a network on 75-second blocks (Mainnet before NU7) must set it.
+    #[serde(default)]
+    pub payout_lifetime_secs: Option<u64>,
 }
+
+/// Zcash's target block spacing from NU7 (ZIP 218), in seconds.
+pub const ZCASH_BLOCK_SECS: u64 = 25;
+/// Seconds of a payout's lifetime for its confirmation on Base after its Zcash confirmations.
+pub const BASE_CONFIRMATION_MARGIN_SECS: u64 = 300;
 
 /// Review H-01: what opening a vault costs its requester, and how many vaults may wait for their
 /// deposit at once. The coordinator applies them; the stamp's bits are public (`GET /config`).
@@ -177,6 +189,19 @@ impl NetworkConfig {
             .iter()
             .find(|n| n.index == index)
             .with_context(|| format!("node {index} not in network config"))
+    }
+
+    /// O-4 rule 2 (R-10): a payout's lifetime in seconds, `payout_lifetime_secs` or, by default,
+    /// (expiry window + reorganisation margin + confirmations) Zcash blocks of 25 s plus five
+    /// minutes for Base: about an hour on the judge deployment. The deployment's `commitGrace`
+    /// must be at least this (the deploy script checks it; the coordinator warns otherwise).
+    pub fn payout_lifetime(&self) -> u64 {
+        self.payout_lifetime_secs.unwrap_or_else(|| {
+            let blocks = u64::from(zecured_zcash_ops::spend::PAYOUT_EXPIRY_DELTA)
+                + u64::from(crate::signing::EXPIRY_REORG_MARGIN)
+                + u64::from(self.confirmations);
+            blocks * ZCASH_BLOCK_SECS + BASE_CONFIRMATION_MARGIN_SECS
+        })
     }
 }
 
@@ -279,7 +304,20 @@ mod tests {
             commit_depth_secs: 120,
             local_fork: false,
             open_vault: OpenVaultLimits::default(),
+            payout_lifetime_secs: None,
         }
+    }
+
+    /// R-10: the default lifetime is the payout's expiry window, the reorganisation margin and the
+    /// confirmations, at 25 s per block, plus five minutes: 3,800 s with ten confirmations.
+    #[test]
+    fn the_payout_lifetime_defaults_to_the_expiry_window() {
+        let mut cfg = judge_config();
+        assert_eq!(cfg.payout_lifetime(), (120 + 10 + 10) * 25 + 300);
+        cfg.payout_lifetime_secs = Some(10_800);
+        assert_eq!(cfg.payout_lifetime(), 10_800);
+        let old: NetworkConfig = serde_json::from_value(serde_json::to_value(judge_config()).unwrap()).unwrap();
+        assert_eq!(old.payout_lifetime_secs, None);
     }
 
     /// RT-15: the L23 delay must leave room in the payout's expiry window.
