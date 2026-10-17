@@ -362,7 +362,9 @@ contract ZecuredSpendLogic is
         if (account == address(0) || _lineage[depositTag].vaultId != vaultId) {
             revert NoReservedRefund(vaultId, depositTag);
         }
-        _refuseCompromised(vaultId);
+        // Also on a compromised vault (the refund was reserved before the compromise, `reserveRefund` refuses one
+        // after): its claim is the compensator's, which tallies the vault only once no refund of it is reserved, and
+        // the signers cannot pay it there (`commitSpend` and `confirmPayout` refuse the vault).
         Vault storage v = _vaults[vaultId];
         VaultStatus status = v.status;
         // R-8: no claim on a vault whose activation is pending (none could be paid there, yet it would accrue
@@ -375,6 +377,7 @@ contract ZecuredSpendLogic is
             revert IZecuredRegistry.ReservationMismatch(vaultId);
         }
         delete _reservedRefund[depositTag];
+        _reservedRefundCount[vaultId] -= 1;
         claimId = _newClaim(vaultId, v, ClaimKind.Refund, amount, bytes32(0));
         emit IZecuredRegistry.RefundOpened(vaultId, claimId, account, amount, depositTag);
     }
@@ -387,6 +390,7 @@ contract ZecuredSpendLogic is
             revert NoReservedRefund(vaultId, depositTag);
         }
         delete _reservedRefund[depositTag];
+        _reservedRefundCount[vaultId] -= 1;
         delete _lineage[depositTag];
         _depositTagUsed[depositTag] = false;
     }
@@ -464,6 +468,11 @@ contract ZecuredSpendLogic is
     /// @inheritdoc IZecuredRefunds
     function reservedRefundOf(bytes32 depositTag) external view returns (address) {
         return _reservedRefund[depositTag];
+    }
+
+    /// @inheritdoc IZecuredRefunds
+    function reservedRefundCount(bytes32 vaultId) external view returns (uint256) {
+        return _reservedRefundCount[vaultId];
     }
 
     // ------------------------------------------------------------------ hooks: the compensator (T-04, v4)

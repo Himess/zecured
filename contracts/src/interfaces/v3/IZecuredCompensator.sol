@@ -80,7 +80,10 @@ struct Entitlement {
 ///        is proven (and paid for good) rather than compensated as well. R-3: a claim confirmed by signatures within
 ///        the dispute window before the vault froze is tallied too, unless proven meanwhile; `tallyVault` waits until
 ///        the vault has no such confirmation left (`IZecuredPayouts.unprovenConfirmations`). R-21: an abandoned refund
-///        of the vault is tallied on request, until the incident is finalized.
+///        of the vault is tallied on request, until the incident is finalized. R-12: a refund reserved before the
+///        compromise opens on the compromised vault (`ZecuredIntake.finalizeRefund`) and is tallied like any pending
+///        claim; `tallyVault`, and so `finalizeIncident`, waits until no refund of the vault is still reserved
+///        (`IZecuredRefunds.reservedRefundCount`, `RefundsReserved`).
 ///      - R-7: an executed F3 case closes its claim in the Registry, so the claim is compensated once, never also paid
 ///        by the bonds; the bonds read `entitlement(claimId)`.
 ///      - R-20: a vault that stays active after `settleVault` (partly covered, or unauthorized) leaves the Registry's
@@ -135,6 +138,10 @@ interface IZecuredCompensator {
     error NotBurnable(bytes32 vaultId);
     /// @notice R-7: an F3 case's execution left `onCase` less than `F3_GAS`.
     error InsufficientGasForCase();
+    /// @notice R-12: refunds of the vault reserved before its compromise are neither opened nor released yet
+    ///         (`ZecuredIntake.finalizeRefund` opens each once it is ready, `dropPendingRefund` releases one whose proof
+    ///         fell off the best chain); `IZecuredRefunds.reservedRefundCount`.
+    error RefundsReserved(bytes32 vaultId, uint256 left);
 
     function onFunds(bytes32 caseId, uint256 amount) external;
     function onCase(bytes32 caseId, ViolationKind kind, bytes32 vaultId, bytes32 claimId, uint64 shortfallZat) external;

@@ -6,7 +6,8 @@ import {MockHeaderRelay} from "../mocks/MockHeaderRelay.sol";
 import {VaultStatus, ClaimStatus} from "../../src/interfaces/v3/IZecuredRegistry.sol";
 import {IZecuredDisputes} from "../../src/interfaces/v3/IZecuredDisputes.sol";
 import {IZecuredPayouts} from "../../src/interfaces/v3/IZecuredPayouts.sol";
-import {Victim} from "../../src/interfaces/v3/IZecuredCompensator.sol";
+import {Victim, Entitlement} from "../../src/interfaces/v3/IZecuredCompensator.sol";
+import {IZecuredRefunds} from "../../src/interfaces/v3/IZecuredRefunds.sol";
 import {Tier3Base} from "../utils/Tier3Base.sol";
 import {CompensationHandler, CompensationSystem} from "./CompensationHandler.sol";
 
@@ -39,7 +40,7 @@ contract CompensationInvariantsTest is Tier3Base {
         usdc.transferOwnership(address(handler)); // MOCK mint for repayments
         oracle.transferOwnership(address(handler)); // MOCK price moves
 
-        bytes4[] memory selectors = new bytes4[](27);
+        bytes4[] memory selectors = new bytes4[](31);
         selectors[0] = CompensationHandler.open.selector;
         selectors[1] = CompensationHandler.open.selector;
         selectors[2] = CompensationHandler.borrow.selector;
@@ -67,6 +68,11 @@ contract CompensationInvariantsTest is Tier3Base {
         selectors[24] = CompensationHandler.settle.selector;
         selectors[25] = CompensationHandler.burn.selector;
         selectors[26] = CompensationHandler.withdraw.selector;
+        // R-12: refunds reserved before a compromise, opened or dropped.
+        selectors[27] = CompensationHandler.reserveRefund.selector;
+        selectors[28] = CompensationHandler.reserveRefund.selector;
+        selectors[29] = CompensationHandler.openRefund.selector;
+        selectors[30] = CompensationHandler.dropRefund.selector;
         targetSelector(FuzzSelector({addr: address(handler), selectors: selectors}));
         targetContract(address(handler));
         targetSender(makeAddr("zecured.comp.inv.caller"));
@@ -120,6 +126,33 @@ contract CompensationInvariantsTest is Tier3Base {
         assertEq(_payouts().unprovenConfirmations(vaultId), unproven, "unproven confirmations");
         isOpen = (status == VaultStatus.Active && !compensated) || unpaid != 0;
         if (compensated && status == VaultStatus.Active) settledOutstanding = outstanding;
+    }
+
+    /// R-12: the Registry counts each vault's reserved refunds as the handler does, and a victim is tallied only once
+    /// none of its refunds is reserved. A refund opened on a compromised vault is never the signers' to pay: pending until
+    /// tallied, then compensated with an entitlement of its amount for its account, exactly once.
+    function invariant_R12_reservedRefunds() public view {
+        IZecuredRefunds refunds = IZecuredRefunds(address(registry));
+        for (uint256 i; i < handler.vaultCount(); ++i) {
+            bytes32 vaultId = handler.vaultIds(i);
+            uint256 reserved = refunds.reservedRefundCount(vaultId);
+            assertEq(reserved, handler.reservedCountOf(vaultId), "R-12: reserved refunds");
+            if (compensator.victim(vaultId).tallied) assertEq(reserved, 0, "R-12: tallied with a refund reserved");
+        }
+        for (uint256 i; i < handler.lateRefundCount(); ++i) {
+            bytes32 claimId = handler.lateRefunds(i);
+            (bytes32 vaultId,, uint64 amount,, ClaimStatus s) = registry.claim(claimId);
+            Entitlement memory e = compensator.entitlement(claimId);
+            if (s == ClaimStatus.Compensated) {
+                assertTrue(e.incident != 0, "R-12: a late refund compensated without an entitlement");
+                assertEq(e.zat, amount, "R-12: the entitlement is the refund");
+                assertEq(e.to, registry.vaultDetails(vaultId).account, "R-12: owed to the vault's account");
+            } else {
+                assertEq(uint8(s), uint8(ClaimStatus.Pending), "R-12: a late refund neither pending nor compensated");
+                assertEq(e.incident, 0, "R-12: entitled while still pending");
+                assertFalse(compensator.victim(vaultId).tallied, "R-12: pending on a tallied victim");
+            }
+        }
     }
 
     /// I19: the compensator holds exactly its unassigned funds and what it set aside.
@@ -178,7 +211,7 @@ contract CompensationInvariantsTest is Tier3Base {
         b = _authorizedVault(a + 1);
         handler.commit(a, 1);
         handler.confirm(0, 1);
-        handler.theft(a);
+        handler.theft(_theftSeed(a));
         handler.execute(0);
         handler.tally(a);
         handler.finalize(0);
@@ -202,6 +235,57 @@ contract CompensationInvariantsTest is Tier3Base {
         invariant_bookkeeping();
     }
 
+    /// The R-12 paths through the handler: refunds reserved before a theft hold the victim's tally until they are
+    /// opened on the compromised vault, where the compensator tallies them; a refund reserved elsewhere is dropped.
+    function test_handler_reachesTheR12Paths() public {
+        for (uint256 seed; handler.vaultCount() < 8 && seed < 64; ++seed) {
+            handler.open(seed);
+        }
+        uint256 a = _authorizedVault(0);
+        handler.reserveRefund(a, 500_000);
+        handler.reserveRefund(a, 700_000);
+        handler.reserveRefund(a + 1, 300_000);
+        assertEq(handler.calls("reserve refund"), 3);
+        handler.dropRefund(2); // the third refund, of vault a + 1: its proof fell
+        assertEq(handler.calls("drop refund"), 1);
+        handler.theft(_theftSeed(a));
+        handler.execute(0);
+        handler.reserveRefund(a, 400_000); // after the compromise: refused
+        assertEq(handler.calls("reserve refund (compromised)"), 1);
+
+        handler.tally(_seedWithMix(a, 0)); // nobody opened the refunds: the vault's tally waits
+        assertEq(handler.calls("tally vault (refunds reserved)"), 1);
+        handler.openRefund(0); // one refund opened on the compromised vault
+        handler.tally(_seedWithMix(a, 1)); // a keeper opens the other first, then everything is tallied
+        assertEq(handler.calls("open refund (compromised)"), 2);
+        assertEq(handler.calls("tally vault"), 1);
+        handler.finalize(0);
+        handler.withdraw(0);
+        assertEq(handler.lateRefundCount(), 2);
+        assertGe(handler.calls("withdraw entitlement"), 2, "both refunds paid by the compensator");
+        assertFalse(handler.violated(), handler.violation());
+        invariant_R12_reservedRefunds();
+        invariant_bookkeeping();
+    }
+
+    /// A seed that makes `theft` pick the vault at `index` without a refund in flight (the handler's `_mix` odd).
+    function _theftSeed(uint256 index) internal view returns (uint256 seed) {
+        uint256 n = handler.vaultCount();
+        for (seed = index;; seed += n) {
+            if (uint256(keccak256(abi.encode(seed))) % 2 == 1) return seed;
+        }
+    }
+
+    /// The first seed from `from` that selects the same vault in a handler scan (`seed % vaultCount`) and whose hash
+    /// (the handler's `_mix`) is a multiple of four (`zero == 0`: refunds left reserved) or not (`zero == 1`: opened).
+    function _seedWithMix(uint256 from, uint256 zero) internal view returns (uint256 seed) {
+        uint256 n = handler.vaultCount();
+        for (seed = from;; seed += n) {
+            bool multiple = uint256(keccak256(abi.encode(seed))) % 4 == 0;
+            if (multiple == (zero == 0)) return seed;
+        }
+    }
+
     /// The index of the first vault from `from` whose account authorized the Registry.
     function _authorizedVault(uint256 from) internal view returns (uint256 i) {
         for (i = from; i < handler.vaultCount(); ++i) {
@@ -216,7 +300,7 @@ contract CompensationInvariantsTest is Tier3Base {
     }
 
     function afterInvariant() external view {
-        string[28] memory names = [
+        string[34] memory names = [
             "open",
             "borrow",
             "repay",
@@ -244,7 +328,13 @@ contract CompensationInvariantsTest is Tier3Base {
             "withdraw entitlement",
             "withdraw equity",
             "setPrice",
-            "warp"
+            "warp",
+            "reserve refund",
+            "reserve refund (compromised)",
+            "open refund",
+            "open refund (compromised)",
+            "drop refund",
+            "tally vault (refunds reserved)"
         ];
         for (uint256 i; i < names.length; ++i) {
             console.log(names[i], handler.calls(names[i]));

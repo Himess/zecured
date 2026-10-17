@@ -31,4 +31,15 @@ contract IntakeHarness is ZecuredIntake {
     function harnessReserveRefund(bytes32 vaultId, address account, uint64 amount, bytes32 depositTag) external {
         _registry.reserveRefund(vaultId, account, amount, depositTag);
     }
+
+    /// @notice Opens the claim of a refund `harnessReserveRefund` reserved (as `finalizeRefund` would, without its
+    ///         readiness, anchor and version checks; the Registry's own checks still apply).
+    function harnessOpenRefund(bytes32 vaultId, bytes32 depositTag) external returns (bytes32 claimId) {
+        return IZecuredRefunds(address(_registry)).openReservedRefund(vaultId, depositTag);
+    }
+
+    /// @notice Releases a refund `harnessReserveRefund` reserved (as `dropPendingRefund` would for a fallen proof).
+    function harnessReleaseRefund(bytes32 vaultId, bytes32 depositTag) external {
+        IZecuredRefunds(address(_registry)).releaseRefund(vaultId, depositTag);
+    }
 }

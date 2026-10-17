@@ -209,13 +209,14 @@ contract ZecuredRegistry is IZecuredRegistry, IZecuredSpendCommits, ZecuredRegis
         _only(intake, OnlyIntake.selector);
         if (vaultId == bytes32(0)) revert ZeroVaultId();
         if (account == address(0)) revert ZeroAccount();
-        // A compromised vault's claims are the compensator's; a late deposit must not add one it never tallies (and
-        // that, unpayable, would keep the vault open for good). `openReservedRefund` checks it again.
+        // A compromised vault's claims are the compensator's, which tallies the vault once: a deposit proven after the
+        // compromise is refused. One reserved before still opens there, and the tally waits for it (R-12).
         _checkNotCompromised(vaultId);
         Vault storage v = _vaults[vaultId];
         if (v.status != VaultStatus.None && v.account != account) revert ReservationMismatch(vaultId);
         _addLineage(vaultId, amount, depositTag);
         _reservedRefund[depositTag] = account;
+        _reservedRefundCount[vaultId] += 1;
     }
 
     /// @inheritdoc IZecuredRegistry

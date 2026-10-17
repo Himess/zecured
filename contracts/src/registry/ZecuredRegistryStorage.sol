@@ -87,6 +87,10 @@ abstract contract ZecuredRegistryStorage is EIP712, IZecuredSignerErrors {
     mapping(bytes32 vaultId => bool) internal _compensatedVault;
     /// @dev R-20: the outstanding of those vaults, which `lockedZatoshi` leaves out.
     uint256 internal _compensatedZat;
+    /// @dev R-12 with the compensation: per vault, its refunds reserved (`_reservedRefund`) and neither opened nor
+    ///      released yet. The compensator tallies a compromised vault only once it is zero, so a refund reserved before
+    ///      the compromise opens first and is tallied with the vault's other claims.
+    mapping(bytes32 vaultId => uint256) internal _reservedRefundCount;
 
     constructor(address[5] memory signers_) EIP712(ZecuredEIP712.REGISTRY_DOMAIN_NAME, ZecuredEIP712.DOMAIN_VERSION) {
         address previous = address(0);

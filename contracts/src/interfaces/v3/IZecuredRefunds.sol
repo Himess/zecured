@@ -20,7 +20,10 @@ interface IZecuredRefundsErrors {
 ///        proof's anchor still on the best chain and its verifier version still active (`openReservedRefund`, from
 ///        `ZecuredIntake.finalizeRefund`), or releases it (`releaseRefund`, from `ZecuredIntake.dropPendingRefund`).
 ///        A refund never opens on a vault whose activation is pending (R-8): it waits until the vault activates,
-///        converts or drops, so no claim ever exists on a pending vault and none accrues liveness there.
+///        converts or drops, so no claim ever exists on a pending vault and none accrues liveness there. A refund
+///        reserved before its vault was compromised still opens (a proof after the compromise is refused): the
+///        compensator settles its claim, which the signers cannot pay there, and tallies the vault only once
+///        `reservedRefundCount` is zero, so the depositor is compensated exactly once.
 ///      - R-11: a Refund claim whose account gave no destination for `refundDormancy` (48 hours on the judge
 ///        deployment, 7 days on mainnet) can be marked dormant by anyone: it stays pending, keeps its vault open and
 ///        can still be abandoned (`abandonRefund`) or compensated, but no longer counts in `lockedZatoshi` and the
@@ -29,8 +32,8 @@ interface IZecuredRefundsErrors {
 interface IZecuredRefunds is IZecuredRefundsErrors {
     /// @notice R-12, the Intake only: opens the Refund claim of a reserved refund for the account it was reserved for,
     ///         without a destination (`RefundOpened`). A `None` vault becomes `Cancelled` with that account; an existing
-    ///         vault must have it. Refused on a pending vault (`VaultPending`, R-8) and on a compromised one
-    ///         (`VaultCompromised`).
+    ///         vault must have it. Refused on a pending vault (`VaultPending`, R-8). On a compromised vault (the refund
+    ///         was reserved before the compromise) the claim opens all the same, for the compensator to tally.
     function openReservedRefund(bytes32 vaultId, bytes32 depositTag) external returns (bytes32 claimId);
 
     /// @notice R-12, the Intake only: frees a reserved refund whose proof was dropped: tag unused, lineage note removed.
@@ -55,4 +58,8 @@ interface IZecuredRefunds is IZecuredRefundsErrors {
 
     /// @notice R-12: the account a reserved refund of `depositTag` will open for (zero if none is reserved).
     function reservedRefundOf(bytes32 depositTag) external view returns (address account);
+
+    /// @notice R-12: how many refunds of the vault are reserved and neither opened nor released yet. The compensator
+    ///         tallies a compromised vault only once it is zero (`IZecuredCompensator.RefundsReserved`).
+    function reservedRefundCount(bytes32 vaultId) external view returns (uint256);
 }
