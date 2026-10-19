@@ -174,6 +174,11 @@ cfg = {
         "max_pending": int(os.environ.get("OPEN_VAULT_MAX_PENDING", "512")),
     },
 }
+# R-10 on a local fork: its livenessPeriod (600 s, for quick liveness tests) is shorter than a payout's real
+# lifetime (about an hour), so a claim armed at once would never be committed and the bonds would always pay it.
+# The fork's payouts are mined within minutes: it shortens the lifetime instead (never on a public network).
+if local:
+    cfg["payout_lifetime_secs"] = int(os.environ.get("PAYOUT_LIFETIME_SECS", "240"))
 json.dump(cfg, open(out, "w"), indent=2)
 print(f"wrote {out} (registry {registry})")
 PY
