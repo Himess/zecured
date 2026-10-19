@@ -102,7 +102,7 @@ txids) and how to reproduce every run: [docs/TESTING.md](docs/TESTING.md).
 
 | Path | What |
 |---|---|
-| `contracts/` | Solidity + Foundry: `ZZEC`, `ZecuredRegistry` (vaults, claims, exits, Tier 3 lineage) with `ZecuredSpendLogic` (spend commitments, disputes), `ZecuredIntake` (deposit proofs and the gates of minting), `SettlementAdapter`, `SignerBondV2`, `ZecuredSlasher`, `ZecuredCompensator`, `ZecuredVersions`, `ZecuredPriceFeed` (mainnet), mocks, and the Zcash header relay (`src/relay/`); 590 tests (5 of them need a Base mainnet RPC), an invariant campaign of 16 invariants and 16 symbolic checks (Halmos) ([docs/INVARIANTS.md](docs/INVARIANTS.md)) |
+| `contracts/` | Solidity + Foundry: `ZZEC`, `ZecuredRegistry` (vaults, claims, exits, Tier 3 lineage) with `ZecuredSpendLogic` (spend commitments, disputes), `ZecuredIntake` (deposit proofs and the gates of minting), `SettlementAdapter`, `SignerBondV2`, `ZecuredSlasher`, `ZecuredCompensator`, `ZecuredVersions`, `ZecuredSwap`, `ZecuredPriceFeed` (mainnet), mocks, and the Zcash header relay (`src/relay/`); 760 tests (6 skipped without a Base mainnet RPC), four invariant campaigns (35 invariants) and 22 symbolic checks (Halmos) ([docs/INVARIANTS.md](docs/INVARIANTS.md)) |
 | `signer/crates/zcash-ops` | Ironwood scanning, PCZT build/prove/sign/extract, ZIP 2005 vault keys |
 | `signer/crates/threshold` | FROST DKG and re-randomized signing |
 | `signer/crates/policy` | P1 classification, payout ledger (I10), PCZT verification against the plan |
