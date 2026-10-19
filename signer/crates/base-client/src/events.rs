@@ -364,6 +364,7 @@ sol! {
         function bestChainTip() external view returns (bytes32 blockHash, uint256 height, uint256 chainWork);
         function bestBlockHashAt(uint256 height) external view returns (bytes32);
         function confirmationWork(bytes32 blockHash) external view returns (uint256);
+        function networkId() external view returns (bytes32);
     }
 }
 

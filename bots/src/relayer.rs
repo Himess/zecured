@@ -1,6 +1,7 @@
-//! K3: keeps the Zcash header relay on Base in step with the Zcash Testnet.
+//! K3: keeps the Zcash header relay on Base in step with the Zcash network it follows (its
+//! `networkId`: Testnet or Mainnet).
 //!
-//! Headers come from Testnet peers over the P2P protocol and are submitted in batches.
+//! Headers come from that network's peers over the P2P protocol and are submitted in batches.
 //! Submitting is permissionless: the relay checks proof of work, difficulty, time and linkage
 //! itself, so a relayer can delay the relay but never feed it a header it would not accept.
 //! A deposit proof only mints once the relay has moved on past it (D26), which is why the
@@ -15,14 +16,17 @@ use std::{
 
 use alloy::{
     network::EthereumWallet,
-    primitives::{Address, B256, Bytes, U256},
+    primitives::{Address, B256, Bytes, U256, keccak256},
     providers::{Provider, ProviderBuilder},
     signers::local::PrivateKeySigner,
 };
 use anyhow::{Context, Result, ensure};
 use tracing::{error, info, warn};
 use zecured_base::events::IZcashHeaderRelay;
-use zecured_deposit_witness::p2p::{self, HeaderLine};
+use zecured_deposit_witness::{
+    ZcashNetwork,
+    p2p::{self, HeaderLine},
+};
 
 /// EIP-7825 caps a transaction at 2^24 = 16,777,216 gas (Base Sepolia, Azul). A batch is split
 /// until its estimate stays below this, with room for the headroom added on top.
@@ -60,10 +64,18 @@ pub fn should_submit(standby_lag: u32, seen: u32, relay_height: u32) -> bool {
     standby_lag == 0 || seen.saturating_sub(relay_height) >= standby_lag
 }
 
-/// Testnet peers are probed again this often, or after a failed pass.
+/// Peers are probed again this often, or after a failed pass.
 const PROBE_EVERY: Duration = Duration::from_secs(300);
 
-/// The Testnet peers that answered the last probe, highest announced height first. Most seed
+/// The Zcash network a relay follows: its `networkId` is keccak256 of `zcash-testnet` or
+/// `zcash-mainnet` (`IZcashHeaderRelay.sol`).
+pub fn network_of(network_id: B256) -> Option<ZcashNetwork> {
+    [ZcashNetwork::Testnet, ZcashNetwork::Mainnet]
+        .into_iter()
+        .find(|n| keccak256(format!("zcash-{n}")) == network_id)
+}
+
+/// The peers that answered the last probe, highest announced height first. Most seed
 /// addresses are unreachable at any time, and some reachable peers lag: asking them in turn on
 /// every pass cost a connect timeout each, and a lagging peer's empty answer looked like the tip.
 #[derive(Default)]
@@ -77,8 +89,23 @@ pub async fn run(r: Relayer) -> Result<()> {
     ensure!(r.batch > 0, "the batch size must be at least 1");
     info!(relay = %r.relay, relayer = %r.key.address(), "relayer running");
     let mut book = PeerBook::default();
+    // The relay's network, read once (`networkId` never changes); an unreachable RPC is retried.
+    let mut network = None;
     loop {
-        if let Err(e) = pass(&r, &mut book).await {
+        if network.is_none() {
+            let provider = ProviderBuilder::new().connect_http(r.rpc.parse()?);
+            match IZcashHeaderRelay::new(r.relay, &provider).networkId().call().await {
+                Ok(id) => {
+                    let n = network_of(id).context("the relay follows a Zcash network this relayer does not know")?;
+                    info!(%n, "the relay follows this Zcash network");
+                    network = Some(n);
+                }
+                Err(e) => warn!(error = %e, "relay.networkId failed"),
+            }
+        }
+        if let Some(n) = network
+            && let Err(e) = pass(&r, n, &mut book).await
+        {
             warn!(error = %e, "relay pass failed");
             book.probed = None;
         }
@@ -91,6 +118,7 @@ pub async fn run(r: Relayer) -> Result<()> {
 /// the peer that answered.
 async fn headers_after<P: Provider>(
     relay: &IZcashHeaderRelay::IZcashHeaderRelayInstance<P>,
+    network: ZcashNetwork,
     peers: &[SocketAddr],
 ) -> Result<(Vec<HeaderLine>, u32, Option<SocketAddr>)> {
     let tip = relay.bestChainTip().call().await.context("relay.bestChainTip")?;
@@ -103,7 +131,8 @@ async fn headers_after<P: Provider>(
             relay.bestBlockHashAt(U256::from(from)).call().await.context("relay.bestBlockHashAt")?
         };
         let peers = peers.to_vec();
-        let fetched = tokio::task::spawn_blocking(move || p2p::fetch_with_peer(from, hash.0, FETCH, &peers)).await?;
+        let fetched =
+            tokio::task::spawn_blocking(move || p2p::fetch_with_peer(network, from, hash.0, FETCH, &peers)).await?;
         match fetched {
             Ok((lines, peer)) if !lines.is_empty() => return Ok((lines, height, peer)),
             Ok((_, peer)) if back == 0 => return Ok((vec![], height, peer)), // at the peers' tip
@@ -133,18 +162,18 @@ async fn unknown<P: Provider>(
     Ok(out)
 }
 
-async fn pass(r: &Relayer, book: &mut PeerBook) -> Result<()> {
+async fn pass(r: &Relayer, network: ZcashNetwork, book: &mut PeerBook) -> Result<()> {
     let started = Instant::now();
     let provider = ProviderBuilder::new().wallet(EthereumWallet::from(r.key.clone())).connect_http(r.rpc.parse()?);
     let relay = IZcashHeaderRelay::new(r.relay, &provider);
     if book.reachable.is_empty() || book.probed.is_none_or(|t| t.elapsed() > PROBE_EVERY) {
-        book.reachable = tokio::task::spawn_blocking(|| p2p::probe(&p2p::seed_peers())).await?;
+        book.reachable = tokio::task::spawn_blocking(move || p2p::probe(network, &p2p::seed_peers(network))).await?;
         book.probed = Some(Instant::now());
         let best = book.reachable.first().map(|p| p.height);
-        info!(reachable = book.reachable.len(), best_height = ?best, "Testnet peers probed");
+        info!(reachable = book.reachable.len(), best_height = ?best, %network, "peers probed");
     }
     let peers: Vec<SocketAddr> = book.reachable.iter().map(|p| p.addr).collect();
-    let (lines, tip_height, _) = headers_after(&relay, &peers).await?;
+    let (lines, tip_height, _) = headers_after(&relay, network, &peers).await?;
     let fetch_ms = elapsed_ms(started);
     let seen = lines.last().map_or(0, |l| l.height).max(book.reachable.first().map_or(0, |p| p.height));
     if !should_submit(r.standby_lag, seen, tip_height) {
@@ -255,5 +284,15 @@ mod tests {
         let h = internal_hash(&line).unwrap();
         assert_eq!(h.0[0], 1);
         assert_eq!(h.0[31], 0);
+    }
+
+    /// The relayer follows its relay's network: `networkId` is keccak256 of `zcash-testnet` or
+    /// `zcash-mainnet` (IZcashHeaderRelay.sol's ZCASH_TESTNET and ZCASH_MAINNET).
+    #[test]
+    fn the_relays_network_id_names_its_zcash_network() {
+        assert_eq!(network_of(keccak256("zcash-testnet")), Some(ZcashNetwork::Testnet));
+        assert_eq!(network_of(keccak256("zcash-mainnet")), Some(ZcashNetwork::Mainnet));
+        assert_eq!(network_of(keccak256("zcash-regtest")), None);
+        assert_eq!(network_of(B256::ZERO), None);
     }
 }

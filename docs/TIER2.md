@@ -122,6 +122,11 @@ personalizes the history tree's hashes, so B and T are of it. A deployment regis
 Intake also checks `branchId` against the ids the proof's verifier version allows (`ZecuredVersions`, D54). (NU6.3 is a Testnet epoch too, from 4,134,000 to
 NU7; the Testnet build proves the current NU7 epoch only.)
 
+The witness builders are not built per network: they take it from the deployment (D81) and check a witness with that
+network's statement parameters, which must be those of the guest that proves it. The anchor's epoch, its first block
+and branch id, comes from zcash_protocol's activation heights: Testnet's NU7 epoch from 4,465,026; on Mainnet NU6.3's
+from 3,428,143 until a zcash_protocol release carries NU7's Mainnet height.
+
 ### 2.3 Why the tag key is bound to the vault (design review)
 
 With K and the viewing key's hash as separate witness fields, the statement could not check that both come from the

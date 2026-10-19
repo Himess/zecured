@@ -71,6 +71,7 @@ fn config(coordinator: Option<Address>) -> NetworkConfig {
         local_fork: true,
         open_vault: Default::default(),
         payout_lifetime_secs: None,
+        zcash_network: None,
     }
 }
 

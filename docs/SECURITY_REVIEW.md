@@ -65,7 +65,7 @@ sources for availability, not for authorization.
 | I-4 | Info | Overflow on server-supplied heights | **Fixed** |
 | I-5 | Info | Any fetch error past expiry counted as "not mined" | **Fixed.** Rebuilt only on a definite "not mined" with all inputs unspent |
 | I-6 | Info | The backend host holds the coordinator key, the demo token and the MOCK oracle key | **Accepted** for the hackathon (one operator); compromise mode is limited to two nodes |
-| I-7 | Info | Network constants are testnet-only | **Accepted.** Testnet only |
+| I-7 | Info | Network constants are testnet-only | **Fixed.** The Zcash network comes from the deployment's configuration and every light wallet server and peer is checked against it (D81) |
 | I-8 | Info | Documents overstated some guarantees | **Fixed.** [THREAT_MODEL.md](THREAT_MODEL.md) and [ARCHITECTURE.md](ARCHITECTURE.md) updated |
 | I-9 | Info | Re-randomized FROST signing as used | Sound |
 

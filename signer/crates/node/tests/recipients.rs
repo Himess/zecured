@@ -46,6 +46,7 @@ fn node(dir: &std::path::Path) -> Node {
         local_fork: true,
         open_vault: Default::default(),
         payout_lifetime_secs: None,
+        zcash_network: None,
     };
     let id = Identity {
         index: 1,

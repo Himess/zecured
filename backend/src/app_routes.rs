@@ -15,8 +15,8 @@ use axum::{
 };
 use tower_http::cors::CorsLayer;
 use tracing::warn;
-use zcash_protocol::consensus::Network;
 use zecured_coordinator::Coordinator;
+use zecured_node::config::ZcashNetwork;
 
 use crate::{
     demo::{self, DemoConfig, DemoPath},
@@ -70,7 +70,7 @@ impl AppWiring {
             demo: DemoPath::off(),
             evidence: evidence::EvidenceFile::new(None),
             stats: None,
-            swap: swap_relay::SwapMaker::new(None, Network::TestNetwork)?,
+            swap: swap_relay::SwapMaker::new(None, ZcashNetwork::Testnet.params())?,
         })
     }
 
@@ -78,11 +78,12 @@ impl AppWiring {
     /// directory (the demo payer's book lives there). Starts the demo wallet's balance watch.
     pub fn new(args: &AppArgs, coordinator: Arc<Coordinator>, data: &Path) -> anyhow::Result<Self> {
         let cfg = coordinator.cfg.clone();
-        let mainnet = cfg.chain_id == demo::BASE_MAINNET;
+        // The demo wallet pays TAZ: never on Base mainnet, nor with vaults on Zcash Mainnet.
+        let mainnet = cfg.chain_id == demo::BASE_MAINNET || cfg.zcash() == ZcashNetwork::Mainnet;
         let demo = if args.demo_wallet_key.is_empty() {
             DemoPath::off()
         } else if mainnet {
-            warn!("DEMO_WALLET_SPENDING_KEY is ignored on Base mainnet: no demo path");
+            warn!("DEMO_WALLET_SPENDING_KEY is ignored on Base mainnet and Zcash Mainnet: no demo path");
             DemoPath::off()
         } else {
             let payer =
@@ -102,11 +103,8 @@ impl AppWiring {
             path.watch();
             path
         };
-        let network = if mainnet {
-            Network::MainNetwork
-        } else {
-            Network::TestNetwork
-        };
+        // The deployment's Zcash network (the network config's, or the one its Base chain goes with).
+        let network = cfg.zcash().params();
         Ok(Self {
             demo,
             evidence: evidence::EvidenceFile::new(args.evidence.clone()),

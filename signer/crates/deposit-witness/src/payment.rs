@@ -15,10 +15,13 @@ use std::path::Path;
 use anyhow::{Context, Result, anyhow, ensure};
 use serde::{Deserialize, Serialize};
 use zcash_protocol::TxId;
-use zecured_payment_statement::{PaymentJournal, PaymentWitness, memo_order_id, receiver_commitment, verify};
-use zecured_zcash_ops::lwd::LwdClient;
+use zecured_payment_statement::{PaymentJournal, PaymentWitness, memo_order_id, receiver_commitment, verify_on};
+use zecured_zcash_ops::{lwd::LwdClient, network::ZcashNetwork};
 
-use crate::witness::{Located, locate};
+use crate::{
+    statement_network,
+    witness::{Located, locate},
+};
 
 /// What the payer keeps about its payment: the note it created and the order's salt.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
@@ -56,7 +59,8 @@ pub struct BuiltPayment {
 }
 
 /// The witness of a payment whose transaction sits as `at` and whose note `opening` opens. Checked
-/// with the statement; the order's id and receiver commitment, when given, must be the journal's.
+/// with the statement on the network `at` was read from; the order's id and receiver commitment,
+/// when given, must be the journal's.
 pub fn from_located(
     at: &Located,
     opening: &PaymentOpening,
@@ -82,7 +86,8 @@ pub fn from_located(
         tip_header: at.tip_header.clone(),
         tip_auth_data_root: at.tip_auth_data_root,
     };
-    let journal = verify(&witness).map_err(|e| anyhow!("the payment statement refuses the witness: {e:?}"))?;
+    let journal = verify_on(statement_network(at.network), &witness)
+        .map_err(|e| anyhow!("the payment statement refuses the witness: {e:?}"))?;
     if let Some(order_id) = order_id {
         ensure!(journal.order_id == order_id, "the payment's memo names another order");
     }
@@ -92,12 +97,14 @@ pub fn from_located(
     Ok((witness, journal))
 }
 
-/// Builds the witness of payment transaction `txid`, anchored at header `tip` (after the payment's
-/// block; the relay must accept that header and the order's tier of work on top of it), for the
-/// order `order_id` paying `commitment` when given, and checks it with the statement.
+/// Builds the witness of payment transaction `txid` of Zcash `network`, anchored at header `tip`
+/// (after the payment's block; the relay must accept that header and the order's tier of work on
+/// top of it), for the order `order_id` paying `commitment` when given, and checks it with the
+/// statement.
 #[allow(clippy::too_many_arguments)]
 pub async fn build(
     client: &mut LwdClient,
+    network: ZcashNetwork,
     headers_path: &Path,
     summaries_path: &Path,
     txid: TxId,
@@ -106,7 +113,9 @@ pub async fn build(
     commitment: Option<[u8; 32]>,
     tip: u32,
 ) -> Result<BuiltPayment> {
-    let at = locate(client, headers_path, summaries_path, txid, tip).await.context("locate the payment")?;
+    let at = locate(client, network, headers_path, summaries_path, txid, tip)
+        .await
+        .context("locate the payment")?;
     let (witness, journal) = from_located(&at, opening, order_id, commitment)?;
     Ok(BuiltPayment {
         witness,
@@ -141,6 +150,7 @@ mod tests {
     fn the_builder_rebuilds_the_fixture() {
         let w: PaymentWitness = serde_json::from_slice(&std::fs::read(FIXTURE).unwrap()).unwrap();
         let at = Located {
+            network: ZcashNetwork::Testnet,
             raw_tx: w.tx.clone(),
             height: 4_488_543,
             tx_index: w.tx_index as usize,
@@ -163,7 +173,7 @@ mod tests {
             rseed: w.note_rseed,
             salt: w.salt,
         };
-        let expected = verify(&w).unwrap();
+        let expected = verify_on(statement_network(ZcashNetwork::Testnet), &w).unwrap();
         let (built, journal) =
             from_located(&at, &opening, Some(expected.order_id), Some(opening.receiver_commitment().unwrap())).unwrap();
         assert_eq!(journal, expected);

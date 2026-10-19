@@ -26,6 +26,7 @@ hex.workspace = true
 thiserror.workspace = true
 tonic.workspace = true
 tokio.workspace = true
+serde.workspace = true
 
 [features]
 # DEMO ONLY: helpers for the threshold demo's "compromised" signer (see zecured-node's `demo`).
@@ -35,5 +36,4 @@ demo = []
 zecured-threshold = { path = "../threshold" }
 sha2 = "0.10"
 rand_core_06 = { workspace = true }
-serde = { workspace = true }
 serde_json = { workspace = true }

@@ -99,7 +99,6 @@ use crate::{
     },
 };
 
-const NETWORK: Network = Network::TestNetwork;
 const ZATS_PER_ZEC: u64 = 100_000_000;
 
 /// H-01: how long a request id that opened a vault (or is opening one) is remembered at most, to
@@ -349,8 +348,8 @@ pub fn zip321_uri(address: &str, amount: u64) -> String {
     format!("zcash:{address}?amount={amount}")
 }
 
-fn fvk_of(v: &CoordVault) -> Result<FullViewingKey> {
-    UnifiedFullViewingKey::decode(&NETWORK, &v.ufvk)
+fn fvk_of(network: &Network, v: &CoordVault) -> Result<FullViewingKey> {
+    UnifiedFullViewingKey::decode(network, &v.ufvk)
         .map_err(|e| anyhow!("stored UFVK: {e}"))?
         .orchard()
         .cloned()
@@ -728,7 +727,7 @@ impl Coordinator {
         let gas: PrivateKeySigner = gas_key.parse().context("coordinator gas key")?;
         Ok(Self {
             nodes: Nodes::new(&cfg, gas.clone())?,
-            zcash: Mutex::new(ZcashView::new(&cfg.lightwalletd_url)),
+            zcash: Mutex::new(ZcashView::new(&cfg.lightwalletd_url, cfg.zcash())),
             store: Mutex::new(Store::open(data_dir)?),
             gas,
             pk: OnceLock::new(),
@@ -926,8 +925,22 @@ impl Coordinator {
 
     // ------------------------------------------------------------------ recipients
 
-    fn recipient_from_ua(ua: &str, salt: [u8; 32]) -> Result<Recipient> {
-        let addr = keys::ironwood_receiver(&NETWORK, ua).context(PublicError::InvalidReceiver)?;
+    /// The consensus parameters of the deployment's Zcash network (the network config's, or the one
+    /// its Base chain goes with): address and key encodings, branch ids by height.
+    fn zcash_params(&self) -> Network {
+        self.cfg.zcash().params()
+    }
+
+    /// A light wallet server connection, once the server has said it follows the deployment's Zcash
+    /// network.
+    async fn lwd_client(&self) -> Result<zecured_zcash_ops::lwd::LwdClient> {
+        let mut client = zecured_zcash_ops::lwd::connect(&self.cfg.lightwalletd_url).await?;
+        zecured_zcash_ops::lwd::check_network(&mut client, self.cfg.zcash()).await?;
+        Ok(client)
+    }
+
+    fn recipient_from_ua(network: &Network, ua: &str, salt: [u8; 32]) -> Result<Recipient> {
+        let addr = keys::ironwood_receiver(network, ua).context(PublicError::InvalidReceiver)?;
         Ok(Recipient {
             receiver: addr.to_raw_address_bytes(),
             salt,
@@ -943,7 +956,7 @@ impl Coordinator {
 
     /// Third-party recipient (liquidator / market maker): reveal to the signers.
     pub async fn add_recipient(&self, ua: &str, salt: [u8; 32]) -> Result<B256> {
-        let r = Self::recipient_from_ua(ua, salt)?;
+        let r = Self::recipient_from_ua(&self.zcash_params(), ua, salt)?;
         let answers = self.nodes.post_many(&self.nodes.indices(), "/v1/recipients", &Self::recipient_in(&r)).await;
         at_least::<serde_json::Value>(answers, usize::from(MIN_SIGNERS), "recipient")?;
         Ok(B256::from(self.store.lock().await.add_recipient(r)?))
@@ -959,7 +972,7 @@ impl Coordinator {
         deadline: u64,
         signature: Bytes,
     ) -> Result<B256> {
-        let r = Self::recipient_from_ua(ua, salt)?;
+        let r = Self::recipient_from_ua(&self.zcash_params(), ua, salt)?;
         let v = self.vault(&vault_id).await?;
         let msg = Destination {
             vaultId: vault_id,
@@ -994,7 +1007,7 @@ impl Coordinator {
         deadline: u64,
         signature: Bytes,
     ) -> Result<()> {
-        let r = Self::recipient_from_ua(ua, salt)?;
+        let r = Self::recipient_from_ua(&self.zcash_params(), ua, salt)?;
         let v = self.vault(&vault_id).await?;
         let msg = RefundRequest {
             vaultId: vault_id,
@@ -1270,7 +1283,7 @@ impl Coordinator {
     /// DEMO: the transaction sweeping every unspent note of the vault to `to` (proved, unsigned),
     /// the action indices of its vault spends, and the value it sweeps.
     async fn sweep_pczt(&self, vault_id: B256, to: &str) -> Result<(pczt::Pczt, Vec<usize>, u64)> {
-        let attacker = keys::ironwood_receiver(&NETWORK, to).context(PublicError::InvalidReceiver)?;
+        let attacker = keys::ironwood_receiver(&self.zcash_params(), to).context(PublicError::InvalidReceiver)?;
         let v = self.vault(&vault_id).await?;
         let mut decisions = v.decisions.clone();
         let notes = self.notes(&v, &mut decisions).await?;
@@ -1285,11 +1298,11 @@ impl Coordinator {
             value: total.checked_sub(fee).context(PublicError::BadRequest)?,
             privacy: spend::OutputPrivacy::NoOvk,
         }];
-        let fvk = fvk_of(&v)?;
+        let fvk = fvk_of(&self.zcash_params(), &v)?;
         let anchor = self.zcash.lock().await.scan(&vault_id).context("vault not scanned")?.anchor();
         let refs: Vec<&ReceivedNote> = inputs.iter().collect();
         let unsigned = spend::build(
-            &NETWORK,
+            &self.zcash_params(),
             BlockHeight::from_u32(notes.tip.checked_add(1).context("tip overflows")?),
             &fvk,
             anchor,
@@ -1451,7 +1464,7 @@ impl Coordinator {
             expiry_height: v.expiry_height,
             confirmations: self.cfg.confirmations,
         };
-        let fvk = fvk_of(v)?;
+        let fvk = fvk_of(&self.zcash_params(), v)?;
         let refunds = refund_tags(&v.claims);
         // I30: unknown (Base unreachable), nothing is proven as a refund nor refunded off-chain.
         let landing = self.landing().await.ok();
@@ -1725,7 +1738,7 @@ impl Coordinator {
             return Ok(false);
         }
         // The nodes never pay a vault's own addresses (security review H-2): plan the same way.
-        let fvk = fvk_of(v)?;
+        let fvk = fvk_of(&self.zcash_params(), v)?;
         let (main, i10) = main_lineage(v.activated_tag.is_some(), v.outstanding, &claims, &notes.lineage, &bound);
         if let Err(e) = &i10
             && v.activated_tag.is_some()
@@ -1933,7 +1946,7 @@ impl Coordinator {
         tip: u32,
     ) -> Result<()> {
         let v = self.vault(id).await?;
-        let fvk = fvk_of(&v)?;
+        let fvk = fvk_of(&self.zcash_params(), &v)?;
         let anchor = self.zcash.lock().await.scan(id).context("vault not scanned")?.anchor();
         let payments: Vec<Payment> = plan
             .payments
@@ -1949,7 +1962,7 @@ impl Coordinator {
             .collect::<Result<_>>()?;
         let refs: Vec<&ReceivedNote> = inputs.iter().collect();
         let unsigned = spend::build(
-            &NETWORK,
+            &self.zcash_params(),
             BlockHeight::from_u32(tip.checked_add(1).context("tip overflows")?),
             &fvk,
             anchor,
@@ -2038,12 +2051,12 @@ impl Coordinator {
 
     /// The Zcash tip now, from the light wallet server.
     async fn fetch_zcash_tip(&self) -> Result<u32> {
-        let mut client = zecured_zcash_ops::lwd::connect(&self.cfg.lightwalletd_url).await?;
+        let mut client = self.lwd_client().await?;
         Ok(u32::try_from(zecured_zcash_ops::lwd::latest_block(&mut client).await?.height)?)
     }
 
     async fn broadcast(&self, raw: Vec<u8>) -> Result<()> {
-        let mut client = zecured_zcash_ops::lwd::connect(&self.cfg.lightwalletd_url).await?;
+        let mut client = self.lwd_client().await?;
         spend::broadcast_raw(&mut client, raw).await
     }
 
@@ -2053,7 +2066,8 @@ impl Coordinator {
             inflight.inputs.clone()
         } else {
             // Records written before `inputs` existed: the transaction's own nullifiers.
-            match inflight.raw_tx.as_deref().map(|raw| inflight::nullifiers_of(raw, &NETWORK, inflight.expiry_height)) {
+            let network = self.zcash_params();
+            match inflight.raw_tx.as_deref().map(|raw| inflight::nullifiers_of(raw, &network, inflight.expiry_height)) {
                 Some(Ok(n)) => n,
                 _ => return Inputs::Unknown,
             }
@@ -2084,8 +2098,8 @@ impl Coordinator {
             self.keep_commitment(kept).await?;
         }
         let txid = TxId::from_hex(&inflight.txid).context("stored txid")?;
-        let lookup = match zecured_zcash_ops::lwd::connect(&self.cfg.lightwalletd_url).await {
-            Ok(mut client) => inflight::lookup(&mut client, &NETWORK, &txid).await,
+        let lookup = match self.lwd_client().await {
+            Ok(mut client) => inflight::lookup(&mut client, &self.zcash_params(), &txid).await,
             Err(e) => Err(e),
         };
         let inputs = self.inputs_state(id, &inflight).await;
@@ -3521,6 +3535,23 @@ mod tests {
         }
     }
 
+    /// The coordinator reads addresses and viewing keys on the deployment's Zcash network (the
+    /// config's, or the one its Base chain goes with): a Testnet address is no receiver of a
+    /// Mainnet deployment, nor a Mainnet address of a Testnet one.
+    #[test]
+    fn receivers_are_read_on_the_deployments_network() {
+        let (mut c, _dir) = offline("network");
+        assert_eq!(c.zcash_params(), Network::TestNetwork, "Base Sepolia: Testnet");
+        let testnet = keys::encode_ironwood_ua(&Network::TestNetwork, test_address()).unwrap();
+        let mainnet = keys::encode_ironwood_ua(&Network::MainNetwork, test_address()).unwrap();
+        assert!(Coordinator::recipient_from_ua(&c.zcash_params(), &testnet, [1; 32]).is_ok());
+        assert!(Coordinator::recipient_from_ua(&c.zcash_params(), &mainnet, [1; 32]).is_err());
+        c.cfg.chain_id = 8_453;
+        assert_eq!(c.zcash_params(), Network::MainNetwork, "Base: Mainnet");
+        assert!(Coordinator::recipient_from_ua(&c.zcash_params(), &mainnet, [1; 32]).is_ok());
+        assert!(Coordinator::recipient_from_ua(&c.zcash_params(), &testnet, [1; 32]).is_err());
+    }
+
     /// M-8: an unsigned destination or refund is refused without asking five nodes, and so is the
     /// off-chain refund of a deposit that can land on Base (I30).
     #[tokio::test]
@@ -3532,10 +3563,10 @@ mod tests {
         c.store.lock().await.save(v).unwrap();
         let id = B256::repeat_byte(1);
         // Any valid Ironwood UA will do.
-        let ua = keys::encode_ironwood_ua(&NETWORK, test_address()).unwrap();
+        let ua = keys::encode_ironwood_ua(&Network::TestNetwork, test_address()).unwrap();
         let stranger = PrivateKeySigner::random();
         let salt = [5u8; 32];
-        let r = Coordinator::recipient_from_ua(&ua, salt).unwrap();
+        let r = Coordinator::recipient_from_ua(&c.zcash_params(), &ua, salt).unwrap();
         let msg = Destination {
             vaultId: id,
             commitment: B256::from(r.commitment()),

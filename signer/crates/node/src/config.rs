@@ -8,6 +8,7 @@ use anyhow::{Context, Result, anyhow};
 use rand_core_06::OsRng;
 use serde::{Deserialize, Serialize};
 use x25519_dalek::{PublicKey, StaticSecret};
+pub use zecured_zcash_ops::network::ZcashNetwork;
 
 /// Public description of one signer node.
 #[derive(Clone, Debug, Serialize, Deserialize)]
@@ -79,10 +80,15 @@ pub struct NetworkConfig {
     /// O-4 rule 2 (R-10): seconds from a payout's commitment until it is either confirmed on Base
     /// or provably dead (its expiry window, the reorganisation margin and the confirmations, plus a
     /// margin for Base). No claim is committed closer than this to the time the bonds may pay its
-    /// claimant. Unset: [`NetworkConfig::payout_lifetime`]'s default for 25-second Zcash blocks
-    /// (NU7); a network on 75-second blocks (Mainnet before NU7) must set it.
+    /// claimant. Unset: [`NetworkConfig::payout_lifetime`]'s default for the Zcash network's block
+    /// spacing (25 s on Testnet, 75 s on Mainnet until its NU7).
     #[serde(default)]
     pub payout_lifetime_secs: Option<u64>,
+    /// The Zcash network of the vaults, `"testnet"` or `"mainnet"`. Unset: the one the Base chain
+    /// goes with (Base Sepolia and anvil: Testnet; Base: Mainnet). Another pairing is refused
+    /// unless `local_fork` ([`ZcashNetwork::resolve`]).
+    #[serde(default)]
+    pub zcash_network: Option<ZcashNetwork>,
 }
 
 /// Zcash's target block spacing from NU7 (ZIP 218), in seconds.
@@ -146,6 +152,8 @@ impl NetworkConfig {
     /// Values a network config must respect.
     pub fn check(&self) -> Result<()> {
         anyhow::ensure!(self.nodes.len() == 5, "the network has exactly 5 signer nodes");
+        // The Zcash network goes with the Base chain (or is named on an explicit local fork).
+        ZcashNetwork::resolve(self.zcash_network, self.chain_id, self.local_fork)?;
         // RT-15: a delay near the expiry would let every payout expire before its broadcast.
         let max_delay = zecured_zcash_ops::spend::PAYOUT_EXPIRY_DELTA.saturating_sub(PAYOUT_DELAY_HEADROOM);
         anyhow::ensure!(
@@ -192,16 +200,23 @@ impl NetworkConfig {
     }
 
     /// O-4 rule 2 (R-10): a payout's lifetime in seconds, `payout_lifetime_secs` or, by default,
-    /// (expiry window + reorganisation margin + confirmations) Zcash blocks of 25 s plus five
-    /// minutes for Base: about an hour on the judge deployment. The deployment's `commitGrace`
-    /// must be at least this (the deploy script checks it; the coordinator warns otherwise).
+    /// (expiry window + reorganisation margin + confirmations) Zcash blocks of the network's
+    /// spacing (25 s on Testnet, 75 s on Mainnet until its NU7) plus five minutes for Base: about
+    /// an hour on the judge deployment. The deployment's `commitGrace` must be at least this (the
+    /// deploy script checks it; the coordinator warns otherwise).
     pub fn payout_lifetime(&self) -> u64 {
         self.payout_lifetime_secs.unwrap_or_else(|| {
             let blocks = u64::from(zecured_zcash_ops::spend::PAYOUT_EXPIRY_DELTA)
                 + u64::from(crate::signing::EXPIRY_REORG_MARGIN)
                 + u64::from(self.confirmations);
-            blocks * ZCASH_BLOCK_SECS + BASE_CONFIRMATION_MARGIN_SECS
+            blocks * self.zcash().block_secs() + BASE_CONFIRMATION_MARGIN_SECS
         })
+    }
+
+    /// The Zcash network of the vaults ([`NetworkConfig::check`] refuses a config without one; one
+    /// built without that check counts as Testnet's).
+    pub fn zcash(&self) -> ZcashNetwork {
+        ZcashNetwork::resolve(self.zcash_network, self.chain_id, self.local_fork).unwrap_or(ZcashNetwork::Testnet)
     }
 }
 
@@ -305,19 +320,83 @@ mod tests {
             local_fork: false,
             open_vault: OpenVaultLimits::default(),
             payout_lifetime_secs: None,
+            zcash_network: None,
         }
     }
 
     /// R-10: the default lifetime is the payout's expiry window, the reorganisation margin and the
-    /// confirmations, at 25 s per block, plus five minutes: 3,800 s with ten confirmations.
+    /// confirmations, at the network's block spacing, plus five minutes: 3,800 s with ten
+    /// confirmations on Testnet (25 s), 10,800 s on Mainnet (75 s until its NU7).
     #[test]
     fn the_payout_lifetime_defaults_to_the_expiry_window() {
         let mut cfg = judge_config();
         assert_eq!(cfg.payout_lifetime(), (120 + 10 + 10) * 25 + 300);
+        let mainnet = NetworkConfig {
+            chain_id: 8_453,
+            ..judge_config()
+        };
+        assert_eq!(mainnet.payout_lifetime(), (120 + 10 + 10) * 75 + 300);
         cfg.payout_lifetime_secs = Some(10_800);
         assert_eq!(cfg.payout_lifetime(), 10_800);
         let old: NetworkConfig = serde_json::from_value(serde_json::to_value(judge_config()).unwrap()).unwrap();
         assert_eq!(old.payout_lifetime_secs, None);
+    }
+
+    /// The Zcash network comes from the config, or else goes with the Base chain; a config pairing
+    /// them otherwise is refused unless it is an explicit local fork.
+    #[test]
+    fn the_zcash_network_goes_with_the_base_chain() {
+        let judge = judge_config();
+        judge.check().unwrap();
+        assert_eq!(judge.zcash(), ZcashNetwork::Testnet, "Base Sepolia: Testnet");
+        let mut old = serde_json::to_value(&judge).unwrap();
+        old.as_object_mut().unwrap().remove("zcash_network");
+        let parsed: NetworkConfig = serde_json::from_value(old).unwrap();
+        assert_eq!((parsed.zcash_network, parsed.zcash()), (None, ZcashNetwork::Testnet), "configs written before");
+        let mainnet = NetworkConfig {
+            chain_id: 8_453,
+            ..judge_config()
+        };
+        mainnet.check().unwrap();
+        assert_eq!(mainnet.zcash(), ZcashNetwork::Mainnet);
+        let mut named = serde_json::to_value(&mainnet).unwrap();
+        named["zcash_network"] = serde_json::json!("mainnet");
+        let named: NetworkConfig = serde_json::from_value(named).unwrap();
+        assert_eq!(named.zcash_network, Some(ZcashNetwork::Mainnet));
+        named.check().unwrap();
+        // Testnet ZEC on Base mainnet, Mainnet ZEC on Base Sepolia: refused...
+        let mismatched = NetworkConfig {
+            zcash_network: Some(ZcashNetwork::Testnet),
+            ..mainnet.clone()
+        };
+        let e = mismatched.check().unwrap_err();
+        assert!(e.to_string().contains("local fork"), "{e}");
+        assert!(
+            NetworkConfig {
+                zcash_network: Some(ZcashNetwork::Mainnet),
+                ..judge_config()
+            }
+            .check()
+            .is_err()
+        );
+        // ...except on an explicit local fork (a fork of Base mainnet rehearsing with Testnet ZEC).
+        let rehearsal = NetworkConfig {
+            local_fork: true,
+            attest_delay_max_blocks: 0,
+            payout_delay_max_blocks: 0,
+            ..mismatched
+        };
+        rehearsal.check().unwrap();
+        assert_eq!(rehearsal.zcash(), ZcashNetwork::Testnet);
+        // A chain without a Zcash network of its own needs one named.
+        assert!(
+            NetworkConfig {
+                chain_id: 1,
+                ..judge_config()
+            }
+            .check()
+            .is_err()
+        );
     }
 
     /// RT-15: the L23 delay must leave room in the payout's expiry window.

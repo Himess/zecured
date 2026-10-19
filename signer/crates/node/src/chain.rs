@@ -20,7 +20,7 @@ use orchard::{
     keys::{FullViewingKey, Scope},
     note::ExtractedNoteCommitment,
 };
-use zcash_protocol::{TxId, consensus::Network};
+use zcash_protocol::TxId;
 use zecured_base::{
     events::{ClaimChange, RegistryEvent, VaultEvent},
     verify::{self, ProviderReader, Verdict},
@@ -37,7 +37,10 @@ use zecured_zcash_ops::{
     tx, witness,
 };
 
-use crate::store::{Store, VaultRecord};
+use crate::{
+    config::ZcashNetwork,
+    store::{Store, VaultRecord},
+};
 
 /// Time allowed to connect to the Base RPC (M-7).
 pub const BASE_CONNECT_TIMEOUT: Duration = Duration::from_secs(10);
@@ -210,12 +213,23 @@ pub fn refund_tags(claims: &[ledger::Claim]) -> Vec<[u8; 32]> {
 /// Zcash access for one node.
 pub struct ZcashView {
     url: String,
+    /// The deployment's Zcash network: the light wallet server must follow it.
+    network: ZcashNetwork,
     /// Independent light wallet servers that must agree on a deposit (C-1).
     witnesses: Vec<String>,
     client: Option<LwdClient>,
     scans: HashMap<B256, ScanState>,
     /// Ironwood-only flag of deposit transactions, by txid.
     shapes: HashMap<[u8; 32], bool>,
+}
+
+/// The deposit statement's parameters for the deployment's Zcash network (its guests are built per
+/// network; nodes read deposits as the deployment's guest proves them).
+pub fn statement_network(network: ZcashNetwork) -> &'static zecured_deposit_statement::Network {
+    match network {
+        ZcashNetwork::Testnet => &zecured_deposit_statement::TESTNET,
+        ZcashNetwork::Mainnet => &zecured_deposit_statement::MAINNET,
+    }
 }
 
 pub fn vault_fvk(v: &VaultRecord) -> Result<FullViewingKey> {
@@ -249,14 +263,15 @@ pub fn merge_decisions(
 }
 
 impl ZcashView {
-    pub fn new(url: &str) -> Self {
-        Self::with_witnesses(url, vec![])
+    pub fn new(url: &str, network: ZcashNetwork) -> Self {
+        Self::with_witnesses(url, network, vec![])
     }
 
     /// A view whose deposit checks also need every `witnesses` server to agree (C-1).
-    pub fn with_witnesses(url: &str, witnesses: Vec<String>) -> Self {
+    pub fn with_witnesses(url: &str, network: ZcashNetwork, witnesses: Vec<String>) -> Self {
         Self {
             url: url.to_owned(),
+            network,
             witnesses,
             client: None,
             scans: HashMap::new(),
@@ -264,9 +279,17 @@ impl ZcashView {
         }
     }
 
+    /// The deployment's Zcash network.
+    pub fn network(&self) -> ZcashNetwork {
+        self.network
+    }
+
+    /// The light wallet server, connected once it has said it follows the deployment's network.
     async fn client(&mut self) -> Result<&mut LwdClient> {
         if self.client.is_none() {
-            self.client = Some(lwd::connect(&self.url).await?);
+            let mut client = lwd::connect(&self.url).await?;
+            lwd::check_network(&mut client, self.network).await?;
+            self.client = Some(client);
         }
         Ok(self.client.as_mut().expect("just set"))
     }
@@ -344,9 +367,9 @@ impl ZcashView {
         // P1: classify external notes in chain order; persist new decisions.
         let externals: Vec<ReceivedNote> =
             self.scans[vault_id].notes.iter().filter(|n| n.scope == Scope::External).cloned().collect();
-        // K2-c: the deposit statement's own reading of the vault's address. A vault whose
-        // address it rejects can receive no conforming deposit.
-        let receiver = zecured_deposit_statement::vault_receiver(base.address).ok();
+        // K2-c: the deposit statement's own reading of the vault's address (on the deployment's
+        // network). A vault whose address it rejects can receive no conforming deposit.
+        let receiver = zecured_deposit_statement::vault_receiver_on(statement_network(self.network), base.address).ok();
         let mut deposits = Vec::with_capacity(externals.len());
         for n in &externals {
             let ironwood_only = self.ironwood_only(&n.txid).await?;
@@ -470,9 +493,11 @@ impl ZcashView {
         if let Some(b) = self.shapes.get(&key) {
             return Ok(*b);
         }
-        let (t, _) = tx::fetch(self.client().await?, &Network::TestNetwork, txid).await?;
-        // K2-c: exactly the deposit statement's D5 (v6, NU7, Ironwood only, outputs enabled).
-        let flag = zecured_deposit_statement::check_deposit_transaction(&t).is_ok();
+        let params = self.network.params();
+        let (t, _) = tx::fetch(self.client().await?, &params, txid).await?;
+        // K2-c: exactly the deposit statement's D5 on the deployment's network (v6, an epoch its
+        // guest proves, Ironwood only, outputs enabled).
+        let flag = zecured_deposit_statement::check_deposit_transaction_on(statement_network(self.network), &t).is_ok();
         self.shapes.insert(key, flag);
         Ok(flag)
     }
@@ -495,7 +520,7 @@ impl ZcashView {
         };
         let cmx = ExtractedNoteCommitment::from(note.note.commitment()).to_bytes();
         witness::check_note_in_tx(
-            &Network::TestNetwork,
+            &self.network.params(),
             &note.txid,
             &primary.tx,
             height,
@@ -504,8 +529,10 @@ impl ZcashView {
         )?;
         for (i, url) in self.witnesses.iter().enumerate() {
             let name = format!("witness light wallet server #{}", i + 1);
+            let network = self.network;
             let view = async {
                 let mut client = lwd::connect(url).await?;
+                lwd::check_network(&mut client, network).await?;
                 witness::deposit_view(&mut client, &note.txid, height).await
             }
             .await
@@ -518,7 +545,8 @@ impl ZcashView {
     /// Confirmations of a mined transaction and whether it spends every given nullifier.
     pub async fn spends(&mut self, txid: &TxId, nullifiers: &[[u8; 32]]) -> Result<(u32, bool)> {
         let tip = self.tip().await?;
-        let (t, height) = tx::fetch(self.client().await?, &Network::TestNetwork, txid).await?;
+        let params = self.network.params();
+        let (t, height) = tx::fetch(self.client().await?, &params, txid).await?;
         let spent: Vec<[u8; 32]> = t
             .ironwood_bundle()
             .map(|b| b.actions().iter().map(|a| a.nullifier().to_bytes()).collect())

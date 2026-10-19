@@ -21,7 +21,7 @@ use reddsa::frost::redpallas::{
     round1::{SigningCommitments, SigningNonces},
 };
 use serde::{Deserialize, Serialize};
-use zcash_protocol::consensus::{BlockHeight, BranchId, Network};
+use zcash_protocol::consensus::{BlockHeight, BranchId};
 use zecured_base::SpendCommit;
 use zecured_policy::{
     derive::{deposit_tag, payout_ref},
@@ -34,6 +34,7 @@ use zecured_zcash_ops::{scan::ReceivedNote, spend::PAYOUT_EXPIRY_DELTA};
 use crate::{
     Inflight,
     chain::{VaultNotes, owns_receiver, vault_fvk},
+    config::ZcashNetwork,
     store::{Store, VaultRecord},
 };
 
@@ -347,19 +348,21 @@ pub fn expected_plan(
     Ok((plan, inputs))
 }
 
-/// Transaction-level expectations for a payout built on top of `tip` (I-4: the tip comes from
-/// the light wallet server, so no arithmetic on it may overflow).
-pub fn expectations(tip: u32) -> Result<TxExpectations> {
+/// Transaction-level expectations for a payout built on top of `tip` on `network` (I-4: the tip
+/// comes from the light wallet server, so no arithmetic on it may overflow).
+pub fn expectations(network: ZcashNetwork, tip: u32) -> Result<TxExpectations> {
     let target = tip.checked_add(1).context("tip height overflow")?;
     Ok(TxExpectations {
-        consensus_branch_id: u32::from(BranchId::for_height(&Network::TestNetwork, BlockHeight::from_u32(target))),
+        consensus_branch_id: u32::from(BranchId::for_height(&network.params(), BlockHeight::from_u32(target))),
         min_expiry: target,
         max_expiry: target.saturating_add(PAYOUT_EXPIRY_DELTA).saturating_add(TIP_SKEW),
     })
 }
 
 /// Round 1: verify and commit.
+#[allow(clippy::too_many_arguments)]
 pub fn commit(
+    network: ZcashNetwork,
     vault: &VaultRecord,
     plan: &PayoutPlan,
     inputs: &[ReceivedNote],
@@ -368,7 +371,7 @@ pub fn commit(
     inflight: Option<&Inflight>,
     unspent: &[[u8; 32]],
 ) -> Result<(Session, Vec<SigningCommitments>)> {
-    let expectations = expectations(tip)?;
+    let expectations = expectations(network, tip)?;
     let pczt = Pczt::parse(&req.pczt).map_err(|e| anyhow!("parse PCZT: {e:?}"))?;
     let fvk = vault_fvk(vault)?;
     let expected: Vec<ExpectedInput> = inputs
@@ -589,11 +592,21 @@ mod tests {
 
     #[test]
     fn server_supplied_tips_cannot_overflow() {
-        assert!(expectations(u32::MAX).is_err());
-        let e = expectations(u32::MAX - 1).unwrap();
+        let testnet = ZcashNetwork::Testnet;
+        assert!(expectations(testnet, u32::MAX).is_err());
+        let e = expectations(testnet, u32::MAX - 1).unwrap();
         assert_eq!(e.min_expiry, u32::MAX);
         assert_eq!(e.max_expiry, u32::MAX);
-        let e = expectations(4_486_000).unwrap();
+        let e = expectations(testnet, 4_486_000).unwrap();
         assert_eq!(e.max_expiry, 4_486_001 + PAYOUT_EXPIRY_DELTA + TIP_SKEW);
+    }
+
+    /// A payout's consensus branch id is its network's at the target height: Testnet's NU7 (from
+    /// 4,465,026), Mainnet's NU6.3 (from 3,428,143; its NU7 has no height yet).
+    #[test]
+    fn the_branch_id_is_the_networks() {
+        let at = |network: ZcashNetwork, tip: u32| expectations(network, tip).unwrap().consensus_branch_id;
+        assert_eq!(at(ZcashNetwork::Testnet, 4_486_000), 0x7719_0ad9, "Testnet NU7");
+        assert_eq!(at(ZcashNetwork::Mainnet, 3_500_000), 0x37a5_165b, "Mainnet NU6.3");
     }
 }

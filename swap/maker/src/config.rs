@@ -7,6 +7,7 @@ use alloy::primitives::{Address, B256};
 use anyhow::{Context, Result, ensure};
 use serde::{Deserialize, Serialize};
 use zecured_swap::Side;
+use zecured_zcash_ops::network::ZcashNetwork;
 
 /// The maker's configuration file.
 #[derive(Clone, Debug, Serialize, Deserialize)]
@@ -15,6 +16,11 @@ pub struct MakerConfig {
     /// Base JSON-RPC (Base Sepolia, a local anvil fork, Base mainnet).
     pub rpc: String,
     pub chain_id: u64,
+    /// The Zcash network of the payments, `"testnet"` or `"mainnet"`. Unset: the one the Base chain
+    /// goes with (Base Sepolia and anvil: Testnet; Base: Mainnet); another pairing only on a local
+    /// fork.
+    #[serde(default)]
+    pub zcash_network: Option<ZcashNetwork>,
     /// The deployed ZecuredSwap.
     pub swap: Address,
     /// The ZEC/USD price in Morpho's scale (`price()`; `priceHigh()` too when it is a
@@ -28,7 +34,8 @@ pub struct MakerConfig {
     pub state: PathBuf,
     /// The maker's Ironwood wallet: `{ spending_key, birthday }` (0600), as `zecured-wallet init`.
     pub wallet: PathBuf,
-    /// JSON Lines Testnet headers from NU7 activation, extended over P2P (tier2 witness builders).
+    /// JSON Lines headers of the network's epoch from its activation (NU7 on Testnet, NU6.3 on
+    /// Mainnet until its NU7), extended over P2P (tier2 witness builders).
     pub headers: PathBuf,
     /// Cache of per-block summaries for the history tree.
     pub summaries: PathBuf,
@@ -135,6 +142,8 @@ impl MakerConfig {
         ensure!(self.max_order_usdc > 0 && self.max_open_orders > 0, "order caps");
         ensure!(self.quote_ttl_secs >= 10, "quote_ttl_secs is at least 10");
         ensure!(self.block_secs > 0 && self.poll_secs > 0, "block_secs and poll_secs");
+        // The payments' Zcash network goes with the Base chain (or is named on a local fork).
+        self.zcash()?;
         if !self.local_fork {
             ensure!(!self.mock_seal, "MOCK seals only on a local fork");
             ensure!(
@@ -166,6 +175,11 @@ impl MakerConfig {
         }
         Ok(())
     }
+
+    /// The payments' Zcash network: `zcash_network`, or the one the Base chain goes with.
+    pub fn zcash(&self) -> Result<ZcashNetwork> {
+        ZcashNetwork::resolve(self.zcash_network, self.chain_id, self.local_fork)
+    }
 }
 
 #[cfg(test)]
@@ -176,6 +190,7 @@ pub mod tests {
         MakerConfig {
             rpc: "http://127.0.0.1:8545".into(),
             chain_id: 84_532,
+            zcash_network: None,
             swap: Address::repeat_byte(0x11),
             oracle: Address::repeat_byte(0x22),
             lwd: "https://testnet.zec.rocks:443".into(),
@@ -260,6 +275,34 @@ pub mod tests {
         let mut c = judge_like();
         c.sides.clear();
         assert!(c.check().is_err());
+    }
+
+    /// The payments' Zcash network goes with the Base chain unless named, and another pairing is
+    /// refused outside a local fork.
+    #[test]
+    fn the_zcash_network_goes_with_the_chain() {
+        let c = judge_like();
+        assert_eq!(c.zcash().unwrap(), ZcashNetwork::Testnet);
+        let mainnet = MakerConfig {
+            chain_id: 8_453,
+            ..judge_like()
+        };
+        mainnet.check().unwrap();
+        assert_eq!(mainnet.zcash().unwrap(), ZcashNetwork::Mainnet);
+        let raw = serde_json::to_value(MakerConfig {
+            zcash_network: Some(ZcashNetwork::Mainnet),
+            ..judge_like()
+        })
+        .unwrap();
+        assert_eq!(raw["zcash_network"], "mainnet");
+        let named: MakerConfig = serde_json::from_value(raw).unwrap();
+        assert!(named.check().is_err(), "Zcash Mainnet on Base Sepolia");
+        let rehearsal = MakerConfig {
+            local_fork: true,
+            ..named
+        };
+        rehearsal.check().unwrap();
+        assert_eq!(rehearsal.zcash().unwrap(), ZcashNetwork::Mainnet);
     }
 
     /// O-7: the inventory endpoint listens on a loopback address only, apart from the public API.

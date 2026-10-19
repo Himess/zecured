@@ -212,6 +212,7 @@ async fn r24_on_a_fork() -> Result<()> {
 
     // What the bot reads.
     let d = Deployment {
+        zcash: zecured_zcash_ops::network::ZcashNetwork::Testnet,
         registry: Address::ZERO,
         adapter: Address::ZERO,
         usdc: loan,

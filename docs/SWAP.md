@@ -140,5 +140,6 @@ blocks (threat model L26), and its payment carries no outgoing viewing key.
   contract.
 - **Testnet first.** The payment fixture is synthetic (the disposable test vault's real deposit
   transaction with one action re-encrypted as a payment, re-anchored under a synthetic header)
-  until a rehearsal payment gives a real one, and the maker proves Testnet payments only: a Mainnet
-  witness builder and payment-main as an active version come before the swap opens on mainnet.
+  until a rehearsal payment gives a real one. The maker and the witness builder follow the
+  configured Zcash network (D81); payment-main, with real seals, as an active Swap version comes
+  before the swap opens on mainnet.
