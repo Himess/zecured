@@ -37,7 +37,7 @@ use serde::Deserialize;
 use serde_json::json;
 use tracing::{debug, info, warn};
 use zecured_base::events::{self, RegistryEvent};
-use zecured_zcash_ops::spend::zip317_fee;
+use zecured_zcash_ops::{network::ZcashNetwork, spend::zip317_fee};
 
 use crate::chain::{
     CloseRequest, DeleverageRequest, Deployment, IRegistryView, ISettlementAdapter, Liquidation, ORACLE_PRICE_SCALE,
@@ -75,8 +75,17 @@ struct Cli {
     /// so that a restart resumes them. Default: data/bots/<role>-claims.json.
     #[arg(long, env = "BOT_CLAIMS_FILE", global = true)]
     claims: Option<PathBuf>,
+    /// The Zcash network of the deployment's vaults (`testnet` or `mainnet`), when it is not the
+    /// one the deployment's Base chain goes with (a local fork rehearsing with another network).
+    /// The relayer follows its relay's own network.
+    #[arg(long, env = "ZECURED_ZCASH_NETWORK", global = true, value_parser = parse_zcash_network)]
+    zcash_network: Option<ZcashNetwork>,
     #[command(subcommand)]
     cmd: Cmd,
+}
+
+fn parse_zcash_network(name: &str) -> Result<ZcashNetwork> {
+    ZcashNetwork::from_name(name)
 }
 
 #[derive(Subcommand)]
@@ -105,7 +114,7 @@ enum Cmd {
         #[arg(long, default_value_t = 20)]
         zec_risk_bps_per_hour: u64,
     },
-    /// Keep the Zcash header relay fed from Testnet peers (K3; run two, independently).
+    /// Keep the Zcash header relay fed from its network's peers (K3; run two, independently).
     Relayer {
         /// The ZcashHeaderRelay (contracts/deployments/<name>.relay.json).
         #[arg(long, env = "ZECURED_RELAY")]
@@ -166,7 +175,10 @@ async fn main() -> Result<()> {
         })
         .await;
     }
-    let d = Deployment::load(&cli.deployments)?;
+    let mut d = Deployment::load(&cli.deployments)?;
+    if let Some(network) = cli.zcash_network {
+        d.zcash = network;
+    }
     let role = match cli.cmd {
         Cmd::Liquidator { .. } => "liquidator",
         _ => "market-maker",
@@ -239,7 +251,7 @@ async fn liquidator(
     claims_file: PathBuf,
 ) -> Result<()> {
     let me = key.address();
-    let receiver = chain::ironwood_receiver(zaddr)?;
+    let receiver = chain::ironwood_receiver(d.zcash, zaddr)?;
     let provider = ProviderBuilder::new().wallet(EthereumWallet::from(key)).connect_http(rpc.parse()?);
     chain::ensure_allowance(&provider, d.usdc, me, d.adapter).await?;
     let mut armer = claim_armer(&provider, &d, backend, claims_file, None).await?;
@@ -658,7 +670,7 @@ async fn market_maker(
     margin_bps: u16,
     claims_file: PathBuf,
 ) -> Result<()> {
-    let receiver = chain::ironwood_receiver(&zaddr)?;
+    let receiver = chain::ironwood_receiver(d.zcash, &zaddr)?;
     // One provider and one nonce lock for every transaction of this process: the API's closes and
     // deleverages and the arming loop's `armLiveness` come from the same key, concurrently. (The
     // allowance is set before either starts, and waited for.)

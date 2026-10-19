@@ -38,7 +38,7 @@ use zecured_base::{
 };
 use zecured_deposit_witness::{p2p, violation};
 use zecured_policy::derive::{deposit_tag, payout_ref, tag_key};
-use zecured_zcash_ops::{lwd, scan::ReceivedNote};
+use zecured_zcash_ops::{lwd, network::ZcashNetwork, scan::ReceivedNote};
 
 use crate::{
     Coordinator, LIVENESS_WARNING_INTERVAL, RECEIPT_TIMEOUT,
@@ -140,6 +140,8 @@ struct InclusionJob {
     txid: TxId,
     anchor: u32,
     payout_ref: B256,
+    /// The deployment's Zcash network: its peers, light wallet server and statement.
+    network: ZcashNetwork,
     lwd: String,
     settings: DepositProofs,
     seal_path: PathBuf,
@@ -147,13 +149,16 @@ struct InclusionJob {
 
 impl InclusionJob {
     async fn run(self) -> Result<()> {
-        let headers = self.settings.headers.clone();
-        let last = tokio::task::spawn_blocking(move || p2p::extend_file(&headers, &p2p::seed_peers())).await??;
+        let (headers, network) = (self.settings.headers.clone(), self.network);
+        let last = tokio::task::spawn_blocking(move || p2p::extend_file(network, &headers, &p2p::seed_peers(network)))
+            .await??;
         ensure!(last >= self.anchor, "the P2P peers are behind the relay");
         let mut client = lwd::connect(&self.lwd).await?;
+        lwd::check_network(&mut client, network).await?;
         // Checked with the statement natively before anything is proven.
         let (witness, journal) = violation::included(
             &mut client,
+            network,
             &self.settings.headers,
             &self.settings.summaries,
             self.tag_key,
@@ -319,6 +324,7 @@ impl Coordinator {
             txid: payout.txid,
             anchor,
             payout_ref: reference,
+            network: self.cfg.zcash(),
             lwd: self.cfg.lightwalletd_url.clone(),
             settings: prover.settings.clone(),
             seal_path,

@@ -43,7 +43,7 @@ use zecured_swap::{
     pay::{authorize, build_payment, check_payment_note, select_inputs},
     seal::Prover,
 };
-use zecured_zcash_ops::{lwd, scan::ScanState, spend};
+use zecured_zcash_ops::{lwd, network::ZcashNetwork, scan::ScanState, spend};
 
 use crate::{
     api::ApiError,
@@ -237,6 +237,9 @@ impl Wallet {
 /// The maker: its configuration, keys, chain access and books.
 pub struct Maker {
     pub cfg: MakerConfig,
+    /// The payments' Zcash network.
+    pub zcash: ZcashNetwork,
+    /// Its consensus parameters (encodings, branch ids by height).
     pub network: Network,
     pub signer: PrivateKeySigner,
     pub provider: DynProvider,
@@ -301,7 +304,7 @@ pub fn new_record(
 impl Maker {
     pub fn new(
         cfg: MakerConfig,
-        network: Network,
+        zcash: ZcashNetwork,
         signer: PrivateKeySigner,
         provider: DynProvider,
         domain: Eip712Domain,
@@ -316,7 +319,8 @@ impl Maker {
         };
         Self {
             cfg,
-            network,
+            zcash,
+            network: zcash.params(),
             signer,
             provider,
             domain,
@@ -394,6 +398,7 @@ impl Maker {
     /// One pass over every open order.
     pub async fn tick(&self) -> Result<()> {
         let mut client = lwd::connect(&self.cfg.lwd).await?;
+        lwd::check_network(&mut client, self.zcash).await?;
         let zcash_tip = u32::try_from(lwd::latest_block(&mut client).await?.height)?;
         self.scan_wallet(&mut client, zcash_tip).await?;
         self.sync_orders().await?;
@@ -667,13 +672,15 @@ impl Maker {
         let Some(anchor) = payment_anchor(&self.provider, self.cfg.swap, floor, rec.zatoshi).await? else {
             return Ok(false);
         };
-        let headers = self.cfg.headers.clone();
-        let have = tokio::task::spawn_blocking(move || p2p::extend_file(&headers, &p2p::seed_peers())).await??;
+        let (headers, network) = (self.cfg.headers.clone(), self.zcash);
+        let have = tokio::task::spawn_blocking(move || p2p::extend_file(network, &headers, &p2p::seed_peers(network)))
+            .await??;
         anyhow::ensure!(have >= anchor, "the P2P peers are behind the relay");
         let txid = TxId::from_hex(rec.txid.as_deref().context("no txid")?).context("stored txid")?;
         let opening = rec.opening.clone().context("no opening")?;
         let built = payment::build(
             client,
+            self.zcash,
             &self.cfg.headers,
             &self.cfg.summaries,
             txid,

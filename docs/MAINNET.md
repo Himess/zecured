@@ -126,9 +126,10 @@ name a public-good address instead of burning what no victim needs.
   Base: either the maker signs a receipt when it gets the salt and receiver (as the signers do for
   liveness), or the taker posts them encrypted to the maker's key with a proof that they open the
   order's commitment.
-- **Swap before it opens on mainnet.** The maker proves Testnet payments only today: it needs a
-  Mainnet witness builder, and payment-main must be an active Swap version. USDC's blocklist
-  applies: a blocklisted counterparty cannot be paid, and its order's USDC stays in the contract.
+- **Swap before it opens on mainnet.** The maker and the witness builders follow the configured
+  Zcash network (D81); payment-main, with real seals, must be an active Swap version. USDC's
+  blocklist applies: a blocklisted counterparty cannot be paid, and its order's USDC stays in the
+  contract.
 - **Share refresh and repair through the nodes.** The threshold library refreshes every share of
   a vault and repairs a lost one, but no node runs either yet (docs/TIER3.md § 5). Mainnet needs
   both as node rounds, their private messages sealed node to node as in the DKG, and a runbook: a
@@ -159,11 +160,19 @@ app: "Mainnet beta — unaudited — invite only — small caps".
   for a new Swap version.
 - **Operations:** a second stack with its own data directories and units, two independent
   Mainnet light wallet servers, the watchdog on both stacks, one prover and queue for both.
+- **The Zcash network** comes from the configuration (D81): the network config's chain id 8453
+  gives Mainnet (or `zcash_network: "mainnet"`), the maker's config likewise, the bots read it from
+  the deployment's `chainId` and the relayer from its relay's `networkId`. A light wallet server
+  of the other network is refused at its first answer. Until Mainnet's NU7 the witness builders
+  walk NU6.3's epoch from 3,428,143: about 95,000 headers and compact blocks on 2026-10-19, read
+  once into the header file and the summaries cache (minutes; then only the new blocks).
 
 **NU7 activation (about 2026-11-05).** Before it: the relay's activation height, spacing (25 s)
 and averaging window (102 blocks from NU7); ZIP 221's history tree restarting at the activation, so
 a proof's leaf and peaks are of its own epoch; the guests' branch ids (deposit-main proves both
-NU6.3 and NU7). During it the activation window is watched; if anything is off, the operators
+NU6.3 and NU7); the off-chain stack on a zcash_protocol release with NU7's Mainnet height (the
+payouts' branch id, the nodes' expectations of it and the witness builders' epochs all come from
+it) and the P2P client announcing NU7's Mainnet protocol version (170,190). During it the activation window is watched; if anything is off, the operators
 pause new minting with `zecured-ops`, and exits go on.
 
 ## 6. What stays true on mainnet

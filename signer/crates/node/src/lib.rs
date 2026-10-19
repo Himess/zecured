@@ -398,7 +398,7 @@ impl Node {
         }
         store::private_dir(data_dir)?;
         let store = Store::open(&data_dir.join("store"))?;
-        let zcash = ZcashView::with_witnesses(&cfg.lightwalletd_url, opts.lightwalletd_witnesses);
+        let zcash = ZcashView::with_witnesses(&cfg.lightwalletd_url, cfg.zcash(), opts.lightwalletd_witnesses);
         Ok(Self {
             cfg,
             id,
@@ -641,8 +641,16 @@ impl Node {
             for note in &inputs {
                 self.check_refund_on_base(&v, note).await?;
             }
-            let (session, commitments) =
-                signing::commit(&v, &plan, &inputs, notes.tip, &req, v.inflight.as_ref(), &notes.unspent)?;
+            let (session, commitments) = signing::commit(
+                self.cfg.zcash(),
+                &v,
+                &plan,
+                &inputs,
+                notes.tip,
+                &req,
+                v.inflight.as_ref(),
+                &notes.unspent,
+            )?;
             return self.start_session(&req, session, &commitments, None).await;
         }
         // O-4 and RT-3: the claims as every node and the coordinator plan from them, the claims a
@@ -656,8 +664,16 @@ impl Node {
         let claims = plan_salts(&store, &v, &plan.claims)?;
         drop(store);
         // H-1 (inside `commit`): no other payout while one this node signed can still be mined.
-        let (mut session, commitments) =
-            signing::commit(&v, &plan, &inputs, notes.tip, &req, v.inflight.as_ref(), &notes.unspent)?;
+        let (mut session, commitments) = signing::commit(
+            self.cfg.zcash(),
+            &v,
+            &plan,
+            &inputs,
+            notes.tip,
+            &req,
+            v.inflight.as_ref(),
+            &notes.unspent,
+        )?;
         // Tier 3 (docs/TIER3.md § 5): sign the payout's commitment; the shares wait until Base has it.
         let [input] = inputs.as_slice() else {
             bail!("a payout spends exactly one lineage note ({} here)", inputs.len());

@@ -18,11 +18,11 @@ use clap::Parser;
 use orchard::keys::{FullViewingKey, Scope, SpendingKey};
 use serde_json::{Value, json};
 use zcash_keys::keys::UnifiedFullViewingKey;
-use zcash_protocol::consensus::Network;
 use zecured_policy::derive::tag_key;
 use zecured_zcash_ops::{
     keys::ironwood_receiver,
     lwd,
+    network::ZcashNetwork,
     scan::{ReceivedNote, ScanState},
 };
 
@@ -99,8 +99,16 @@ impl Needles {
     }
 }
 
-async fn scan_notes(lwd_url: &str, fvk: FullViewingKey, birthday: u32) -> Result<Vec<ReceivedNote>> {
+/// The notes of `fvk` from `birthday` on, from a light wallet server that follows `network` (a
+/// server of the other network would find none, and the scan would miss every note value).
+async fn scan_notes(
+    lwd_url: &str,
+    network: ZcashNetwork,
+    fvk: FullViewingKey,
+    birthday: u32,
+) -> Result<Vec<ReceivedNote>> {
     let mut client = lwd::connect(lwd_url).await?;
+    lwd::check_network(&mut client, network).await?;
     let tip = u32::try_from(lwd::latest_block(&mut client).await?.height)?;
     let mut state = ScanState::from_birthday(&mut client, fvk, birthday).await?;
     state.scan_to(&mut client, tip).await?;
@@ -192,11 +200,12 @@ struct Report {
 #[tokio::main]
 async fn main() -> Result<()> {
     let args = Args::parse();
-    let network = if args.mainnet {
-        Network::MainNetwork
+    let zcash = if args.mainnet {
+        ZcashNetwork::Mainnet
     } else {
-        Network::TestNetwork
+        ZcashNetwork::Testnet
     };
+    let network = zcash.params();
     let mut needles = Needles::default();
     let (mut wallets, mut vaults) = (0, 0);
 
@@ -209,7 +218,7 @@ async fn main() -> Result<()> {
         let fvk = FullViewingKey::from(&sk);
         needles.add("receiver", &fvk.address_at(0u32, Scope::External).to_raw_address_bytes());
         let birthday = u32::try_from(file["birthday"].as_u64().context("wallet birthday")?)?;
-        needles.notes(&scan_notes(&args.lwd, fvk, birthday).await?);
+        needles.notes(&scan_notes(&args.lwd, zcash, fvk, birthday).await?);
         wallets += 1;
     }
 
@@ -235,7 +244,7 @@ async fn main() -> Result<()> {
                 .cloned()
                 .context("a vault's viewing key has no Orchard-protocol key")?;
             let birthday = u32::try_from(v["birthday"].as_u64().context("vault birthday")?)?;
-            needles.notes(&scan_notes(&args.lwd, fvk, birthday).await?);
+            needles.notes(&scan_notes(&args.lwd, zcash, fvk, birthday).await?);
             vaults += 1;
         }
     }

@@ -56,13 +56,14 @@ at commit `929a92f7383e036b6f6a48f43ec88c5bdd130003` (2026-10-14, the tip of `ma
 | Zebra regtest | `network = "Regtest"`; heights under `[network.testnet_parameters.activation_heights]` with keys `Canopy`, `NU5`, `NU6`, `"NU6.1"`, `"NU6.2"`, `"NU6.3"`, `NU7`; mining via `generate`/`generatetoaddress` RPCs or `internal-miner`; Zebra ≥6.4 has `[rpc] lightwalletd_listen_addr` (built-in lightwalletd-compatible gRPC) | Zebra book, research (not yet run) | 2026-10-10 |
 | Fees | ZIP-317 marginal fee 5,000 zat/action, 2 grace actions (librustzcash); Zebra ≥6.4 also accepts 1,000 | research | 2026-10-10 |
 
-## Zcash infrastructure (mainnet, header relay fixtures only)
+## Zcash infrastructure (mainnet)
 
 | Fact | Value | Source | Verified |
 |---|---|---|---|
 | P2P network | magic `24e92764`, port 8233; DNS seeders `dnsseed.str4d.xyz`, `dnsseed.z.cash`, `mainnet.seeder.shieldedinfra.net`, `mainnet.seeder.zfnd.org`, `seeder.zec.rocks` | Zebra v7.0.0-rc.0 `zebra-chain/src/parameters/constants.rs` (`magics`), `zebra-network/src/config.rs` (`DEFAULT_MAINNET_PEERS`) | 2026-10-15 |
 | P2P protocol versions | Mainnet peers require ≥ 170,160 (NU6.3); NU7 uses 170,190 on Mainnet and 170,180 on Testnet; Zebra 7.0.0-rc.0 advertises 170,180. Mainnet `getheaders` was answered only by `/Zakura:1.5.0/` and `/Zakura:1.6.0/` peers (protocol 170,190); the Zebra peers tried (4.3.0, 5.0.0, 5.1.0, 6.2.3, 6.4.2) closed the connection on it and a `/MagicBean:6.20.0/` (zcashd) peer timed out | `zebra-network/src/protocol/external/types.rs`, `zebra-network/src/constants.rs`; ZIP 259; `tools/zcash_p2p_headers.py --network mainnet` | 2026-10-15 |
 | Mainnet block API | CipherScan `https://api.mainnet.cipherscan.app/api/block/<height>` (same fields as the Testnet API) | probe; `tools/build_fixture.py --network mainnet --cipherscan` | 2026-10-15 |
+| Light wallet servers' chain name | `GetLightdInfo.chain_name` is `main` on Mainnet (`https://zec.rocks:443` and `https://na.zec.rocks:443`: ECC lightwalletd v0.5.3, branch `0x37a5165b`, height 3,523,050) and `test` on Testnet (`https://testnet.zec.rocks:443`: v0.5.4, branch `0x77190ad9`, height 4,518,055); the stack refuses a server whose chain is not its network's (D81) | `zecured-spike info` | 2026-10-19 |
 
 ## Base Sepolia (84532)
 

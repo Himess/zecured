@@ -38,7 +38,10 @@ decision from its own view of both chains:
   also holds how deep a payout's commitment must be on Base before any share is released: under
   Base's `safe` head or, while that lags, `commit_depth_secs` old (default 120, at most 180), and in
   any case `commit_depth_blocks` deep (default 3); seconds keep their meaning when Base's Denim
-  upgrade brings 200 ms blocks (review H-11). It also holds the L23 and D15 random delays.
+  upgrade brings 200 ms blocks (review H-11). It also holds the L23 and D15 random delays, and
+  the vaults' Zcash network (`zcash_network`; unset, the one the chain id goes with): the node
+  encodes vault addresses and viewing keys for it, builds its expectations of a payout with its
+  branch ids and refuses a light wallet server that follows another network.
 
 The coordinator is trusted for liveness only: it schedules work, builds PCZTs and relays
 messages. It holds no key share and cannot make a node sign anything outside policy.

@@ -575,6 +575,7 @@ impl LwdPayer {
     /// forgets the payments in flight whose inputs were seen spent or that expired.
     async fn sync(&self, st: &mut WalletState) -> anyhow::Result<lwd::LwdClient> {
         let mut client = lwd::connect(&self.lwd_url).await?;
+        lwd::check_network(&mut client, zecured_zcash_ops::network::ZcashNetwork::Testnet).await?;
         let tip = u32::try_from(lwd::latest_block(&mut client).await?.height)?;
         if st.scan.is_none() {
             st.scan = Some(ScanState::from_birthday(&mut client, self.fvk.clone(), self.birthday).await?);

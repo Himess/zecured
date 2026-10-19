@@ -27,10 +27,9 @@ use alloy::{
     providers::{Provider, ProviderBuilder},
     signers::local::PrivateKeySigner,
 };
-use anyhow::{Context, Result, bail, ensure};
+use anyhow::{Context, Result, ensure};
 use clap::{Parser, Subcommand};
 use tracing::{info, warn};
-use zcash_protocol::consensus::Network;
 use zecured_base::gas_with_headroom;
 use zecured_swap::{
     Side,
@@ -97,12 +96,9 @@ fn prover_image_id(cfg: &MakerConfig) -> Result<B256> {
 }
 
 async fn run(cfg: MakerConfig, signer: PrivateKeySigner) -> Result<()> {
-    // The witness builders follow the Zcash Testnet's NU7 history; a Mainnet maker needs them for
-    // Mainnet first (docs/MAINNET.md).
-    if cfg.chain_id == 8_453 {
-        bail!("the maker proves Zcash Testnet payments only (the Mainnet witness builder is not part of this round)");
-    }
-    let network = Network::TestNetwork;
+    // The payments' Zcash network: its encodings, light wallet server, peers and epochs. Its payment
+    // guest (payment-test or payment-main) must be an active Swap version (checked below).
+    let network = cfg.zcash()?;
     let provider = ProviderBuilder::new()
         .wallet(EthereumWallet::from(signer.clone()))
         .connect_http(cfg.rpc.parse()?)

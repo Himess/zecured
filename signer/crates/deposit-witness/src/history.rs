@@ -7,15 +7,45 @@
 //! counts. A deposit proof can therefore show "my deposit's block is in the history committed
 //! by this recent header" without revealing which block it is.
 
-use anyhow::{Result, anyhow, ensure};
+use anyhow::{Context, Result, anyhow, ensure};
 use primitive_types::U256;
 use sha2::{Digest, Sha256};
 use zcash_history::{Entry, NodeData, NodeDataV2, NodeDataV3, Tree, V3, Version};
+use zcash_protocol::consensus::{BlockHeight, BranchId};
+use zecured_zcash_ops::network::ZcashNetwork;
 
 /// NU7 consensus branch ID (testnet activation height 4,465,026; docs/ref/FACTS.md).
 pub const NU7_BRANCH_ID: u32 = 0x77190AD9;
 /// First block of the NU7 epoch on testnet: the first leaf of the epoch's history tree.
 pub const NU7_ACTIVATION_HEIGHT: u32 = 4_465_026;
+
+/// A network-upgrade epoch's history tree: its first block (the tree's first leaf) and the
+/// consensus branch id its leaves carry.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct Epoch {
+    pub activation: u32,
+    pub branch_id: u32,
+}
+
+/// The epoch of block `height` of Zcash `network`, whose history tree that block's header commits
+/// to (ZIP 221: the tree restarts at every network upgrade). Refused unless the statements prove
+/// on it: Testnet's NU7 epoch; Mainnet's NU6.3 epoch, then its NU7 epoch. The heights are
+/// zcash_protocol's (docs/ref/FACTS.md); Mainnet's NU7 has none yet, so every Mainnet block from
+/// NU6.3 on counts as NU6.3's until a release with that height (docs/MAINNET.md § 5).
+pub fn epoch(network: ZcashNetwork, height: u32) -> Result<Epoch> {
+    let params = network.params();
+    let branch = BranchId::for_height(&params, BlockHeight::from_u32(height));
+    let branch_id = u32::from(branch);
+    ensure!(
+        crate::statement_network(network).allows(branch_id),
+        "block {height} of Zcash {network} is in an epoch the statements do not prove on (branch id {branch_id:#010x})"
+    );
+    let (start, _) = branch.height_bounds(&params).context("the epoch has no activation height")?;
+    Ok(Epoch {
+        activation: u32::from(start),
+        branch_id,
+    })
+}
 
 /// Size of a serialized post-NU5 block header (140-byte prefix, compactSize, 1344-byte solution).
 pub const HEADER_LENGTH: usize = 1487;
@@ -187,6 +217,29 @@ pub fn txid_merkle_path(txids: &[[u8; 32]], index: usize) -> Result<Vec<[u8; 32]
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// Each network's epochs as zcash_protocol's heights give them (docs/ref/FACTS.md): Testnet
+    /// proves from NU7 (4,465,026) only; Mainnet from NU6.3 (3,428,143), and NU7 has no Mainnet
+    /// height yet.
+    #[test]
+    fn the_epoch_is_the_networks() {
+        let nu7 = Epoch {
+            activation: NU7_ACTIVATION_HEIGHT,
+            branch_id: NU7_BRANCH_ID,
+        };
+        assert_eq!(epoch(ZcashNetwork::Testnet, NU7_ACTIVATION_HEIGHT).unwrap(), nu7);
+        assert_eq!(epoch(ZcashNetwork::Testnet, 4_500_000).unwrap(), nu7);
+        // Testnet's NU6.3 epoch (4,134,000 ..): not one the Testnet statements prove on.
+        assert!(epoch(ZcashNetwork::Testnet, NU7_ACTIVATION_HEIGHT - 1).is_err());
+        let nu6_3 = Epoch {
+            activation: 3_428_143,
+            branch_id: zecured_deposit_statement::NU6_3_BRANCH_ID,
+        };
+        assert_eq!(epoch(ZcashNetwork::Mainnet, 3_428_143).unwrap(), nu6_3);
+        assert_eq!(epoch(ZcashNetwork::Mainnet, 3_499_045).unwrap(), nu6_3);
+        // Mainnet's NU6.2 epoch: no Ironwood pool, nothing to prove.
+        assert!(epoch(ZcashNetwork::Mainnet, 3_428_142).is_err());
+    }
 
     #[test]
     fn work_matches_the_compact_target() {

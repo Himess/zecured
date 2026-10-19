@@ -40,7 +40,7 @@ use zecured_swap::{
 };
 use zecured_zcash_ops::{keys::ironwood_receiver, lwd, spend};
 
-use crate::{NETWORK, load_wallet, read_secret_json, scan, write_json};
+use crate::{load_wallet, lwd_connect, read_secret_json, scan, write_json, zcash_network, zcash_params};
 
 #[derive(Subcommand)]
 pub enum SwapCmd {
@@ -235,7 +235,7 @@ async fn take_sell_quote(
     ensure!(provider.get_chain_id().await? == chain_id, "the maker quotes for another chain than the RPC's");
     ensure!(q.side == SIDE_SELL && q.taker == me && q.zatoshi == zatoshi, "the quote is not the one asked for");
     check_quote_signature(&swap_domain(chain_id, swap), &q, &signature)?;
-    let receiver = ironwood_receiver(&NETWORK, maker_ua)?.to_raw_address_bytes();
+    let receiver = ironwood_receiver(&zcash_params(), maker_ua)?.to_raw_address_bytes();
     ensure!(
         zecured_swap::receiver_commitment(&maker_salt, &receiver) == q.makerReceiverCommitment,
         "the maker's receiver does not open the quote's commitment"
@@ -352,7 +352,7 @@ async fn pay(wallet: &Path, lwd_url: &str, f: &mut SwapFile, q: &SwapQuote, path
     let recipient = Option::<orchard::Address>::from(orchard::Address::from_raw_address_bytes(&receiver))
         .context("the maker's receiver")?;
     let unsigned = build_payment(
-        &NETWORK,
+        &zcash_params(),
         BlockHeight::from_u32(state.scanned_to + 1),
         &w.fvk,
         state.anchor(),
@@ -372,7 +372,7 @@ async fn pay(wallet: &Path, lwd_url: &str, f: &mut SwapFile, q: &SwapQuote, path
     f.raw_tx = Some(hex::encode(&raw));
     f.status = "paid".into();
     write_json(path, f)?;
-    let mut client = lwd::connect(lwd_url).await?;
+    let mut client = lwd_connect(lwd_url).await?;
     spend::broadcast_raw(&mut client, raw).await?;
     println!("paid {} zatoshi to the maker's receiver (memo bound to the order)", q.zatoshi);
     Ok(())
@@ -388,7 +388,7 @@ async fn prove(
     opts: &SwapOpts,
     provider: &DynProvider,
 ) -> Result<bool> {
-    let mut client = lwd::connect(lwd_url).await?;
+    let mut client = lwd_connect(lwd_url).await?;
     let txid = TxId::from_hex(f.txid.as_deref().context("no txid")?).context("stored txid")?;
     let (_, height) = lwd::raw_transaction(&mut client, &txid).await?;
     if height == 0 {
@@ -403,12 +403,14 @@ async fn prove(
         eprintln!("the relay has not the order's work on top of the payment yet; waiting");
         return Ok(false);
     };
-    let headers = opts.headers.clone();
-    let have = tokio::task::spawn_blocking(move || p2p::extend_file(&headers, &p2p::seed_peers())).await??;
+    let (headers, network) = (opts.headers.clone(), zcash_network());
+    let have =
+        tokio::task::spawn_blocking(move || p2p::extend_file(network, &headers, &p2p::seed_peers(network))).await??;
     ensure!(have >= anchor, "the P2P peers are behind the relay");
     let opening = f.opening.clone().context("no opening")?;
     let built = payment::build(
         &mut client,
+        network,
         &opts.headers,
         &opts.summaries,
         txid,

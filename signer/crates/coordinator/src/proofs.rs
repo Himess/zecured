@@ -60,7 +60,7 @@ use zecured_deposit_witness::{
 };
 use zecured_node::chain::VaultNotes;
 use zecured_policy::derive::deposit_tag;
-use zecured_zcash_ops::{lwd, scan::ReceivedNote};
+use zecured_zcash_ops::{lwd, network::ZcashNetwork, scan::ReceivedNote};
 
 use crate::{
     Coordinator, RECEIPT_TIMEOUT,
@@ -217,6 +217,8 @@ struct Job {
     vault: witness::Vault,
     target: Target,
     anchor: u32,
+    /// The deployment's Zcash network: its peers, light wallet server and statement.
+    network: ZcashNetwork,
     lwd: String,
     settings: DepositProofs,
     seal_path: PathBuf,
@@ -294,12 +296,15 @@ pub(crate) async fn prove_into(
 
 impl Job {
     async fn run(self) -> Result<()> {
-        let headers = self.settings.headers.clone();
-        let last = tokio::task::spawn_blocking(move || p2p::extend_file(&headers, &p2p::seed_peers())).await??;
+        let (headers, network) = (self.settings.headers.clone(), self.network);
+        let last = tokio::task::spawn_blocking(move || p2p::extend_file(network, &headers, &p2p::seed_peers(network)))
+            .await??;
         ensure!(last >= self.anchor, "the P2P peers are behind the relay");
         let mut client = lwd::connect(&self.lwd).await?;
+        lwd::check_network(&mut client, network).await?;
         let built = witness::build(
             &mut client,
+            network,
             &self.settings.headers,
             &self.settings.summaries,
             self.target.txid,
@@ -465,6 +470,7 @@ impl Coordinator {
             },
             target: target.clone(),
             anchor,
+            network: self.cfg.zcash(),
             lwd: self.cfg.lightwalletd_url.clone(),
             settings: prover.settings.clone(),
             seal_path,

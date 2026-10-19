@@ -48,6 +48,17 @@ pub async fn lightd_info(client: &mut LwdClient) -> Result<service::LightdInfo> 
     Ok(client.get_lightd_info(Empty {}).await.map_err(|s| anyhow!("GetLightdInfo: {s}"))?.into_inner())
 }
 
+/// That the server follows `network`: a deployment's light wallet server on the wrong Zcash network
+/// is refused before anything is read from it.
+pub async fn check_network(client: &mut LwdClient, network: crate::network::ZcashNetwork) -> Result<()> {
+    let chain = lightd_info(client).await?.chain_name;
+    ensure!(
+        chain == network.lightd_chain_name(),
+        "the light wallet server follows Zcash chain {chain:?}, the deployment Zcash {network}"
+    );
+    Ok(())
+}
+
 /// Height and hash of the latest block known to the server.
 pub async fn latest_block(client: &mut LwdClient) -> Result<service::BlockId> {
     Ok(client

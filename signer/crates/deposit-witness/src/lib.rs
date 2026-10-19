@@ -14,3 +14,15 @@ pub mod p2p;
 pub mod payment;
 pub mod violation;
 pub mod witness;
+
+pub use zecured_zcash_ops::network::ZcashNetwork;
+
+/// The statements' parameters for Zcash `network`. Their guests are built per network (the
+/// statements' `NETWORK`); a builder checks a witness natively with the parameters of the network
+/// it reads, which must be the network of the guest that proves it.
+pub fn statement_network(network: ZcashNetwork) -> &'static zecured_deposit_statement::Network {
+    match network {
+        ZcashNetwork::Testnet => &zecured_deposit_statement::TESTNET,
+        ZcashNetwork::Mainnet => &zecured_deposit_statement::MAINNET,
+    }
+}

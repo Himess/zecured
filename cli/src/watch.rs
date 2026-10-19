@@ -269,7 +269,7 @@ pub async fn check_third_party(
         let p = registry.claimPayment(committed_ref).call().await.context("Registry.claimPayment")?;
         let address = Option::<orchard::Address>::from(orchard::Address::from_raw_address_bytes(&r.receiver))
             .context("not an Ironwood receiver")?;
-        let value = claim_output_value(client, x, p.outputIndex, ivk, &address).await?;
+        let value = claim_output_value(client, crate::zcash_network(), x, p.outputIndex, ivk, &address).await?;
         findings.push(judge(claim_id, x, p.expected, value, evidence(x, p.outputIndex, r, Some(ivk))));
     }
     Ok(findings)
@@ -325,7 +325,7 @@ pub async fn check_claims(
             };
             let address = Option::<orchard::Address>::from(orchard::Address::from_raw_address_bytes(&r.receiver))
                 .context("not an Ironwood receiver")?;
-            let value = claim_output_value(client, *x, p.outputIndex, ivk, &address).await?;
+            let value = claim_output_value(client, crate::zcash_network(), *x, p.outputIndex, ivk, &address).await?;
             findings.push(judge(p.claimId, *x, p.expected, value, evidence(*x, p.outputIndex, r, Some(ivk))));
         }
     }

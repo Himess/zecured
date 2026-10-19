@@ -16,7 +16,7 @@ use alloy::{
 use anyhow::{Context, Result, anyhow, bail, ensure};
 use rand_core_06::{OsRng, RngCore};
 use serde_json::{Value, json};
-use zcash_protocol::consensus::Network;
+use zecured_zcash_ops::network::ZcashNetwork;
 
 sol! {
     #[derive(Debug)]
@@ -129,6 +129,9 @@ const WAD: u128 = 1_000_000_000_000_000_000;
 /// Addresses and market from `contracts/deployments/base-sepolia.json`.
 #[derive(Clone, Debug)]
 pub struct Deployment {
+    /// The Zcash network of the deployment's vaults: the one its Base chain (`chainId`) goes with,
+    /// unless `--zcash-network` names one.
+    pub zcash: ZcashNetwork,
     pub registry: Address,
     pub adapter: Address,
     pub usdc: Address,
@@ -152,7 +155,10 @@ impl Deployment {
         let m = |k: &str| -> Result<String> {
             Ok(raw["market"][k].as_str().context(format!("missing market.{k}"))?.to_owned())
         };
+        let chain_id = raw["chainId"].as_u64().context("missing chainId")?;
         Ok(Self {
+            zcash: ZcashNetwork::for_base_chain(chain_id)
+                .with_context(|| format!("Base chain {chain_id} goes with no Zcash network: pass --zcash-network"))?,
             registry: c("ZecuredRegistry")?,
             adapter: c("SettlementAdapter")?,
             usdc: m("loanToken")?.parse()?, // Circle USDC on Base Sepolia, MockUSDC on the local fork
@@ -622,9 +628,10 @@ pub async fn position<P: Provider>(p: &P, d: &Deployment, user: Address) -> Resu
     position_in(p, d, &m, user).await
 }
 
-/// The raw 43-byte Orchard-protocol (Ironwood) receiver of the bot's unified address.
-pub fn ironwood_receiver(zcash_address: &str) -> Result<[u8; 43]> {
-    Ok(zecured_zcash_ops::keys::ironwood_receiver(&Network::TestNetwork, zcash_address)
+/// The raw 43-byte Orchard-protocol (Ironwood) receiver of the bot's unified address, an address
+/// of Zcash `network`.
+pub fn ironwood_receiver(network: ZcashNetwork, zcash_address: &str) -> Result<[u8; 43]> {
+    Ok(zecured_zcash_ops::keys::ironwood_receiver(&network.params(), zcash_address)
         .context("the bot's Zcash address has no Ironwood (Orchard-protocol) receiver")?
         .to_raw_address_bytes())
 }

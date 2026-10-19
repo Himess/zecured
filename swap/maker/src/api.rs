@@ -325,7 +325,6 @@ mod tests {
     use axum::body::Body;
     use orchard::keys::{FullViewingKey, SpendingKey};
     use tower::ServiceExt;
-    use zcash_protocol::consensus::Network;
     use zecured_swap::abi::IZecuredSwap;
 
     use super::*;
@@ -404,7 +403,7 @@ mod tests {
         let domain = zecured_swap::quote::swap_domain(cfg.chain_id, cfg.swap);
         let maker = Arc::new(Maker::new(
             cfg,
-            Network::TestNetwork,
+            zecured_zcash_ops::network::ZcashNetwork::Testnet,
             PrivateKeySigner::random(),
             provider,
             domain,
