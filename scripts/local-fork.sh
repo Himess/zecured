@@ -182,8 +182,9 @@ PY
   echo "relay $ZCASH_RELAY, guests: deposit $DEPOSIT_IMAGE_ID, violation $VIOLATION_IMAGE_ID, payment $PAYMENT_IMAGE_ID (MOCK verifier)"
 }
 
-# The opening fee on the fork (optional): a copy of the anvil configuration with ANVIL_FEE_BPS, and the
-# treasury's commitment from tools/recipient. The salt never leaves its 0600 file.
+# The opening fee on the fork (optional): a copy of the anvil configuration with ANVIL_FEE_BPS and
+# ANVIL_MIN_FEE_ZAT (default 20,000: the Registry wants a fee floor above the dust limit and ZIP 317's
+# marginal fee), and the treasury's commitment from tools/recipient. The salt never leaves its 0600 file.
 fee_setup() {
   [[ -n "${ANVIL_FEE_BPS:-}" ]] || return 0
   : "${FEE_TREASURY_ADDRESS:?FEE_TREASURY_ADDRESS: the unified address of the treasury (ANVIL_FEE_BPS is set)}"
@@ -194,10 +195,11 @@ fee_setup() {
     "$ROOT/target/debug/zecured-recipient" --address "$FEE_TREASURY_ADDRESS" --out "$recipient" > /dev/null
   fi
   FEE_COMMITMENT="$(python3 -I -c 'import json,sys; print(json.load(open(sys.argv[1]))["commitment"])' "$recipient")"
-  python3 -I - "$ROOT/contracts/config/zecured-anvil.json" "$config" "$ANVIL_FEE_BPS" <<'PY'
+  python3 -I - "$ROOT/contracts/config/zecured-anvil.json" "$config" "$ANVIL_FEE_BPS" "${ANVIL_MIN_FEE_ZAT:-20000}" <<'PY'
 import json, sys
 c = json.load(open(sys.argv[1]))
 c["feeBps"] = int(sys.argv[3])
+c["minFeeZat"] = int(sys.argv[4])
 json.dump(c, open(sys.argv[2], "w"), indent=2)
 PY
   export FEE_COMMITMENT ZECURED_CONFIG="config/zecured-anvil-fee.local.json"
