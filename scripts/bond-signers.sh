@@ -46,4 +46,9 @@ done
 unset key
 
 cd "$ROOT/contracts"
+# A local fork (anvil, which keeps Base Sepolia's chain id) records its transactions under data/local-fork,
+# never under contracts/broadcast/*/84532, where the real Base Sepolia records live.
+if [[ "$RPC" == http://127.0.0.1* || "$RPC" == http://localhost* ]]; then
+  export FOUNDRY_BROADCAST="$ROOT/data/local-fork/broadcast-bond"
+fi
 forge script script/BondSigners.s.sol --rpc-url "$RPC" --broadcast
