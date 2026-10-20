@@ -165,11 +165,13 @@ named by the first 8 hex digits of its txid and its block.
 | Zecured Swap, Sell (CLI) | `zecured-wallet swap sell`: the maker locked USDC, the wallet paid 0.01 ZEC, waited for the order's work on the relay, proved and settled | order `0x6fc71e83`: payment `d5aaef42` (block 4,523,265), settled 20:54:23 |
 | Swap refund | A Buy order without a destination: `refund` refused before the pay window ended (`PayDeadlineNotPassed`); after the window (the fork's clock moved 7,300 s on) it returned the taker's 12.7765 USDC | order `0x5b4f2e87` |
 | Two signers down | Nodes 4 and 5 offline: a 0.01 TAZ vault borrowed, repaid and released; nodes 1, 2 and 3 committed, signed and confirmed the payout | payout `b8fac240` (block 4,523,234), confirmed 20:34:02 |
+| One signer down at opening | Node 5 switched offline from the admin panel: `loan open` refused at once ("Not enough signers are available"), no vault created; node 5 back, openings work again | 22:53:43, refused in 1 s |
 | Dispute, then proof (T-05, D57, section 3) | A confirmed release disputed by its claimant at 20:35:24; the coordinator queued the payout's inclusion proof at dispute priority (20:36:59), proved it (20:38:06) and Base took it: the claim is final (20:38:15), 2 min 51 s after the dispute | payout `398fda25` (block 4,523,236) |
 | Proven delivery, routine (D76) | A partial release (0.004 ZEC) of a vault that stays open: confirmed 21:04:35, its inclusion proven on Base 21:08:53 by the coordinator's routine proof, inside the 10-minute dispute window | payout `5c71277d` (block 4,523,295), 390,000 zatoshi |
 | Receipts and liveness (R-5, T-05) | Release requested with three signers up, then nodes 3, 4 and 5 offline: nothing could be committed. `slashLiveness` before arming: refused (`NotLivenessEligible`); `loan arm` with a signer's receipt at 20:46:31; once due (20:55:10) `slashLiveness` paid the claimant 13.2825 USDC (value × price × 1.05). Back online, the signers did not pay the claim again; the five gave its Reimburse destination (R-6, `zecured-ops`), and the signers paid that | bond payment 20:55:15; Reimburse payout `2b6e77ae` (block 4,523,295), 990,000 zatoshi |
 | Refund lifecycle (R-11, R-12) | The coverage cap made full (the MOCK base price raised to 50,000 USD): the deposit of a new vault was proven but waited; the owner asked for it back (`loan prove-refund`); the refund proof was accepted as pending (21:10:29), finalized once the relay moved on (21:13:04), given a destination and paid | Refund claim 1,000,000 zatoshi, payout committed 21:16:59, confirmed 21:20:08 |
 | Underwater liquidation | The liquidator stopped, the shock lowered in two steps to 56.25 % (LTV about 107 %), the liquidator restarted: it liquidated the whole collateral; Morpho realized the bad debt (about 1.29 USDC of the lenders' 100,000) | Liquidation claim 1,000,000 zatoshi, payout confirmed 21:51:05 |
+| Browser, gasless | The app (`next dev`, pinned to the fork's deployment) in a browser: a 0.01 TAZ loan, its owner key and Safe account made in the browser, the vault's five signatures checked there; paid from the CLI wallet; the first UserOp deployed the account, authorized the Registry and the Adapter on Morpho and borrowed 4 USDC (577,222 gas); the signers validated the destination; "Repay with USDC, then release" in one UserOp (401,324 gas); the app fetched a signer's receipt and armed the claim's liveness with a sponsored UserOp. Every request of the browser went to the backend only (its RPC, bundler and paymaster proxy) | deposit `5bfdaa09` 22:53:06, activated 23:02:00; borrow `0xb750ec91`; release payout `1182cbdc` (block 4,523,628), committed 23:12:31, confirmed 23:16:01 |
 | Demo path (P-1) | A vault opened by the CLI; `POST /demo/vaults/:id/pay` with a 20-bit stamp: the demo wallet paid the vault, the vault activated; a second request was refused (`demo_already_paid`) | demo payment `85890de1`; activated 20:25:52 |
 | Operators' drill (O-3) | `scripts/ops-drill.sh --send`: a pause with two signatures refused, with three sent; the unpause sent; a Swap version scheduled by all five and the removal of the last working deposit version simulated (three signatures refused, R-23) | each stage in 0 to 4 s |
 | Leak scan (P-6) | `zecured-leak-scan` over the second run's deployment and swap records, with `--blocks --anvil-state`: 298 identifiers of the six test wallets and six vaults | 159 events, 108 transactions' calldata, 320 storage words: **0 matches** |
@@ -198,10 +200,20 @@ the same relay and the MOCK verifier; DEMO.md's scenes:
 | Prove | `build-violation uncommitted` anchored at 4,523,547: the witness in 68 s; the MOCK host sealed its journal (the zkVM proves such a witness for real, § 2b) | the journal: kind 1, the anchor, the payout's reference, the note's tag; no Zcash transaction, note or address |
 | Slash | `proveViolation` once the anchor had the fork's slash work (22:38:08, 363,360 gas with the MOCK verifier): the vault frozen at once; `executeSlash` after the 2-minute window (22:40:14, 522,976 gas) | all five bonds 0, `halted()` true, the 5 USDC bounty cap owed to the prover, the vault compromised |
 
-Found and fixed: `signer-network.sh init` gave a node without a key in `.env` an empty key, which the node refuses, so
-a network of fresh keys (the theft demo's) could not be initialized.
+The compensation then ran as far as it goes for this victim: `tallyVault`, `finalizeIncident` (the incident at
+$1,265, every layer covered at 100 %) and `settleVault`. The victim was the CLI's account, which had never borrowed and
+so had never authorized the Registry on Morpho: by design its share is zero, since an unauthorized vault's zZEC cannot
+be retired (the app's first UserOp gives that authorization). The leak scan of this deployment (222 identifiers of two
+wallets and the vault; 48 events, 25 transactions' calldata, 115 storage words) found **0 matches**.
 
-Not in these runs: the browser app's sponsored flow (run on the v2 contracts, first table).
+Found and fixed: `signer-network.sh init` gave a node without a key in `.env` an empty key, which the node refuses, so
+a network of fresh keys (the theft demo's) could not be initialized. In the browser run, the app warned that a correct
+deposit "cannot back the loan" and kept asking for the payment until its proof was on Base (V-10).
+
+Not in these runs: closing and deleveraging from the app. On the second fork the swap refund test had moved the
+fork's clock 7,300 s ahead, so a request the browser dated by its own clock had already expired there
+(`RequestExpired`), and the coordinator's R-3 keeper, which reads its own clock, saw confirmations as disputable for
+longer than Base did.
 
 ## 2b. Tier 2 deposit proofs (docs/TIER2.md)
 
