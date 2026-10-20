@@ -99,7 +99,7 @@ from symbolic storage, which no change to the token can break.
 ## 2. Live end-to-end runs
 
 The runs in the first table used the v2 contracts (signer attestations, 2026-10-11 to 10-14); the v3 runs on a local
-fork follow it (2026-10-16), and the jury deployment's will follow those.
+fork follow it (2026-10-16), then the v4 runs (2026-10-19 and 10-20), and the jury deployment's will follow those.
 
 Setup: Zcash **testnet** after NU7 through `testnet.zec.rocks`, five signer node processes plus
 the coordinator talking over HTTP, and the Base side on a local fork of Base Sepolia (the real
@@ -144,6 +144,48 @@ the code the jury deployment runs.
 Not in this run: the opening fee (the fork's config charges none), liquidation and close from collateral, and the
 app's sponsored UserOps. Twice the coordinator asked for signatures right after a new Base event that the nodes had
 not applied yet; they refused, and its next pass, about 80 seconds later, went through.
+
+### v4 on a local fork (2026-10-19 and 2026-10-20)
+
+Two runs of the v4 code on fresh anvil forks of Base Sepolia (blocks 48,316,593 and 48,379,206), set up as the v3 run:
+a fresh v4 deployment and ZecuredSwap, the real header relay fed over P2P, the MOCK verifier with the pinned Testnet
+guests' image ids (deposit, violation and payment), five signer node processes, the coordinator, the liquidator, the
+lending market maker and the swap maker, all on the Windows development machine; Zcash is real Testnet (TAZ from the
+Valar faucet). The fork's configuration charges the 0.5 % opening fee (`ANVIL_FEE_BPS=50`, a 20,000 zatoshi floor), and
+its payout lifetime is 240 s (its liveness period is 600 s, see below). Times are UTC; a payout's Zcash transaction is
+named by the first 8 hex digits of its txid and its block.
+
+| Flow | What happened | Evidence |
+|---|---|---|
+| Opening fee (D48) | 0.05 TAZ vault: deposit proven and accepted about 9 minutes after its broadcast, activated 3 minutes later with a Fee claim of 25,000 zatoshi to the treasury's commitment (collateral 4,975,000). The Fee claim was paid at once, alone, so it bore its payout's whole ZIP 317 fee (10,000), as ECONOMICS says; borrow 18 USDC, repay, release | fee payout `c7ee110e` (block 4,518,214, 15,000 zatoshi to the treasury); release committed 09:55:07, confirmed 09:58:18 |
+| Liquidation | 0.01 TAZ vault borrowed to 57.7 % LTV; the demo shock set to 90 % at 09:46:14; the liquidator liquidated at 09:46:22 and armed its claim's liveness with a signer's receipt (R-5) at 09:47:53 | Liquidation claim 722,472 zatoshi; payout `dc7c669a` (block 4,518,234), ovk none |
+| Pre-liquidation (D60) | 0.01 TAZ vault borrowed to 49.8 % LTV with the app's preset terms (55 %, close factor 10 to 50 %, incentive 2 to 5 %); shock 87 % at 09:48:20 (LTV 57.2 %): the bot pre-liquidated at 09:48:25, repaying 1.384 USDC for 129,401 zatoshi (it logged that the round lost money on gas, as designed: logged, not enforced) | payout `71e2f625` (block 4,518,234) |
+| Close from collateral | `loan close` on a 0.01 TAZ vault with 5 USDC of debt: the market maker repaid through the SettlementAdapter in one Base transaction | CloseUser 541,138 + CloseMarketMaker 458,862 zatoshi = the outstanding 1,000,000 (I7); one payout, `4a3f0840` for the market maker (block 4,518,244) |
+| Zecured Swap, Buy | Quote, `open` with the taker's USDC and receiver commitment, destination to the maker; the maker paid with memo `"ZSWP" ‖ orderId` and ovk none, proved the payment (MOCK seal) and settled | order `0x21660b10`: 0.01 ZEC for 11.115555 USDC; paid 09:52:27, proven 09:57:39 (anchor 4,518,235), settled 10:00:14 |
+| Zecured Swap, Sell (CLI) | `zecured-wallet swap sell`: the maker locked USDC, the wallet paid 0.01 ZEC, waited for the order's work on the relay, proved and settled | order `0x6fc71e83`: payment `d5aaef42` (block 4,523,265), settled 20:54:23 |
+| Swap refund | A Buy order without a destination: `refund` refused before the pay window ended (`PayDeadlineNotPassed`); after the window (the fork's clock moved 7,300 s on) it returned the taker's 12.7765 USDC | order `0x5b4f2e87` |
+| Two signers down | Nodes 4 and 5 offline: a 0.01 TAZ vault borrowed, repaid and released; nodes 1, 2 and 3 committed, signed and confirmed the payout | payout `b8fac240` (block 4,523,234), confirmed 20:34:02 |
+| Dispute, then proof (T-05, D57, section 3) | A confirmed release disputed by its claimant at 20:35:24; the coordinator queued the payout's inclusion proof at dispute priority (20:36:59), proved it (20:38:06) and Base took it: the claim is final (20:38:15), 2 min 51 s after the dispute | payout `398fda25` (block 4,523,236) |
+| Proven delivery, routine (D76) | A partial release (0.004 ZEC) of a vault that stays open: confirmed 21:04:35, its inclusion proven on Base 21:08:53 by the coordinator's routine proof, inside the 10-minute dispute window | payout `5c71277d` (block 4,523,295), 390,000 zatoshi |
+| Receipts and liveness (R-5, T-05) | Release requested with three signers up, then nodes 3, 4 and 5 offline: nothing could be committed. `slashLiveness` before arming: refused (`NotLivenessEligible`); `loan arm` with a signer's receipt at 20:46:31; once due (20:55:10) `slashLiveness` paid the claimant 13.2825 USDC (value × price × 1.05). Back online, the signers did not pay the claim again; the five gave its Reimburse destination (R-6, `zecured-ops`), and the signers paid that | bond payment 20:55:15; Reimburse payout `2b6e77ae` (block 4,523,295), 990,000 zatoshi |
+| Refund lifecycle (R-11, R-12) | The coverage cap made full (the MOCK base price raised to 50,000 USD): the deposit of a new vault was proven but waited; the owner asked for it back (`loan prove-refund`); the refund proof was accepted as pending (21:10:29), finalized once the relay moved on (21:13:04), given a destination and paid | Refund claim 1,000,000 zatoshi, payout committed 21:16:59, confirmed 21:20:08 |
+| Underwater liquidation | The liquidator stopped, the shock lowered in two steps to 56.25 % (LTV about 107 %), the liquidator restarted: it liquidated the whole collateral; Morpho realized the bad debt (about 1.29 USDC of the lenders' 100,000) | Liquidation claim 1,000,000 zatoshi, payout confirmed 21:51:05 |
+| Demo path (P-1) | A vault opened by the CLI; `POST /demo/vaults/:id/pay` with a 20-bit stamp: the demo wallet paid the vault, the vault activated; a second request was refused (`demo_already_paid`) | demo payment `85890de1`; activated 20:25:52 |
+| Operators' drill (O-3) | `scripts/ops-drill.sh --send`: a pause with two signatures refused, with three sent; the unpause sent; a Swap version scheduled by all five and the removal of the last working deposit version simulated (three signatures refused, R-23) | each stage in 0 to 4 s |
+| Leak scan (P-6) | `zecured-leak-scan` over the second run's deployment and swap records, with `--blocks --anvil-state`: 298 identifiers of the six test wallets and six vaults | 159 events, 108 transactions' calldata, 320 storage words: **0 matches** |
+
+Found and fixed during these runs: the fork's fee setup lacked a fee floor (the Registry refused it); a local fork's bond
+transactions had been committed as Base Sepolia's (removed; the bond script now records a fork's under `data/`); the
+fork's 600-second liveness period was shorter than a payout's lifetime, so R-10 never let the signers commit a claim the
+bots armed at once (the fork now sets `payout_lifetime_secs`); the fork's slash work (38,000,000, about 45 minutes of
+Testnet blocks) never let a delivery proof beat its 10-minute dispute window (now 3,000,000); the wallet stopped on a
+swap payment the server did not know yet, and reused an owner request's nonce after a request two signers had kept;
+the coordinator proved an upheld payout a second time before the slasher's event arrived, and called
+`finalizeActivation` on every pass while a liveness payment had left a bond below the minimum; two scripts did not
+parse in bash 5.2. The first run's fork stopped after 28 hours when the machine ran out of memory.
+
+Not in these runs: the browser app's sponsored flow (run on the v2 contracts, first table) and the theft demo, which
+has its own deployment.
 
 ## 2b. Tier 2 deposit proofs (docs/TIER2.md)
 
