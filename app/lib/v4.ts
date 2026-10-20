@@ -45,6 +45,25 @@ export function capWait(p: {
   return p.vaultStatus === "awaiting_deposit" ? "possible" : "none";
 }
 
+/**
+ * Whether the deposit step still asks for a payment (the address, its QR code, "Pay … from Ironwood"): the signers
+ * have not seen the vault's conforming deposit (`depositSeen`, mined with its confirmations), and Base has neither its
+ * pending activation nor a refund of it. Asking again once the deposit was seen invites a second payment, which only
+ * comes back as a refund.
+ */
+export function awaitingDeposit(p: {
+  /** GET /vaults/:id `status`; undefined while unread. */
+  vaultStatus: string | undefined;
+  depositSeen?: boolean;
+  /** Base has a pending activation for the vault. */
+  pending: boolean;
+  /** Base has a pending refund or a Refund claim for the vault (R-12). */
+  refunding: boolean;
+}): boolean {
+  const waiting = p.vaultStatus === undefined || p.vaultStatus === "awaiting_deposit" || p.vaultStatus === "unknown";
+  return waiting && p.depositSeen !== true && !p.pending && !p.refunding;
+}
+
 /** P-8: what the operator's switch on new vaults means (C01: separate from existing vaults' payouts). */
 export function openingsNotice(o: { open: boolean; inviteOnly: boolean } | null): { title: string; body: string } | null {
   if (!o) return null;

@@ -323,9 +323,12 @@ async fn get_vault(State(c): App, Param(id): Param<B256>) -> ApiResult {
         "payoutInFlight": v.inflight,
         "birthdayHeight": v.birthday_height,
         "tipHeight": v.tip_height,
-        // Deposits that have not landed on Base: each is refunded once a proof lands it (T-02), or,
-        // when no guest of the deployment can land it (`offChain`), off-chain on request (P5, I30).
-        "nonConforming": v.non_conforming.iter().map(|n| json!({ "noteId": n.note_id, "amount": n.amount.to_string(), "offChain": n.offchain })).collect::<Vec<_>>(),
+        // Payments that cannot back the loan, not landed on Base: each is refunded once a proof
+        // lands it (T-02), or, when no guest of the deployment can land it (`offChain`), off-chain
+        // on request (P5, I30). The vault's own deposit, while it waits to land, is not one of them.
+        "nonConforming": v.non_conforming.iter().filter(|n| !n.candidate).map(|n| json!({ "noteId": n.note_id, "amount": n.amount.to_string(), "offChain": n.offchain })).collect::<Vec<_>>(),
+        // R-11.1: the vault's conforming deposit is mined, with its confirmations.
+        "depositSeen": v.deposit_seen,
         // A Refund claim waits for its account's destination (`destinationSet`, T-02). v4: `proven`
         // (section 3: its payout's delivery is proven on Base, final), `disputableUntil` (confirmed
         // by the signers, disputable until then, Unix seconds; null otherwise) and `livenessArmed`

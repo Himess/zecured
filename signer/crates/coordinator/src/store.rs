@@ -114,9 +114,10 @@ pub struct Armed {
     pub payable_at: u64,
 }
 
-/// An unspent deposit of a vault that has not landed on Base, as the app shows it: it is refunded
-/// once a proof lands it as a Refund claim (T-02), or, if no guest of the deployment can land it,
-/// off-chain at its owner's request (P5, I30).
+/// An unspent deposit of a vault that has not landed on Base: the vault's own deposit until its
+/// proof lands it (`candidate`), or a payment that cannot back the loan, refunded once a proof
+/// lands it as a Refund claim (T-02) or, if no guest of the deployment can land it, off-chain at
+/// its owner's request (P5, I30).
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct NoteView {
     pub note_id: B256,
@@ -124,6 +125,11 @@ pub struct NoteView {
     /// P5: no guest of the deployment can land it, so its owner may ask for it back off-chain.
     #[serde(default)]
     pub offchain: bool,
+    /// The vault's own deposit waiting to land, not a payment that cannot back the loan: P1 has
+    /// not decided it yet (it waits for its confirmations) or decided it conforming (it waits for
+    /// its proof). The app lists only the others as non-conforming.
+    #[serde(default)]
+    pub candidate: bool,
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
@@ -512,6 +518,7 @@ pub(crate) mod tests {
             note_id: B256::repeat_byte(9),
             amount: 20_000,
             offchain: false,
+            candidate: false,
         }];
         // The pass applies only what its scan produced.
         store.update(&id, |v| v.non_conforming = notes.clone()).unwrap();

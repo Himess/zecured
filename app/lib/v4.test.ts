@@ -1,5 +1,13 @@
 import { describe, expect, it } from "vitest";
-import { capWait, openingsNotice, openRefusal, PROOF_MINTING_SENTENCE, refundProofRefusal, SWAP_PRIVACY_SENTENCE } from "./v4";
+import {
+  awaitingDeposit,
+  capWait,
+  openingsNotice,
+  openRefusal,
+  PROOF_MINTING_SENTENCE,
+  refundProofRefusal,
+  SWAP_PRIVACY_SENTENCE,
+} from "./v4";
 
 describe("R-11.1: a deposit waiting for room under the coverage cap", () => {
   const waiting = { vaultStatus: "awaiting_deposit", baseStatus: "None" as const, pending: false, mintBlock: "CapExceeded" as const };
@@ -67,5 +75,26 @@ describe("fixed sentences", () => {
     expect(SWAP_PRIVACY_SENTENCE).toBe("On a swap your Base account is visible; where the ZEC goes is not.");
     expect(PROOF_MINTING_SENTENCE).toMatch(/zero-knowledge proof/);
     expect(PROOF_MINTING_SENTENCE).not.toMatch(/signers (see|saw)/);
+  });
+});
+
+describe("the deposit step stops asking for a payment once the deposit is seen", () => {
+  const fresh = { vaultStatus: "awaiting_deposit", pending: false, refunding: false };
+
+  it("asks while nothing was seen, also before the vault's status is read", () => {
+    expect(awaitingDeposit(fresh)).toBe(true);
+    expect(awaitingDeposit({ ...fresh, vaultStatus: undefined })).toBe(true);
+    expect(awaitingDeposit({ ...fresh, depositSeen: false })).toBe(true);
+  });
+
+  it("stops once the signers saw the conforming deposit, before its proof is on Base (second e2e round)", () => {
+    expect(awaitingDeposit({ ...fresh, depositSeen: true })).toBe(false);
+  });
+
+  it("stops once Base has the proof, the activation or a refund", () => {
+    expect(awaitingDeposit({ ...fresh, vaultStatus: "deposit_seen" })).toBe(false);
+    expect(awaitingDeposit({ ...fresh, pending: true })).toBe(false);
+    expect(awaitingDeposit({ ...fresh, refunding: true })).toBe(false);
+    expect(awaitingDeposit({ ...fresh, vaultStatus: "active" })).toBe(false);
   });
 });

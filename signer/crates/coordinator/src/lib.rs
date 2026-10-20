@@ -68,7 +68,7 @@ use zecured_base::{
 };
 use zecured_node::{
     ConfirmIn, ConfirmResponse, DestinationIn, Planning, ReceiptIn, ReceiptOut, RecipientIn, RefundIn,
-    chain::{BaseView, VaultNotes, ZcashView, note_cmx, refund_tags},
+    chain::{BaseView, VaultNotes, ZcashView, note_cmx, refund_tags, to_policy_position},
     config::NetworkConfig,
     dkg::{Round1Out, Round2In, Round2Out, Round3In, Round3Out, Sealed, VaultOpen},
     largest_tier, now,
@@ -194,9 +194,12 @@ pub struct VaultView {
     pub expiry_height: u32,
     pub outstanding: u64,
     pub claims: Vec<ClaimView>,
-    /// Deposits that have not landed on Base: each is refunded once a proof lands it as a Refund
-    /// claim (T-02), whose destination the vault's account then gives.
+    /// Deposits that have not landed on Base: the vault's own deposit while it waits to land
+    /// (`candidate`), and payments that cannot back the loan, each refunded once a proof lands it
+    /// as a Refund claim (T-02), whose destination the vault's account then gives.
     pub non_conforming: Vec<NoteView>,
+    /// R-11.1: P1 classified the vault's conforming deposit (mined, with its confirmations).
+    pub deposit_seen: bool,
     pub inflight: bool,
     pub birthday_height: u32,
     /// Zcash tip at the last coordinator pass (0 before the first pass).
@@ -381,6 +384,13 @@ fn log_failure(vault: &B256, what: &str, e: &anyhow::Error) {
 /// True if an idle vault last scanned at `last` is due for another scan at `now`.
 pub fn idle_scan_due(last: Option<Instant>, now: Instant) -> bool {
     last.is_none_or(|t| now.duration_since(t) >= IDLE_SCAN_INTERVAL)
+}
+
+/// Whether an unlanded deposit at `position` is the vault's own deposit waiting to land rather
+/// than a payment that cannot back the loan: P1 has not decided it (it waits for its
+/// confirmations) or decided it conforming (it waits for its proof).
+pub fn deposit_candidate(decisions: &[(NotePosition, Classification)], position: &NotePosition) -> bool {
+    !decisions.iter().any(|(p, c)| p == position && matches!(c, Classification::NonConforming(_)))
 }
 
 /// The end of a vault opening: every signer of the network answered round 3 for itself, all
@@ -1199,6 +1209,7 @@ impl Coordinator {
                 })
                 .collect(),
             non_conforming: v.non_conforming.clone(),
+            deposit_seen: v.deposit_seen(),
             inflight: v.inflight.is_some(),
             birthday_height: v.birthday,
             tip_height: self.last_tip.load(Ordering::Relaxed),
@@ -1511,6 +1522,7 @@ impl Coordinator {
                 note_id: B256::from(*note_id),
                 amount: n.value(),
                 offchain: notes.refundable.iter().any(|(r, _)| r == note_id),
+                candidate: deposit_candidate(&decisions, &to_policy_position(&n.position)),
             })
             .collect();
         // Only what the scan produced is written; everything else stays as it is now.
@@ -3018,6 +3030,7 @@ mod tests {
             note_id: B256::repeat_byte(9),
             amount: 20_000,
             offchain: true,
+            candidate: false,
         }];
         c.store.lock().await.save(v).unwrap();
         let _scan_in_progress = c.zcash.lock().await;
@@ -3028,6 +3041,34 @@ mod tests {
         assert_eq!(view.non_conforming.len(), 1);
         let e = c.view(B256::repeat_byte(2)).await.unwrap_err();
         assert_eq!(public_error(&e), Some(PublicError::UnknownVault));
+    }
+
+    /// The app warns of payments that cannot back the loan from `nonConforming`: the vault's own
+    /// deposit, waiting for its confirmations (undecided) or for its proof (conforming), is no such
+    /// payment (in the second e2e round the app warned of a correct deposit for minutes); a note P1
+    /// decided non-conforming is. `deposit_seen` follows the conforming decision (R-11.1).
+    #[tokio::test]
+    async fn the_vaults_own_deposit_is_not_a_non_conforming_payment() {
+        let at = |height: u32| NotePosition {
+            height,
+            tx_index: 1,
+            action_index: 0,
+        };
+        let mut decisions = vec![];
+        assert!(deposit_candidate(&decisions, &at(10)), "undecided: waiting for its confirmations");
+        decisions.push((at(10), Classification::Conforming));
+        decisions.push((at(11), Classification::NonConforming(classify::NonConformingReason::SecondPayment)));
+        assert!(deposit_candidate(&decisions, &at(10)), "conforming: waiting for its proof");
+        assert!(!deposit_candidate(&decisions, &at(11)), "a second payment cannot back the loan");
+        assert!(deposit_candidate(&decisions, &at(12)), "a later note, not decided yet");
+
+        let (c, _dir) = offline("own-deposit");
+        let mut v = vault(1);
+        c.store.lock().await.save(v.clone()).unwrap();
+        assert!(!c.view(B256::repeat_byte(1)).await.unwrap().deposit_seen);
+        v.decisions = decisions;
+        c.store.lock().await.save(v).unwrap();
+        assert!(c.view(B256::repeat_byte(1)).await.unwrap().deposit_seen);
     }
 
     fn open_request(owner: &PrivateKeySigner, c: &Coordinator, deadline: u64) -> OpenVaultRequest {
@@ -3609,6 +3650,7 @@ mod tests {
                         note_id,
                         amount: 250_000,
                         offchain,
+                        candidate: false,
                     })
                     .to_vec();
             })

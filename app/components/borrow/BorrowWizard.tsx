@@ -25,7 +25,7 @@ import { checkVaultAddress, openVault, requestRefundProof } from "@/lib/owner";
 import { vaultHref } from "@/lib/routes";
 import { vaultCheckUnavailable, VaultProofError, type VaultCheck } from "@/lib/signers";
 import { feeNotice, formatPeriod, openGate } from "@/lib/v3";
-import { capWait, openingsNotice, openRefusal, refundProofRefusal } from "@/lib/v4";
+import { awaitingDeposit, capWait, openingsNotice, openRefusal, refundProofRefusal } from "@/lib/v4";
 import { blocksToDuration, formatTaz } from "@/lib/zcash";
 import { DemoPayment } from "./DemoPayment";
 
@@ -372,10 +372,15 @@ const STATUS_STEPS = [
   { status: "active", label: "zZEC minted into your Morpho position", duration: null },
 ] as const;
 
-/** Where the deposit is: the signers' status, and Base's pending activation (K3) between proof and mint. */
-function statusStep(vault: Vault | null, basePending: boolean): number {
-  if (vault?.status === "active") return 3;
+/**
+ * Where the deposit is: the signers' status, and Base's own word: its pending activation (K3) between proof and mint,
+ * then the active vault (the backend follows Base's events a little later).
+ */
+function statusStep(vault: Vault | null, basePending: boolean, baseActive: boolean): number {
+  if (vault?.status === "active" || baseActive) return 3;
   if (basePending) return 2;
+  // The deposit is mined with its confirmations; its proof is not on Base yet.
+  if (vault?.status === "awaiting_deposit" && vault.depositSeen) return 1;
   const i = vault ? STATUS_STEPS.findIndex((s) => s.status === vault.status) : 0;
   return Math.max(0, i);
 }
@@ -396,13 +401,17 @@ function DepositStep({ loan, vault, vaultError }: { loan: StoredLoan; vault: Vau
   // Base: a proven deposit waiting to be activated, or one that came back as a refund (T-02).
   const ledger = useVaultLedger(loan.vaultId, 20_000);
   const l = ledger.data;
-  const statusIndex = statusStep(vault, Boolean(l?.pending));
+  const statusIndex = statusStep(vault, Boolean(l?.pending), l?.status === "Active");
   const refunded = Boolean(l && l.claims.some((c) => c.kind === "Refund"));
   // R-12: proven as a refund, its claim not open yet.
   const refundPending = (l?.pendingRefunds?.length ?? 0) > 0;
   // Paying again after the deposit was seen, or after expiry, does not back the loan.
-  const awaiting =
-    (!vault || vault.status === "awaiting_deposit" || vault.status === "unknown") && !l?.pending && !refunded && !refundPending;
+  const awaiting = awaitingDeposit({
+    vaultStatus: vault?.status,
+    depositSeen: vault?.depositSeen,
+    pending: Boolean(l?.pending),
+    refunding: refunded || refundPending,
+  });
   const expiry = vault?.expiryHeight ?? loan.expiryHeight;
   const blocksLeft = vault?.tipHeight !== undefined && expiry !== undefined ? expiry - vault.tipHeight : null;
   // R-11.1: the deposit is on Zcash but its proof waits for room under the coverage cap.
@@ -457,7 +466,7 @@ function DepositStep({ loan, vault, vaultError }: { loan: StoredLoan; vault: Vau
             Checking the signers&apos; signatures on this vault…
           </p>
         ) : null}
-        {!awaiting && vault?.status === "deposit_seen" && !l?.pending && cap === "none" ? (
+        {!awaiting && (vault?.status === "deposit_seen" || vault?.depositSeen) && !l?.pending && cap === "none" ? (
           <Notice tone="ok" title="Deposit received on Zcash" live>
             <p>
               A zero-knowledge proof that your deposit is in a Zcash block is being made and sent to Base; nothing is
