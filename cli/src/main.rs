@@ -622,11 +622,21 @@ fn check_viewing_key(ufvk: &str, l: &LoanFile) -> Result<bool> {
     Ok(true)
 }
 
+/// The next nonce of the loan's owner requests, spent and saved before the request is sent. A
+/// request can reach some signers and still fail (too few available): those signers keep its nonce
+/// as used, so it is never sent again (they keep a set of used nonces; the app draws random ones).
+fn spend_nonce(wallet: &Path, vault: &B256, l: &mut LoanFile) -> Result<u64> {
+    let nonce = l.next_nonce;
+    l.next_nonce += 1;
+    write_json(&loan_path(wallet, vault), l)?;
+    Ok(nonce)
+}
+
 /// The vault's viewing key from the backend (owner-signed `ViewKeyRequest`), refused unless it
 /// is the key every signer signed when the vault opened; `false` for loans opened before that.
 async fn viewing_key(wallet: &Path, backend: &str, vault: &B256) -> Result<(String, bool)> {
     let (mut l, owner, _) = owner_ctx(wallet, vault, Some(String::new()))?;
-    let nonce = l.next_nonce;
+    let nonce = spend_nonce(wallet, vault, &mut l)?;
     let deadline = now() + REQUEST_TTL_SECS;
     let msg = ViewKeyRequest {
         vaultId: *vault,
@@ -640,8 +650,6 @@ async fn viewing_key(wallet: &Path, backend: &str, vault: &B256) -> Result<(Stri
         json!({ "nonce": nonce.to_string(), "deadline": deadline.to_string(), "signature": sig }),
     )
     .await?;
-    l.next_nonce += 1;
-    write_json(&loan_path(wallet, vault), &l)?;
     let ufvk = r["ufvk"].as_str().context("the backend returned no viewing key")?.to_owned();
     let checked = check_viewing_key(&ufvk, &l)?;
     Ok((ufvk, checked))
@@ -973,7 +981,7 @@ async fn loan(wallet: &Path, lwd_url: &str, backend: &str, cmd: LoanCmd) -> Resu
             let (mut l, owner, to) = owner_ctx(wallet, &vault, to)?;
             let salt = fresh_salt();
             let receiver = ironwood_receiver(&zcash_params(), &to)?.to_raw_address_bytes();
-            let nonce = l.next_nonce;
+            let nonce = spend_nonce(wallet, &vault, &mut l)?;
             let deadline = now() + REQUEST_TTL_SECS;
             let msg = RefundRequest {
                 vaultId: vault,
@@ -990,8 +998,6 @@ async fn loan(wallet: &Path, lwd_url: &str, backend: &str, cmd: LoanCmd) -> Resu
                         "deadline": deadline.to_string(), "signature": sig }),
             )
             .await?;
-            l.next_nonce += 1;
-            write_json(&loan_path(wallet, &vault), &l)?;
             println!("{}", serde_json::to_string_pretty(&r)?);
         }
         LoanCmd::Refunds { vault, rpc } => {
@@ -1063,7 +1069,7 @@ async fn loan(wallet: &Path, lwd_url: &str, backend: &str, cmd: LoanCmd) -> Resu
         }
         LoanCmd::ProveRefund { vault } => {
             let (mut l, owner, _) = owner_ctx(wallet, &vault, Some(String::new()))?;
-            let nonce = l.next_nonce;
+            let nonce = spend_nonce(wallet, &vault, &mut l)?;
             let deadline = now() + REQUEST_TTL_SECS;
             let msg = ProveRefund {
                 vaultId: vault,
@@ -1077,8 +1083,6 @@ async fn loan(wallet: &Path, lwd_url: &str, backend: &str, cmd: LoanCmd) -> Resu
                 json!({ "nonce": nonce.to_string(), "deadline": deadline.to_string(), "signature": sig }),
             )
             .await?;
-            l.next_nonce += 1;
-            write_json(&loan_path(wallet, &vault), &l)?;
             println!("{}", serde_json::to_string_pretty(&r)?);
         }
         LoanCmd::ViewingKey { vault } => {
@@ -1184,7 +1188,7 @@ async fn destination(wallet: &Path, backend: &str, vault: &B256, to: Option<Stri
     let (mut l, owner, to) = owner_ctx(wallet, vault, to)?;
     let salt = fresh_salt();
     let receiver = ironwood_receiver(&zcash_params(), &to)?.to_raw_address_bytes();
-    let nonce = l.next_nonce;
+    let nonce = spend_nonce(wallet, vault, &mut l)?;
     let deadline = now() + REQUEST_TTL_SECS;
     let c = B256::from(commitment(&salt, &receiver));
     let msg = Destination {
@@ -1201,7 +1205,6 @@ async fn destination(wallet: &Path, backend: &str, vault: &B256, to: Option<Stri
                 "deadline": deadline.to_string(), "signature": sig }),
     )
     .await?;
-    l.next_nonce += 1;
     l.destinations.push(KeptDestination {
         commitment: c,
         receiver: hex::encode(receiver),
