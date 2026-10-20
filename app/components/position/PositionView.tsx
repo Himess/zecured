@@ -181,10 +181,11 @@ export function PositionView() {
         </Notice>
       ) : null}
       {liquidations.length > 0 ? (
-        <Notice tone="warn" title="Part of the collateral was liquidated">
+        <Notice tone="warn" title="Part of the collateral went to repay debt">
           <p>
-            A liquidator repaid debt and received {formatTaz(liquidations.reduce((s, c) => s + c.amount, 0n))} in shielded
-            ZEC. The rest is still yours: release it once no debt remains, or close or repay.
+            {formatTaz(liquidations.reduce((s, c) => s + c.amount, 0n))} in shielded ZEC is paid to whoever repaid part of
+            the debt: the market maker of a deleverage you signed, a pre-liquidation within the terms you set, or a
+            liquidator. The rest is still yours: release it once no debt remains, or close or repay.
           </p>
         </Notice>
       ) : null}

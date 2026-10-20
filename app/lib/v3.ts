@@ -246,7 +246,7 @@ export function abandonableAt(c: LedgerClaim, refundAbandonPeriod: number): numb
 
 export const CLAIM_KIND_LABEL: Record<LedgerClaim["kind"], string> = {
   Release: "Release to you",
-  Liquidation: "Liquidation (paid to the liquidator)",
+  Liquidation: "Repaid debt (paid to a liquidator or market maker)",
   CloseUser: "Close: your remainder",
   CloseMarketMaker: "Close: the market maker's share",
   Refund: "Refund of a deposit",
