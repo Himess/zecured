@@ -95,7 +95,7 @@ enum KindArgs {
         claim_file: PathBuf,
     },
     /// Not a violation (T-05): a payout of the vault is in a block under the anchor. The journal
-    /// names it by its payoutRef; the v2 slasher refuses this kind.
+    /// names it by its payoutRef; `ZecuredSlasher.proveInclusion` makes its claims final (D76).
     Included {
         #[arg(long)]
         ufvk_file: PathBuf,

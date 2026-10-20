@@ -184,8 +184,24 @@ the coordinator proved an upheld payout a second time before the slasher's event
 `finalizeActivation` on every pass while a liveness payment had left a bond below the minimum; two scripts did not
 parse in bash 5.2. The first run's fork stopped after 28 hours when the machine ran out of memory.
 
-Not in these runs: the browser app's sponsored flow (run on the v2 contracts, first table) and the theft demo, which
-has its own deployment.
+**The theft demo (T3-6) on the second fork (2026-10-20).** Its own deployment on the same fork (a copy of the anvil
+configuration with `theftDemo` set and the demo's 10 USDC bonds, `DEPLOYMENT_NAME=anvil-theft-demo`), its own five
+signers with fresh keys and its own coordinator, the `demo-tier3` build (nodes on ports 9201 to 9205, backend on 8180),
+the same relay and the MOCK verifier; DEMO.md's scenes:
+
+| Scene | What happened | Evidence |
+|---|---|---|
+| Setup | All five bonded (5 × 10 USDC); a 0.01 TAZ vault opened on the demo's backend and paid: its deposit proven and accepted 7 minutes after the broadcast, the vault activated 3.5 minutes later | activated 22:32:16 |
+| Compromise three | `POST /admin/nodes/{3,4,5}/mode` with `compromised`: all three accepted (outside this build the panel stops at two) | |
+| Steal | `POST /admin/vaults/<id>/steal` to a test wallet of ours: the three compromised nodes signed the sweep in 8 s, with no commitment on Base | sweep `a8c1f1ba` (block 4,523,546), broadcast 22:33:24 |
+| Detect | `zecured-wallet watch --tier3` with the vault's viewing key: `VIOLATION F1`, the vault's lineage note spent by a transaction no commitment names, and the command that builds the witness | 22:34:50, the block after the sweep |
+| Prove | `build-violation uncommitted` anchored at 4,523,547: the witness in 68 s; the MOCK host sealed its journal (the zkVM proves such a witness for real, § 2b) | the journal: kind 1, the anchor, the payout's reference, the note's tag; no Zcash transaction, note or address |
+| Slash | `proveViolation` once the anchor had the fork's slash work (22:38:08, 363,360 gas with the MOCK verifier): the vault frozen at once; `executeSlash` after the 2-minute window (22:40:14, 522,976 gas) | all five bonds 0, `halted()` true, the 5 USDC bounty cap owed to the prover, the vault compromised |
+
+Found and fixed: `signer-network.sh init` gave a node without a key in `.env` an empty key, which the node refuses, so
+a network of fresh keys (the theft demo's) could not be initialized.
+
+Not in these runs: the browser app's sponsored flow (run on the v2 contracts, first table).
 
 ## 2b. Tier 2 deposit proofs (docs/TIER2.md)
 

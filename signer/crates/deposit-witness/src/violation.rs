@@ -193,8 +193,9 @@ pub async fn wrong_claim_ref(
 }
 
 /// Included (design notes T-05): payout `txid` of the vault (tag key `K`) is in a block under
-/// header `tip`. Not a violation: the journal names the payout by its `payoutRef` for a contract
-/// that confirms payouts by proof; the v2 slasher refuses it. The witness carries K only.
+/// header `tip`. Not a violation: the journal names the payout by its `payoutRef`, and
+/// `ZecuredSlasher.proveInclusion` makes the payout's claims final with it (proven delivery, D76;
+/// `proveViolation` refuses kind 5). The witness carries K only.
 pub async fn included(
     client: &mut LwdClient,
     network: ZcashNetwork,
