@@ -9,7 +9,6 @@
 
 use alloy::primitives::B256;
 use anyhow::{Context, Result, anyhow, ensure};
-use tonic::Code;
 use zcash_client_backend::proto::service::TxFilter;
 use zcash_primitives::transaction::Transaction;
 use zcash_protocol::{
@@ -105,22 +104,7 @@ pub fn mined_height(raw_height: u64) -> Option<u32> {
     (raw_height > 0).then(|| u32::try_from(raw_height).ok()).flatten()
 }
 
-/// True if a `GetTransaction` error status definitely means "no such transaction":
-/// lightwalletd answers `NotFound`; Zebra-backed servers may relay the node's RPC error
-/// ("No such mempool or main chain transaction") with another code.
-pub fn is_not_found(code: Code, message: &str) -> bool {
-    match code {
-        Code::NotFound => true,
-        // Transport and load problems never mean "not found".
-        Code::Unavailable
-        | Code::DeadlineExceeded
-        | Code::Cancelled
-        | Code::ResourceExhausted
-        | Code::Unauthenticated
-        | Code::PermissionDenied => false,
-        _ => message.contains("No such mempool or main chain transaction"),
-    }
-}
+pub use zecured_zcash_ops::lwd::is_not_found;
 
 /// Asks the light wallet server about `txid`.
 pub async fn lookup(client: &mut LwdClient, network: &Network, txid: &TxId) -> Result<TxLookup> {
@@ -175,6 +159,8 @@ pub fn confirmable(vault_id: &B256, claims: &[B256], states: &[(B256, u8)], reop
 
 #[cfg(test)]
 mod tests {
+    use tonic::Code;
+
     use super::*;
 
     const EXPIRY: u32 = 1_000;

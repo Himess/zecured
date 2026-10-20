@@ -390,7 +390,9 @@ async fn prove(
 ) -> Result<bool> {
     let mut client = lwd_connect(lwd_url).await?;
     let txid = TxId::from_hex(f.txid.as_deref().context("no txid")?).context("stored txid")?;
-    let (_, height) = lwd::raw_transaction(&mut client, &txid).await?;
+    // Unknown to the server (a payment just broadcast may not have reached its node yet, or the
+    // node dropped it) or in its mempool: rebroadcast and wait.
+    let height = lwd::raw_transaction_if_known(&mut client, &txid).await?.map_or(0, |(_, h)| h);
     if height == 0 {
         if let Some(raw) = &f.raw_tx {
             let _ = spend::broadcast_raw(&mut client, hex::decode(raw)?).await;
