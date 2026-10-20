@@ -45,7 +45,7 @@ sys.exit(0 if url.startswith(("http://127.0.0.1", "http://localhost")) else 1)' 
     source "$ROOT/.env"
     set +a
   fi
-  : "${DEPLOYER_PRIVATE_KEY:?set in .env: it pays the gas of the drill's transactions}"
+  : "${DEPLOYER_PRIVATE_KEY:?set in .env: it pays the gas of the drill transactions}"
 fi
 
 (cd "$ROOT" && cargo build -q -p zecured-ops)

@@ -4,5 +4,5 @@
 # stacks' proofs take turns on the GPU instead of running at once; each coordinator keeps its own queue and order.
 # Standard input (the witness) and the exit status pass through.
 set -euo pipefail
-host=${ZECURED_PROVER_HOST:?set ZECURED_PROVER_HOST to the network's zecured-tier2-host build}
+host=${ZECURED_PROVER_HOST:?set ZECURED_PROVER_HOST to the zecured-tier2-host build of the network}
 exec flock /var/lib/zecured-prover/lock "$host" "$@"
