@@ -266,6 +266,16 @@ impl CoordVault {
             .collect()
     }
 
+    /// Section 3: claims this coordinator's inclusion proof made final on Base (the slasher upheld or
+    /// confirmed each). The books mark them at once, as they will on the slasher's event: a pass
+    /// before that event is ingested must not prove the same payout again.
+    pub fn proven_on_base(&mut self, claims: &[[u8; 32]]) {
+        for c in self.claims.iter_mut().filter(|c| claims.contains(&c.id)) {
+            c.state = ClaimState::Paid;
+            c.proven = true;
+        }
+    }
+
     /// Section 3: the committed claims not final on Base yet (pending, confirmed or disputed), whose
     /// payout's delivery this coordinator proves once it is mined deep enough.
     pub fn to_prove(&self) -> Vec<[u8; 32]> {
@@ -513,6 +523,31 @@ pub(crate) mod tests {
         assert_eq!(v.used_view_nonces, vec![7]);
         assert_eq!(v.non_conforming, notes, "unlanded deposits survive a restart (M-10)");
         assert!(store.update(&B256::repeat_byte(2), |_| ()).is_err());
+    }
+
+    /// Section 3: once Base took this coordinator's inclusion proof, its claims leave both lists at
+    /// once (in the second e2e round a pass before the slasher's event was ingested proved a
+    /// disputed payout again); the other claims stay.
+    #[test]
+    fn a_proof_taken_on_base_is_not_made_again() {
+        let mut v = vault(4);
+        let mut disputed = claim(1, 500_000);
+        disputed.state = ClaimState::Disputed;
+        let mut confirmed = claim(2, 300_000);
+        confirmed.state = ClaimState::Paid;
+        let other = claim(3, 200_000);
+        v.claims = vec![disputed, confirmed, other];
+        v.commitments = vec![CommittedPayout {
+            payout_ref: B256::repeat_byte(7),
+            input_tag: B256::repeat_byte(8),
+            claims: vec![[1; 32], [2; 32], [3; 32]],
+        }];
+        assert_eq!(v.to_uphold(), vec![[1; 32]]);
+        assert_eq!(v.to_prove(), vec![[1; 32], [2; 32], [3; 32]]);
+        v.proven_on_base(&[[1; 32], [2; 32]]);
+        assert!(v.to_uphold().is_empty());
+        assert_eq!(v.to_prove(), vec![[3; 32]]);
+        assert!(v.claims[..2].iter().all(|c| c.proven && c.state == ClaimState::Paid));
     }
 
     #[test]

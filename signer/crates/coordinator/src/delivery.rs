@@ -397,6 +397,18 @@ impl Coordinator {
         ensure!(receipt.status(), "proveInclusionBatch reverted");
         info!(vault = %short(vault_id), claims = claims.len(), "a payout's delivery is proven on Base: its claims are final");
         let _ = fs::remove_file(seal_path);
+        // The claims Base now holds paid are final (the slasher upheld or confirmed each; one it
+        // skipped as compensated or written off stays as its event says). The books follow at
+        // once: a pass before the slasher's event is ingested must not prove this payout again.
+        let registry = IZecuredRegistry::new(self.cfg.registry, &provider);
+        let mut final_now = Vec::with_capacity(claims.len());
+        for id in claims {
+            let status = registry.claimDetails(*id).call().await.context("Registry.claimDetails")?.status;
+            if status == zecured_base::verify::CLAIM_PAID {
+                final_now.push(id.0);
+            }
+        }
+        self.update_vault(vault_id, |v| v.proven_on_base(&final_now)).await?;
         Ok(())
     }
 }
