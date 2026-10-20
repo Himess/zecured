@@ -379,6 +379,16 @@ pub(crate) fn journal_mode(journal: &[u8]) -> u8 {
 }
 
 impl Coordinator {
+    /// Whether to warn again that a signer's bond is below the minimum (at most every half hour).
+    fn bonds_warning_due(&self) -> bool {
+        let mut last = self.bonds_warned.lock().unwrap_or_else(|p| p.into_inner());
+        if last.is_some_and(|at| at.elapsed() < crate::LIVENESS_WARNING_INTERVAL) {
+            return false;
+        }
+        *last = Some(std::time::Instant::now());
+        true
+    }
+
     /// Proof mode: vaults are activated with `attestDepositWithProof`, made by this coordinator.
     pub fn with_deposit_proofs(mut self, settings: DepositProofs, data_dir: &Path) -> Result<Self> {
         self.proofs = Some(Prover::new(settings, data_dir)?);
@@ -771,6 +781,20 @@ impl Coordinator {
         }
         if intake.mintingPaused().call().await.context("Intake.mintingPaused")? {
             return Ok(()); // T-03: it waits for the pause to end
+        }
+        // A bond below the minimum (a liveness payment took part of it, or a signer is leaving):
+        // the Intake activates nothing until every signer is bonded again (SignersNotBonded). The
+        // activation waits, as for a pause, instead of failing on every pass.
+        if contracts.bond != Address::ZERO
+            && !ISignerBond::new(contracts.bond, &provider).fullyBonded().call().await.context("bond.fullyBonded")?
+        {
+            if self.bonds_warning_due() {
+                warn!(
+                    vault = %short(id),
+                    "a signer's bond is below the minimum: activations wait until the signers top up their bonds"
+                );
+            }
+            return Ok(());
         }
         let tip = relay.bestChainTip().call().await.context("relay.bestChainTip")?;
         let now = provider

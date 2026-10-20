@@ -287,6 +287,8 @@ pub struct Coordinator {
     landing: OnceCell<Landing>,
     /// T-05 (a): when the coordinator last warned about each vault's disputed confirmations.
     dispute_warned: std::sync::Mutex<HashMap<B256, Instant>>,
+    /// When this coordinator last warned that a signer's bond is below the minimum.
+    bonds_warned: std::sync::Mutex<Option<Instant>>,
     /// O-2: each node's last applied Base block, as its status reported it, and when it was read.
     node_blocks: std::sync::Mutex<Option<(Instant, Vec<(u16, u64)>)>>,
     /// Mainnet beta (section 6): the invite gate of `POST /vaults`; `None`: openings are open.
@@ -740,6 +742,7 @@ impl Coordinator {
             liveness_warned: std::sync::Mutex::default(),
             landing: OnceCell::new(),
             dispute_warned: std::sync::Mutex::default(),
+            bonds_warned: std::sync::Mutex::default(),
             node_blocks: std::sync::Mutex::default(),
             invites: None,
             receipts: std::sync::Mutex::default(),
