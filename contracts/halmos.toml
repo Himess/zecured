@@ -5,3 +5,9 @@
 forge-build-out = "out/halmos"
 # The longest loop: the signature check over at most 6 signatures.
 loop = 8
+# Branch feasibility queries get 100 ms (Halmos's default is 1 ms). With the default, the number of paths depended on
+# the machine (15 or 16 here, 18 to 23 on CI runners), and on CI B4's payment check reported counterexamples whose
+# concrete replay passes (runs 39227859962 and 39233876008): a branch whose query timed out is followed as if it were
+# feasible. 100 ms leaves these small queries time to finish on a slow runner too; all checks run in about four
+# minutes on a 6-core desktop.
+solver-timeout-branching = "100ms"

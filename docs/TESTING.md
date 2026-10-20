@@ -22,7 +22,8 @@ so signers and contracts cannot silently disagree on a message format.
 
 `cd contracts && FOUNDRY_PROFILE=halmos halmos` runs the `check_` functions in
 `contracts/test/halmos/` with [Halmos](https://github.com/a16z/halmos) 0.3.3 (settings in
-`contracts/halmos.toml`). All twenty-two run in about four minutes on a 6-core desktop. Their inputs are symbolic:
+`contracts/halmos.toml`: loops up to 8, and 100 ms for each branch's feasibility query, so that a slow runner explores
+the same paths as a fast one). All twenty-two run in about four minutes on a 6-core desktop. Their inputs are symbolic:
 callers, recipients, amounts, the function called and the signatures. A passing check holds for
 every value of them, where a fuzz test tries samples.
 

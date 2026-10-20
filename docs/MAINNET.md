@@ -149,7 +149,7 @@ app: "Mainnet beta — unaudited — invite only — small caps".
   checked by the deploy script): `maxTotalZat` 1 ZEC, vaults of 0.05 and 0.1 ZEC, `minBond` 300
   USDC, `coverageBps` 5,000, `feeBps` 50, the template's windows and work tiers, `bountyCap` 100
   USDC, `refundDormancy` 7 days.
-- **Relay:** NU7's Mainnet height (to be assigned on 2026-10-20) in `config/relay-mainnet.json`, a
+- **Relay:** NU7's Mainnet height (3,543,405 proposed on 2026-10-20, not yet ratified; docs/ref/FACTS.md) in `config/relay-mainnet.json`, a
   checkpoint near the tip, two feeders (§ 3).
 - **Price:** `ZecuredPriceFeed` over Chainlink and API3; API3's plan runs until 2026-12-20, past
   the judging period.
