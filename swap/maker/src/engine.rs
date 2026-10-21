@@ -225,17 +225,19 @@ pub fn decide(cfg: &MakerConfig, rec: &OrderRecord, f: &Facts, pay_delay: u32, d
                 },
                 // W-8: not mined as far as the server says, which proves nothing (a reorganization, a
                 // server behind or another one): before its expiry height the payment is sent again;
-                // after it, it never happened only if the wallet shows its inputs unspent. Otherwise
-                // the maker waits, and never pays the order twice.
-                _ => {
-                    if !rec.expiry_height.is_some_and(|e| f.zcash_tip > e) {
-                        Step::Rebroadcast
-                    } else if f.inputs_unspent {
-                        Step::PaymentExpired
-                    } else {
-                        Step::Wait
+                // after it, it never happened only if the wallet shows its inputs unspent, and (N-12)
+                // only once the tip is EXPIRY_MARGIN_BLOCKS past it. Otherwise the maker waits, and
+                // never pays the order twice.
+                _ => match rec.expiry_height {
+                    Some(e) if f.zcash_tip > e => {
+                        if f.inputs_unspent && f.zcash_tip > e.saturating_add(EXPIRY_MARGIN_BLOCKS) {
+                            Step::PaymentExpired
+                        } else {
+                            Step::Wait
+                        }
                     }
-                }
+                    _ => Step::Rebroadcast,
+                },
             }
         }
         (Side::Buy, MakerStatus::Proven) => {
@@ -249,18 +251,23 @@ pub fn decide(cfg: &MakerConfig, rec: &OrderRecord, f: &Facts, pay_delay: u32, d
     }
 }
 
+/// N-12 (W-8): blocks past its expiry height before an unmined payment counts as expired: a short
+/// reorganization, or a light wallet server a block or two behind, could still show it mined at or
+/// below that height.
+pub const EXPIRY_MARGIN_BLOCKS: u32 = 3;
+
 /// W-8: whether a wallet scan that covers blocks up to `scanned_to` shows every input of a payment
 /// with expiry height `expiry` unspent: `inputs` are the payment's input nullifiers (hex) and
 /// `notes` the wallet's notes (nullifier, spent). Then the payment was never mined, and never will
-/// be: no block above its expiry height may hold it. A payment without recorded inputs shows
-/// nothing.
+/// be: no block above its expiry height may hold it. The scan must reach `EXPIRY_MARGIN_BLOCKS`
+/// past that height (N-12). A payment without recorded inputs shows nothing.
 pub fn inputs_unspent(
     scanned_to: u32,
     expiry: u32,
     inputs: &[String],
     notes: impl IntoIterator<Item = ([u8; 32], bool)>,
 ) -> bool {
-    if scanned_to <= expiry || inputs.is_empty() {
+    if scanned_to <= expiry.saturating_add(EXPIRY_MARGIN_BLOCKS) || inputs.is_empty() {
         return false;
     }
     let notes: Vec<(String, bool)> = notes.into_iter().map(|(nf, spent)| (hex::encode(nf), spent)).collect();
@@ -984,7 +991,7 @@ mod tests {
         let mut f = facts(1_000_200);
         f.payment = Some(Seen::NotMined);
         assert_eq!(decide(&cfg, &r, &f, 3, 2), Step::Rebroadcast);
-        f.zcash_tip = 4_500_124;
+        f.zcash_tip = 4_500_127;
         assert_eq!(decide(&cfg, &r, &f, 3, 2), Step::Wait, "expired, its inputs not shown unspent");
         f.inputs_unspent = true;
         assert_eq!(decide(&cfg, &r, &f, 3, 2), Step::PaymentExpired);
@@ -1039,7 +1046,7 @@ mod tests {
         r.anchor_height = Some(4_500_014);
         r.input_nullifiers = vec!["ab".repeat(32)];
         let mut f = facts(1_000_200);
-        f.zcash_tip = 4_500_124;
+        f.zcash_tip = 4_500_127;
         f.payment = Some(Seen::NotMined);
         assert_ne!(decide(&cfg, &r, &f, 3, 2), Step::PaymentExpired, "a payment seen mined never expires");
         assert_eq!(decide(&cfg, &r, &f, 3, 2), Step::Wait);
@@ -1238,11 +1245,38 @@ mod tests {
         let (a, b) = ([0xab; 32], [0xcd; 32]);
         let inputs = vec![hex::encode(a), hex::encode(b)];
         let notes = |a_spent, b_spent| vec![(a, a_spent), (b, b_spent), ([0xee; 32], true)];
-        assert!(inputs_unspent(124, 123, &inputs, notes(false, false)));
-        assert!(!inputs_unspent(123, 123, &inputs, notes(false, false)), "the scan must pass the expiry height");
-        assert!(!inputs_unspent(124, 123, &inputs, notes(false, true)), "an input spent: by the payment or another");
-        assert!(!inputs_unspent(124, 123, &inputs, vec![(a, false)]), "an input the wallet does not know");
-        assert!(!inputs_unspent(124, 123, &[], notes(false, false)), "no recorded inputs: nothing shown");
+        assert!(inputs_unspent(127, 123, &inputs, notes(false, false)));
+        assert!(!inputs_unspent(126, 123, &inputs, notes(false, false)), "the scan must pass the expiry height");
+        assert!(!inputs_unspent(127, 123, &inputs, notes(false, true)), "an input spent: by the payment or another");
+        assert!(!inputs_unspent(127, 123, &inputs, vec![(a, false)]), "an input the wallet does not know");
+        assert!(!inputs_unspent(127, 123, &[], notes(false, false)), "no recorded inputs: nothing shown");
+    }
+
+    /// N-12 (W-8): an unmined payment counts as expired only three blocks after its expiry height:
+    /// before that, a short reorganization or a light wallet server a block or two behind could
+    /// still show it mined at or below that height, and the order would be paid twice.
+    #[test]
+    fn n12_a_payment_expires_only_three_blocks_after_its_expiry_height() {
+        let (a, b) = ([0xab; 32], [0xcd; 32]);
+        let inputs = vec![hex::encode(a), hex::encode(b)];
+        let notes = vec![(a, false), (b, false)];
+        for scanned_to in 124..=126 {
+            assert!(!inputs_unspent(scanned_to, 123, &inputs, notes.clone()), "scanned to {scanned_to}");
+        }
+        assert!(inputs_unspent(127, 123, &inputs, notes));
+        let cfg = judge_like();
+        let mut r = rec(Side::Buy, MakerStatus::Paid);
+        r.expiry_height = Some(4_500_123);
+        r.input_nullifiers = inputs;
+        let mut f = facts(1_000_200);
+        f.payment = Some(Seen::NotMined);
+        f.inputs_unspent = true;
+        for tip in 4_500_124..=4_500_126 {
+            f.zcash_tip = tip;
+            assert_eq!(decide(&cfg, &r, &f, 3, 2), Step::Wait, "tip {tip}: not expired yet");
+        }
+        f.zcash_tip = 4_500_127;
+        assert_eq!(decide(&cfg, &r, &f, 3, 2), Step::PaymentExpired);
     }
 
     /// The maker never pays when the pipeline would not fit before the deadline (docs/SWAP.md "The market maker").
