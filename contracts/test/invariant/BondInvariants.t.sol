@@ -36,7 +36,7 @@ contract BondInvariantsTest is ZecuredFixture {
         usdc.transferOwnership(address(handler)); // MOCK mint for the signers' deposits
         oracle.transferOwnership(address(handler)); // MOCK price moves
 
-        bytes4[] memory selectors = new bytes4[](22);
+        bytes4[] memory selectors = new bytes4[](24);
         selectors[0] = BondHandler.open.selector;
         selectors[1] = BondHandler.open.selector;
         selectors[2] = BondHandler.release.selector;
@@ -59,6 +59,9 @@ contract BondInvariantsTest is ZecuredFixture {
         selectors[19] = BondHandler.withdraw.selector;
         selectors[20] = BondHandler.warp.selector;
         selectors[21] = BondHandler.setPrice.selector;
+        // W-4: late armings.
+        selectors[22] = BondHandler.armLate.selector;
+        selectors[23] = BondHandler.armLate.selector;
         targetSelector(FuzzSelector({addr: address(handler), selectors: selectors}));
         targetContract(address(handler));
         targetSender(makeAddr("zecured.bondinv.caller"));
@@ -66,6 +69,21 @@ contract BondInvariantsTest is ZecuredFixture {
 
     /// Each of the handler's actions runs, in a fixed order, without a violation: liveness with a receipt, the bonds'
     /// reimbursement, a partial unbonding withdrawn once ready, another cancelled, forged receipts refused.
+    /// W-4: a claim armed long after its deadline with its earliest receipt; the bonds pay it exactly when the rules
+    /// (with the arming's own time) say, and never twice.
+    function test_handlerSmoke_lateArming() public {
+        handler.open(1);
+        handler.release(0);
+        handler.armLate(0, 2, 7);
+        assertEq(handler.calls("arm (late)"), 1, "armed late");
+        handler.slashLiveness(0, false);
+        handler.slashLiveness(0, true);
+        handler.slashLiveness(0, true);
+        assertFalse(handler.violated(), handler.violation());
+        assertEq(handler.calls("liveness"), 1, "paid once, when due");
+        invariant_B3_bondPaidClaimsWereArmedOnce();
+    }
+
     function test_handlerSmoke_bonds() public {
         handler.open(1);
         handler.open(2);
@@ -170,7 +188,7 @@ contract BondInvariantsTest is ZecuredFixture {
     }
 
     function afterInvariant() external view {
-        string[20] memory names = [
+        string[21] memory names = [
             "open",
             "release",
             "refund",
@@ -190,7 +208,8 @@ contract BondInvariantsTest is ZecuredFixture {
             "withdraw",
             "withdraw (not ready)",
             "warp",
-            "setPrice"
+            "setPrice",
+            "arm (late)"
         ];
         for (uint256 i; i < names.length; ++i) {
             console.log(names[i], handler.calls(names[i]));

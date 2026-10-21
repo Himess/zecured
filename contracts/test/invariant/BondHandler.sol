@@ -138,15 +138,18 @@ contract BondHandler is Test {
         bool kindOk = c.kind == ClaimKind.Release || c.kind == ClaimKind.Liquidation || c.kind == ClaimKind.CloseUser
             || c.kind == ClaimKind.CloseMarketMaker || c.kind == ClaimKind.Refund;
         if (!kindOk || c.status != ClaimStatus.Pending || c.bondPaid || c.commitment == bytes32(0)) return (false, 0);
-        (bytes32 commitment, uint64 armedAt) = bond.livenessArming(claimId);
-        if (armedAt == 0 || commitment != c.commitment) return (false, 0); // R-5
-        uint64 payableAt = armedAt > c.createdAt ? armedAt : uint64(c.createdAt);
+        (bytes32 commitment, uint64 armedPayableAt) = bond.livenessArming(claimId);
+        if (armedPayableAt == 0 || commitment != c.commitment) return (false, 0); // R-5
+        uint64 payableAt = armedPayableAt > c.createdAt ? armedPayableAt : uint64(c.createdAt);
         uint64 deadline = payableAt + bond.livenessPeriod();
         uint64 dueAt = deadline;
         bytes32 input = registry.claimInput(claimId);
         if (input != bytes32(0)) {
+            // W-4: commitments made before a late arming stay protected in full.
+            uint64 armedAt = bond.livenessArmedAt(claimId);
+            uint64 cap = deadline > armedAt ? deadline : armedAt;
             uint64 last = registry.lastCommitAt(input);
-            uint64 protectedUntil = (last < deadline ? last : deadline) + bond.commitGrace();
+            uint64 protectedUntil = (last < cap ? last : cap) + bond.commitGrace();
             if (protectedUntil > dueAt) dueAt = protectedUntil;
         }
         if (block.timestamp < dueAt) return (false, 0);
@@ -235,6 +238,33 @@ contract BondHandler is Test {
             if (commitment != c.commitment || payableAt != expected) _flag("R-5: an arming not as the rules say");
             armedFor[claimId] = c.commitment;
             calls["arm"]++;
+        } catch {
+            _flag("R-5: a signer's receipt for a payable claim was refused");
+        }
+    }
+
+    /// W-4: a claimant arms long after its claim's deadline, with the earliest receipt (its node held the destination
+    /// at the claim's creation): the arming records its own time, and the commitments made before it stay protected in
+    /// full (`slashLiveness` checks the due time against the rules), so arming late gains nothing.
+    function armLate(uint256 seed, uint256 signerSeed, uint256 delaySeed) external {
+        (bool found, bytes32 claimId) = _claim(seed);
+        if (!found) return;
+        ClaimDetails memory c = registry.claimDetails(claimId);
+        if (c.status != ClaimStatus.Pending || c.bondPaid || c.commitment == bytes32(0)) return;
+        (bytes32 armedCommitment,) = bond.livenessArming(claimId);
+        if (armedCommitment == c.commitment) return; // armed for this destination already
+        uint256 period = bond.livenessPeriod();
+        uint256 late = uint256(c.createdAt) + period + bound(delaySeed, 1, 2 * period);
+        if (block.timestamp < late) vm.warp(late);
+        uint64 receivedAt = uint64(c.createdAt);
+        bytes memory receipt = _sign(
+            signerKeys[_signerIndex(signerSeed)], bond.hashDestinationReceived(claimId, c.commitment, receivedAt)
+        );
+        vm.prank(outsider);
+        try bond.armLiveness(claimId, receivedAt, receipt) {
+            if (bond.livenessArmedAt(claimId) != block.timestamp) _flag("W-4: a late arming did not record its time");
+            armedFor[claimId] = c.commitment;
+            calls["arm (late)"]++;
         } catch {
             _flag("R-5: a signer's receipt for a payable claim was refused");
         }

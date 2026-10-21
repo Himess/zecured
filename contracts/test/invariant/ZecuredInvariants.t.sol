@@ -72,7 +72,7 @@ contract ZecuredInvariantsTest is ZecuredFixture {
         usdc.transferOwnership(address(handler)); // MOCK mint for the handler's actors
         oracle.transferOwnership(address(handler)); // MOCK price moves
 
-        bytes4[] memory selectors = new bytes4[](61);
+        bytes4[] memory selectors = new bytes4[](62);
         selectors[0] = ZecuredHandler.prove.selector;
         selectors[1] = ZecuredHandler.prove.selector; // weighted: deposits first
         selectors[2] = ZecuredHandler.prove.selector;
@@ -137,6 +137,8 @@ contract ZecuredInvariantsTest is ZecuredFixture {
         selectors[58] = ZecuredHandler.provePayout.selector;
         selectors[59] = ZecuredHandler.expireConfirmation.selector;
         selectors[60] = ZecuredHandler.attackReplayOrFinal.selector;
+        // W-2: F1 cases about the notes of pending deposits (a usurped tag).
+        selectors[61] = ZecuredHandler.usurpedTagCase.selector;
         targetSelector(FuzzSelector({addr: address(handler), selectors: selectors}));
         targetContract(address(handler));
         // The handler pranks its own actors, so the caller does not matter. A fixed caller matters on a fork: every
@@ -146,6 +148,22 @@ contract ZecuredInvariantsTest is ZecuredFixture {
 
     /// The refund lifecycle's actions (R-8, R-11, R-12) run, in a fixed order, without a violation: the campaign
     /// explores them at random, this shows each of them does what the handler checks.
+    /// W-2: an F1 case about a pending deposit's note (its tag usurped by a false change record) keeps the note from
+    /// backing a mint; the deposit can still be taken back as a refund.
+    function test_handlerSmoke_usurpedTag() public {
+        handler.prove(1, false, false); // a vault, pending
+        uint256 seed;
+        while (uint256(keccak256(abi.encode(seed))) % 4 != 0) ++seed; // the handler's op 0: a case opens on the tag
+        handler.usurpedTagCase(seed);
+        handler.finalize(0);
+        assertEq(handler.calls("finalize"), 0, "no mint against a note an F1 case is about");
+        assertEq(handler.calls("finalize (gated)"), 1);
+        handler.refundPending(0, true);
+        assertFalse(handler.violated(), handler.violation());
+        invariant_I13_I20_eachNoteLandsOnce();
+        invariant_R8_noClaimOnAPendingVault();
+    }
+
     function test_handlerSmoke_refundLifecycle() public {
         handler.prove(1, false, false); // a vault, pending
         handler.prove(2, false, false);
@@ -554,7 +572,7 @@ contract ZecuredInvariantsTest is ZecuredFixture {
     }
 
     function afterInvariant() external view {
-        string[72] memory names = [
+        string[73] memory names = [
             "prove: pending",
             "prove: refund (known vault)",
             "prove: refund (account bound)",
@@ -626,7 +644,8 @@ contract ZecuredInvariantsTest is ZecuredFixture {
             "preLiquidate (refused)",
             "attack: pre-liquidation",
             "attack: spend pending refund",
-            "attack: replay or final"
+            "attack: replay or final",
+            "usurped tag case"
         ];
         for (uint256 i; i < names.length; ++i) {
             console.log(names[i], handler.calls(names[i]));

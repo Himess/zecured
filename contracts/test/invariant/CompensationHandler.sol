@@ -22,6 +22,7 @@ import {IZecuredDisputes} from "../../src/interfaces/v3/IZecuredDisputes.sol";
 import {IZecuredPayouts} from "../../src/interfaces/v3/IZecuredPayouts.sol";
 import {ViolationKind, ViolationJournal} from "../../src/interfaces/v3/IZecuredSlasher.sol";
 import {IZecuredCompensator, Incident, Victim, Entitlement} from "../../src/interfaces/v3/IZecuredCompensator.sol";
+import {ISignerBond} from "../../src/interfaces/v3/ISignerBond.sol";
 import {SpendCommit} from "../../src/libraries/ZecuredEIP712.sol";
 import {MockHeaderRelay} from "../mocks/MockHeaderRelay.sol";
 import {IntakeHarness} from "../utils/IntakeHarness.sol";
@@ -542,6 +543,46 @@ contract CompensationHandler is Test {
         uint64 expected = registry.claimPayment(p.claimRef).expected;
         uint64 value = uint64(bound(valueSeed, 0, expected - 1));
         if (_open(_journal(ViolationKind.Misdirected, p.claimRef, bytes32(0), value, p.commitment))) calls["F3"]++;
+    }
+
+    /// W-1: a committed payout named its claim under a reference its claimant never computes: F4, proven by a holder of
+    /// K and the claim's salt. The open case counts against the claim (W-5); its execution makes the compensator owe the
+    /// claim, final or not.
+    function wrongRef(uint256 payoutSeed) external {
+        if (payouts.length == 0) return;
+        Payout memory p = payouts[payoutSeed % payouts.length];
+        bytes32 honest = keccak256(abi.encode("zecured.comp.inv.honestRef", p.claimRef));
+        if (_open(_journal(ViolationKind.WrongClaimRef, p.ref, honest, 0, p.commitment))) {
+            if (!slasher.claimCaseOpen(p.claimId)) _flag("W-5: an open F4 case does not count against its claim");
+            calls["F4"]++;
+        }
+    }
+
+    /// W-5: while an F3 or F4 case about a claim is open, the bonds never pay its liveness: its claimant arms it with the
+    /// earliest receipt and asks once the deadline has passed.
+    function livenessDuringCase(uint256 payoutSeed, uint256 signerSeed) external {
+        if (payouts.length == 0) return;
+        Payout memory p = payouts[payoutSeed % payouts.length];
+        if (!slasher.claimCaseOpen(p.claimId)) return;
+        ISignerBond bond = ISignerBond(slasher.signerBond());
+        ClaimDetails memory c = registry.claimDetails(p.claimId);
+        if (c.status != ClaimStatus.Pending || c.bondPaid || c.claimant == address(0)) return;
+        uint64 receivedAt = uint64(c.createdAt);
+        (uint8 v, bytes32 r, bytes32 s) =
+            vm.sign(signerKeys[signerSeed % 5], bond.hashDestinationReceived(p.claimId, c.commitment, receivedAt));
+        try bond.armLiveness(p.claimId, receivedAt, abi.encodePacked(r, s, v)) {}
+        catch {
+            return;
+        }
+        uint64 deadline = bond.livenessDeadline(p.claimId);
+        if (deadline == 0 || deadline > block.timestamp + 30 days) return;
+        _upTo(deadline);
+        vm.prank(c.claimant);
+        try bond.slashLiveness(p.claimId) {
+            _flag("W-5: the bonds paid a claim while an F3 or F4 case about it was open");
+        } catch {
+            calls["liveness (case open)"]++;
+        }
     }
 
     /// After the challenge window anyone executes an open case; it never reverts with enough gas.
