@@ -4,13 +4,14 @@
 //!   zecured-swap-maker invite-hash < code.txt         # keccak256 of an invite code, for the config
 //!
 //! It quotes (`GET /swap/quote`: the oracle price plus or minus the spread, within its inventory,
-//! its caps and ZecuredSwap's, only while it follows both chains and the relay keeps up), follows
-//! its orders on Base, takes a Buy taker's destination (`POST /swap/orders/{id}/destination`),
-//! fixes the height of the proof's anchor, pays one Ironwood note with the memo "ZSWP" || orderId
-//! and `ovk = None` after a random privacy delay, proves the payment under the header at exactly
-//! that height once the relay has the order's tier of work on top of it (W-10), submits the proof
-//! and finalizes; on Sell it refunds itself an order its taker did not prove in time. It never logs
-//! a receiver, a salt, a key, a txid or an IP, nor a payment's block next to its order.
+//! its caps and ZecuredSwap's, only while it follows both chains, the relay keeps up and its
+//! guest's Swap version works: W-7), follows its orders on Base, takes a Buy taker's destination
+//! (`POST /swap/orders/{id}/destination`), fixes the height of the proof's anchor, pays one
+//! Ironwood note with the memo "ZSWP" || orderId and `ovk = None` after a random privacy delay,
+//! proves the payment under the header at exactly that height once the relay has the order's tier
+//! of work on top of it (W-10), submits the proof and finalizes; on Sell it refunds itself an order
+//! its taker did not prove in time. It never logs a receiver, a salt, a key, a txid or an IP, nor a
+//! payment's block next to its order.
 
 mod api;
 mod config;
