@@ -120,6 +120,17 @@ nodes' stores freezes the affected vaults; three leaked stores are enough to ste
   (`--treasury`, `ZECURED_TREASURY_KEYS`), registers the derived recipient with the nodes once Base
   holds the commitment, so the reimbursement is paid like any claim; it never registers a
   destination that is not the derived one.
+- **The prover's budget (W-28).** If three colluding signers withhold a payout's confirmation, the
+  claim stays pending and the honest `Included` proof of its payout must be on Base before the bonds
+  may pay its liveness: within `commitGrace` less the payout's lifetime and the slasher's confirmation
+  work, about 20 minutes in the worst case on the judge deployment. Whoever runs the coordinator's
+  prover keeps a proof (queue, STARK, Groth16 wrap and submission) inside that budget: a GPU prover,
+  or a larger `commitGrace` (the mainnet design, docs/MAINNET.md § 7). The coordinator drops a
+  proof's privacy delay when the delayed anchor would miss such a deadline (W-10).
+- **The coordinator's Ironwood index (W-11).** To resolve commitments its scan does not show, the
+  coordinator keeps the txids of the network's Ironwood transactions in its data directory
+  (`ironwood-txids.<network>.bin`, public chain data), read once over the whole Ironwood history and
+  then extended; deleting it only costs reading the history again.
 - **Deposit proofs (Tier 2):** every deposit reaches Base by proof (D41); a node needs nothing for
   them and signs nothing for them, it applies the resulting events like any other. Proving (the
   coordinator, or the borrower's CLI) and feeding the header relay (`scripts/relay-feed.sh`, anyone)
