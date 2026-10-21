@@ -40,7 +40,9 @@ remove a broken one at once (D63).
    on the relay's best chain and the version still active, `finalizeSettlement` pays the USDC to
    the maker, less the fee (none on the judge deployment or the beta).
 7. **Refund.** If no valid proof stands when the deadline passes, `refund` returns the USDC to
-   the taker. A proof only needs to arrive by the deadline; finalizing may come later.
+   the taker. A proof only needs to arrive by the deadline while it stays valid: one whose anchor
+   leaves the best chain after the deadline cannot be proven again (W-27, docs/MAINNET.md § 7);
+   finalizing may come later.
 
 A Sell runs the same way with the roles swapped: the maker locks the USDC at `open` and names its
 own receiver commitment in the quote; the CLI checks the maker's receiver against it before it

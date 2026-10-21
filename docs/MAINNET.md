@@ -183,3 +183,68 @@ The bonds cover what the cap admits, not more; five colluding signers can take e
 new verifier version can only follow their public delay; proof of work protects a deposit proof
 only by the work it demands; and someone must build each witness and run the prover. docs/ECONOMICS.md
 § "What the bonds do not cover" says the same in numbers.
+
+## 7. Known limitations and their designs
+
+What the independent v4 review (2026-10-21) found that v4.1 does not close, with the design that
+would. Each has a row in docs/DECISIONS.md (D94 to D103).
+
+- **W-22: compensation for claims paid on Zcash (medium).** F3 does not check that the payout X it
+  judges spent the committed input (a claimant cannot compute the input's tag), F4 does not either,
+  and since W-1 F4 compensates a final claim too; `Included` does not bind X to the input (W-11).
+  The spend logic lets a new commitment of a spent input name its claims again (D57 needs it), and
+  the compensator registers a shortfall in any state but `None`. So three colluding signers who
+  also hold a claim (as the liquidator, the market maker or a vault's owner) can have a claim that
+  Zcash already paid compensated again: commit the input a second time naming an unrelated X2 and
+  prove F3 on X2's output (or prove X2 included first), or commit their own claim under a wrong
+  reference and prove F4. Each case slashes the commitment's signers, so while the bonds stand they
+  lose more than they gain (mainnet's coverage is 50 %; at the judge deployment's 100 % they gain at
+  most the bounty, 50 USDC). After any slash the bonds are empty and new bonds are refused, so it
+  costs nothing, and the compensation joins the open incident in layer 2 or 4, ahead of the lenders
+  and owners of the real theft. Design: (a) a second `Included` and F4 that also prove X spent the
+  committed input, with a viewing-key witness as F1's, and a Registry that records which payout paid
+  each claim, so that F3 and F4 on a final claim count only against that payout; (b) claim-level
+  compensation whose own case brought no funds is paid after layer 4, from what the incident leaves,
+  so that self-compensation after a halt takes nothing from the victims.
+- **W-23: the reimbursement, per signer and never blocking.** v4.1 gives each claim the bonds paid
+  its own treasury destination, signed by three signers who each derive it (W-6): three colluders
+  can still sign another destination and take the honest signers' share. Design: each signer
+  registers its own reimbursement commitment when it bonds, and the claim is paid back per share. A
+  bond-paid claim without a destination moves into the change of its input's next commitment, bound
+  to the change's tag, so that its input never freezes; the same for a compensated claim whose
+  input is unspent. And a liveness arming needs the receipts of two different signers, with the
+  later `receivedAt`: one dishonest signer can now arm a claim it never let be delivered.
+- **W-24: borrowing during a challenge window.** Until a theft's case is executed (24 hours on the
+  judge deployment, 3 days on mainnet) the owner of the robbed vault can still borrow up to the
+  LLTV; the keeper burns the collateral down to the LLTV again whenever that would retire something
+  (W-12), but what was borrowed in between is the compensator's. Design: the debt is fixed at
+  `frozenSince` by a snapshot and later borrowing comes out of the owner's equity, or the collateral
+  above the LLTV is escrowed when the case is proven.
+- **W-25: a refund proof that cancels a vault.** Anyone holding a vault's tag key K (the five
+  signers, the prover) can cancel a vault whose activation was never proven with a Refund-mode
+  proof of its deposit: a denial of service that costs the owner its vault and its fee. Design:
+  Refund mode on such a vault only from the journal's account.
+- **W-26: refunds and the cap.** A refund is not counted against the coverage cap, yet a
+  compromised vault's refund is compensated in full. Design: compensate a refund up to the cap's
+  share only.
+- **W-27: a proof that goes stale after its deadline.** A swap settlement or refund proof that
+  arrived in time but whose anchor later left the best chain cannot be proven again once the
+  deadline passed; SWAP.md's "a proof only needs to arrive by the deadline" holds only while the
+  proof stays valid. Design: a bounded period to prove again, and a taker's collateral on Sell.
+- **W-28: the prover's budget when confirmations are withheld.** If three colluders withhold a
+  payout's confirmation, the honest `Included` proof must land within `commitGrace` less the
+  payout's lifetime and the slasher's work: about 20 minutes in the worst case on the judge
+  deployment (docs/OPERATORS.md states the budget). Design: a larger `commitGrace` on mainnet.
+- **W-29: liveness taken before an F3 is proven.** A claimant that takes the bonds' liveness
+  payment first and proves F3 afterwards is paid part of its 105 % by the honest signers' bonds:
+  the F3 still slashes the culprits (W-5), but the slash goes to the pool, not back to them.
+  Accepted for now: the culprits are slashed either way, and the order gains the claimant nothing.
+- **W-30: a refund that cancels its own vault.** A refund waiting on a vault whose activation was
+  dropped can cancel that vault in the same transaction. No design yet: it is listed for the
+  mainnet audit.
+- **W-31: a false change record executed before the deposit lands.** When an F1 case about a tag
+  that colluders recorded as their own vault's change executes before the real deposit's proof lands,
+  it compromises the colluders' vault, whose owner is counted as the victim; the case then follows
+  the note to the deposit's vault once the tag is the deposit's (W-2). The false record is the
+  signers' own violation, provable as F2 if its payout lands; that is the remedy for now.
+

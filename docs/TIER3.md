@@ -307,9 +307,11 @@ redirect the reward (`test_prove_revertsOnABadJournalOrSeal`: a seal for another
     wallet, a ciphertext that decrypts to more than its `cmx` commits, or an index X does not have,
     all count as 0. Honest nodes always pay the committed receiver in the committed output, so this
     raises no false alarm.
-- Base checks: `claimPayment(ref)` exists for `outputIndex`, its claim's commitment is
-  `destCommitment`, and `value < expected`.
-- Slashes the payout's signers.
+- Base checks: `claimPayment(ref)` exists for `outputIndex`, the commitment of its payout recorded the
+  claim under `destCommitment` (`claimRefOf(payoutRef, destCommitment) == ref`: what the payout was
+  committed to, so that a liveness payment that cleared the claim's destination since cannot hide
+  the misdirection, W-5), and `value < expected`.
+- Slashes the payout's signers; the compensator owes the claimant the shortfall.
 
 **F4 WrongClaimRef (the borrower, and every signer).**
 - Private input: the vault's tag key K, and a claim's salt and receiver. A wrong K gives a `payoutRef`
@@ -318,7 +320,11 @@ redirect the reward (`test_prove_revertsOnABadJournalOrSeal`: a seal for another
   honest commitment of X gives the claim) and `destCommitment = keccak256(salt ‖ receiver)`.
 - Base checks: `spendRecord(ref)` exists, and `claimRefOf(ref, destCommitment)` is set and differs
   from `noteTag`.
-- Slashes the record's signers: they signed a reference that hides X from the claimant.
+- Slashes the record's signers: they signed a reference that hides X from the claimant. W-1: the
+  hidden claim (`claimPayment` of the committed reference) is compensated in full, its `expected`,
+  pending or already final; a claim the bonds paid is not (its claimant has its USDC).
+- W-5: while an F3 or F4 case about a claim is open (`claimCaseOpen`), the bonds pay no liveness for
+  it.
 
 **Included (kind 5): not a violation.**
 - Private input: the vault's tag key K.
@@ -344,7 +350,14 @@ redirect the reward (`test_prove_revertsOnABadJournalOrSeal`: a seal for another
   D54) and the anchor (best chain, at least `slashConfirmationWork`);
 - checks the kind's condition and a beneficiary that is not a vault's smart account (smart accounts
   never receive ETH);
-- then opens case `keccak256(kind, ref, noteTag)`: one case per violation, whoever proves it first.
+- then opens case `keccak256(kind, ref, noteTag)`, for F1 `keccak256(kind, ref, noteTag, vaultId)`:
+  one case per violation, whoever proves it first.
+- W-2: an F1 case belongs to the vault that owns its note's tag. When a deposit takes the tag over
+  from a (false) change record, the case moves to the deposit's vault (`followNote`, anyone, open or
+  executed; also at execution): a new case from the same verified fields, a new challenge window, that
+  vault frozen; the old case, if open, is dismissed. While an F1 case is about a note, or one was
+  executed (`openF1CasesOf`, `noteSpendProven`), the Intake activates no deposit of that note and drops
+  it only once its anchor leaves the best chain.
 
 `executeSlash(caseId)`, after the challenge window:
 - checks the anchor and the condition again;
