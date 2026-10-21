@@ -1,9 +1,9 @@
 # Running Zecured on a server
 
-How the demo deployment runs unattended on one Linux VM through the judging period (reviews
-G1–G3). Every service restarts on failure, and a watchdog sends alarms. Everything an operator
-may need to change lives in environment files, not in code: endpoints, keys, thresholds and the
-alarm channel.
+How a deployment runs unattended on one Linux VM (reviews G1–G3). None is kept running through
+the hackathon's judging period (docs/DECISIONS.md D82). Every service restarts on failure, and a
+watchdog sends alarms. Everything an operator may need to change lives in environment files, not in
+code: endpoints, keys, thresholds and the alarm channel.
 
 ## Layout
 

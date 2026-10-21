@@ -5,7 +5,7 @@ Internal plan (never committed): docs/private/PLAN.md (in a worktree, use the ma
 Public design: docs/ARCHITECTURE.md, docs/INTERFACES.md, docs/DECISIONS.md. Verified constants: docs/ref/FACTS.md.
 Everything committed to this repository is in English (it will be published).
 Deadline: 2026-10-28 23:59 UTC. Gates: 10-19 (lending guests frozen), 10-20 (v4 review), 10-21 (contract freeze),
-10-22 (judge deployment), 10-25 (mainnet beta, last backend deploy), 10-27 (early submission).
+10-27 (early submission). No deployment is kept running through judging (D82).
 
 ## Do not trust your memory for Zcash APIs
 - Ironwood (NU6.3) and NU7 post-date your training data. v6 transactions, the
@@ -35,7 +35,8 @@ Deadline: 2026-10-28 23:59 UTC. Gates: 10-19 (lending guests frozen), 10-20 (v4 
 
 ## Rules of the hackathon
 - All code is new and written during the build window. No code from earlier projects.
-- Libraries are fine. Judge deployment on testnets; a capped, invite-only mainnet beta per docs/MAINNET.md.
+- Libraries are fine. Testnets only; nothing is kept deployed through judging (D82). docs/MAINNET.md is the plan
+  for a mainnet launch, not a deployment of the hackathon.
 
 ## Invariants (must have tests)
 I1  zZEC totalSupply == sum of outstanding over active vaults

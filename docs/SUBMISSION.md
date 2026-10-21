@@ -1,8 +1,9 @@
 # Submission description (draft)
 
 The form's description field, in the order the form asks for: what it does, why it does not leak,
-what is real and what is a mock. To finalize with the deployment addresses, the status page and the
-video link.
+what is real and what is a mock. To finalize with the video link. No deployment is kept running
+through judging (DECISIONS D82): the evidence is in TESTING.md, and the README runs the whole system
+on a local fork.
 
 ---
 
@@ -93,4 +94,7 @@ and paid back like any claim. What remains outside: all five signers together
 - **The price.** `MockZecOracle` stands behind `DemoShockOracle`, whose owner-set shock lets the
   demo show a liquidation.
 - **The theft demonstration.** It is a separate deployment with its own signers and a 2-minute
-  challenge window. It never touches the judge deployment.
+  challenge window. It never touches the lending deployment.
+- **No deployment kept running.** Nothing stays deployed through judging (D82). The system ran end
+  to end on Base Sepolia forks with real Zcash testnet transactions, and every pinned guest's real
+  Groth16 seal passes RISC Zero's router (TESTING.md § 2 and § 2b).

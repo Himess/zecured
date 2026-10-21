@@ -103,10 +103,17 @@ Loan size, collateral denomination, interest, liquidation events and the amount 
 you at close, on Base — unlinkable to you. Zcash recipients appear on Base only as salted
 commitments. Full table in [THREAT_MODEL.md](THREAT_MODEL.md).
 
+**Can I try it live?**
+Not on a hosted deployment: none is kept running through judging ([D82](DECISIONS.md)). The
+README runs the whole system, app included, on a local fork of Base Sepolia with real Zcash
+testnet; [TESTING.md](TESTING.md) records the end-to-end runs (short txids and timings) and the
+real Groth16 seals of every pinned guest, checked by RISC Zero's router.
+
 **What's mocked?**
 The price oracle (`MockZecOracle`, behind `DemoShockOracle`, whose owner-set shock shows a
 liquidation) and signer independence (all five nodes run by us; the bonds show the mechanism). The
 theft demonstration is a separate deployment with a 2-minute challenge window. Everything else is
 real: Zcash testnet (NU7) Ironwood transactions, FROST threshold signing, the zero-knowledge deposit
-and violation proofs, the on-chain Zcash header relay, Morpho Blue and Circle's testnet USDC on Base
-Sepolia, gasless smart accounts through our own proxy, bundler and paymaster.
+and violation proofs, the on-chain Zcash header relay, Morpho Blue's own deployment (on Base Sepolia
+forks, where a MockUSDC stands in for Circle's testnet USDC), gasless smart accounts through our own
+proxy, bundler and paymaster.

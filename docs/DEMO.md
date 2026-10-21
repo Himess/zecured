@@ -31,7 +31,7 @@
 
 Three signers really steal from a vault, and the theft is proven and slashed on Base. This runs on
 a separate deployment with its own five signers, where three nodes can be compromised (review
-T3-6, docs/TIER3.md § 8). Its binaries refuse to start against the judge deployment.
+T3-6, docs/TIER3.md § 8). Its binaries refuse to start against the lending deployment (its signers are compiled in).
 
 Setup, once:
 1. `THEFT_DEMO=1 scripts/signer-network.sh init`: five fresh node identities in
@@ -57,7 +57,7 @@ Setup, once:
 
 ## Try with demo TAZ (P-1, DEMO)
 
-On the judge deployment the deposit step offers "Try with demo TAZ" to a judge without testnet ZEC:
+On a testnet deployment the deposit step offers "Try with demo TAZ" to a visitor without testnet ZEC:
 the operators' demo wallet pays the vault its exact amount from its own Ironwood notes. It is a real
 Zcash testnet payment, proven on Base like any deposit. Each vault gets one demo payment, within a
 daily budget, after a second of proof of work in the browser. When the loan is closed its ZEC goes

@@ -139,8 +139,9 @@ name a public-good address instead of burning what no victim needs.
 
 ## 5. Mainnet beta
 
-A capped, invite-only beta on Base mainnet and Zcash Mainnet, unaudited, and labelled so in the
-app: "Mainnet beta — unaudited — invite only — small caps".
+Not run for the hackathon (DECISIONS D82): this is the plan, and the code and configuration for it
+are in the repository. A capped, invite-only beta on Base mainnet and Zcash Mainnet, unaudited, and
+labelled so in the app: "Mainnet beta — unaudited — invite only — small caps".
 
 - **Invitations.** Vault openings (the coordinator's `POST /vaults`) and swap quotes need an invite
   code. Only the codes' hashes are stored, their uses are counted, and one switch closes new

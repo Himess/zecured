@@ -1,7 +1,8 @@
-# Operations through the judging period
+# Operating a deployment
 
-The code is frozen at the submission tag on 28 October. From then until 23 November the
-deployment must run untouched, with only operations allowed:
+No deployment is kept running through the judging period (D82): this page is what running one
+takes, for whoever deploys Zecured. The plan it was written for: the code frozen at the submission
+tag, then the deployment running untouched for weeks, with only operations allowed:
 - restarts;
 - topping up balances;
 - changing endpoints, keys and thresholds in configuration.
