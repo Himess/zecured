@@ -39,7 +39,7 @@ use zecured_swap::{
 use zecured_zcash_ops::keys::encode_ironwood_ua;
 
 use crate::{
-    engine::{Maker, accept_destination},
+    engine::{DestinationFacts, Maker, accept_destination},
     gate::{INVITE_HEADER, admitted},
     quoting::{Market, QuoteJson, QuoteRequest, quote, terms},
     state::MakerStatus,
@@ -83,6 +83,12 @@ impl ApiError {
     pub const PRICE_STALE: Self = Self::new(StatusCode::SERVICE_UNAVAILABLE, "price_stale", "No fresh ZEC price.");
     pub const UNAVAILABLE: Self =
         Self::new(StatusCode::SERVICE_UNAVAILABLE, "unavailable", "The maker cannot follow Zcash or Base right now.");
+    /// W-7: under the code `unavailable`, which the backend's proxy maps.
+    pub const PROOFS_STOPPED: Self = Self::new(
+        StatusCode::SERVICE_UNAVAILABLE,
+        "unavailable",
+        "ZecuredSwap takes no payment proof of the maker's guest now: the maker neither quotes nor pays.",
+    );
     pub const UNKNOWN_ORDER: Self = Self::new(StatusCode::NOT_FOUND, "unknown_order", "No such order of this maker.");
     pub const NOT_BUY: Self =
         Self::new(StatusCode::CONFLICT, "not_buy", "Only a Buy order takes a destination: on Sell the taker pays.");
@@ -123,7 +129,7 @@ pub fn router(maker: Arc<Maker>) -> Router {
         .with_state(maker)
 }
 
-/// The market as the quote needs it: price, relay lag, inventory.
+/// The market as the quote needs it: price, whether a proof could land (W-7), inventory.
 async fn market(m: &Maker, side: Side) -> Result<Market, ApiError> {
     let oracle = IZecPrice::new(m.cfg.oracle, &m.provider);
     let now = m.now().await?;
@@ -138,12 +144,9 @@ async fn market(m: &Maker, side: Side) -> Result<Market, ApiError> {
         Err(_) if m.cfg.local_fork => (low, None),
         Err(_) => return Err(ApiError::PRICE_STALE),
     };
-    // The engine's last pass: it must be recent (the maker follows both chains), and its view of
-    // the relay gives the lag.
-    let (zcash_tip, relay_height, pass_at) = m.last_pass();
-    if crate::engine::unix_now().saturating_sub(pass_at) > 3 * m.cfg.poll_secs + 60 {
-        return Err(ApiError::UNAVAILABLE);
-    }
+    // W-7: the Swap version, read now; the relay's lag from the engine's last pass, which must be
+    // recent (the maker follows both chains).
+    let proofs = m.proof_path().await?;
     let (reserved, open_orders) = {
         let book = m.book.lock().await;
         (book.reserved_zatoshi(), book.open_orders().count())
@@ -156,7 +159,7 @@ async fn market(m: &Maker, side: Side) -> Result<Market, ApiError> {
         price,
         price_age,
         now,
-        relay_lag: zcash_tip.saturating_sub(relay_height),
+        proofs,
         zcash_free: m.balance.load(Ordering::Relaxed).saturating_sub(reserved),
         usdc_free: balance.min(allowance),
         open_orders,
@@ -230,6 +233,8 @@ async fn post_destination(
         return Err(ApiError::BAD_REQUEST);
     };
     let now = m.now().await?;
+    // W-7: whether a proof could land, read before the book is locked.
+    let proofs = m.proof_path().await?;
     // An order opened since the engine's last pass is read from Base directly.
     let known = m.book.lock().await.orders.contains_key(&order_id);
     let fresh = if known {
@@ -242,7 +247,8 @@ async fn post_destination(
         book.orders.entry(order_id).or_insert(rec);
     }
     let rec = book.orders.get(&order_id).ok_or(ApiError::UNKNOWN_ORDER)?.clone();
-    let d = accept_destination(&m.cfg, &m.network, &rec, now, &body.receiver, &body.salt)?;
+    let facts = DestinationFacts { now, proofs };
+    let d = accept_destination(&m.cfg, &m.network, &rec, &facts, &body.receiver, &body.salt)?;
     let entry = book.orders.get_mut(&order_id).expect("read above");
     if entry.status == MakerStatus::AwaitingDestination {
         entry.receiver = Some(hex::encode(d.receiver));
@@ -410,6 +416,7 @@ mod tests {
             limits,
             book,
             wallet(),
+            B256::ZERO,
         ));
         maker.balance.store(100_000_000, Ordering::Relaxed);
         let get = |app: Router| async move {

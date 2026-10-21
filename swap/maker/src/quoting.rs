@@ -3,7 +3,7 @@
 
 use alloy::primitives::{Address, B256, U256};
 use serde::{Deserialize, Serialize};
-use zecured_swap::{Side, abi::SwapQuote};
+use zecured_swap::{Side, abi::SwapQuote, chain::ProofPath};
 
 use crate::{api::ApiError, config::MakerConfig, pricing};
 
@@ -25,8 +25,9 @@ pub struct Market {
     pub price_age: Option<u64>,
     /// Base's clock (the latest block's timestamp).
     pub now: u64,
-    /// Zcash blocks the relay lags the light wallet server's tip.
-    pub relay_lag: u64,
+    /// W-7: whether a proof could land: the Swap version is working, and the Zcash blocks the
+    /// relay lags the light wallet server's tip.
+    pub proofs: ProofPath,
     /// Zatoshi the maker can pay now, less what its unpaid Buy orders already promise.
     pub zcash_free: u64,
     /// USDC the maker can lock now (balance and allowance).
@@ -106,7 +107,11 @@ pub fn terms(cfg: &MakerConfig, limits: &ChainLimits, m: &Market, req: &QuoteReq
         (Side::Buy, _) if cfg.invite_only => return Err(ApiError::TAKER_REQUIRED),
         (Side::Buy, _) => Address::ZERO,
     };
-    if m.relay_lag > cfg.max_relay_lag_blocks {
+    // W-7: no quote whose payment could not be proven: the Swap version works, the relay keeps up.
+    if !m.proofs.version_working {
+        return Err(ApiError::PROOFS_STOPPED);
+    }
+    if m.proofs.relay_lag > cfg.max_relay_lag_blocks {
         return Err(ApiError::RELAY_BEHIND);
     }
     if m.price_age.is_some_and(|age| age > cfg.max_price_age_secs) || m.price.is_zero() {
@@ -192,7 +197,10 @@ mod tests {
             price: U256::from(40_000_000u64) * price_scale() / U256::from(100_000_000u64),
             price_age: Some(60),
             now: 1_760_000_000,
-            relay_lag: 1,
+            proofs: ProofPath {
+                version_working: true,
+                relay_lag: 1,
+            },
             zcash_free: 2_000_000_000,
             usdc_free: U256::from(500_000_000u64),
             open_orders: 0,
@@ -245,7 +253,7 @@ mod tests {
         let l = limits();
         let buy = req("buy", Some(50_000_000), None, None);
         let mut m = market();
-        m.relay_lag = 6;
+        m.proofs.relay_lag = 6;
         assert_eq!(terms(&cfg, &l, &m, &buy), Err(ApiError::RELAY_BEHIND));
         let mut m = market();
         m.price_age = Some(3_601);
@@ -280,5 +288,23 @@ mod tests {
         invite.invite_only = true;
         invite.invite_code_hashes = vec![B256::repeat_byte(1)];
         assert_eq!(terms(&invite, &l, &m, &buy), Err(ApiError::TAKER_REQUIRED), "invitees get bound quotes");
+    }
+
+    /// W-7: no quote, on either side, while ZecuredSwap takes no proof of the maker's guest (its
+    /// Swap version removed, or the router's verifier stopped): a payment could never be proven.
+    #[test]
+    fn w7_refuses_to_quote_when_the_version_is_not_working() {
+        let cfg = judge_like();
+        let mut m = market();
+        m.proofs.version_working = false;
+        assert_eq!(
+            terms(&cfg, &limits(), &m, &req("buy", Some(50_000_000), None, None)),
+            Err(ApiError::PROOFS_STOPPED)
+        );
+        assert_eq!(
+            terms(&cfg, &limits(), &m, &req("sell", Some(50_000_000), None, Some(Address::repeat_byte(7)))),
+            Err(ApiError::PROOFS_STOPPED)
+        );
+        assert_eq!(ApiError::PROOFS_STOPPED.code, "unavailable", "a code the backend's proxy knows");
     }
 }

@@ -40,7 +40,7 @@ use zecured_swap::{
     OrderStatus, Side,
     abi::IZecuredSwap,
     anchor,
-    chain::{anchor_at, finalize_settlement, prove_settlement, relay_tip},
+    chain::{ProofPath, anchor_at, finalize_settlement, prove_settlement, relay_tip, swap_version_working},
     pay::{Seen, authorize, build_payment, check_payment_note, payment_seen, select_inputs},
     seal::Prover,
 };
@@ -80,6 +80,8 @@ pub struct Facts {
     pub tip_epoch_provable: bool,
     /// W-20: mined, the last block of the payment's epoch.
     pub payment_epoch_last: Option<u32>,
+    /// W-7: whether a proof could land (read once per pass).
+    pub proofs: ProofPath,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -165,6 +167,11 @@ pub fn decide(cfg: &MakerConfig, rec: &OrderRecord, f: &Facts, pay_delay: u32, d
             if f.now.saturating_add(cfg.required_secs()) > rec.pay_deadline {
                 return Step::Abandon("too late to pay and prove before the deadline");
             }
+            // W-7: never a payment whose proof could not land (a removed Swap version, a stopped
+            // router, a relay behind); the deadline check abandons the order if it lasts.
+            if !f.proofs.version_working || f.proofs.relay_lag > cfg.max_relay_lag_blocks {
+                return Step::Wait;
+            }
             // W-20: the payment, its anchor and the order's tier of work in one epoch the statement
             // proves on, or no payment yet (past the activation, the next epoch may take it).
             if !anchor::fits_in_epoch(f.zcash_tip, cfg.anchor_pipeline_blocks(), f.tip_epoch_provable, f.tip_epoch_last)
@@ -200,8 +207,15 @@ pub fn decide(cfg: &MakerConfig, rec: &OrderRecord, f: &Facts, pay_delay: u32, d
             }
             match f.payment {
                 Some(Seen::Mined(mined)) => match rec.anchor_height {
-                    // The block seen when the anchor was scheduled (a reorganization may move it).
-                    Some(a) if rec.mined_height == Some(mined) && a > mined => Step::Prove,
+                    // The block seen when the anchor was scheduled (a reorganization may move it); W-7:
+                    // no proving run while ZecuredSwap would not take the proof.
+                    Some(a) if rec.mined_height == Some(mined) && a > mined => {
+                        if f.proofs.version_working {
+                            Step::Prove
+                        } else {
+                            Step::Wait
+                        }
+                    }
                     // W-10: the planned anchor whatever the payment's block, unless it came late;
                     // W-20: never past the last block of the payment's epoch.
                     _ => match anchor::anchor_height(rec.planned_anchor_height, draw, mined, f.payment_epoch_last) {
@@ -253,28 +267,50 @@ pub fn inputs_unspent(
     inputs.iter().all(|input| notes.iter().any(|(nf, spent)| nf == input && !spent))
 }
 
+/// What the maker knows when a destination arrives (`POST /swap/orders/:id/destination`).
+#[derive(Clone, Copy, Debug)]
+pub struct DestinationFacts {
+    /// Base's clock.
+    pub now: u64,
+    /// W-7: whether a proof could land now.
+    pub proofs: ProofPath,
+}
+
 /// `POST /swap/orders/:id/destination`: whether the maker takes the taker's destination for `rec`
 /// now. Only a Buy order still waiting for it (or given the same one again), with time left for
-/// the whole pipeline before its deadline, and a destination that opens its commitment.
+/// the whole pipeline before its deadline, and a destination that opens its commitment; a first
+/// destination only while a proof could land (W-7).
 pub fn accept_destination(
     cfg: &MakerConfig,
     network: &Network,
     rec: &OrderRecord,
-    now: u64,
+    d: &DestinationFacts,
     receiver: &str,
     salt: &str,
 ) -> Result<Destination, ApiError> {
     if rec.side != Side::Buy {
         return Err(ApiError::NOT_BUY);
     }
-    match rec.status {
-        MakerStatus::AwaitingDestination | MakerStatus::DestinationReceived => {}
+    let first = match rec.status {
+        MakerStatus::AwaitingDestination => true,
+        MakerStatus::DestinationReceived => false,
         _ => return Err(ApiError::NOT_AWAITING),
-    }
-    if now.saturating_add(cfg.required_secs()) > rec.pay_deadline {
+    };
+    if d.now.saturating_add(cfg.required_secs()) > rec.pay_deadline {
         return Err(ApiError::TOO_LATE);
     }
-    check_destination(network, receiver, salt, rec.receiver_commitment).map_err(|_| ApiError::BAD_DESTINATION)
+    let destination =
+        check_destination(network, receiver, salt, rec.receiver_commitment).map_err(|_| ApiError::BAD_DESTINATION)?;
+    if first {
+        // W-7: no destination for a payment whose proof could not land; it may be given again later.
+        if !d.proofs.version_working {
+            return Err(ApiError::PROOFS_STOPPED);
+        }
+        if d.proofs.relay_lag > cfg.max_relay_lag_blocks {
+            return Err(ApiError::RELAY_BEHIND);
+        }
+    }
+    Ok(destination)
 }
 
 /// The maker's Ironwood wallet: the file `zecured-wallet init` writes.
@@ -326,6 +362,9 @@ pub struct Maker {
     relay_tip: AtomicU64,
     pass_at: AtomicU64,
     pub prover: Prover,
+    /// W-7: the Swap version of the prover's guest and selector: the maker quotes, takes
+    /// destinations, pays and proves only while it is working.
+    pub version_id: B256,
     proving_key: tokio::sync::OnceCell<Arc<ProvingKey>>,
 }
 
@@ -382,12 +421,9 @@ impl Maker {
         limits: ChainLimits,
         book: Book,
         wallet: Wallet,
+        version_id: B256,
     ) -> Self {
-        let prover = Prover {
-            host: cfg.host.clone(),
-            mock: cfg.mock_seal,
-            work: cfg.state.with_file_name("proofs"),
-        };
+        let prover = cfg.prover();
         Self {
             cfg,
             zcash,
@@ -403,6 +439,7 @@ impl Maker {
             relay_tip: AtomicU64::new(0),
             pass_at: AtomicU64::new(0),
             prover,
+            version_id,
             proving_key: tokio::sync::OnceCell::new(),
         }
     }
@@ -414,6 +451,20 @@ impl Maker {
             self.relay_tip.load(Ordering::Relaxed),
             self.pass_at.load(Ordering::Relaxed),
         )
+    }
+
+    /// W-7: whether a payment made now could be proven, as the API decides a quote or a
+    /// destination: the version is read now, the relay's lag is the last pass's, which must be
+    /// recent (the maker follows both chains).
+    pub async fn proof_path(&self) -> Result<ProofPath, ApiError> {
+        let (zcash_tip, relay_height, pass_at) = self.last_pass();
+        if unix_now().saturating_sub(pass_at) > 3 * self.cfg.poll_secs + 60 {
+            return Err(ApiError::UNAVAILABLE);
+        }
+        Ok(ProofPath {
+            version_working: swap_version_working(&self.provider, self.cfg.swap, self.version_id).await?,
+            relay_lag: zcash_tip.saturating_sub(relay_height),
+        })
     }
 
     /// An open order of this maker read from Base (one the engine has not synced yet).
@@ -475,12 +526,17 @@ impl Maker {
         self.sync_orders().await?;
         let now = self.now().await?;
         let relay_height = relay_tip(&self.provider, self.cfg.swap).await?;
+        // W-7: whether a proof could land, read once per pass, before any payment of the pass.
+        let proofs = ProofPath {
+            version_working: swap_version_working(&self.provider, self.cfg.swap, self.version_id).await?,
+            relay_lag: u64::from(zcash_tip).saturating_sub(relay_height),
+        };
         self.zcash_tip.store(u64::from(zcash_tip), Ordering::Relaxed);
         self.relay_tip.store(relay_height, Ordering::Relaxed);
         self.pass_at.store(unix_now(), Ordering::Relaxed);
         let ids: Vec<B256> = self.book.lock().await.open_orders().map(|o| o.order_id).collect();
         for id in ids {
-            if let Err(e) = self.advance(&mut client, id, now, zcash_tip, relay_height).await {
+            if let Err(e) = self.advance(&mut client, id, now, zcash_tip, relay_height, proofs).await {
                 warn!(order = %id, "order step failed: {e:#}");
             }
         }
@@ -550,6 +606,7 @@ impl Maker {
         now: u64,
         zcash_tip: u32,
         relay_height: u64,
+        proofs: ProofPath,
     ) -> Result<Facts> {
         let swap = self.swap();
         let order = swap.order(rec.order_id).call().await?;
@@ -601,6 +658,7 @@ impl Maker {
                 Some(Seen::Mined(h)) => anchor::epoch_last_height(self.zcash, h),
                 _ => None,
             },
+            proofs,
         })
     }
 
@@ -611,11 +669,12 @@ impl Maker {
         now: u64,
         zcash_tip: u32,
         relay_height: u64,
+        proofs: ProofPath,
     ) -> Result<()> {
         let Some(rec) = self.book.lock().await.orders.get(&id).cloned() else {
             return Ok(());
         };
-        let f = self.facts(client, &rec, now, zcash_tip, relay_height).await?;
+        let f = self.facts(client, &rec, now, zcash_tip, relay_height, proofs).await?;
         let (pay_delay, draw) = anchor::draw(self.cfg.pay_delay_max_blocks);
         let step = decide(&self.cfg, &rec, &f, pay_delay, draw);
         let mut rec = rec;
@@ -862,6 +921,20 @@ mod tests {
             tip_epoch_last: None,
             tip_epoch_provable: true,
             payment_epoch_last: None,
+            proofs: ProofPath {
+                version_working: true,
+                relay_lag: 1,
+            },
+        }
+    }
+
+    fn dest(now: u64) -> DestinationFacts {
+        DestinationFacts {
+            now,
+            proofs: ProofPath {
+                version_working: true,
+                relay_lag: 1,
+            },
         }
     }
 
@@ -1193,10 +1266,9 @@ mod tests {
         assert_eq!(decide(&cfg, &r, &f, 3, 2), Step::Finish(MakerStatus::Refunded));
     }
 
-    #[test]
-    fn destinations() {
+    /// A Buy order awaiting the destination `(ua, salt)`, and the latest time it is taken.
+    fn awaiting(cfg: &MakerConfig) -> (OrderRecord, String, [u8; 32], u64) {
         use orchard::keys::{Scope, SpendingKey};
-        let cfg = judge_like();
         let sk = (0u8..=255).find_map(|i| Option::<SpendingKey>::from(SpendingKey::from_bytes([i; 32]))).unwrap();
         let addr = FullViewingKey::from(&sk).address_at(5u32, Scope::External);
         let ua = zecured_zcash_ops::keys::encode_ironwood_ua(&Network::TestNetwork, addr).unwrap();
@@ -1204,26 +1276,89 @@ mod tests {
         let mut r = rec(Side::Buy, MakerStatus::AwaitingDestination);
         r.receiver_commitment = zecured_swap::receiver_commitment(&salt, &addr.to_raw_address_bytes());
         let now = r.pay_deadline - cfg.required_secs();
-        let d = accept_destination(&cfg, &Network::TestNetwork, &r, now, &ua, &hex::encode(salt)).unwrap();
-        assert_eq!(d.receiver, addr.to_raw_address_bytes());
+        (r, ua, salt, now)
+    }
+
+    #[test]
+    fn destinations() {
+        let cfg = judge_like();
+        let (r, ua, salt, now) = awaiting(&cfg);
+        let d = accept_destination(&cfg, &Network::TestNetwork, &r, &dest(now), &ua, &hex::encode(salt)).unwrap();
+        assert_eq!(zecured_swap::receiver_commitment(&d.salt, &d.receiver), r.receiver_commitment);
         assert_eq!(
-            accept_destination(&cfg, &Network::TestNetwork, &r, now + 1, &ua, &hex::encode(salt)).err(),
+            accept_destination(&cfg, &Network::TestNetwork, &r, &dest(now + 1), &ua, &hex::encode(salt)).err(),
             Some(ApiError::TOO_LATE)
         );
         assert_eq!(
-            accept_destination(&cfg, &Network::TestNetwork, &r, now, &ua, &hex::encode([0x12; 32])).err(),
+            accept_destination(&cfg, &Network::TestNetwork, &r, &dest(now), &ua, &hex::encode([0x12; 32])).err(),
             Some(ApiError::BAD_DESTINATION)
         );
         let sell = rec(Side::Sell, MakerStatus::TakerPays);
         assert_eq!(
-            accept_destination(&cfg, &Network::TestNetwork, &sell, now, &ua, &hex::encode(salt)).err(),
+            accept_destination(&cfg, &Network::TestNetwork, &sell, &dest(now), &ua, &hex::encode(salt)).err(),
             Some(ApiError::NOT_BUY)
         );
         let mut paid = r.clone();
         paid.status = MakerStatus::Paid;
         assert_eq!(
-            accept_destination(&cfg, &Network::TestNetwork, &paid, now, &ua, &hex::encode(salt)).err(),
+            accept_destination(&cfg, &Network::TestNetwork, &paid, &dest(now), &ua, &hex::encode(salt)).err(),
             Some(ApiError::NOT_AWAITING)
         );
+    }
+
+    /// W-7: the maker takes no destination for a payment whose proof could not land: its Swap
+    /// version removed or its router's verifier stopped, or the relay behind. The same destination
+    /// given again once taken is still acknowledged.
+    #[test]
+    fn w7_refuses_a_destination_when_the_router_is_stopped() {
+        let cfg = judge_like();
+        let (mut r, ua, salt, now) = awaiting(&cfg);
+        let mut d = dest(now);
+        d.proofs.version_working = false;
+        assert_eq!(
+            accept_destination(&cfg, &Network::TestNetwork, &r, &d, &ua, &hex::encode(salt)).err(),
+            Some(ApiError::PROOFS_STOPPED)
+        );
+        d.proofs = ProofPath {
+            version_working: true,
+            relay_lag: 6,
+        };
+        assert_eq!(
+            accept_destination(&cfg, &Network::TestNetwork, &r, &d, &ua, &hex::encode(salt)).err(),
+            Some(ApiError::RELAY_BEHIND)
+        );
+        r.status = MakerStatus::DestinationReceived;
+        assert!(accept_destination(&cfg, &Network::TestNetwork, &r, &d, &ua, &hex::encode(salt)).is_ok());
+    }
+
+    /// W-7: the maker never pays while no proof could land (its Swap version removed or its
+    /// router's verifier stopped, or the relay behind), and starts no proving run while the
+    /// version is not working.
+    #[test]
+    fn w7_refuses_to_pay_when_the_version_is_not_working() {
+        let cfg = judge_like();
+        let mut r = rec(Side::Buy, MakerStatus::DestinationReceived);
+        r.pay_after_height = Some(4_500_003);
+        r.planned_anchor_height = Some(4_500_012);
+        r.anchor_draw = Some(2);
+        let mut f = facts(1_000_100);
+        f.zcash_tip = 4_500_003;
+        assert_eq!(decide(&cfg, &r, &f, 3, 2), Step::Pay);
+        f.proofs.version_working = false;
+        assert_eq!(decide(&cfg, &r, &f, 3, 2), Step::Wait, "a removed version or a stopped router");
+        f.proofs = ProofPath {
+            version_working: true,
+            relay_lag: 6,
+        };
+        assert_eq!(decide(&cfg, &r, &f, 3, 2), Step::Wait, "the relay lags");
+        r.status = MakerStatus::Paid;
+        r.expiry_height = Some(4_500_123);
+        r.mined_height = Some(4_500_005);
+        r.anchor_height = Some(4_500_012);
+        let mut f = facts(1_000_200);
+        f.payment = Some(Seen::Mined(4_500_005));
+        assert_eq!(decide(&cfg, &r, &f, 3, 2), Step::Prove);
+        f.proofs.version_working = false;
+        assert_eq!(decide(&cfg, &r, &f, 3, 2), Step::Wait, "no proving run that could not land");
     }
 }

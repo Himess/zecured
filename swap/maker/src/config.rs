@@ -9,6 +9,7 @@ use serde::{Deserialize, Serialize};
 use zecured_swap::{
     Side,
     anchor::{self, MIN_PAY_DELAY_MAX_BLOCKS},
+    seal::Prover,
 };
 use zecured_zcash_ops::network::ZcashNetwork;
 
@@ -133,6 +134,15 @@ impl MakerConfig {
             + self.confirm_estimate_secs
             + self.proving_estimate_secs
             + self.submit_margin_secs
+    }
+
+    /// The maker's prover: the zkVM host (MOCK seals on a local fork), its files next to the book.
+    pub fn prover(&self) -> Prover {
+        Prover {
+            host: self.host.clone(),
+            mock: self.mock_seal,
+            work: self.state.with_file_name("proofs"),
+        }
     }
 
     /// W-20: blocks from the tip a payment is scheduled at to its anchor having the order's tier of
