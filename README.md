@@ -95,7 +95,7 @@ txids) and how to reproduce every run: [docs/TESTING.md](docs/TESTING.md).
 | Zecured Swap: `ZecuredSwap`, the payment statement in the RISC Zero zkVM, the market maker (the app's Buy page uses the user's own wallet; Sell is on the command line) | The payment fixture is synthetic until a rehearsal payment gives a real one (D68) |
 | An onion service configuration for the app and its API (`infra/onion`), deployed with the servers | |
 | Own RPC / bundler / paymaster proxy with a sponsorship allowlist | |
-| Tier 2 deposit statement on real Testnet data, run in the RISC Zero zkVM; Zcash header relay with on-chain Equihash | RISC Zero verifier on the local fork (`MockRiscZeroVerifier`, accepts unproven journals; it also plays the router and its emergency stop for the version registry) for the demo's own proofs, and `mock-host` (MOCK, TEST ONLY), which seals journals of the native deposit and payment statements for it where RISC Zero does not run (Windows); real Groth16 seals of a real deposit and a real F1 spend pass RISC Zero's verifier router on Base Sepolia and on a Base mainnet fork (`RealGroth16Seal.t.sol`) |
+| Tier 2 deposit statement on real Testnet data, run in the RISC Zero zkVM; Zcash header relay with on-chain Equihash | RISC Zero verifier on the local fork (`MockRiscZeroVerifier`, accepts unproven journals; it also plays the router and its emergency stop for the version registry) for the demo's own proofs, and `mock-host` (MOCK, TEST ONLY), which seals journals of the native deposit, violation and payment statements for it where RISC Zero does not run (Windows); real Groth16 seals of a real deposit and a real F1 spend pass RISC Zero's verifier router on Base Sepolia and on a Base mainnet fork (`RealGroth16Seal.t.sol`) |
 | Tier 3 ([docs/TIER3.md](docs/TIER3.md)): every payout committed on Base before it is signed; bonds, slashing, compensation, the liveness penalty and disputes of a confirmation; the violation statement proven on a real Testnet vault spend and run in the zkVM; the `watch --tier3` watchtower | The theft demonstration runs on its own deployment with a 2-minute challenge window (labelled DEMO), never on the judge deployment |
 
 ## Repository layout
@@ -152,25 +152,27 @@ scripts/signer-network.sh start    # 5 signer nodes + backend (logs in signer/da
 Everything Base-related can run against a local fork of Base Sepolia, including the app's
 sponsored UserOps (a local alto bundler and mock paymaster replace the hosted ones, no API key):
 
+Minting needs a deposit proof (Tier 2) and all five signer bonds, so the fork always runs both:
+
 ```bash
-scripts/local-fork.sh start   # anvil fork, fresh deployment (contracts/deployments/anvil.json), bundler :4337, paymaster :4338
+(cd tier2 && cargo build --release)           # RISC Zero guest and host (rzup toolchain)
+./target/debug/update-headers data/tier2/headers_nu7.json   # NU7-epoch headers over P2P (first run: see docs/TIER2.md)
+scripts/local-fork.sh start   # anvil fork, fresh deployment (contracts/deployments/anvil.json), the header relay fed
+                              # from the Testnet, the guests' image ids, bundler :4337, paymaster :4338
 export ZECURED_DEPLOYMENTS=$PWD/contracts/deployments/anvil.json BASE_SEPOLIA_RPC_URL=http://127.0.0.1:8545 \
        BUNDLER_URL=http://127.0.0.1:4337 PAYMASTER_URL=http://127.0.0.1:4338
-scripts/signer-network.sh init && scripts/signer-network.sh start
+scripts/signer-network.sh init && scripts/bond-signers.sh   # nothing is minted before all five bonds are in
+DEPOSIT_PROOF_HOST=$PWD/tier2/target/release/zecured-tier2-host DEPOSIT_PROOF_MOCK=true \
+  scripts/signer-network.sh start             # the coordinator proves each deposit; no signer attests one
 ./target/debug/zecured-bots market-maker &    # and: zecured-bots liquidator &
 ```
 
 ### Tier 2: minting on a deposit proof
 
-```bash
-(cd tier2 && cargo build --release)           # RISC Zero guest and host (rzup toolchain)
-./target/debug/update-headers data/tier2/headers_nu7.json   # NU7-epoch headers over P2P (first run: see docs/TIER2.md)
-TIER2=1 scripts/local-fork.sh start           # + header relay fed from the Testnet, image id, MOCK verifier
-DEPOSIT_PROOF_HOST=$PWD/tier2/target/release/zecured-tier2-host DEPOSIT_PROOF_MOCK=true \
-  scripts/signer-network.sh start             # the coordinator proves deposits instead of attesting them
-```
-
-On the local fork the proof is checked by `MockRiscZeroVerifier` (MOCK). The real seal is a
+On the local fork the proof is checked by `MockRiscZeroVerifier` (MOCK). Where RISC Zero does not run (Windows),
+`target/debug/mock-host` (MOCK) stands in for the zkVM host: it checks the witness with the native statement and seals
+its journal for the MOCK verifier, with the deployment's image ids in `ZECURED_MOCK_DEPOSIT_IMAGE_ID`,
+`ZECURED_MOCK_VIOLATION_IMAGE_ID` and `ZECURED_MOCK_PAYMENT_IMAGE_ID`. The real seal is a
 succinct receipt (`zecured-tier2-host prove`, 36 s on a rented RTX 4090: `scripts/gpu-prove.sh`)
 wrapped in Groth16 (`groth16`, about a minute with Docker on x86), checked by RISC Zero's verifier
 router on Base Sepolia; `RealGroth16Seal.t.sol` runs a real deposit's seal through it.
