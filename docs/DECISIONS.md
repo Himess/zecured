@@ -3,6 +3,10 @@
 Decisions taken during the build, with the reason. Where docs/ARCHITECTURE.md or
 docs/INTERFACES.md and this log disagree, fix the docs: this log is the history.
 
+Code comments cite the v3 round's design items as "design notes T-01" to "T-12" (rows D40 to D58 below) and the
+v4 round's specification as "the v4 work order" (its content is in docs/TIER3.md, docs/SWAP.md and docs/MAINNET.md
+§ 5).
+
 | # | Date | Decision | Why | Affects |
 |---|---|---|---|---|
 | D1 | 2026-10-10 | Use the NU7-capable `-pre` librustzcash wave (zcash_protocol 0.11.0-pre.0, zcash_primitives 0.31.0-pre.1, pczt 0.10.0-pre.1, zcash_keys 0.17.0-pre.1, zcash_client_backend 0.25.0-pre.1, orchard 0.16) | Testnet is past NU7 (4,465,026, branch `0x77190AD9`); the stable releases only know NU7 behind `zcash_unstable` with a placeholder branch ID and cannot transact on testnet | signer build |

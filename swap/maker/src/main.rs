@@ -1,4 +1,4 @@
-//! `zecured-swap-maker`: Zecured Swap's market maker (work order 5.6).
+//! `zecured-swap-maker`: Zecured Swap's market maker (docs/SWAP.md "The market maker").
 //!
 //!   zecured-swap-maker run --config maker.json        # MAKER_PRIVATE_KEY: the maker's Base key
 //!   zecured-swap-maker invite-hash < code.txt         # keccak256 of an invite code, for the config

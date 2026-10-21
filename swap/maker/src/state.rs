@@ -1,7 +1,7 @@
 //! The maker's order book: its orders as Base opened them and how far each is, persisted (0600,
 //! atomically) so that a restart neither pays twice nor forgets a payment to prove. A Buy order's
 //! destination (the taker's receiver and salt), the payment's txid and the note's opening are kept
-//! only until the order is settled, refunded or abandoned, then erased (work order 5.5).
+//! only until the order is settled, refunded or abandoned, then erased (docs/SWAP.md "The market maker").
 
 use std::{
     collections::BTreeMap,
@@ -85,7 +85,7 @@ pub struct OrderRecord {
 }
 
 impl OrderRecord {
-    /// Erases what the maker only needed to pay and prove (work order 5.5).
+    /// Erases what the maker only needed to pay and prove (docs/SWAP.md "The market maker").
     pub fn forget_private(&mut self) {
         self.receiver = None;
         self.salt = None;

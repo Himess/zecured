@@ -7,3 +7,24 @@
 7c4801a8d0d0821ca210db7abc5dda0fa89f32e8:app/lib/safe.test.ts:generic-api-key:16
 b92b3009adf165cbfe3cc7c8bc23a0544ef7cf75:tools/local-aa/start.mjs:generic-api-key:22
 b92b3009adf165cbfe3cc7c8bc23a0544ef7cf75:tools/local-aa/start.mjs:generic-api-key:23
+# Reviewed 2026-10-21 (gitleaks 8.30.1, the whole history). Each is public, not a secret:
+# - contracts/config/*.json, app/lib/__fixtures__/deployment.ts, backend/src/main.rs: token contract addresses
+#   (Circle USDC on Base and Base Sepolia, zZEC) under keys named loanToken or collateralToken;
+# - contracts/test/unit/DepositJournalV2.t.sol, app/lib/signers.test.ts: the tag key hash of a test vector;
+# - contracts/test/unit/ZecuredEIP712.t.sol: the tag key of the first ZIP 2005 use_qsk test vector's UFVK, and
+#   anvil's well-known development key #0.
+0f4948817d8204217b2b991655d62816a2288f14:contracts/config/zecured-base-mainnet.json:generic-api-key:10
+198d4c51556bab00f54081f922d9b8fee6d561fe:backend/src/main.rs:generic-api-key:1273
+198d4c51556bab00f54081f922d9b8fee6d561fe:backend/src/main.rs:generic-api-key:1285
+198d4c51556bab00f54081f922d9b8fee6d561fe:backend/src/main.rs:generic-api-key:1288
+37d42fa7a8ee16cb79cf44b0664c7c9a5d0aea8a:app/lib/signers.test.ts:generic-api-key:45
+37d42fa7a8ee16cb79cf44b0664c7c9a5d0aea8a:contracts/test/unit/ZecuredEIP712.t.sol:generic-api-key:67
+37d42fa7a8ee16cb79cf44b0664c7c9a5d0aea8a:contracts/test/unit/ZecuredEIP712.t.sol:generic-api-key:69
+ded02541b858bfe51ebe21bc9b314001bf9d29a2:backend/src/main.rs:generic-api-key:1349
+e131df8668f76a78b6f4f4b93d3c601dd03ef824:contracts/config/zecured-base-sepolia-theft-demo.json:generic-api-key:10
+e131df8668f76a78b6f4f4b93d3c601dd03ef824:contracts/config/zecured-base-sepolia.json:generic-api-key:10
+e18b778a6a4149cfc0ae8353a590b19efca41016:contracts/test/unit/DepositJournalV2.t.sol:generic-api-key:29
+ec3f7fc63ec032da778c71cb2f18c6d3bdb9afad:app/lib/__fixtures__/deployment.ts:generic-api-key:32
+ec3f7fc63ec032da778c71cb2f18c6d3bdb9afad:app/lib/__fixtures__/deployment.ts:generic-api-key:66
+ec3f7fc63ec032da778c71cb2f18c6d3bdb9afad:app/lib/__fixtures__/deployment.ts:generic-api-key:69
+f77030646292cec219f4126550bc624c2b630a47:contracts/config/zecured-base-mainnet-beta.json:generic-api-key:10

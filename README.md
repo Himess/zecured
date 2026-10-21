@@ -104,6 +104,11 @@ how to reproduce every run: [docs/TESTING.md](docs/TESTING.md).
 | Tier 2 deposit statement on real Testnet data, run in the RISC Zero zkVM; Zcash header relay with on-chain Equihash | RISC Zero verifier on the local fork (`MockRiscZeroVerifier`, accepts unproven journals; it also plays the router and its emergency stop for the version registry) for the demo's own proofs, and `mock-host` (MOCK, TEST ONLY), which seals journals of the native deposit, violation and payment statements for it where RISC Zero does not run (Windows); real Groth16 seals of a real deposit and a real F1 spend pass RISC Zero's verifier router on Base Sepolia and on a Base mainnet fork (`RealGroth16Seal.t.sol`), and so do the pinned guests' (statement v2: deposit, F1, `Included`, payment; `RealSealsV2.t.sol`) |
 | Tier 3 ([docs/TIER3.md](docs/TIER3.md)): every payout committed on Base before it is signed; bonds, slashing, compensation, the liveness penalty and disputes of a confirmation; the violation statement proven on a real Testnet vault spend and run in the zkVM; the `watch --tier3` watchtower | The theft demonstration runs on its own deployment with a 2-minute challenge window (labelled DEMO), never on the judge deployment |
 
+Test fixtures: `tier2/statement/tests/fixtures/TEST-ONLY_*` hold the viewing key and the deposit witness of one
+disposable Testnet vault, made only for the tests (never a demo or judge vault), and
+`tier2/payment-statement/tests/fixtures/TEST-ONLY_*` a synthetic payment witness derived from it. The other keys in the
+repository are published test vectors (such as ZIP 2005's) and anvil's well-known development keys.
+
 ## Repository layout
 
 | Path | What |

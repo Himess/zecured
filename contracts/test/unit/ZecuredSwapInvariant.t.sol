@@ -188,10 +188,10 @@ struct SwapFixtureView {
     bytes32 imageB;
 }
 
-/// Invariants of the escrow (work order § 9: "locked USDC = open orders"): the USDC the contract holds is exactly the
-/// sum of its open orders, every unit that came in either is still locked or went out once (to the payer's
-/// counterparty or back to the locker), a pending settlement exists only for an open order, and a settled or refunded
-/// order never changes again.
+/// Invariants of the escrow (docs/INVARIANTS.md I36 to I39, "locked USDC = open orders"): the USDC the contract holds
+/// is exactly the sum of its open orders, every unit that came in either is still locked or went out once (to the
+/// payer's counterparty or back to the locker), a pending settlement exists only for an open order, and a settled or
+/// refunded order never changes again.
 contract ZecuredSwapInvariantTest is SwapFixture {
     SwapHandler internal handler;
 

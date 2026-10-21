@@ -103,8 +103,9 @@ contract ReentrantToken is ERC20 {
     }
 }
 
-/// ZecuredSwap (Zecured Swap, work order § 5): open, proveSettlement (K3), finalizeSettlement, dropSettlement and
-/// refund, and every attack of § 5.8 as a test. MOCK verifier and relay; a real version registry.
+/// ZecuredSwap (Zecured Swap, docs/SWAP.md): open, proveSettlement (K3), finalizeSettlement, dropSettlement and
+/// refund, and every attack of docs/SWAP.md "Attacks and what stops them" as a test (the attacks are numbered 1 to 12
+/// there). MOCK verifier and relay; a real version registry.
 contract ZecuredSwapTest is SwapFixture {
     // ------------------------------------------------------------------ config
 
@@ -245,7 +246,7 @@ contract ZecuredSwapTest is SwapFixture {
         assertEq(swap.lockedUsdc(), 20e6);
     }
 
-    /// § 5.8 (5): the order id binds the chain, this contract, the maker and its nonce; the vector of
+    /// Attack 5: the order id binds the chain, this contract, the maker and its nonce; the vector of
     /// tier2/payment-k4 (`keccak256(abi.encode(84532, 0x1111..11, 0x2222..22, 7))`).
     function test_orderId_formulaAndVector() public view {
         assertEq(swap.orderIdOf(maker, 7), keccak256(abi.encode(block.chainid, address(swap), maker, uint256(7))));
@@ -262,7 +263,7 @@ contract ZecuredSwapTest is SwapFixture {
         );
     }
 
-    /// § 5.8 (6): a quote opens once (its nonce is spent), also by its own taker.
+    /// Attack 6: a quote opens once (its nonce is spent), also by its own taker.
     function test_open_replayOfAQuote() public {
         SwapQuote memory q = _quote(SIDE_BUY, 50_000_000, 20e6);
         bytes memory sig = _sign(swap, q, makerKey);
@@ -514,7 +515,7 @@ contract ZecuredSwapTest is SwapFixture {
         assertFalse(swap.settlementStale(id));
     }
 
-    /// § 5.8 (1) and (5): one payment, one order. A journal names one order of one contract on one chain: it proves
+    /// Attacks 1 and 5: one payment, one order. A journal names one order of one contract on one chain: it proves
     /// nothing for another order (of the same maker or not), another deployment or another chain.
     function test_prove_aJournalOfAnotherOrder() public {
         bytes32 a = _openBuy(50_000_000, 20e6);
@@ -538,7 +539,7 @@ contract ZecuredSwapTest is SwapFixture {
         }
     }
 
-    /// § 5.8 (2): a payment to another receiver, or of less than the order's amount, proves nothing (the payer paid at
+    /// Attack 2: a payment to another receiver, or of less than the order's amount, proves nothing (the payer paid at
     /// their own loss); more is fine.
     function test_prove_wrongReceiverOrTooLittle() public {
         bytes32 id = _openBuy(50_000_000, 20e6);
@@ -634,7 +635,7 @@ contract ZecuredSwapTest is SwapFixture {
         swap.proveSettlement(id, journal, seal, PAYMENT_IMAGE);
     }
 
-    /// § 5.8 (4): a fake branch. The anchor must be on the relay's best chain with the tier's work of the order's
+    /// Attack 4: a fake branch. The anchor must be on the relay's best chain with the tier's work of the order's
     /// amount on top.
     function test_prove_anchorAndWorkTiers() public {
         bytes32 small = _openBuy(TIER1_ZAT, 20e6);
@@ -661,7 +662,7 @@ contract ZecuredSwapTest is SwapFixture {
         swap.proveSettlement(large, journal, seal, PAYMENT_IMAGE);
     }
 
-    /// § 5.8 (7): the proof must come by the pay deadline (the deadline itself counts); the finalization may be later.
+    /// Attack 7: the proof must come by the pay deadline (the deadline itself counts); the finalization may be later.
     function test_prove_byTheDeadline() public {
         bytes32 id = _openBuy(50_000_000, 20e6);
         uint64 deadline = _order(id).payDeadline;
@@ -780,7 +781,7 @@ contract ZecuredSwapTest is SwapFixture {
         swap.finalizeSettlement(id);
     }
 
-    /// § 5.8 (4): the anchor left the best chain before the finalization: no USDC moves; the record is dropped.
+    /// Attack 4: the anchor left the best chain before the finalization: no USDC moves; the record is dropped.
     function test_finalize_anchorReorgedOut() public {
         bytes32 id = _openBuy(50_000_000, 20e6);
         _prove(id);
@@ -798,7 +799,7 @@ contract ZecuredSwapTest is SwapFixture {
         _prove(id);
     }
 
-    /// § 5.8 (8), R-14: a broken guest's Swap version is removed by three signers at once; a settlement it proved no
+    /// Attack 8, R-14: a broken guest's Swap version is removed by three signers at once; a settlement it proved no
     /// longer finalizes and anyone drops it; a payment can be proven again with another version.
     function test_finalize_versionRemoved() public {
         bytes32 id = _openBuy(50_000_000, 20e6);
@@ -871,7 +872,7 @@ contract ZecuredSwapTest is SwapFixture {
         assertEq(usdcToken.balanceOf(taker), 1_000e6);
     }
 
-    /// § 5.8 (7): no refund while a proof made in time stands; it is finalized instead.
+    /// Attack 7: no refund while a proof made in time stands; it is finalized instead.
     function test_refund_notWhileAProofStands() public {
         bytes32 id = _openBuy(50_000_000, 20e6);
         vm.warp(_order(id).payDeadline);
@@ -886,7 +887,7 @@ contract ZecuredSwapTest is SwapFixture {
         assertEq(usdcToken.balanceOf(maker), 1_020e6);
     }
 
-    /// § 5.8 (4): a fake proof at the deadline delays the refund only until its anchor leaves the best chain.
+    /// Attack 4: a fake proof at the deadline delays the refund only until its anchor leaves the best chain.
     function test_refund_afterAFakeProofIsDropped() public {
         bytes32 id = _openBuy(50_000_000, 20e6);
         vm.warp(_order(id).payDeadline);
@@ -901,7 +902,7 @@ contract ZecuredSwapTest is SwapFixture {
         assertEq(usdcToken.balanceOf(taker), 1_000e6);
     }
 
-    /// § 5.8 (9): RISC Zero stops the router's verifier: no proof verifies, and an unproven order is refunded after its
+    /// Attack 9: RISC Zero stops the router's verifier: no proof verifies, and an unproven order is refunded after its
     /// deadline (the payer's risk; a maker's on Buy).
     function test_refund_afterARouterEstop() public {
         bytes32 id = _openBuy(50_000_000, 20e6);
@@ -916,7 +917,7 @@ contract ZecuredSwapTest is SwapFixture {
 
     // ------------------------------------------------------------------ reentrancy
 
-    /// § 5.8 (11): a token that calls back into the swap while it pays out finds every entry point locked.
+    /// Attack 11: a token that calls back into the swap while it pays out finds every entry point locked.
     function test_reentrancy() public {
         ReentrantToken token = new ReentrantToken();
         ZecuredSwap reSwap = new ZecuredSwap(_config(address(token), 0, address(0)));
@@ -937,7 +938,7 @@ contract ZecuredSwapTest is SwapFixture {
 
     // ------------------------------------------------------------------ privacy
 
-    /// § 5.8 (12): what Base sees of an order is its amounts, parties, deadline, the receiver's salted commitment and the
+    /// Attack 12: what Base sees of an order is its amounts, parties, deadline, the receiver's salted commitment and the
     /// anchor header: the events carry nothing else (no txid, note commitment, nullifier or address of Zcash).
     function test_events_carryNoZcashIdentifier() public {
         vm.recordLogs();

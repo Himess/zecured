@@ -1,5 +1,5 @@
 {
-  "_comment": "ZecuredSwap on Base mainnet, the capped invite-only beta (work order 5.9, mainnet beta column; docs/MAINNET.md). Circle USDC; the Intake's mainnet work tiers; the Swap version's branch ids NU6.3 and NU7; a 24-hour pay window; no fee. Invitations are the maker's (GET /swap/quote), not the contract's.",
+  "_comment": "ZecuredSwap on Base mainnet, the capped invite-only beta (docs/SWAP.md \"Parameters\", mainnet beta column; docs/MAINNET.md). Circle USDC; the Intake's mainnet work tiers; the Swap version's branch ids NU6.3 and NU7; a 24-hour pay window; no fee. Invitations are the maker's (GET /swap/quote), not the contract's.",
   "network": "base-mainnet-beta",
   "chainId": 8453,
   "zcashNetwork": "zcash-mainnet",

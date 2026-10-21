@@ -40,8 +40,8 @@ contract SignerBondV2Harness is SignerBondV2 {
 /// @notice Unit tests of SignerBondV2 (design notes T-01 and T-05, with a bound on deferrals; rules in the v3
 ///         `ISignerBond`; v4: liveness receipts R-5, compensator entitlements R-7, stale prices R-9, R-18). No fork: the
 ///         Registry, the slasher, the Intake, the compensator and the oracle are MOCKs (test/mocks/BondV2Mocks.sol) and
-///         the token is MockUSDC. The parameters are the judge deployment's (design notes § 2.8 and § 8.8): five bonds of
-///         400 USDC (2,000 in all), a 100 USDC minimum, ZEC at $1,200.
+///         the token is MockUSDC. The parameters are the judge deployment's (docs/MAINNET.md § 2, judge column): five
+///         bonds of 400 USDC (2,000 in all), a 100 USDC minimum, ZEC at $1,200.
 contract SignerBondV2Test is Test {
     uint256 internal constant START = 1_790_000_000;
     uint256 internal constant MIN_BOND = 100e6;
@@ -613,7 +613,7 @@ contract SignerBondV2Test is Test {
         bond.withdrawUnbonded(stranger);
     }
 
-    /// Design notes § 2.7: a halt stops deposits (and minting); the unbonding rules go on.
+    /// A halt stops deposits (and minting); the unbonding rules go on.
     function test_halt_stopsDepositsButNotUnbonding() public {
         _unbond(0, 100e6);
         _slash(CASE, 0x02);
@@ -872,7 +872,7 @@ contract SignerBondV2Test is Test {
         assertEq(dueAt, 0);
     }
 
-    /// Design notes § 8.2: only the claimant can turn its claim into USDC.
+    /// DECISIONS D47: only the claimant can turn its claim into USDC.
     function test_slashLiveness_onlyTheClaimant() public {
         _claim(CLAIM, ClaimKind.CloseMarketMaker, 0.01e8, liquidator);
         vm.warp(block.timestamp + LIVENESS);
@@ -893,7 +893,7 @@ contract SignerBondV2Test is Test {
         assertEq(dueAt, 0);
     }
 
-    /// Design notes § 8.2: the claims of a frozen vault are the compensator's.
+    /// DECISIONS D46 and D47: the claims of a frozen vault are the compensator's.
     function test_slashLiveness_notWhileTheVaultIsFrozen() public {
         _claim(CLAIM, ClaimKind.Liquidation, 0.01e8, liquidator);
         vm.warp(block.timestamp + LIVENESS);
@@ -925,7 +925,7 @@ contract SignerBondV2Test is Test {
         assertEq(bond.slashLiveness(CLAIM), 126e6);
     }
 
-    /// Design notes § 8.2: a payout committed less than `commitGrace` ago may still be mined; its claims wait.
+    /// DECISIONS D47: a payout committed less than `commitGrace` ago may still be mined; its claims wait.
     function test_slashLiveness_anInFlightPayoutWaitsCommitGrace() public {
         _claim(CLAIM, ClaimKind.Liquidation, 0.1e8, liquidator);
         uint64 deadline = uint64(block.timestamp) + LIVENESS;

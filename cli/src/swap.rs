@@ -1,4 +1,4 @@
-//! Zecured Swap from the CLI wallet (work order 5.2, Sell: "off-ramp"): sell shielded ZEC for USDC
+//! Zecured Swap from the CLI wallet (docs/SWAP.md, Sell: the off-ramp): sell shielded ZEC for USDC
 //! with no custodian. The maker locks USDC in ZecuredSwap; this wallet pays one Ironwood note
 //! with the memo "ZSWP" || orderId and `ovk = None` to the maker's receiver, proves the payment in
 //! zero knowledge and finalizes the order, which releases the USDC to the taker's Base address.

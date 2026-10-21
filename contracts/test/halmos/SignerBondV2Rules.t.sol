@@ -78,7 +78,7 @@ contract SignerBondV2HalmosHarness is SignerBondV2 {
     }
 }
 
-/// @notice Symbolic checks of SignerBondV2's effective bond with Halmos (docs/TESTING.md § 1b; design notes § 2.9), on
+/// @notice Symbolic checks of SignerBondV2's effective bond with Halmos (docs/TESTING.md § 1b), on
 ///         the real bond. Bonds, amounts and the signer are symbolic, so each check covers every value, not samples
 ///         (bonds and amounts below 2^64 USDC units, 18 trillion USDC, so that no sum overflows):
 ///         B1  the effective bond never exceeds the sum of the bonds, from ANY state of the bond (symbolic storage);
