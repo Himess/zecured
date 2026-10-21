@@ -59,15 +59,16 @@ pub fn pay_after(c: u32, delay: u32) -> u32 {
 }
 
 /// W-10: the anchor height planned at `c` for a maximum delay of `max` blocks and the draw `r`:
-/// `c + max + 1 + r`.
+/// `c + max + 1 + r`. N-9: `max` counts as at least 1, the least delay a payment has: with none (a
+/// local fork) the payment, due once block `c` is mined, still lands below its anchor.
 pub fn planned_anchor(c: u32, max: u32, r: u32) -> u32 {
-    c.saturating_add(max).saturating_add(1).saturating_add(r)
+    c.saturating_add(max.max(1)).saturating_add(1).saturating_add(r)
 }
 
 /// Blocks from the tip at which a payment is scheduled to its latest planned anchor:
 /// `planned_anchor(tip + 1, max, max) - tip`.
 pub fn anchor_window(max: u32) -> u32 {
-    max.saturating_mul(2).saturating_add(2)
+    max.max(1).saturating_add(max).saturating_add(2)
 }
 
 /// W-10, W-20: the anchor height of a payment mined at `h`: the `planned` one when the payment
@@ -138,6 +139,18 @@ mod tests {
         // The window: the latest planned anchor is anchor_window blocks above the scheduling tip.
         assert_eq!(planned_anchor(c, max, max) - tip, anchor_window(max));
         assert_eq!(anchor_window(8), 18);
+    }
+
+    /// N-9: without delays (`pay_delay_max_blocks` 0, a local fork) a payment broadcast when it is
+    /// due still lands below its planned anchor.
+    #[test]
+    fn n9_no_delay_still_leaves_a_block_for_the_payment() {
+        let tip = 4_500_000;
+        let c = current_height(tip);
+        let (delay, r) = draw(0);
+        let due = pay_after(c, delay);
+        assert!(due + 1 < planned_anchor(c, 0, r), "due at {due}, anchored at {}", planned_anchor(c, 0, r));
+        assert_eq!(planned_anchor(c, 0, 0) - tip, anchor_window(0));
     }
 
     /// W-10: a payment from before anchors were planned anchors as a late one.

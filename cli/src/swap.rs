@@ -1134,6 +1134,24 @@ mod tests {
         );
     }
 
+    /// N-9: without delays (`--pay-delay-max-blocks 0` with `--mock`, a local fork) the CLI still
+    /// pays: its payment, due once the tip reaches the schedule, lands below the planned anchor.
+    #[test]
+    fn n9_the_cli_pays_without_delays() {
+        let mut o = some_opts();
+        o.pay_delay_max_blocks = 0;
+        check_opts(&o).unwrap();
+        let mut f = file();
+        schedule(&mut f, 4_500_000, 0);
+        let due = f.pay_after_height.unwrap();
+        assert_eq!(
+            pay_move(&f, &facts(due), &o),
+            PayMove::Pay,
+            "due at {due}, anchored at {:?}",
+            f.planned_anchor_height
+        );
+    }
+
     /// W-7: no payment while no proof could land: the Swap version not working (removed, or the
     /// router's verifier stopped), or the relay behind.
     #[test]

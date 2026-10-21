@@ -1252,6 +1252,37 @@ mod tests {
         assert!(!inputs_unspent(127, 123, &[], notes(false, false)), "no recorded inputs: nothing shown");
     }
 
+    /// N-9: without delays (`pay_delay_max_blocks` 0, a local fork) the maker still pays: its
+    /// payment, due once the tip reaches the schedule, lands below the planned anchor.
+    #[test]
+    fn n9_a_payment_without_delays_is_paid() {
+        let mut cfg = judge_like();
+        cfg.local_fork = true;
+        cfg.mock_seal = true;
+        cfg.pay_delay_max_blocks = 0;
+        cfg.check().unwrap();
+        let mut r = rec(Side::Buy, MakerStatus::DestinationReceived);
+        let (pay_delay, draw) = anchor::draw(0);
+        let Step::SchedulePayment {
+            pay_after,
+            planned_anchor,
+            draw,
+        } = decide(&cfg, &r, &facts(1_000_000), pay_delay, draw)
+        else {
+            panic!("not scheduled")
+        };
+        r.pay_after_height = Some(pay_after);
+        r.planned_anchor_height = Some(planned_anchor);
+        r.anchor_draw = Some(draw);
+        let mut f = facts(1_000_100);
+        f.zcash_tip = pay_after;
+        assert_eq!(
+            decide(&cfg, &r, &f, pay_delay, draw),
+            Step::Pay,
+            "due at {pay_after}, anchored at {planned_anchor}"
+        );
+    }
+
     /// N-12 (W-8): an unmined payment counts as expired only three blocks after its expiry height:
     /// before that, a short reorganization or a light wallet server a block or two behind could
     /// still show it mined at or below that height, and the order would be paid twice.
