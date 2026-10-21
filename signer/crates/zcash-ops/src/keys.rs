@@ -137,6 +137,13 @@ pub fn encode_ufvk<P: Parameters>(params: &P, fvk: &FullViewingKey) -> Result<St
     ufvk.encode(params).map_err(|e| anyhow!("encode UFVK: {e:?}"))
 }
 
+/// Decodes a UFVK and returns its Orchard-protocol (Ironwood) full viewing key.
+pub fn decode_ufvk<P: Parameters>(params: &P, encoded: &str) -> Result<FullViewingKey> {
+    let ufvk =
+        UnifiedFullViewingKey::decode(params, encoded).map_err(|e| anyhow!("not a unified full viewing key: {e}"))?;
+    ufvk.orchard().cloned().context("the viewing key has no Orchard-protocol (Ironwood) key")
+}
+
 /// Parses a unified address and returns its Orchard-protocol receiver, rejecting
 /// addresses without one. Transparent and Sapling receivers are ignored: Zecured only
 /// ever pays the Orchard-protocol receiver, in the Ironwood pool.

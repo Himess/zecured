@@ -7528,11 +7528,13 @@ dependencies = [
  "clap",
  "hex",
  "orchard",
+ "rand_core 0.6.4",
  "serde",
  "serde_json",
  "tokio",
  "zecured-base",
  "zecured-policy",
+ "zecured-zcash-ops",
 ]
 
 [[package]]

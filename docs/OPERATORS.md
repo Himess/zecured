@@ -113,7 +113,11 @@ nodes' stores freezes the affected vaults; three leaked stores are enough to ste
   that the note is no lineage note and has never landed. Every other non-conforming deposit lands
   as a Refund claim and is paid like any claim.
 - **Reimbursement destinations (T-05, W-6):** when the bonds paid a claim, three operators give the
-  claim the destination that reimburses them. Each prepares or signs it with the treasury keys
+  claim the destination that reimburses them. One operator makes the treasury keys file once from the
+  treasury's unified full viewing key (`zecured-wallet --wallet <treasury wallet> viewing-key --out
+  treasury.ufvk`, or the treasury wallet's own export; then `zecured-ops treasury-keys --ufvk-file
+  treasury.ufvk --out treasury-keys.json`, which draws the salt key) and shares it privately with the
+  other operators and the coordinator. Each prepares or signs it with the treasury keys
   (`zecured-ops prepare reimburse-destination --claim <id> --treasury treasury-keys.json --out
   r.json`, then `zecured-ops sign r.json --treasury treasury-keys.json ...`), which derives the
   claim's own destination from its id; `sign` refuses any other commitment. The coordinator, given the same file

@@ -123,6 +123,12 @@ enum Cmd {
     Init,
     /// Print the wallet's Ironwood-only unified address.
     Address,
+    /// Write the wallet's unified full viewing key to a file readable by its owner only (never
+    /// printed): for a watcher, or a treasury's keys file (`zecured-ops treasury-keys`, W-6).
+    ViewingKey {
+        #[arg(long)]
+        out: PathBuf,
+    },
     /// Scan and show the wallet's notes and balance.
     Balance,
     /// Send ZEC to an address's Ironwood receiver.
@@ -782,6 +788,14 @@ async fn main() -> Result<()> {
         Cmd::Address => {
             let w = load_wallet(&cli.wallet)?;
             println!("{}", encode_ironwood_ua(&zcash_params(), w.fvk.address_at(0u32, Scope::External))?);
+        }
+        Cmd::ViewingKey { out } => {
+            let w = load_wallet(&cli.wallet)?;
+            let ufvk = zecured_zcash_ops::keys::encode_ufvk(&zcash_params(), &w.fvk)?;
+            let mut f = create_private_file(&out)?;
+            f.write_all(ufvk.as_bytes())?;
+            f.sync_all()?;
+            println!("wrote the wallet's viewing key to {} (owner only)", out.display());
         }
         Cmd::Balance => {
             let w = load_wallet(&cli.wallet)?;

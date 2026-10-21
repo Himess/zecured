@@ -440,6 +440,19 @@ pub enum Spec {
     },
 }
 
+/// W-6: the contents of a new treasury keys file for the treasury whose unified full viewing key is
+/// `ufvk` (Zcash `network`): its Ironwood external incoming viewing key and a fresh random salt key.
+/// One operator makes it and shares it privately with the others and the coordinator; nothing of it is
+/// printed.
+pub fn new_treasury_keys(network: zecured_zcash_ops::network::ZcashNetwork, ufvk: &str) -> Result<serde_json::Value> {
+    let fvk = zecured_zcash_ops::keys::decode_ufvk(&network.params(), ufvk.trim())?;
+    let ivk = fvk.to_ivk(orchard::keys::Scope::External).to_bytes();
+    let mut salt_key = [0u8; 32];
+    rand_core_06::RngCore::fill_bytes(&mut rand_core_06::OsRng, &mut salt_key);
+    TreasuryKeys::from_bytes(&ivk, salt_key)?;
+    Ok(serde_json::json!({ "ivk": hex::encode(ivk), "saltKey": hex::encode(salt_key) }))
+}
+
 /// W-6: reads the treasury keys file (`{"ivk": <128 hex>, "saltKey": <64 hex>}`, private to the
 /// signers; never printed).
 pub fn read_treasury(path: &Path) -> Result<TreasuryKeys> {
@@ -647,6 +660,26 @@ pub fn parse_branch(text: &str) -> Result<u32> {
 
 #[cfg(test)]
 mod tests {
+
+    /// W-6: the treasury keys file is made from the treasury's viewing key, with a fresh salt key
+    /// each time, and reads back as the keys it holds.
+    #[test]
+    fn w6_the_treasury_keys_file_is_made_from_the_viewing_key() {
+        use orchard::keys::{FullViewingKey, Scope, SpendingKey};
+        use zecured_zcash_ops::network::ZcashNetwork;
+        let sk = Option::<SpendingKey>::from(SpendingKey::from_bytes([7; 32])).unwrap();
+        let fvk = FullViewingKey::from(&sk);
+        let ufvk = zecured_zcash_ops::keys::encode_ufvk(&ZcashNetwork::Testnet.params(), &fvk).unwrap();
+        let a = new_treasury_keys(ZcashNetwork::Testnet, &ufvk).unwrap();
+        let b = new_treasury_keys(ZcashNetwork::Testnet, &ufvk).unwrap();
+        assert_eq!(a["ivk"], hex::encode(fvk.to_ivk(Scope::External).to_bytes()));
+        assert_eq!(a["ivk"], b["ivk"]);
+        assert_ne!(a["saltKey"], b["saltKey"], "a fresh salt key");
+        let keys = TreasuryKeys::from_hex(a["ivk"].as_str().unwrap(), a["saltKey"].as_str().unwrap()).unwrap();
+        assert_eq!(keys.reimbursement(&[1; 32]).receiver.len(), 43);
+        assert!(new_treasury_keys(ZcashNetwork::Mainnet, &ufvk).is_err(), "a Testnet key on Mainnet");
+        assert!(new_treasury_keys(ZcashNetwork::Testnet, "uviewtest1nope").is_err());
+    }
 
     /// W-6: a signer signs a reimbursement destination only if it is the claim's treasury
     /// destination as its own treasury keys derive it, and never without the keys.
