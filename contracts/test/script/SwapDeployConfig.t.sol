@@ -24,8 +24,8 @@ contract RouterOnlyVersions {
 }
 
 /// Every swap config the deploy script reads passes its checks and the constructor's rules; the judge config has the
-/// work order's judge values (5.9) and the Intake's judge work tiers and K3, the mainnet beta config the beta column
-/// and the mainnet template's tiers. No fork, no RPC.
+/// judge values of docs/SWAP.md "Parameters" and the Intake's judge work tiers and K3, the mainnet beta config the
+/// beta column and the mainnet template's tiers. No fork, no RPC.
 contract SwapDeployConfigTest is Test {
     DeploySwapHarness internal script;
 
@@ -58,7 +58,7 @@ contract SwapDeployConfigTest is Test {
         );
     }
 
-    /// The swap's tiers and K3 are the lending deployment's Intake's on the same network (work order 5.9).
+    /// The swap's tiers and K3 are the lending deployment's Intake's on the same network (docs/SWAP.md "Parameters").
     function _assertIntakeTiers(DeploySwap.SwapNetworkConfig memory c, string memory lending) internal view {
         string memory json = vm.readFile(string.concat("config/zecured-", lending, ".json"));
         uint256[] memory maxAmounts = vm.parseJsonUintArray(json, ".tierMaxAmountZat");

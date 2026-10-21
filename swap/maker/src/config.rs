@@ -89,7 +89,7 @@ pub struct MakerConfig {
     /// The first Base block to read `OrderOpened` from (the swap's deployment block).
     #[serde(default)]
     pub from_block: u64,
-    /// Mainnet beta (work order 6): quotes only for invitees. Off for the judge deployment.
+    /// Mainnet beta (docs/MAINNET.md § 5): quotes only for invitees. Off for the judge deployment.
     #[serde(default)]
     pub invite_only: bool,
     /// keccak256 of each invite code's UTF-8 bytes (the code itself is never stored or logged).
@@ -155,8 +155,8 @@ impl MakerConfig {
                 "prove_delay_max_blocks is at least {MIN_PROVE_DELAY_MAX_BLOCKS} outside a local fork (H-05, L5)"
             );
         }
-        // The maker never quotes a window it cannot meet (work order 5.6): a destination given
-        // within the first half of the window must still leave the whole pipeline its time.
+        // The maker never quotes a window it cannot meet (docs/SWAP.md "The market maker"): a
+        // destination given within the first half of the window must still leave the whole pipeline its time.
         ensure!(
             u64::from(self.pay_window_secs) >= 2 * self.required_secs(),
             "pay_window_secs ({}) must be at least twice the pipeline's {} s (privacy delays, confirmations, proving, margin)",

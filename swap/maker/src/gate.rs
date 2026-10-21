@@ -12,8 +12,8 @@ use crate::config::MakerConfig;
 /// parameter: URLs end up in logs.
 pub const INVITE_HEADER: &str = "x-zecured-invite";
 
-/// Mainnet beta (work order 6): whether `code` admits its holder. With `invite_only` off (the judge
-/// deployment) everyone is admitted; on, the code's keccak256 must be one of the configured hashes.
+/// Mainnet beta (docs/MAINNET.md § 5): whether `code` admits its holder. With `invite_only` off (the
+/// judge deployment) everyone is admitted; on, the code's keccak256 must be one of the configured hashes.
 pub fn admitted(cfg: &MakerConfig, code: Option<&str>) -> bool {
     if !cfg.invite_only {
         return true;

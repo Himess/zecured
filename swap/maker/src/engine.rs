@@ -795,7 +795,7 @@ mod tests {
         assert_eq!(decide(&cfg, &r, &f, 3, 2), Step::Finish(MakerStatus::Settled));
     }
 
-    /// The maker never pays when the pipeline would not fit before the deadline (work order 5.6).
+    /// The maker never pays when the pipeline would not fit before the deadline (docs/SWAP.md "The market maker").
     #[test]
     fn too_late_to_pay_or_prove() {
         let cfg = judge_like();

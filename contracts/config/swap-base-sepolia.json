@@ -1,5 +1,5 @@
 {
-  "_comment": "ZecuredSwap on Base Sepolia, the judge deployment (work order 5.9, judge column). Amounts in USDC units (6 decimals) or zatoshi, times in seconds. The work tiers are the Intake's judge values; the branch ids are the Swap version's (NU7). script/DeploySwap.s.sol checks it; test/script/SwapDeployConfig.t.sol pins it.",
+  "_comment": "ZecuredSwap on Base Sepolia, the judge deployment (docs/SWAP.md \"Parameters\", judge column). Amounts in USDC units (6 decimals) or zatoshi, times in seconds. The work tiers are the Intake's judge values; the branch ids are the Swap version's (NU7). script/DeploySwap.s.sol checks it; test/script/SwapDeployConfig.t.sol pins it.",
   "network": "base-sepolia",
   "chainId": 84532,
   "zcashNetwork": "zcash-testnet",

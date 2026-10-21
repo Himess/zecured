@@ -87,20 +87,20 @@ can start the first Swap version (`PAYMENT_IMAGE_ID`).
 
 ## Attacks and what stops them
 
-| Attack | What stops it | Tests |
-|---|---|---|
-| One payment for two orders | The memo binds one order id | K4 memo changes; `test_prove_aJournalOfAnotherOrder` |
-| A wrong receiver or too little | The commitment and the amount are checked | `test_prove_wrongReceiverOrTooLittle` |
-| An Orchard-pool, Sapling or transparent part | D5 in the statement | K4 |
-| A fake branch | Work tiers by amount, the readiness wait (K3), drops and stale-record replacement | `test_prove_anchorAndWorkTiers`, `test_finalize_anchorReorgedOut`, `test_refund_afterAFakeProofIsDropped` |
-| A journal replayed on another order, contract or chain | The order id binds the chain, the contract, the maker and its nonce | `test_orderId_formulaAndVector` |
-| A quote replayed | The nonce is spent at `open`; a quote naming a taker is that taker's | `test_open_replayOfAQuote`, `test_open_takerBinding` |
-| A proof at the deadline | A proof must come by the deadline; no refund while one stands | `test_prove_byTheDeadline`, `test_refund_notWhileAProofStands` |
-| A broken guest | Three signers remove the Swap version at once; pending settlements under it go stale and are dropped (R-14) | `test_finalize_versionRemoved` |
-| RISC Zero's emergency stop | Proofs revert; after the deadline the USDC goes back to whoever locked it (the payer's risk) | `test_refund_afterARouterEstop` |
-| Rounding | Exact zatoshi; the fee rounds down | — |
-| Reentrancy | `nonReentrant` everywhere, SafeERC20, ERC-1271 checked by a static call | `test_reentrancy`, `test_open_erc1271MakerCannotMeddle` |
-| A leak through events | No event or calldata holds a Zcash identifier | `test_events_carryNoZcashIdentifier`; the leak scanner (docs/TESTING.md § 4) |
+| # | Attack | What stops it | Tests |
+|---|---|---|---|
+| 1 | One payment for two orders | The memo binds one order id | K4 memo changes; `test_prove_aJournalOfAnotherOrder` |
+| 2 | A wrong receiver or too little | The commitment and the amount are checked | `test_prove_wrongReceiverOrTooLittle` |
+| 3 | An Orchard-pool, Sapling or transparent part | D5 in the statement | K4 |
+| 4 | A fake branch | Work tiers by amount, the readiness wait (K3), drops and stale-record replacement | `test_prove_anchorAndWorkTiers`, `test_finalize_anchorReorgedOut`, `test_refund_afterAFakeProofIsDropped` |
+| 5 | A journal replayed on another order, contract or chain | The order id binds the chain, the contract, the maker and its nonce | `test_orderId_formulaAndVector` |
+| 6 | A quote replayed | The nonce is spent at `open`; a quote naming a taker is that taker's | `test_open_replayOfAQuote`, `test_open_takerBinding` |
+| 7 | A proof at the deadline | A proof must come by the deadline; no refund while one stands | `test_prove_byTheDeadline`, `test_refund_notWhileAProofStands` |
+| 8 | A broken guest | Three signers remove the Swap version at once; pending settlements under it go stale and are dropped (R-14) | `test_finalize_versionRemoved` |
+| 9 | RISC Zero's emergency stop | Proofs revert; after the deadline the USDC goes back to whoever locked it (the payer's risk) | `test_refund_afterARouterEstop` |
+| 10 | Rounding | Exact zatoshi; the fee rounds down | — |
+| 11 | Reentrancy | `nonReentrant` everywhere, SafeERC20, ERC-1271 checked by a static call | `test_reentrancy`, `test_open_erc1271MakerCannotMeddle` |
+| 12 | A leak through events | No event or calldata holds a Zcash identifier | `test_events_carryNoZcashIdentifier`; the leak scanner (docs/TESTING.md § 4) |
 
 Four invariants run over a handler that opens, proves, reorganizes, drops, removes versions,
 finalizes, refunds and moves time: the contract's balance is what it holds locked, which is exactly

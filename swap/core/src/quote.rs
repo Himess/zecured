@@ -10,7 +10,7 @@ use anyhow::{Context, Result, anyhow, ensure};
 
 use crate::abi::SwapQuote;
 
-/// The frozen type string (docs/private/V4_FREEZE.md § 5; IZecuredSwap.sol).
+/// The frozen type string (docs/INTERFACES.md § 2.8; IZecuredSwap.sol).
 pub const SWAP_QUOTE_TYPE: &str = "SwapQuote(address maker,address taker,uint8 side,uint64 zatoshi,uint256 usdc,bytes32 makerReceiverCommitment,uint32 payWindow,uint64 quoteDeadline,uint256 nonce)";
 
 /// ZecuredSwap's EIP-712 domain.

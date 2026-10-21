@@ -16,10 +16,11 @@ import {MockCapPrice} from "../mocks/MockCapPrice.sol";
 import {ZecuredHandler, HandlerSystem} from "./ZecuredHandler.sol";
 
 /// @notice Handler-based invariant tests of v3 against the real Morpho Blue on a Base Sepolia fork: CLAUDE.md I1, I2,
-///         I3 (on-chain part), I4 to I9, the review's I11 to I14, Tier 3's I15 to I17, and the v3 design notes' I18 and
-///         I20 to I24 and I27. Deposits arrive only as deposit proofs through the Intake (MOCK relay and verifier); the
-///         bonds and the slasher are a MOCK the handler drives (halt, bonding, effective bond, cases, freeze), with the
-///         coverage cap (T-01) on and an opening fee (T-06). Runs/depth: [profile.default.invariant] in foundry.toml.
+///         I3 (on-chain part), I4 to I9, the review's I11 to I14, Tier 3's I15 to I17, and the v3 round's I18 and
+///         I20 to I24 and I27 (docs/INVARIANTS.md). Deposits arrive only as deposit proofs through the Intake (MOCK
+///         relay and verifier); the bonds and the slasher are a MOCK the handler drives (halt, bonding, effective bond,
+///         cases, freeze), with the coverage cap (T-01) on and an opening fee (T-06). Runs/depth:
+///         [profile.default.invariant] in foundry.toml.
 contract ZecuredInvariantsTest is ZecuredFixture {
     ZecuredHandler internal handler;
     MockSignerBond internal gates;
