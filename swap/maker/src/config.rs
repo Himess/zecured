@@ -129,7 +129,16 @@ pub const MAX_SPREAD_BPS: u16 = 2_000;
 impl MakerConfig {
     pub fn load(path: &std::path::Path) -> Result<Self> {
         let raw = std::fs::read_to_string(path).with_context(|| format!("read {}", path.display()))?;
-        let cfg: Self = serde_json::from_str(&raw).context("parse the maker config")?;
+        let raw: serde_json::Value = serde_json::from_str(&raw).context("parse the maker config")?;
+        // W-10: the proving delay is gone, and a config still setting it is refused by name (not as
+        // serde's "unknown field"), with what took its place.
+        ensure!(
+            raw.get("prove_delay_max_blocks").is_none(),
+            "prove_delay_max_blocks is no longer read: the proof's anchor is now planned before the payment, \
+             and pay_delay_max_blocks sets both the payment's delay and that planned anchor (docs/SWAP.md \
+             \"Privacy\"); remove prove_delay_max_blocks from the config"
+        );
+        let cfg: Self = serde_json::from_value(raw).context("parse the maker config")?;
         cfg.check()?;
         Ok(cfg)
     }
@@ -311,6 +320,26 @@ pub mod tests {
         raw.as_object_mut().unwrap().remove("max_open_orders_per_taker");
         let c: MakerConfig = serde_json::from_value(raw).unwrap();
         assert_eq!(c.max_open_orders_per_taker, 3, "the default of a config written before W-19");
+    }
+
+    /// W-10: a config written before the planned anchor, still naming `prove_delay_max_blocks`, is
+    /// refused with a message naming what replaced it, not serde's generic "unknown field".
+    #[test]
+    fn prove_delay_max_blocks_is_refused_by_name() {
+        let dir =
+            std::env::temp_dir().join(format!("zecured-maker-cfg-{}", hex::encode(zecured_swap::random_bytes32())));
+        std::fs::create_dir_all(&dir).unwrap();
+        let path = dir.join("maker.json");
+        let mut raw = serde_json::to_value(judge_like()).unwrap();
+        raw["prove_delay_max_blocks"] = serde_json::json!(4);
+        std::fs::write(&path, serde_json::to_vec(&raw).unwrap()).unwrap();
+        let e = format!("{:#}", MakerConfig::load(&path).unwrap_err());
+        assert!(e.contains("prove_delay_max_blocks"), "{e}");
+        assert!(e.contains("pay_delay_max_blocks") && e.contains("planned anchor"), "{e}");
+        raw.as_object_mut().unwrap().remove("prove_delay_max_blocks");
+        std::fs::write(&path, serde_json::to_vec(&raw).unwrap()).unwrap();
+        MakerConfig::load(&path).unwrap();
+        let _ = std::fs::remove_dir_all(&dir);
     }
 
     /// The payments' Zcash network goes with the Base chain unless named, and another pairing is
