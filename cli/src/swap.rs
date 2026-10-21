@@ -192,7 +192,8 @@ enum PayMove {
     GiveUp(&'static str),
 }
 
-/// What an opened order's payment depends on, read just before it is decided.
+/// What an opened order's payment depends on, read just before it is decided, and again right
+/// before it is broadcast (N-4).
 struct PayFacts {
     /// The light wallet server's Zcash tip.
     tip: u32,
@@ -306,6 +307,28 @@ async fn fits_epoch(provider: &DynProvider, pin: &SwapPin, tip: u32, zatoshi: u6
         anchor::provable_epoch(network, tip),
         last,
     ))
+}
+
+/// What an opened order's payment depends on, read now: for the decision to pay, and again right
+/// before the broadcast (N-4).
+async fn pay_facts(
+    provider: &DynProvider,
+    pin: &SwapPin,
+    version: B256,
+    lwd_url: &str,
+    deadline: u64,
+    q: &SwapQuote,
+    opts: &SwapOpts,
+) -> Result<PayFacts> {
+    let mut client = lwd_connect(lwd_url).await?;
+    let tip = lwd_tip(&mut client).await?;
+    Ok(PayFacts {
+        tip,
+        now: base_now(provider).await?,
+        deadline,
+        proofs: proof_path(provider, pin, version, tip).await?,
+        fits_epoch: fits_epoch(provider, pin, tip, q.zatoshi, opts.pay_delay_max_blocks).await?,
+    })
 }
 
 async fn lwd_tip(client: &mut lwd::LwdClient) -> Result<u32> {
@@ -614,18 +637,11 @@ async fn advance(wallet: &Path, lwd_url: &str, mut f: SwapFile, opts: &SwapOpts)
                     OrderStatus::from_u8(o.status)? == OrderStatus::Open,
                     "the order is no longer open on Base: nothing was paid"
                 );
-                let mut client = lwd_connect(lwd_url).await?;
-                let tip = lwd_tip(&mut client).await?;
-                let x = PayFacts {
-                    tip,
-                    now: base_now(&provider).await?,
-                    deadline: o.payDeadline,
-                    proofs: proof_path(&provider, &pin, version_of(&mut version, &prover)?, tip).await?,
-                    fits_epoch: fits_epoch(&provider, &pin, tip, q.zatoshi, opts.pay_delay_max_blocks).await?,
-                };
+                let version = version_of(&mut version, &prover)?;
+                let x = pay_facts(&provider, &pin, version, lwd_url, o.payDeadline, &q, opts).await?;
                 match pay_move(&f, &x, opts) {
                     PayMove::Schedule => {
-                        schedule(&mut f, tip, opts.pay_delay_max_blocks);
+                        schedule(&mut f, x.tip, opts.pay_delay_max_blocks);
                         eprintln!("the payment waits a random privacy delay of a few Zcash blocks");
                     }
                     PayMove::Wait(why) => {
@@ -634,9 +650,26 @@ async fn advance(wallet: &Path, lwd_url: &str, mut f: SwapFile, opts: &SwapOpts)
                         continue;
                     }
                     PayMove::GiveUp(why) => bail!("{why}"),
-                    // Marks the order "paid" (with the opening) before the broadcast: a resume never
-                    // pays twice, it rebroadcasts.
-                    PayMove::Pay => pay(wallet, lwd_url, &mut f, &q, &path).await?,
+                    PayMove::Pay => {
+                        let built = build_payment_tx(wallet, lwd_url, &f, &q).await?;
+                        // N-4: building took time (a scan of the wallet, a Halo 2 proof): the payment is
+                        // decided again on what the chains say now, before anything is written or sent.
+                        let x = pay_facts(&provider, &pin, version, lwd_url, o.payDeadline, &q, opts).await?;
+                        match release(&mut f, built, &x, opts) {
+                            // Marked "paid" (with the opening) before the broadcast: a resume never pays
+                            // twice, it rebroadcasts.
+                            Some(raw) => {
+                                write_json(&path, &f)?;
+                                let mut client = lwd_connect(lwd_url).await?;
+                                spend::broadcast_raw(&mut client, raw).await?;
+                                println!(
+                                    "paid {} zatoshi to the maker's receiver (memo bound to the order)",
+                                    q.zatoshi
+                                );
+                            }
+                            None => eprintln!("the payment was not sent: the chains moved on while it was built"),
+                        }
+                    }
                 }
             }
             "paid" => {
@@ -700,9 +733,31 @@ async fn advance(wallet: &Path, lwd_url: &str, mut f: SwapFile, opts: &SwapOpts)
     }
 }
 
-/// Pays the maker's receiver: one note of the order's zatoshi, the swap memo, `ovk = None`; the
-/// opening is written to the order's file before the broadcast.
-async fn pay(wallet: &Path, lwd_url: &str, f: &mut SwapFile, q: &SwapQuote, path: &Path) -> Result<()> {
+/// A payment built and checked, neither recorded nor sent yet.
+struct Built {
+    opening: PaymentOpening,
+    txid: String,
+    raw: Vec<u8>,
+}
+
+/// N-4: what becomes of a built payment, decided again on `x`, read right before its broadcast:
+/// still a payment, it is recorded in the order's file (marked paid, its opening and txid kept)
+/// and its transaction returned for the broadcast; otherwise it is dropped and the file left as
+/// it was (the order is planned again, waits or is given up from there).
+fn release(f: &mut SwapFile, built: Built, x: &PayFacts, opts: &SwapOpts) -> Option<Vec<u8>> {
+    if pay_move(f, x, opts) != PayMove::Pay {
+        return None;
+    }
+    f.opening = Some(built.opening);
+    f.txid = Some(built.txid);
+    f.raw_tx = Some(hex::encode(&built.raw));
+    f.status = "paid".into();
+    Some(built.raw)
+}
+
+/// Builds the payment of the maker's receiver: one note of the order's zatoshi, the swap memo,
+/// `ovk = None`, from a fresh scan of the wallet; checked against the payment statement.
+async fn build_payment_tx(wallet: &Path, lwd_url: &str, f: &SwapFile, q: &SwapQuote) -> Result<Built> {
     let w = load_wallet(wallet)?;
     let state = scan(&w, lwd_url).await?;
     let unspent = state.unspent();
@@ -728,16 +783,11 @@ async fn pay(wallet: &Path, lwd_url: &str, f: &mut SwapFile, q: &SwapQuote, path
     let sk = w.sk;
     let tx = tokio::task::spawn_blocking(move || authorize(unsigned, &sk, &pk)).await??;
     check_payment_note(&tx, &opening, f.order_id)?;
-    let raw = spend::serialize(&tx)?;
-    f.opening = Some(opening);
-    f.txid = Some(tx.txid().to_string());
-    f.raw_tx = Some(hex::encode(&raw));
-    f.status = "paid".into();
-    write_json(path, f)?;
-    let mut client = lwd_connect(lwd_url).await?;
-    spend::broadcast_raw(&mut client, raw).await?;
-    println!("paid {} zatoshi to the maker's receiver (memo bound to the order)", q.zatoshi);
-    Ok(())
+    Ok(Built {
+        opening,
+        txid: tx.txid().to_string(),
+        raw: spend::serialize(&tx)?,
+    })
 }
 
 /// Proves a mined payment under the anchor it planned (W-10) and submits the proof; false while the
@@ -1157,6 +1207,41 @@ mod tests {
             (f.pay_after_height, f.planned_anchor_height, f.anchor_draw),
             "a resume keeps the schedule"
         );
+    }
+
+    /// N-4: a built payment is decided again on the facts read right before its broadcast. Once the
+    /// tip passed its plan while it was built (a payment then could no longer land below its
+    /// anchor), or the Swap version stopped working, nothing is written or sent; still due, it is
+    /// marked paid with its opening before the broadcast.
+    #[test]
+    fn n4_the_cli_does_not_broadcast_once_the_tip_passed_its_plan() {
+        let o = some_opts();
+        let built = || Built {
+            opening: PaymentOpening {
+                action_index: 1,
+                recipient: vec![0xab; 43],
+                value: 50_000_000,
+                rseed: [0x42; 32],
+                salt: [0x5a; 32],
+            },
+            txid: "cd".repeat(32),
+            raw: vec![1, 2, 3],
+        };
+        let mut f = scheduled();
+        assert_eq!(pay_move(&f, &facts(4_500_003), &o), PayMove::Pay, "decided at the tip 4,500,003");
+        // Built while the tip went past the plan (the anchor at 4,500,014).
+        assert_eq!(release(&mut f, built(), &facts(4_500_013), &o), None);
+        assert_eq!(f.status, "opened");
+        assert!(f.opening.is_none() && f.txid.is_none() && f.raw_tx.is_none(), "nothing recorded");
+        assert_eq!(pay_move(&f, &facts(4_500_013), &o), PayMove::Schedule, "planned again");
+        let mut x = facts(4_500_005);
+        x.proofs.version_working = false;
+        assert_eq!(release(&mut f, built(), &x, &o), None, "the version removed while it was built");
+        assert_eq!(f.status, "opened");
+        // Still due two blocks later: recorded, then sent.
+        assert_eq!(release(&mut f, built(), &facts(4_500_005), &o), Some(vec![1, 2, 3]));
+        assert_eq!((f.status.as_str(), f.txid.as_deref()), ("paid", Some("cd".repeat(32).as_str())));
+        assert!(f.opening.is_some() && f.raw_tx.as_deref() == Some("010203"));
     }
 
     /// N-12: a late payment's anchor (`h + 1 + r`) takes an `r` of its own, drawn the first time and

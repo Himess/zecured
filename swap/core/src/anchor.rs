@@ -11,9 +11,10 @@
 //! delay of 1 to `pay_delay_max_blocks` blocks, so it lands in one of the blocks `c + 1` to
 //! `c + pay_delay_max_blocks` unless it waits in the mempool, below `a` whichever it is; the two
 //! blocks of headroom (N-4) keep it below `a` when the tip moves on while it is built, between the
-//! decision to pay and the broadcast. A payment mined at or after `a` (late) anchors at `h + 1 + r`
-//! instead. The payer proves under the header at exactly `a` once the order's tier of work is on
-//! top of it ([`crate::chain::anchor_at`]).
+//! decision to pay and the broadcast (where the payer decides again, on the chains as they are
+//! then, and sends nothing that could no longer land below `a`). A payment mined at or after `a`
+//! (late) anchors at `h + 1 + r` instead, with an `r` of its own (N-12). The payer proves under the
+//! header at exactly `a` once the order's tier of work is on top of it ([`crate::chain::anchor_at`]).
 //!
 //! The statement needs the payment and its anchor in one epoch (W-20): the anchor never passes the
 //! last block of the payment's epoch, a payment mined in that very block cannot be proven, and a
