@@ -311,6 +311,12 @@ pub struct Coordinator {
     /// W-6: the signers' treasury keys, which derive each bond-paid claim's reimbursement recipient;
     /// `None`: those recipients are not registered here (never logged).
     treasury: Option<TreasuryKeys>,
+    /// W-11: the network's Ironwood transactions (`zecured_zcash_ops::txindex`), kept in the data
+    /// directory and opened on first use, to resolve commitments whose payout the scan does not show.
+    ironwood: Mutex<Option<zecured_zcash_ops::txindex::IronwoodIndex>>,
+    ironwood_path: std::path::PathBuf,
+    /// W-11: how far the history was searched for each unresolved payout reference.
+    searched: std::sync::Mutex<HashMap<B256, u32>>,
     /// TEST ONLY: see [`TEST_WITHHOLD_FLAG`].
     #[cfg(feature = "test-hooks")]
     withhold_flag: std::path::PathBuf,
@@ -782,6 +788,9 @@ impl Coordinator {
             compensator: OnceCell::new(),
             keeper_tries: std::sync::Mutex::default(),
             treasury: None,
+            ironwood: Mutex::new(None),
+            ironwood_path: data_dir.join(format!("ironwood-txids.{}.bin", cfg.zcash())),
+            searched: std::sync::Mutex::default(),
             #[cfg(feature = "test-hooks")]
             withhold_flag: data_dir.join(TEST_WITHHOLD_FLAG),
             cfg,

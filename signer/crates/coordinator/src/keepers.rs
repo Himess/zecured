@@ -67,6 +67,7 @@ pub(crate) enum Keeper {
     Arm,
     Follow,
     Treasury,
+    Resolve,
 }
 
 /// R-3: the vault's confirmations by signatures (paid, not final) whose dispute window of `window`
@@ -200,6 +201,9 @@ impl Coordinator {
         }
         if let Err(e) = self.register_reimbursements(v).await {
             log_failure(&v.vault_id, "registering a reimbursement recipient", &e);
+        }
+        if let Err(e) = self.resolve_commitments(v).await {
+            log_failure(&v.vault_id, "resolving a commitment over the Ironwood history", &e);
         }
     }
 

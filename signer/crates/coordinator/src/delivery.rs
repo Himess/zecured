@@ -29,6 +29,14 @@
 //! the coordinator proves the violation instead (F4, at a dispute's priority), and the compensator
 //! pays the claim.
 //!
+//! W-11: `Included` proves only that a named X is in a block, not that X spent the committed input
+//! nor that it came after the commitment. A commitment of the vault whose payout the scan does not
+//! show (its input unspent, or spent by another transaction) is resolved by its payout reference
+//! over the whole Ironwood history ([`Coordinator::resolve_commitments`]). An X found there that did
+//! not spend the input is no payout of this coordinator: each of its claims named under a reference
+//! its claimant does not compute is proven an F4, as in W-1; its other claims are their claimants'
+//! (F3), and its change, if committed, F2.
+//!
 //! W-10: a proof's anchor is public on Base (the slasher's events and the journal), the payout's
 //! block is not. An anchor taken as the first header with the slasher's work above the payout sits
 //! right above its block and gives it away. So the anchor of a payout's proofs is fixed when its
@@ -73,7 +81,7 @@ use crate::{
     proofs::{DepositProofs, Prover, SealFile, guest_active, prove_into, seal_selector, version_active},
     queue::{Enqueued, Priority},
     short,
-    store::{CoordVault, PlannedAnchor},
+    store::{CommittedPayout, CoordVault, PlannedAnchor},
 };
 
 /// W-10: the Zcash block target spacing, to estimate when an anchor gets the slasher's work.
@@ -265,6 +273,48 @@ pub(crate) fn landed_payouts(
         }
     }
     landed
+}
+
+/// W-11: the vault's commitments whose payout the scan does not show: the input is unspent (the
+/// payout `inflight` is skipped: it is not mined yet), or spent by a transaction of another payout
+/// reference.
+pub(crate) fn unresolved<'a>(
+    v: &'a CoordVault,
+    spent: &[([u8; 32], TxId, u32)],
+    inflight: Option<B256>,
+) -> Vec<&'a CommittedPayout> {
+    v.commitments
+        .iter()
+        .filter(|c| Some(c.payout_ref) != inflight)
+        .filter(|c| match spent.iter().find(|(tag, ..)| B256::from(*tag) == c.input_tag) {
+            Some((_, txid, _)) => B256::from(payout_ref(&v.ufvk, txid.as_ref())) != c.payout_ref,
+            None => true,
+        })
+        .collect()
+}
+
+/// W-11: the claims commitment `c` names under a reference other than `keccak256(salt || txid_X)`
+/// for its payout `x` mined at `height` (`salt_of` by claim id; a claim without a salt here is
+/// skipped).
+pub(crate) fn hidden_claims(
+    c: &CommittedPayout,
+    x: TxId,
+    height: u32,
+    salt_of: impl Fn(&[u8; 32]) -> Option<[u8; 32]>,
+) -> Vec<HiddenClaim> {
+    c.claims
+        .iter()
+        .enumerate()
+        .filter_map(|(i, id)| {
+            let (committed, salt) = (c.claim_refs.get(i)?, salt_of(id)?);
+            (*committed != B256::from(claim_ref(&salt, x.as_ref()))).then(|| HiddenClaim {
+                payout_ref: c.payout_ref,
+                claim: B256::from(*id),
+                txid: x,
+                height,
+            })
+        })
+        .collect()
 }
 
 /// One background inclusion proof.
@@ -616,6 +666,81 @@ impl Coordinator {
 }
 
 impl Coordinator {
+    /// W-11: resolves the vault's commitments the scan does not show over the whole Ironwood
+    /// history, at most once per keeper period. A payout found there that did not spend its input
+    /// was committed by others: its hidden claims are proven F4 (with proofs configured), and the
+    /// operators are told.
+    pub(crate) async fn resolve_commitments(&self, v: &CoordVault) -> Result<()> {
+        let spent = {
+            let zcash = self.zcash.lock().await;
+            match zcash.scan(&v.vault_id) {
+                Some(scan) => spent_notes(&v.ufvk, &scan.notes),
+                None => return Ok(()),
+            }
+        };
+        let inflight = v.inflight.as_ref().and_then(|f| f.spend_commit.as_ref()).map(|k| k.record.payout_ref);
+        let todo: Vec<CommittedPayout> = unresolved(v, &spent, inflight).into_iter().cloned().collect();
+        if todo.is_empty() || !self.keeper_due(&v.vault_id, crate::keepers::Keeper::Resolve) {
+            return Ok(());
+        }
+        let tip = self.fetch_zcash_tip().await?;
+        let mut guard = self.ironwood.lock().await;
+        if guard.is_none() {
+            *guard = Some(zecured_zcash_ops::txindex::IronwoodIndex::open(&self.ironwood_path, self.cfg.zcash())?);
+        }
+        let index = guard.as_mut().context("the Ironwood index")?;
+        if index.range().1 < tip {
+            let mut client = self.lwd_client().await?;
+            index.update(&mut client, tip).await?;
+        }
+        let k = tag_key(&v.ufvk);
+        let mut found = vec![];
+        for c in &todo {
+            let from = self.searched.lock().unwrap_or_else(|p| p.into_inner()).get(&c.payout_ref).copied().unwrap_or(0);
+            let hit = index
+                .txs()
+                .filter(|(h, _)| *h > from)
+                .find(|(_, txid)| B256::from(zecured_policy::derive::payout_ref_with_key(&k, txid)) == c.payout_ref)
+                .map(|(h, txid)| (TxId::from_bytes(*txid), *h));
+            match hit {
+                Some(x) => found.push((c.clone(), x)),
+                None => {
+                    let read = index.range().1.saturating_sub(zecured_zcash_ops::txindex::REORG_MARGIN);
+                    self.searched.lock().unwrap_or_else(|p| p.into_inner()).insert(c.payout_ref, read);
+                }
+            }
+        }
+        drop(guard);
+        if found.is_empty() {
+            return Ok(());
+        }
+        error!(
+            vault = %short(&v.vault_id),
+            payouts = found.len(),
+            "a commitment of the vault names a mined transaction that did not spend its input (W-11): its hidden claims are proven F4; its other claims are their claimants' (F3), its change F2"
+        );
+        let Some(prover) = self.proofs.as_ref() else {
+            return Ok(());
+        };
+        let slasher = self.v3().await?.slasher;
+        if slasher == Address::ZERO {
+            return Ok(());
+        }
+        let salts: Vec<([u8; 32], [u8; 32])> = {
+            let store = self.store.lock().await;
+            v.claims.iter().filter_map(|c| Some((c.id, store.recipient(&c.commitment)?.salt))).collect()
+        };
+        let salt_of = |id: &[u8; 32]| salts.iter().find(|(c, _)| c == id).map(|(_, s)| *s);
+        for (c, (x, height)) in found {
+            for h in hidden_claims(&c, x, height, salt_of) {
+                if let Err(e) = self.prove_hidden(v, prover, slasher, &h).await {
+                    log_failure(&v.vault_id, "proving a hidden claim of a foreign commitment (F4)", &e);
+                }
+            }
+        }
+        Ok(())
+    }
+
     /// W-20: whether a known network upgrade is too close for the proof of a payout broadcast now
     /// (its anchor window of `2 * payout_delay_max_blocks + 2` blocks and the slasher's work); `false`
     /// while zcash_protocol knows no later activation.
@@ -904,6 +1029,55 @@ mod tests {
         assert_eq!(anchor_height(Some(120), 4, 110, Some(110)), None, "the epoch's last block: unprovable");
         assert_eq!(epoch_last_height(ZcashNetwork::Testnet, 4_500_000), None);
         assert_eq!(epoch_last_height(ZcashNetwork::Testnet, 4_200_000), Some(4_465_025), "until NU7 activated");
+    }
+
+    /// W-11: a commitment whose payout the scan does not show is resolved over the history: one whose
+    /// input another payout spent (a foreign commitment, or a rebuilt payout's), or whose input is
+    /// unspent, never the payout in flight; a claim it names under a wrong reference for the X found
+    /// is hidden (F4), one under the right reference is not.
+    #[test]
+    fn w11_a_foreign_commitment_is_resolved_and_its_hidden_claims_found() {
+        let mut v = crate::store::tests::vault(1);
+        v.ufvk = "uviewtest1vault".into();
+        let (x1, old) = ([0x11u8; 32], [0x0du8; 32]);
+        let honest = |id: u8, tx: &[u8; 32]| B256::from(claim_ref(&[id; 32], tx));
+        let own = CommittedPayout {
+            payout_ref: B256::from(payout_ref(&v.ufvk, &x1)),
+            input_tag: B256::repeat_byte(0x7a),
+            claims: vec![[1; 32]],
+            claim_refs: vec![honest(1, &x1)],
+        };
+        // Colluders commit the same input again, naming a transaction mined months before.
+        let foreign = CommittedPayout {
+            payout_ref: B256::from(payout_ref(&v.ufvk, &old)),
+            input_tag: B256::repeat_byte(0x7a),
+            claims: vec![[1; 32], [2; 32]],
+            claim_refs: vec![honest(1, &old), B256::repeat_byte(0xee)],
+        };
+        let pending = CommittedPayout {
+            payout_ref: B256::repeat_byte(0x99),
+            input_tag: B256::repeat_byte(0x7b),
+            claims: vec![[3; 32]],
+            claim_refs: vec![B256::repeat_byte(0x33)],
+        };
+        v.commitments = vec![own.clone(), foreign.clone(), pending.clone()];
+        let spent = vec![([0x7a; 32], TxId::from_bytes(x1), 500)];
+        let refs = |cs: Vec<&CommittedPayout>| cs.into_iter().map(|c| c.payout_ref).collect::<Vec<_>>();
+        assert_eq!(refs(unresolved(&v, &spent, None)), vec![foreign.payout_ref, pending.payout_ref]);
+        assert_eq!(
+            refs(unresolved(&v, &spent, Some(pending.payout_ref))),
+            vec![foreign.payout_ref],
+            "not the payout in flight"
+        );
+        let salt = |id: &[u8; 32]| Some([id[0]; 32]);
+        let hidden = hidden_claims(&foreign, TxId::from_bytes(old), 200, salt);
+        assert_eq!(
+            hidden.iter().map(|h| h.claim).collect::<Vec<_>>(),
+            vec![B256::repeat_byte(2)],
+            "claim 2's wrong reference: F4"
+        );
+        assert_eq!((hidden[0].payout_ref, hidden[0].height), (foreign.payout_ref, 200));
+        assert!(hidden_claims(&foreign, TxId::from_bytes(old), 200, |_| None).is_empty(), "no salt here: not judged");
     }
 
     /// W-20: no payout is broadcast when its anchor window and the slasher's work would cross a known

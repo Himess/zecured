@@ -329,6 +329,15 @@ redirect the reward (`test_prove_revertsOnABadJournalOrSeal`: a seal for another
   then the Registry checks that `ref` is a committed payout of each claim's own input and vault; it
   upholds a disputed confirmation (D53) or a reopened one (D57) the same way. `proveViolation` refuses it (`ViolationKind` stops at
   `WrongClaimRef`).
+- What it does not show (W-11): that X spent the committed input, nor that X was mined after the
+  commitment. Three colluding signers can commit an input a second time naming a transaction mined
+  months before, and make its claims final with an `Included` proof of that old transaction. Finality
+  stays safe because every claimant still has its remedy against the named X: F3 when X's committed
+  output did not pay it, F4 when the commitment named its claim under a reference it cannot find. For
+  that, the watchers search the whole Ironwood history for X, not the blocks after the claim (below);
+  a payout the scan does not show is resolved the same way by the borrower and the coordinator. A
+  version of `Included` and F4 that also proves X spent the committed input is a mainnet design
+  (MAINNET.md, W-22).
 
 **Cases.** `proveViolation(kind, journal, seal, imageId)`:
 - checks the seal (an active Violation version of `ZecuredVersions`: its router selector and image id,
@@ -368,6 +377,15 @@ redirect the reward (`test_prove_revertsOnABadJournalOrSeal`: a seal for another
   `zecured-wallet watch-claims --destinations <the bot's file>`. The bots keep every commitment's
   salt (RT-2). For each `SpendCommitted` naming one of its claims, the claimant finds X among the
   Zcash transactions by its reference and decrypts the committed output.
+- **W-11: the whole Ironwood history.** A commitment may name a transaction mined long before it
+  (above), so both watchers search every Ironwood transaction since the network's NU6.3 activation,
+  from an index kept next to the wallet (`zecured_zcash_ops::txindex`: the txids of the transactions
+  with Ironwood actions, public data; the first run reads the history once, later runs only the new
+  blocks, and the last 100 blocks are read again each time). The claimant finds X by each committed
+  claim reference wherever it was mined; `watch --tier3` also resolves every `SpendCommitted` of the
+  vault by its payout reference, and reports an X that spent no lineage note: F2 if its committed
+  change never came, and its claims are checked for F3 and F4 like any payout's. The coordinator does
+  the same for commitments its scan does not show, and proves each hidden claim's F4 (W-1).
 
 Each finding is written to an evidence file (0600) and prints the `build-violation uncommitted |
 withheld-change | misdirected | wrong-claim-ref` command that builds its witness (`build-violation
