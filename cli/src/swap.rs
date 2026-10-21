@@ -10,9 +10,10 @@
 //! The wallet deals only with the ZecuredSwap of its pinned deployment record
 //! (`--swap-deployment` or `ZECURED_SWAP_DEPLOYMENT`, required: N-12), whatever contract or chain
 //! a maker names (W-9). It opens an order, and pays it, only while a proof could land: its payment
-//! guest is a working Swap version and the relay keeps up (W-7), and the payment, its anchor and
-//! the order's tier of work fit before a known network upgrade (W-20). It pays after a random
-//! delay, under an anchor whose height it drew before paying (W-10, docs/SWAP.md "Privacy").
+//! guest is a working Swap version and the relay keeps up (W-7), the payment, its anchor and the
+//! order's tier of work fit before a known network upgrade (W-20), and the whole pipeline before
+//! the order's deadline (N-11). It pays after a random delay, under an anchor whose height it drew
+//! before paying (W-10, docs/SWAP.md "Privacy"), deciding again right before the broadcast (N-4).
 //!
 //! TEST ONLY: the taker is an EOA (`SWAP_TAKER_PRIVATE_KEY`) that pays its own Base gas; the app
 //! takes Buy orders from the user's own wallet. Each order's file (0600, next to the wallet) keeps
@@ -54,10 +55,14 @@ use zecured_zcash_ops::{keys::ironwood_receiver, lwd, spend};
 
 use crate::{load_wallet, lwd_connect, read_json, read_secret_json, scan, write_json, zcash_network, zcash_params};
 
-/// Relay headers whose average work estimates how many blocks the order's tier of work takes (W-20).
+/// Relay headers whose average work estimates how many blocks the order's tier of work takes (W-20,
+/// N-11).
 const WORK_SAMPLE: u32 = 24;
 /// Seconds per Zcash block (the target spacing on Testnet and Mainnet).
 const BLOCK_SECS: u64 = 75;
+/// N-11: the payment's own time, from the decision to pay to its broadcast (the wallet's scan and
+/// the Halo 2 proof): the two blocks of headroom its anchor's plan keeps for it (N-4).
+const PAY_SECS: u64 = anchor::PAY_HEADROOM_BLOCKS as u64 * BLOCK_SECS;
 
 #[derive(Subcommand)]
 pub enum SwapCmd {
@@ -119,9 +124,11 @@ pub struct SwapOpts {
     /// relay and proves before the deadline.
     #[arg(long, default_value_t = 10_800)]
     min_window: u32,
-    /// The time this wallet needs from its payment to its proof on Base, seconds (the anchor, the
-    /// order's tier of work, proving, submitting): it never pays with less than that left before
-    /// the deadline; the order then goes back to the maker unpaid.
+    /// Seconds this wallet needs to prove its payment and submit the proof, once the anchor has the
+    /// order's tier of work on top of it. N-11: it pays only while the blocks to the anchor and the
+    /// tier's work (75 s each, the work from the relay's last headers), the payment's own build
+    /// (two blocks) and these seconds fit before the deadline; otherwise the order goes back to the
+    /// maker unpaid.
     #[arg(long, default_value_t = 7_200)]
     prove_secs: u64,
     /// W-10: the payment waits a random 1 to this many Zcash blocks after the order lands on Base,
@@ -202,30 +209,46 @@ struct PayFacts {
     deadline: u64,
     /// W-7: whether a proof could land.
     proofs: ProofPath,
+    /// N-11: the blocks the order's tier of work takes on top of the anchor, from the average work
+    /// of the relay's last headers.
+    work_blocks: u32,
     /// W-20: the payment, its anchor and the order's tier of work fit in the tip's epoch, one the
     /// statement proves on.
     fits_epoch: bool,
 }
 
+/// N-11: seconds from now to a payment's proof on Base, its anchor `to_anchor` blocks above the
+/// tip: those blocks and the tier's `work_blocks` on top of the anchor (75 s each), the payment's
+/// own build, and `--prove-secs` (proving and submitting).
+fn pipeline_secs(to_anchor: u32, work_blocks: u32, opts: &SwapOpts) -> u64 {
+    u64::from(to_anchor.saturating_add(work_blocks)) * BLOCK_SECS + PAY_SECS + opts.prove_secs
+}
+
 fn pay_move(f: &SwapFile, x: &PayFacts, opts: &SwapOpts) -> PayMove {
-    if x.now.saturating_add(opts.prove_secs) > x.deadline {
+    let scheduled = match (f.pay_after_height, f.planned_anchor_height) {
+        // A payment broadcast now still lands below its planned anchor.
+        (Some(after), Some(planned)) if x.tip.saturating_add(1) < planned => Some((after, planned)),
+        _ => None,
+    };
+    // N-11: the whole pipeline before the deadline, from the anchor as planned (or, about to be
+    // planned, the latest a plan from this tip may set).
+    let to_anchor = scheduled.map_or(anchor::anchor_window(opts.pay_delay_max_blocks), |(_, p)| p - x.tip);
+    if x.now.saturating_add(pipeline_secs(to_anchor, x.work_blocks, opts)) > x.deadline {
         return PayMove::GiveUp(
             "too late to pay and prove before the deadline: nothing was paid, and the maker's USDC goes back to it",
         );
     }
-    match (f.pay_after_height, f.planned_anchor_height) {
-        (Some(after), Some(planned)) if x.tip.saturating_add(1) < planned => {
-            if let Some(why) = x.proofs.problem(opts.max_relay_lag) {
-                PayMove::Wait(why)
-            } else if !x.fits_epoch {
-                PayMove::Wait("the payment and its proof would not fit before a network upgrade activation")
-            } else if x.tip < after {
-                PayMove::Wait("the payment's random privacy delay")
-            } else {
-                PayMove::Pay
-            }
-        }
-        _ => PayMove::Schedule,
+    let Some((after, _)) = scheduled else {
+        return PayMove::Schedule;
+    };
+    if let Some(why) = x.proofs.problem(opts.max_relay_lag) {
+        PayMove::Wait(why)
+    } else if !x.fits_epoch {
+        PayMove::Wait("the payment and its proof would not fit before a network upgrade activation")
+    } else if x.tip < after {
+        PayMove::Wait("the payment's random privacy delay")
+    } else {
+        PayMove::Pay
     }
 }
 
@@ -260,11 +283,12 @@ fn check_opts(opts: &SwapOpts) -> Result<()> {
         opts.mock || opts.pay_delay_max_blocks >= MIN_PAY_DELAY_MAX_BLOCKS,
         "--pay-delay-max-blocks is at least {MIN_PAY_DELAY_MAX_BLOCKS} outside a local fork (W-10)"
     );
-    // The anchor window, its two blocks of headroom included (N-4), on top of proving.
+    // The anchor window, its two blocks of headroom included (N-4), the payment's build and proving
+    // (N-11; the tier's work is read from the relay once there is a quote).
     let window = u64::from(anchor::anchor_window(opts.pay_delay_max_blocks)) * BLOCK_SECS;
     ensure!(
-        u64::from(opts.min_window) > window + opts.prove_secs,
-        "--min-window must hold the anchor window ({window} s: 2 × --pay-delay-max-blocks + 4 blocks) on top of --prove-secs"
+        u64::from(opts.min_window) > window + PAY_SECS + opts.prove_secs,
+        "--min-window must hold the anchor window ({window} s: 2 × --pay-delay-max-blocks + 4 blocks) and the payment's build ({PAY_SECS} s) on top of --prove-secs"
     );
     Ok(())
 }
@@ -291,22 +315,24 @@ async fn proof_path(provider: &DynProvider, pin: &SwapPin, version: B256, tip: u
     })
 }
 
-/// W-20: whether a payment scheduled at the tip `tip`, its anchor and the order's tier of work fit
-/// in the tip's epoch (the tier's work in blocks is read from the relay only near a known
-/// activation).
-async fn fits_epoch(provider: &DynProvider, pin: &SwapPin, tip: u32, zatoshi: u64, max: u32) -> Result<bool> {
+/// W-20: whether a payment scheduled at the tip `tip`, its anchor and the order's tier of work
+/// (`work_blocks` on top of the anchor) fit in the tip's epoch.
+fn fits_epoch(tip: u32, work_blocks: u32, max: u32) -> bool {
     let network = zcash_network();
-    let last = anchor::epoch_last_height(network, tip);
-    let work = match last {
-        Some(_) => blocks_for_work(provider, pin.swap, zatoshi, WORK_SAMPLE).await?,
-        None => 0,
-    };
-    Ok(anchor::fits_in_epoch(
+    anchor::fits_in_epoch(
         tip,
-        anchor::anchor_window(max).saturating_add(work),
+        anchor::anchor_window(max).saturating_add(work_blocks),
         anchor::provable_epoch(network, tip),
-        last,
-    ))
+        anchor::epoch_last_height(network, tip),
+    )
+}
+
+/// W-20, N-11: how many relay blocks the order's tier of work takes now, from the average work of
+/// the relay's last headers.
+async fn work_blocks(provider: &DynProvider, pin: &SwapPin, zatoshi: u64) -> Result<u32> {
+    blocks_for_work(provider, pin.swap, zatoshi, WORK_SAMPLE)
+        .await
+        .context("the order's tier of work in relay blocks")
 }
 
 /// What an opened order's payment depends on, read now: for the decision to pay, and again right
@@ -322,12 +348,14 @@ async fn pay_facts(
 ) -> Result<PayFacts> {
     let mut client = lwd_connect(lwd_url).await?;
     let tip = lwd_tip(&mut client).await?;
+    let work_blocks = work_blocks(provider, pin, q.zatoshi).await?;
     Ok(PayFacts {
         tip,
         now: base_now(provider).await?,
         deadline,
         proofs: proof_path(provider, pin, version, tip).await?,
-        fits_epoch: fits_epoch(provider, pin, tip, q.zatoshi, opts.pay_delay_max_blocks).await?,
+        work_blocks,
+        fits_epoch: fits_epoch(tip, work_blocks, opts.pay_delay_max_blocks),
     })
 }
 
@@ -619,9 +647,18 @@ async fn advance(wallet: &Path, lwd_url: &str, mut f: SwapFile, opts: &SwapOpts)
                 if let Some(why) = path_now.problem(opts.max_relay_lag) {
                     bail!("{why}: the order is not opened");
                 }
+                let work = work_blocks(&provider, &pin, q.zatoshi).await?;
                 ensure!(
-                    fits_epoch(&provider, &pin, tip, q.zatoshi, opts.pay_delay_max_blocks).await?,
+                    fits_epoch(tip, work, opts.pay_delay_max_blocks),
                     "the payment and its proof would not fit before a network upgrade activation: the order is not opened"
+                );
+                // N-11: nor one whose window could not hold the whole pipeline of a payment planned
+                // right away (which `pay_move` asks for before paying).
+                let need = pipeline_secs(anchor::anchor_window(opts.pay_delay_max_blocks), work, opts);
+                ensure!(
+                    need <= u64::from(q.payWindow),
+                    "the pay window ({} s) cannot hold the payment's pipeline ({need} s: the anchor window, the order's tier of work, the payment, --prove-secs): the order is not opened",
+                    q.payWindow
                 );
                 let call = swap.open(q.clone(), f.signature.clone(), B256::ZERO);
                 let gas = gas_with_headroom(call.estimate_gas().await.context("estimate open")?);
@@ -1153,6 +1190,7 @@ mod tests {
         }
     }
 
+    /// The judge tier's work: 16 blocks (1,200 s).
     fn facts(tip: u32) -> PayFacts {
         PayFacts {
             tip,
@@ -1162,6 +1200,7 @@ mod tests {
                 version_working: true,
                 relay_lag: 1,
             },
+            work_blocks: 16,
             fits_epoch: true,
         }
     }
@@ -1310,15 +1349,35 @@ mod tests {
         assert!(matches!(pay_move(&scheduled(), &x, &o), PayMove::Wait(why) if why.contains("activation")));
     }
 
-    /// The CLI never pays with less than `--prove-secs` left before the deadline.
+    /// N-11: the CLI pays only while the payment's whole pipeline fits before the deadline: the
+    /// blocks to its planned anchor and the order's tier of work on top of it, the payment's own
+    /// build and `--prove-secs`, not `--prove-secs` alone.
     #[test]
-    fn the_cli_does_not_pay_too_close_to_its_deadline() {
+    fn n11_the_cli_pays_only_while_its_whole_pipeline_fits_before_the_deadline() {
         let o = some_opts();
         let mut x = facts(4_500_003);
         x.now = x.deadline - 7_200;
+        let m = pay_move(&scheduled(), &x, &o);
+        assert!(matches!(m, PayMove::GiveUp(_)), "--prove-secs alone is left: {m:?}");
+        // From the tip 4,500,003: 11 blocks to the anchor at 4,500,014 and 16 of work, 75 s each,
+        // two blocks for the payment, 7,200 s to prove and submit.
+        let need = (11 + 16) * 75 + 150 + 7_200;
+        x.now = x.deadline - need;
         assert_eq!(pay_move(&scheduled(), &x, &o), PayMove::Pay);
         x.now += 1;
         assert!(matches!(pay_move(&scheduled(), &x, &o), PayMove::GiveUp(_)));
+        // A bigger tier's work counts too, and so does a wait for the privacy delay.
+        x.now -= 75;
+        x.work_blocks = 17;
+        assert!(matches!(pay_move(&scheduled(), &x, &o), PayMove::GiveUp(_)));
+        x.tip = 4_500_002;
+        assert!(matches!(pay_move(&scheduled(), &x, &o), PayMove::GiveUp(_)), "given up while it waits");
+        // A plan from the tip: its latest anchor, 2 × 8 + 4 blocks above it.
+        let mut x = facts(4_500_000);
+        x.now = x.deadline - ((20 + 16) * 75 + 150 + 7_200);
+        assert_eq!(pay_move(&file(), &x, &o), PayMove::Schedule);
+        x.now += 1;
+        assert!(matches!(pay_move(&file(), &x, &o), PayMove::GiveUp(_)), "too late to plan one");
     }
 
     /// W-10: the options keep a privacy delay outside a local fork, and room for it in the window.
@@ -1333,10 +1392,11 @@ mod tests {
         check_opts(&o).unwrap();
         o.min_window = 7_200;
         assert!(check_opts(&o).is_err(), "no room for the delays");
-        // N-4: the anchor window counts its two blocks of headroom: 2 × 8 + 4 blocks of 75 s.
+        // N-4, N-11: the anchor window counts its two blocks of headroom (2 × 8 + 4 blocks of 75 s),
+        // and the window the payment's own build (two blocks).
         o.pay_delay_max_blocks = 8;
-        o.min_window = 20 * 75 + 7_200;
-        assert!(check_opts(&o).is_err(), "no room for the headroom");
+        o.min_window = 20 * 75 + 150 + 7_200;
+        assert!(check_opts(&o).is_err(), "no room for the headroom and the payment");
         o.min_window += 1;
         check_opts(&o).unwrap();
     }
