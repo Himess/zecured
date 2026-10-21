@@ -3,16 +3,16 @@
 //! with the memo "ZSWP" || orderId and `ovk = None` to the maker's receiver, proves the payment in
 //! zero knowledge and finalizes the order, which releases the USDC to the taker's Base address.
 //!
-//!   zecured-wallet swap sell --maker <url> --zec 0.5 [--min-usdc 19.5]
-//!   zecured-wallet swap resume --order <orderId>
-//!   zecured-wallet swap status --order <orderId>
+//!   zecured-wallet swap sell --swap-deployment <record> --maker <url> --zec 0.5 [--min-usdc 19.5]
+//!   zecured-wallet swap resume --swap-deployment <record> --order <orderId>
+//!   zecured-wallet swap status --swap-deployment <record> --order <orderId>
 //!
 //! The wallet deals only with the ZecuredSwap of its pinned deployment record
-//! (`--swap-deployment`), whatever contract or chain a maker names (W-9). It opens an order, and
-//! pays it, only while a proof could land: its payment guest is a working Swap version and the
-//! relay keeps up (W-7), and the payment, its anchor and the order's tier of work fit before a
-//! known network upgrade (W-20). It pays after a random delay, under an anchor whose height it
-//! drew before paying (W-10, docs/SWAP.md "Privacy").
+//! (`--swap-deployment` or `ZECURED_SWAP_DEPLOYMENT`, required: N-12), whatever contract or chain
+//! a maker names (W-9). It opens an order, and pays it, only while a proof could land: its payment
+//! guest is a working Swap version and the relay keeps up (W-7), and the payment, its anchor and
+//! the order's tier of work fit before a known network upgrade (W-20). It pays after a random
+//! delay, under an anchor whose height it drew before paying (W-10, docs/SWAP.md "Privacy").
 //!
 //! TEST ONLY: the taker is an EOA (`SWAP_TAKER_PRIVATE_KEY`) that pays its own Base gas; the app
 //! takes Buy orders from the user's own wallet. Each order's file (0600, next to the wallet) keeps
@@ -138,14 +138,11 @@ pub struct SwapOpts {
 #[derive(Args, Clone)]
 pub struct PinOpts {
     /// The deployment record of the ZecuredSwap this wallet deals with, as script/DeploySwap.s.sol
-    /// writes it (`chainId`, `ZecuredSwap`, `usdc`, `relay`, `versions`): a quote naming another
-    /// contract or chain is refused, and so is a contract whose USDC, relay or version registry is
-    /// not the record's.
-    #[arg(
-        long,
-        env = "ZECURED_SWAP_DEPLOYMENT",
-        default_value = "contracts/deployments/base-sepolia.swap.json"
-    )]
+    /// writes it (`chainId`, `ZecuredSwap`, `usdc`, `relay`, `versions`), e.g.
+    /// contracts/deployments/base-sepolia.swap.json: a quote naming another contract or chain is
+    /// refused, and so is a contract whose USDC, relay or version registry is not the record's.
+    /// Required (N-12): a default path would be read relative to the working directory.
+    #[arg(long, env = "ZECURED_SWAP_DEPLOYMENT", value_name = "FILE")]
     swap_deployment: PathBuf,
 }
 
@@ -1189,6 +1186,31 @@ mod tests {
         check_opts(&o).unwrap();
         o.min_window = 7_200;
         assert!(check_opts(&o).is_err(), "no room for the delays");
+    }
+
+    /// N-12: the pinned deployment record has no default (a path relative to the working directory
+    /// would pin whatever record is there): a run without `--swap-deployment` or
+    /// `ZECURED_SWAP_DEPLOYMENT` is refused before anything is done.
+    #[test]
+    fn n12_the_swap_deployment_record_must_be_given() {
+        use clap::Parser;
+        let cmd = PinOpts::augment_args(clap::Command::new("t"));
+        let arg = cmd.get_arguments().find(|a| a.get_id() == "swap_deployment").unwrap();
+        assert!(arg.get_default_values().is_empty(), "a default record: {:?}", arg.get_default_values());
+        assert!(arg.is_required_set(), "not required");
+        #[derive(Parser)]
+        struct T {
+            #[command(subcommand)]
+            cmd: SwapCmd,
+        }
+        // The variable would stand for the flag; a run without either is refused.
+        if std::env::var_os("ZECURED_SWAP_DEPLOYMENT").is_none() {
+            let order = B256::repeat_byte(1).to_string();
+            let e = T::try_parse_from(["t", "status", "--order", &order]).err().expect("refused");
+            assert!(e.to_string().contains("--swap-deployment"), "{e}");
+            let given = T::try_parse_from(["t", "status", "--order", &order, "--swap-deployment", "x.json"]);
+            assert!(given.is_ok());
+        }
     }
 
     /// W-9: the pin is DeploySwap's record; an order file of another contract or chain is refused.
