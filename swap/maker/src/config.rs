@@ -6,7 +6,11 @@ use std::{net::SocketAddr, path::PathBuf};
 use alloy::primitives::{Address, B256};
 use anyhow::{Context, Result, ensure};
 use serde::{Deserialize, Serialize};
-use zecured_swap::Side;
+use zecured_swap::{
+    Side,
+    anchor::{self, MIN_PAY_DELAY_MAX_BLOCKS},
+    seal::Prover,
+};
 use zecured_zcash_ops::network::ZcashNetwork;
 
 /// The maker's configuration file.
@@ -60,20 +64,25 @@ pub struct MakerConfig {
     pub max_order_zat: u64,
     /// USDC units (6 decimals).
     pub max_order_usdc: u64,
-    /// Most orders the maker has open at once.
+    /// Most orders the maker has open at once, Sell orders included: it bounds the USDC the maker
+    /// locks (its approval is sized by it) and the free options its Sell quotes hand out (W-19).
     pub max_open_orders: usize,
-    /// H-05 (L23): a random 1 to `pay_delay_max_blocks` Zcash blocks between receiving a
+    /// W-19: most open orders of one taker (a quote names its taker on Sell, and on Buy when asked;
+    /// a Buy destination counts the taker's orders in payment), 1 to `max_open_orders`.
+    #[serde(default = "default_max_open_orders_per_taker")]
+    pub max_open_orders_per_taker: usize,
+    /// H-05 (L23), W-10: a random 1 to `pay_delay_max_blocks` Zcash blocks between receiving a
     /// destination and broadcasting the payment, so the payment does not sit in the block right
-    /// after the order opened on Base.
+    /// after the order opened on Base; and the proof's anchor, fixed before the payment, at
+    /// `c + pay_delay_max_blocks + 1 + r` with `r` drawn in `0..=pay_delay_max_blocks`
+    /// (`zecured_swap::anchor`), so the public anchor says nothing of the payment's block. (There
+    /// is no separate proving delay any more: `r` does that work.)
     pub pay_delay_max_blocks: u32,
-    /// H-05 (L5): a random 0 to `prove_delay_max_blocks` extra blocks above the payment's before
-    /// the proof's anchor, so the public anchor does not point at the block right after the
-    /// payment's.
-    pub prove_delay_max_blocks: u32,
     /// Seconds per Zcash block (75 on Testnet and Mainnet).
     #[serde(default = "default_block_secs")]
     pub block_secs: u64,
-    /// Seconds until a payment's block has the order's tier of work on the relay (estimate).
+    /// Seconds until the proof's anchor has the order's tier of work on top of it on the relay
+    /// (estimate).
     pub confirm_estimate_secs: u64,
     /// Seconds to prove a payment (STARK and Groth16; a few with MOCK seals).
     pub proving_estimate_secs: u64,
@@ -110,10 +119,12 @@ fn default_poll_secs() -> u64 {
     15
 }
 
+fn default_max_open_orders_per_taker() -> usize {
+    3
+}
+
 /// The most a spread may be (20 %).
 pub const MAX_SPREAD_BPS: u16 = 2_000;
-/// H-05 (L5): the least `prove_delay_max_blocks` outside a local fork.
-pub const MIN_PROVE_DELAY_MAX_BLOCKS: u32 = 2;
 
 impl MakerConfig {
     pub fn load(path: &std::path::Path) -> Result<Self> {
@@ -123,14 +134,31 @@ impl MakerConfig {
         Ok(cfg)
     }
 
-    /// Seconds an order needs from its destination to its proof on Base, at most: the payment's
-    /// privacy delay, its confirmations, the proof's extra blocks, proving, and the margin.
+    /// Seconds an order needs from its destination to its proof on Base, at most: the anchor window
+    /// (W-10: the latest planned anchor is `2 × pay_delay_max_blocks + 2` blocks above the tip the
+    /// payment is scheduled at, the payment's own delay included), the tier's work on top of the
+    /// anchor, proving, and the margin.
     pub fn required_secs(&self) -> u64 {
-        u64::from(self.pay_delay_max_blocks) * self.block_secs
+        u64::from(anchor::anchor_window(self.pay_delay_max_blocks)) * self.block_secs
             + self.confirm_estimate_secs
-            + u64::from(self.prove_delay_max_blocks) * self.block_secs
             + self.proving_estimate_secs
             + self.submit_margin_secs
+    }
+
+    /// The maker's prover: the zkVM host (MOCK seals on a local fork), its files next to the book.
+    pub fn prover(&self) -> Prover {
+        Prover {
+            host: self.host.clone(),
+            mock: self.mock_seal,
+            work: self.state.with_file_name("proofs"),
+        }
+    }
+
+    /// W-20: blocks from the tip a payment is scheduled at to its anchor having the order's tier of
+    /// work on top, at most: the anchor window and the work (`confirm_estimate_secs` in blocks).
+    pub fn anchor_pipeline_blocks(&self) -> u32 {
+        let work = u32::try_from(self.confirm_estimate_secs.div_ceil(self.block_secs)).unwrap_or(u32::MAX);
+        anchor::anchor_window(self.pay_delay_max_blocks).saturating_add(work)
     }
 
     /// What every config must respect; the chain's own bounds are checked at start.
@@ -140,6 +168,10 @@ impl MakerConfig {
         ensure!(self.spread_bps <= MAX_SPREAD_BPS, "spread_bps is at most {MAX_SPREAD_BPS}");
         ensure!(self.min_order_zat > 0 && self.min_order_zat <= self.max_order_zat, "order bounds");
         ensure!(self.max_order_usdc > 0 && self.max_open_orders > 0, "order caps");
+        ensure!(
+            (1..=self.max_open_orders).contains(&self.max_open_orders_per_taker),
+            "max_open_orders_per_taker is 1 to max_open_orders (W-19)"
+        );
         ensure!(self.quote_ttl_secs >= 10, "quote_ttl_secs is at least 10");
         ensure!(self.block_secs > 0 && self.poll_secs > 0, "block_secs and poll_secs");
         // The payments' Zcash network goes with the Base chain (or is named on a local fork).
@@ -147,19 +179,15 @@ impl MakerConfig {
         if !self.local_fork {
             ensure!(!self.mock_seal, "MOCK seals only on a local fork");
             ensure!(
-                self.pay_delay_max_blocks >= 1,
-                "pay_delay_max_blocks is at least 1 outside a local fork (H-05, L23)"
-            );
-            ensure!(
-                self.prove_delay_max_blocks >= MIN_PROVE_DELAY_MAX_BLOCKS,
-                "prove_delay_max_blocks is at least {MIN_PROVE_DELAY_MAX_BLOCKS} outside a local fork (H-05, L5)"
+                self.pay_delay_max_blocks >= MIN_PAY_DELAY_MAX_BLOCKS,
+                "pay_delay_max_blocks is at least {MIN_PAY_DELAY_MAX_BLOCKS} outside a local fork (H-05, L23, W-10)"
             );
         }
         // The maker never quotes a window it cannot meet (docs/SWAP.md "The market maker"): a
         // destination given within the first half of the window must still leave the whole pipeline its time.
         ensure!(
             u64::from(self.pay_window_secs) >= 2 * self.required_secs(),
-            "pay_window_secs ({}) must be at least twice the pipeline's {} s (privacy delays, confirmations, proving, margin)",
+            "pay_window_secs ({}) must be at least twice the pipeline's {} s (the anchor window, confirmations, proving, margin)",
             self.pay_window_secs,
             self.required_secs()
         );
@@ -210,8 +238,8 @@ pub mod tests {
             max_order_zat: 1_000_000_000,
             max_order_usdc: 200_000_000,
             max_open_orders: 10,
+            max_open_orders_per_taker: 3,
             pay_delay_max_blocks: 8,
-            prove_delay_max_blocks: 4,
             block_secs: 75,
             confirm_estimate_secs: 1_200,
             proving_estimate_secs: 3_000,
@@ -242,8 +270,9 @@ pub mod tests {
     fn the_judge_config_passes() {
         let c = judge_like();
         c.check().unwrap();
-        // 8 and 4 blocks of 75 s, 1,200 s of work, 3,000 s of proving, 900 s of margin.
-        assert_eq!(c.required_secs(), 600 + 1_200 + 300 + 3_000 + 900);
+        // W-10: an anchor window of 2 × 8 + 2 blocks of 75 s, 1,200 s of work on top of the anchor,
+        // 3,000 s of proving, 900 s of margin.
+        assert_eq!(c.required_secs(), 18 * 75 + 1_200 + 3_000 + 900);
     }
 
     #[test]
@@ -253,14 +282,12 @@ pub mod tests {
         assert!(c.check().is_err(), "MOCK seals off a local fork");
         c.local_fork = true;
         c.pay_delay_max_blocks = 0;
-        c.prove_delay_max_blocks = 0;
         c.check().unwrap();
         let mut c = judge_like();
         c.pay_delay_max_blocks = 0;
         assert!(c.check().is_err(), "H-05: a payment right after the order");
-        let mut c = judge_like();
-        c.prove_delay_max_blocks = 1;
-        assert!(c.check().is_err(), "H-05: an anchor right after the payment");
+        c.pay_delay_max_blocks = 1;
+        assert!(c.check().is_err(), "W-10: one block between the order and its anchor");
         let mut c = judge_like();
         c.proving_estimate_secs = 10_000;
         assert!(c.check().is_err(), "a window the maker cannot meet");
@@ -275,6 +302,15 @@ pub mod tests {
         let mut c = judge_like();
         c.sides.clear();
         assert!(c.check().is_err());
+        let mut c = judge_like();
+        c.max_open_orders_per_taker = 0;
+        assert!(c.check().is_err(), "W-19: no taker could open an order");
+        c.max_open_orders_per_taker = c.max_open_orders + 1;
+        assert!(c.check().is_err(), "W-19: above the maker's own cap");
+        let mut raw = serde_json::to_value(judge_like()).unwrap();
+        raw.as_object_mut().unwrap().remove("max_open_orders_per_taker");
+        let c: MakerConfig = serde_json::from_value(raw).unwrap();
+        assert_eq!(c.max_open_orders_per_taker, 3, "the default of a config written before W-19");
     }
 
     /// The payments' Zcash network goes with the Base chain unless named, and another pairing is

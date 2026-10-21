@@ -28,6 +28,8 @@ sha2 = "0.10"
 # The reference Equihash check (Zebra's), to label the relay's differential corpus.
 equihash = "0.3"
 anyhow.workspace = true
+# Debug-level details that must stay out of errors a payer logs next to its order (W-10).
+tracing.workspace = true
 hex.workspace = true
 serde = { workspace = true }
 serde_json.workspace = true

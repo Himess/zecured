@@ -7,7 +7,8 @@
 //! `"ZSWP" || orderId`, to the receiver whose `keccak256(salt || receiver)` the order names, with
 //! `ovk = None`; it keeps the note's opening ([`pay`]) to build the payment witness and prove it
 //! ([`seal`]), then submits the proof and finalizes the order once the relay has moved on
-//! ([`chain`]). The maker signs quotes under EIP-712 ([`quote`]).
+//! ([`chain`]), under an anchor whose height it fixed before paying ([`anchor`]). The maker signs
+//! quotes under EIP-712 ([`quote`]).
 //!
 //! Privacy: the recipient's receiver and salt travel off-chain only; Base sees the commitment.
 //! Nothing here logs a receiver, a salt, a viewing or spending key, or a Zcash txid.
@@ -23,6 +24,7 @@ use zecured_payment_statement::payment_memo;
 pub use zecured_payment_statement::{MEMO_BINDING_LENGTH, MEMO_PREFIX};
 
 pub mod abi;
+pub mod anchor;
 pub mod chain;
 pub mod pay;
 pub mod quote;

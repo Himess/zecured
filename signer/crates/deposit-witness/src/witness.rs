@@ -9,7 +9,7 @@
 
 use std::{collections::BTreeMap, fs, path::Path};
 
-use anyhow::{Context, Result, anyhow, ensure};
+use anyhow::{Context, Result, anyhow, bail, ensure};
 use orchard::{
     keys::{PreparedIncomingViewingKey, Scope},
     note_encryption::IronwoodDomain,
@@ -150,7 +150,12 @@ pub async fn locate(
     let (raw_tx, height) = lwd::raw_transaction(client, &txid).await?;
     let height = u32::try_from(height)?;
     let epoch = history::epoch(network, tip)?;
-    ensure!(height >= epoch.activation && height < tip, "transaction at {height}, anchor {tip}");
+    if !(height >= epoch.activation && height < tip) {
+        // W-10: the transaction's height stays out of the error, which a payer logs next to its
+        // order; it is at debug level only.
+        tracing::debug!(height, tip, "the transaction is not below the anchor in the anchor's epoch");
+        bail!("the transaction is not below the anchor in the anchor's epoch");
+    }
 
     let summaries = summaries(client, &headers, summaries_path, epoch, tip - 1).await?;
     let leaves: Vec<_> = summaries.iter().map(|s| history::leaf(epoch.branch_id, s)).collect();

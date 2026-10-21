@@ -4,12 +4,14 @@
 //!   zecured-swap-maker invite-hash < code.txt         # keccak256 of an invite code, for the config
 //!
 //! It quotes (`GET /swap/quote`: the oracle price plus or minus the spread, within its inventory,
-//! its caps and ZecuredSwap's, only while it follows both chains and the relay keeps up), follows
-//! its orders on Base, takes a Buy taker's destination (`POST /swap/orders/{id}/destination`),
-//! pays one Ironwood note with the memo "ZSWP" || orderId and `ovk = None` after a random privacy
-//! delay, proves the payment once the relay has the order's tier of work on top (after a random
-//! number of extra blocks), submits the proof and finalizes; on Sell it refunds itself an order its
-//! taker did not prove in time. It never logs a receiver, a salt, a key, a txid or an IP.
+//! its caps and ZecuredSwap's, only while it follows both chains, the relay keeps up and its
+//! guest's Swap version works: W-7), follows its orders on Base, takes a Buy taker's destination
+//! (`POST /swap/orders/{id}/destination`), fixes the height of the proof's anchor, pays one
+//! Ironwood note with the memo "ZSWP" || orderId and `ovk = None` after a random privacy delay,
+//! proves the payment under the header at exactly that height once the relay has the order's tier
+//! of work on top of it (W-10), submits the proof and finalizes; on Sell it refunds itself an order
+//! its taker did not prove in time. It never logs a receiver, a salt, a key, a txid or an IP, nor a
+//! payment's block next to its order.
 
 mod api;
 mod config;
@@ -19,11 +21,11 @@ mod pricing;
 mod quoting;
 mod state;
 
-use std::{io::Read, path::PathBuf, process::Command, sync::Arc};
+use std::{io::Read, path::PathBuf, sync::Arc};
 
 use alloy::{
     network::EthereumWallet,
-    primitives::{B256, U256, keccak256},
+    primitives::{U256, keccak256},
     providers::{Provider, ProviderBuilder},
     signers::local::PrivateKeySigner,
 };
@@ -34,7 +36,7 @@ use zecured_base::gas_with_headroom;
 use zecured_swap::{
     Side,
     abi::{IERC20, IZecuredSwap},
-    chain::swap_version_active,
+    chain::{swap_version, swap_version_id, swap_version_working},
     quote::swap_domain,
 };
 
@@ -44,10 +46,6 @@ use crate::{
     quoting::ChainLimits,
     state::Book,
 };
-
-/// RISC Zero's Groth16 verifier v3.0 selector behind the router; the MOCK verifier's.
-const GROTH16_SELECTOR: [u8; 4] = [0x73, 0xc4, 0x57, 0xba];
-const MOCK_SELECTOR: [u8; 4] = [0xff, 0xff, 0xff, 0xff];
 
 #[derive(Parser)]
 #[command(about = "Zecured Swap market maker")]
@@ -88,16 +86,9 @@ async fn main() -> Result<()> {
     }
 }
 
-/// The image id the maker's prover proves with (`<host> payment image-id`).
-fn prover_image_id(cfg: &MakerConfig) -> Result<B256> {
-    let out = Command::new(&cfg.host).args(["payment", "image-id"]).output().context("run the zkVM host")?;
-    ensure!(out.status.success(), "the zkVM host gave no payment image id");
-    Ok(String::from_utf8(out.stdout)?.trim().parse().context("payment image id")?)
-}
-
 async fn run(cfg: MakerConfig, signer: PrivateKeySigner) -> Result<()> {
     // The payments' Zcash network: its encodings, light wallet server, peers and epochs. Its payment
-    // guest (payment-test or payment-main) must be an active Swap version (checked below).
+    // guest (payment-test or payment-main) must be a Swap version (checked below).
     let network = cfg.zcash()?;
     let provider = ProviderBuilder::new()
         .wallet(EthereumWallet::from(signer.clone()))
@@ -119,13 +110,21 @@ async fn run(cfg: MakerConfig, signer: PrivateKeySigner) -> Result<()> {
         limits.min_pay_window,
         limits.max_pay_window
     );
-    // The maker never pays a payment it could not prove: its guest must be an active Swap version.
-    let image_id = prover_image_id(&cfg)?;
-    let selector = if cfg.mock_seal { MOCK_SELECTOR } else { GROTH16_SELECTOR };
+    // The maker never pays a payment it could not prove (W-7): it quotes, takes destinations, pays
+    // and proves only while its guest's Swap version is working, as read before each. A guest never
+    // scheduled is a misconfigured host; a version that does not work now (not active yet, removed,
+    // its verifier stopped) leaves the maker running, to finalize and refund what it has open.
+    let prover = cfg.prover();
+    let version_id = swap_version_id(prover.selector(), prover.image_id()?);
     ensure!(
-        swap_version_active(&provider, cfg.swap, selector, image_id).await?,
-        "the prover's payment guest is not an active Swap version of ZecuredSwap's version registry"
+        swap_version(&provider, cfg.swap, version_id).await?.activeAt != 0,
+        "the prover's payment guest was never scheduled as a Swap version of ZecuredSwap's version registry"
     );
+    if !swap_version_working(&provider, cfg.swap, version_id).await? {
+        warn!(
+            "the prover's Swap version is not working (not active yet, removed, or its verifier stopped): no quote, destination or payment until it is"
+        );
+    }
     if cfg.sides.contains(&Side::Sell) {
         let usdc = IERC20::new(swap.usdc().call().await?, &provider);
         let need = U256::from(cfg.max_order_usdc) * U256::from(cfg.max_open_orders);
@@ -142,7 +141,7 @@ async fn run(cfg: MakerConfig, signer: PrivateKeySigner) -> Result<()> {
     let wallet = Wallet::load(&cfg.wallet)?;
     let domain = swap_domain(cfg.chain_id, cfg.swap);
     let bind = cfg.bind;
-    let maker = Arc::new(Maker::new(cfg, network, signer, provider, domain, limits, book, wallet));
+    let maker = Arc::new(Maker::new(cfg, network, signer, provider, domain, limits, book, wallet, version_id));
     if maker.cfg.local_fork {
         warn!("local fork: privacy delays may be zero and seals MOCK");
     }

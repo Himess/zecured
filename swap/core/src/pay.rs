@@ -25,6 +25,7 @@ use zcash_primitives::transaction::{
     fees::zip317,
 };
 use zcash_protocol::{
+    TxId,
     consensus::{BlockHeight, Parameters},
     memo::MemoBytes,
     value::Zatoshis,
@@ -32,11 +33,36 @@ use zcash_protocol::{
 pub use zecured_deposit_witness::payment::PaymentOpening;
 use zecured_payment_statement::memo_order_id;
 use zecured_zcash_ops::{
+    lwd::{self, LwdClient},
     scan::ReceivedNote,
     spend::{self, PAYOUT_EXPIRY_DELTA, zip317_fee},
 };
 
 use crate::payment_memo_bytes;
+
+/// What a light wallet server says of a payment (W-8): mined in its main chain at a height, or not
+/// mined (in the mempool, mined on a fork only, or unknown to the server: not relayed yet, or
+/// dropped). A transport error is no answer at all: [`payment_seen`] returns it as an error, never
+/// as "not mined", so a payer never forgets a payment because of one.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Seen {
+    Mined(u32),
+    NotMined,
+}
+
+/// The height `GetTransaction` gave (`None`: the server definitely has no such transaction) as
+/// [`Seen`]: 0 is the mempool and `u64::MAX` a block off the main chain (lightwalletd's sentinels).
+pub fn seen_at(height: Option<u64>) -> Result<Seen> {
+    match height {
+        None | Some(0) | Some(u64::MAX) => Ok(Seen::NotMined),
+        Some(h) => Ok(Seen::Mined(u32::try_from(h).context("a block height")?)),
+    }
+}
+
+/// [`Seen`] of the payment `txid`; a transport error is an error (W-8).
+pub async fn payment_seen(client: &mut LwdClient, txid: &TxId) -> Result<Seen> {
+    seen_at(lwd::raw_transaction_if_known(client, txid).await?.map(|(_, h)| h))
+}
 
 /// An unauthorized payment PCZT and what proving it later needs.
 pub struct UnsignedPayment {
@@ -216,4 +242,20 @@ pub fn check_payment_note(tx: &Transaction, opening: &PaymentOpening, order_id: 
     );
     ensure!(memo_order_id(&memo) == Some(order_id.0), "the payment's memo names another order");
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// W-8: only a main-chain height is "mined"; the mempool, a fork and an unknown transaction
+    /// are "not mined". A transport error never gets here: [`payment_seen`] returns it.
+    #[test]
+    fn w8_only_a_main_chain_height_is_mined() {
+        assert_eq!(seen_at(Some(4_500_005)).unwrap(), Seen::Mined(4_500_005));
+        assert_eq!(seen_at(Some(0)).unwrap(), Seen::NotMined, "the mempool");
+        assert_eq!(seen_at(Some(u64::MAX)).unwrap(), Seen::NotMined, "a block off the main chain");
+        assert_eq!(seen_at(None).unwrap(), Seen::NotMined, "unknown to the server");
+        assert!(seen_at(Some(u64::from(u32::MAX) + 1)).is_err(), "no such height");
+    }
 }

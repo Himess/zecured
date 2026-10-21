@@ -30,6 +30,11 @@ impl SealFile {
     }
 }
 
+/// RISC Zero's Groth16 verifier v3.0 selector behind the router: the first four bytes of a seal.
+pub const GROTH16_SELECTOR: [u8; 4] = [0x73, 0xc4, 0x57, 0xba];
+/// The MOCK verifier's selector (`MockRiscZeroVerifier`, local fork only).
+pub const MOCK_SELECTOR: [u8; 4] = [0xff, 0xff, 0xff, 0xff];
+
 /// How to prove.
 #[derive(Clone, Debug)]
 pub struct Prover {
@@ -57,6 +62,21 @@ fn run_host(host: &Path, args: &[&str], witness: Option<&[u8]>) -> Result<()> {
 }
 
 impl Prover {
+    /// The selector of the seals it makes: Groth16, or MOCK.
+    pub fn selector(&self) -> [u8; 4] {
+        if self.mock { MOCK_SELECTOR } else { GROTH16_SELECTOR }
+    }
+
+    /// The image id of the payment guest it proves with (`<host> payment image-id`).
+    pub fn image_id(&self) -> Result<B256> {
+        let out = Command::new(&self.host)
+            .args(["payment", "image-id"])
+            .output()
+            .with_context(|| format!("run the zkVM host {}", self.host.display()))?;
+        ensure!(out.status.success(), "the zkVM host gave no payment image id");
+        String::from_utf8(out.stdout)?.trim().parse().context("payment image id")
+    }
+
     /// The seal of `witness` (its journal checked against the native statement's).
     pub fn seal(&self, witness: &PaymentWitness) -> Result<SealFile> {
         std::fs::create_dir_all(&self.work)?;
