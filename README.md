@@ -95,7 +95,7 @@ txids) and how to reproduce every run: [docs/TESTING.md](docs/TESTING.md).
 | Zecured Swap: `ZecuredSwap`, the payment statement in the RISC Zero zkVM, the market maker (the app's Buy page uses the user's own wallet; Sell is on the command line) | The payment fixture is synthetic until a rehearsal payment gives a real one (D68) |
 | An onion service configuration for the app and its API (`infra/onion`), deployed with the servers | |
 | Own RPC / bundler / paymaster proxy with a sponsorship allowlist | |
-| Tier 2 deposit statement on real Testnet data, run in the RISC Zero zkVM; Zcash header relay with on-chain Equihash | RISC Zero verifier on the local fork (`MockRiscZeroVerifier`, accepts unproven journals; it also plays the router and its emergency stop for the version registry) for the demo's own proofs, and `mock-host` (MOCK, TEST ONLY), which seals journals of the native deposit, violation and payment statements for it where RISC Zero does not run (Windows); real Groth16 seals of a real deposit and a real F1 spend pass RISC Zero's verifier router on Base Sepolia and on a Base mainnet fork (`RealGroth16Seal.t.sol`), and so does the deployed deposit guest's (statement v2, `RealSealsV2.t.sol`) |
+| Tier 2 deposit statement on real Testnet data, run in the RISC Zero zkVM; Zcash header relay with on-chain Equihash | RISC Zero verifier on the local fork (`MockRiscZeroVerifier`, accepts unproven journals; it also plays the router and its emergency stop for the version registry) for the demo's own proofs, and `mock-host` (MOCK, TEST ONLY), which seals journals of the native deposit, violation and payment statements for it where RISC Zero does not run (Windows); real Groth16 seals of a real deposit and a real F1 spend pass RISC Zero's verifier router on Base Sepolia and on a Base mainnet fork (`RealGroth16Seal.t.sol`), and so do the deployed guests' (statement v2: deposit, F1, `Included`, payment; `RealSealsV2.t.sol`) |
 | Tier 3 ([docs/TIER3.md](docs/TIER3.md)): every payout committed on Base before it is signed; bonds, slashing, compensation, the liveness penalty and disputes of a confirmation; the violation statement proven on a real Testnet vault spend and run in the zkVM; the `watch --tier3` watchtower | The theft demonstration runs on its own deployment with a 2-minute challenge window (labelled DEMO), never on the judge deployment |
 
 ## Repository layout
@@ -176,7 +176,7 @@ its journal for the MOCK verifier, with the deployment's image ids in `ZECURED_M
 succinct receipt (`zecured-tier2-host prove`, 36 s on a rented RTX 4090: `scripts/gpu-prove.sh`)
 wrapped in Groth16 (`groth16`, about a minute with Docker on x86), checked by RISC Zero's verifier
 router on Base Sepolia; `RealGroth16Seal.t.sol` runs a real deposit's seal through it, and `RealSealsV2.t.sol` the
-seals of the deployed guests (statement v2).
+seals of the deployed guests (statement v2: deposit, F1, `Included` and the swap's payment).
 
 ### Reproducing the guest image ids
 

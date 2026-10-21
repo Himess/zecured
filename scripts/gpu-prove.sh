@@ -39,10 +39,10 @@ setup() {
     export PATH="/usr/local/cuda-12.8/bin:$PATH" CUDA_PATH=/usr/local/cuda-12.8 CUDA_HOME=/usr/local/cuda-12.8 \
       CUDA_ROOT=/usr/local/cuda-12.8
   fi
-  # bindgen (circom-witnesscalc, in the Groth16 prover) needs libclang.
-  if ! command -v clang >/dev/null; then
+  # circom-witnesscalc (in the Groth16 prover) needs libclang for bindgen and protoc for its build script.
+  if ! command -v clang >/dev/null || ! command -v protoc >/dev/null; then
     apt-get update -qq
-    DEBIAN_FRONTEND=noninteractive apt-get install -y -qq clang libclang-dev pkg-config libssl-dev
+    DEBIAN_FRONTEND=noninteractive apt-get install -y -qq clang libclang-dev pkg-config libssl-dev protobuf-compiler
   fi
   if ! command -v cargo >/dev/null; then
     curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh -s -- -y --profile minimal --default-toolchain none

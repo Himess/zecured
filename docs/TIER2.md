@@ -290,9 +290,10 @@ keep an off-chain refund from ever spending a note that backs zZEC, or could:
    the real deposit, 48 s for an F1 violation (TESTING.md § 2b). `risc0-groth16` 3.0.5 wraps in Groth16 either with
    Docker on x86 or natively with its `cuda` feature. The CUDA prover fails on our receipts (an out-of-bounds read
    in its own kernel, TESTING.md § 2b), so the wrap uses Docker on x86: about a minute per seal. Its input is the
-   succinct receipt, which holds no viewing key. Both seals pass RISC Zero's router (done), and so does statement
-   v2's deposit-test seal (`RealSealsV2.t.sol`, 2026-10-21). On a 4-vCPU server without a GPU that STARK took 7 h
-   58 min (TESTING.md § 2b): a deployment that proves its users' deposits needs a GPU. A deposit witness holds
+   succinct receipt, which holds no viewing key. Both seals pass RISC Zero's router (done), and so do statement v2's
+   (`RealSealsV2.t.sol`, 2026-10-21): deposit-test, violation-test (F1 and `Included`) and payment-test. On an RTX
+   4090 their STARKs take 4 to 37 s; on a 4-vCPU server without a GPU the deposit's took 7 h 58 min (TESTING.md
+   § 2b): a deployment that proves its users' deposits needs a GPU. A deposit witness holds
    the vault's tag key K, not its viewing key (statement v2): the GPU server learns which notes and payouts are the
    vault's, not their amounts or recipients. The private alternative keeps the STARK on the depositor's machine.
 2. **Base Sepolia**: deploy a relay from a recent checkpoint (`script/DeployRelay.s.sol`, Testnet parameters by
