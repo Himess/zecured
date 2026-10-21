@@ -166,12 +166,14 @@ impl Book {
         self.orders.values().filter(|o| !o.status.is_done())
     }
 
-    /// Zatoshi the wallet's scanned balance does not show as gone yet: promised by Buy orders not
-    /// paid, or paid by a transaction not mined (its inputs still look unspent).
+    /// Zatoshi the wallet's scanned balance does not show as gone yet: promised by Buy orders given
+    /// a destination and not paid, or paid by a transaction not mined (its inputs still look
+    /// unspent). W-19: an order without a destination reserves nothing, so orders opened and left
+    /// without one cannot tie up the inventory; a destination the maker could not pay is refused.
     pub fn reserved_zatoshi(&self) -> u64 {
         self.open_orders()
             .filter(|o| match o.status {
-                MakerStatus::AwaitingDestination | MakerStatus::DestinationReceived => true,
+                MakerStatus::DestinationReceived => true,
                 MakerStatus::Paid => o.mined_height.is_none(),
                 _ => false,
             })
@@ -229,6 +231,27 @@ mod tests {
         assert!(!json.contains("height") && !json.contains("anchor"), "no Zcash height of the payment: {json}");
     }
 
+    /// W-19: a Buy order reserves the maker's ZEC only once its destination is in: orders opened and
+    /// left without one (queue stuffing) leave the inventory alone. Sell orders reserve no ZEC but
+    /// count as open orders (`max_open_orders` bounds the USDC the maker locks).
+    #[test]
+    fn w19_buy_orders_without_a_destination_reserve_no_zec() {
+        let mut book = Book::default();
+        let awaiting = record(MakerStatus::AwaitingDestination);
+        book.orders.insert(awaiting.order_id, awaiting);
+        assert_eq!(book.reserved_zatoshi(), 0, "no destination, no reservation");
+        let mut received = record(MakerStatus::DestinationReceived);
+        received.order_id = B256::repeat_byte(2);
+        book.orders.insert(received.order_id, received);
+        assert_eq!(book.reserved_zatoshi(), 50_000_000, "a destination reserves");
+        let mut sell = record(MakerStatus::TakerPays);
+        sell.side = Side::Sell;
+        sell.order_id = B256::repeat_byte(3);
+        book.orders.insert(sell.order_id, sell);
+        assert_eq!(book.reserved_zatoshi(), 50_000_000, "a Sell order reserves no ZEC");
+        assert_eq!(book.open_orders().count(), 3, "Sell orders count toward max_open_orders");
+    }
+
     /// W-10: the anchor's draw and the planned anchor survive a restart (they are drawn once per
     /// order); a book written before them still loads.
     #[test]
@@ -265,7 +288,7 @@ mod tests {
         let path = dir.join("orders.json");
         let mut book = Book::default();
         book.synced_to = 42;
-        book.orders.insert(B256::repeat_byte(1), record(MakerStatus::AwaitingDestination));
+        book.orders.insert(B256::repeat_byte(1), record(MakerStatus::DestinationReceived));
         let mut paid = record(MakerStatus::Paid);
         paid.order_id = B256::repeat_byte(2);
         book.orders.insert(paid.order_id, paid);

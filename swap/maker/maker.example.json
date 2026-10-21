@@ -20,6 +20,7 @@
   "max_order_zat": 1000000000,
   "max_order_usdc": 200000000,
   "max_open_orders": 10,
+  "max_open_orders_per_taker": 3,
   "pay_delay_max_blocks": 8,
   "block_secs": 75,
   "confirm_estimate_secs": 1200,

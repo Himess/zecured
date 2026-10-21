@@ -19,7 +19,7 @@
 
 use std::sync::{Arc, atomic::Ordering};
 
-use alloy::primitives::{B256, U256};
+use alloy::primitives::{Address, B256, U256};
 use axum::{
     Json, Router,
     extract::{Path, Query, State, rejection::QueryRejection},
@@ -75,6 +75,9 @@ impl ApiError {
     pub const NO_INVENTORY: Self =
         Self::new(StatusCode::CONFLICT, "no_inventory", "The maker cannot fill this order now.");
     pub const BUSY: Self = Self::new(StatusCode::SERVICE_UNAVAILABLE, "busy", "The maker has too many open orders.");
+    /// W-19: under the code `busy`, which the backend's proxy maps.
+    pub const TAKER_BUSY: Self =
+        Self::new(StatusCode::SERVICE_UNAVAILABLE, "busy", "This taker has as many open orders as the maker takes.");
     pub const RELAY_BEHIND: Self = Self::new(
         StatusCode::SERVICE_UNAVAILABLE,
         "relay_behind",
@@ -130,7 +133,7 @@ pub fn router(maker: Arc<Maker>) -> Router {
 }
 
 /// The market as the quote needs it: price, whether a proof could land (W-7), inventory.
-async fn market(m: &Maker, side: Side) -> Result<Market, ApiError> {
+async fn market(m: &Maker, side: Side, taker: Option<Address>) -> Result<Market, ApiError> {
     let oracle = IZecPrice::new(m.cfg.oracle, &m.provider);
     let now = m.now().await?;
     let low = oracle.price().call().await.map_err(|_| ApiError::PRICE_STALE)?;
@@ -147,9 +150,14 @@ async fn market(m: &Maker, side: Side) -> Result<Market, ApiError> {
     // W-7: the Swap version, read now; the relay's lag from the engine's last pass, which must be
     // recent (the maker follows both chains).
     let proofs = m.proof_path().await?;
-    let (reserved, open_orders) = {
+    let (reserved, open_orders, taker_open_orders) = {
         let book = m.book.lock().await;
-        (book.reserved_zatoshi(), book.open_orders().count())
+        let taker = taker.filter(|t| *t != Address::ZERO);
+        (
+            book.reserved_zatoshi(),
+            book.open_orders().count(),
+            taker.map_or(0, |t| book.open_orders().filter(|o| o.taker == t).count()),
+        )
     };
     let me = m.signer.address();
     let usdc = IERC20::new(m.swap().usdc().call().await.map_err(anyhow::Error::from)?, &m.provider);
@@ -163,6 +171,7 @@ async fn market(m: &Maker, side: Side) -> Result<Market, ApiError> {
         zcash_free: m.balance.load(Ordering::Relaxed).saturating_sub(reserved),
         usdc_free: balance.min(allowance),
         open_orders,
+        taker_open_orders,
     })
 }
 
@@ -179,7 +188,7 @@ async fn get_quote(
         return Err(ApiError::BAD_REQUEST);
     };
     let side = Side::parse(&req.side).map_err(|_| ApiError::BAD_REQUEST)?;
-    let market = market(&m, side).await?;
+    let market = market(&m, side, req.taker).await?;
     let t = terms(&m.cfg, &m.limits, &market, &req)?;
     // A random nonce: unguessable order ids, and none reused across restarts.
     let nonce = U256::from_be_bytes(zecured_swap::random_bytes32());
@@ -247,7 +256,20 @@ async fn post_destination(
         book.orders.entry(order_id).or_insert(rec);
     }
     let rec = book.orders.get(&order_id).ok_or(ApiError::UNKNOWN_ORDER)?.clone();
-    let facts = DestinationFacts { now, proofs };
+    // W-19: what the maker could still pay, and how many of this taker's orders are in payment.
+    let facts = DestinationFacts {
+        now,
+        proofs,
+        zcash_free: m.balance.load(Ordering::Relaxed).saturating_sub(book.reserved_zatoshi()),
+        taker_paying: book
+            .open_orders()
+            .filter(|o| {
+                o.order_id != order_id
+                    && o.taker == rec.taker
+                    && matches!(o.status, MakerStatus::DestinationReceived | MakerStatus::Paid | MakerStatus::Proven)
+            })
+            .count(),
+    };
     let d = accept_destination(&m.cfg, &m.network, &rec, &facts, &body.receiver, &body.salt)?;
     let entry = book.orders.get_mut(&order_id).expect("read above");
     if entry.status == MakerStatus::AwaitingDestination {
@@ -278,8 +300,8 @@ async fn get_order(
 }
 
 /// O-7: what the maker can still fill: ZEC (the last scan's spendable balance less what its open
-/// Buy orders reserved) and USDC (its balance within its allowance to ZecuredSwap, which Sell orders
-/// lock), in zatoshi and USDC units.
+/// Buy orders with a destination reserved) and USDC (its balance within its allowance to
+/// ZecuredSwap, which Sell orders lock), in zatoshi and USDC units.
 pub async fn inventory(m: &Maker) -> anyhow::Result<(u64, U256)> {
     let reserved = m.book.lock().await.reserved_zatoshi();
     let zec_free = m.balance.load(Ordering::Relaxed).saturating_sub(reserved);
@@ -317,6 +339,7 @@ async fn get_status(State(m): State<Arc<Maker>>) -> Json<serde_json::Value> {
         "inviteOnly": m.cfg.invite_only,
         "openOrders": open,
         "maxOpenOrders": m.cfg.max_open_orders,
+        "maxOpenOrdersPerTaker": m.cfg.max_open_orders_per_taker,
     }))
 }
 
@@ -379,27 +402,30 @@ mod tests {
     }
 
     /// O-7: the operators' endpoint answers the free ZEC (the scanned balance less what open Buy
-    /// orders reserved) and the lockable USDC (balance within the allowance); the public API never
-    /// serves it.
+    /// orders with a destination reserved) and the lockable USDC (balance within the allowance); the
+    /// public API never serves it.
     #[tokio::test]
     async fn the_inventory_is_served_on_the_status_router_only() {
         let rpc = base_stub(Address::repeat_byte(0x55)).await;
         let provider = ProviderBuilder::new().connect_http(rpc.parse().unwrap()).erased();
         let cfg = judge_like();
         let mut book = Book::default();
-        let order = B256::repeat_byte(1);
-        book.orders.insert(
-            order,
+        let buy = |id: u8| {
             new_record(
-                order,
+                B256::repeat_byte(id),
                 Side::Buy,
                 Address::repeat_byte(2),
                 30_000_000,
                 U256::from(1u64),
                 2_000_000_000,
                 B256::repeat_byte(3),
-            ),
-        );
+            )
+        };
+        // One Buy order given its destination reserves its ZEC; one still without reserves none (W-19).
+        let mut given = buy(1);
+        given.status = MakerStatus::DestinationReceived;
+        book.orders.insert(given.order_id, given);
+        book.orders.insert(B256::repeat_byte(4), buy(4));
         let limits = ChainLimits {
             max_order_usdc: U256::from(1u64),
             max_order_zat: 1,

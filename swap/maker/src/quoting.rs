@@ -28,12 +28,15 @@ pub struct Market {
     /// W-7: whether a proof could land: the Swap version is working, and the Zcash blocks the
     /// relay lags the light wallet server's tip.
     pub proofs: ProofPath,
-    /// Zatoshi the maker can pay now, less what its unpaid Buy orders already promise.
+    /// Zatoshi the maker can pay now, less what its unpaid Buy orders with a destination already
+    /// promise (W-19: an order without one reserves nothing).
     pub zcash_free: u64,
     /// USDC the maker can lock now (balance and allowance).
     pub usdc_free: U256,
-    /// The maker's orders not done.
+    /// The maker's orders not done, Sell orders included.
     pub open_orders: usize,
+    /// W-19: those of the quote's taker, when it names one.
+    pub taker_open_orders: usize,
 }
 
 /// The query of `GET /swap/quote`: a side, one amount, and the taker (required on Sell and in
@@ -120,6 +123,11 @@ pub fn terms(cfg: &MakerConfig, limits: &ChainLimits, m: &Market, req: &QuoteReq
     if m.open_orders >= cfg.max_open_orders {
         return Err(ApiError::BUSY);
     }
+    // W-19: one taker holds at most its cap of open orders (an open Buy quote names no taker: its
+    // destination is bounded instead).
+    if taker != Address::ZERO && m.taker_open_orders >= cfg.max_open_orders_per_taker {
+        return Err(ApiError::TAKER_BUSY);
+    }
     let (zatoshi, usdc) = match (req.zatoshi, req.usdc) {
         (Some(z), None) => (z, pricing::usdc_for(z, m.price, side, cfg.spread_bps).map_err(|_| ApiError::PRICE_STALE)?),
         (None, Some(u)) => {
@@ -204,6 +212,7 @@ mod tests {
             zcash_free: 2_000_000_000,
             usdc_free: U256::from(500_000_000u64),
             open_orders: 0,
+            taker_open_orders: 0,
         }
     }
 
@@ -288,6 +297,26 @@ mod tests {
         invite.invite_only = true;
         invite.invite_code_hashes = vec![B256::repeat_byte(1)];
         assert_eq!(terms(&invite, &l, &m, &buy), Err(ApiError::TAKER_REQUIRED), "invitees get bound quotes");
+    }
+
+    /// W-19: one taker holds at most `max_open_orders_per_taker` open orders: a quote naming it is
+    /// refused beyond (an open Buy quote names none: its destination is bounded instead). Sell
+    /// orders count toward the maker's own cap.
+    #[test]
+    fn w19_a_taker_may_hold_at_most_its_cap_of_open_orders() {
+        let cfg = judge_like();
+        let taker = Some(Address::repeat_byte(7));
+        let sell = req("sell", Some(50_000_000), None, taker);
+        let mut m = market();
+        m.taker_open_orders = 2;
+        assert!(terms(&cfg, &limits(), &m, &sell).is_ok());
+        m.taker_open_orders = 3;
+        assert_eq!(terms(&cfg, &limits(), &m, &sell), Err(ApiError::TAKER_BUSY));
+        assert_eq!(terms(&cfg, &limits(), &m, &req("buy", Some(50_000_000), None, taker)), Err(ApiError::TAKER_BUSY));
+        assert!(terms(&cfg, &limits(), &m, &req("buy", Some(50_000_000), None, None)).is_ok(), "an open Buy quote");
+        let mut m = market();
+        m.open_orders = 10;
+        assert_eq!(terms(&cfg, &limits(), &m, &sell), Err(ApiError::BUSY), "Sell orders count toward max_open_orders");
     }
 
     /// W-7: no quote, on either side, while ZecuredSwap takes no proof of the maker's guest (its

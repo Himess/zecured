@@ -64,8 +64,13 @@ pub struct MakerConfig {
     pub max_order_zat: u64,
     /// USDC units (6 decimals).
     pub max_order_usdc: u64,
-    /// Most orders the maker has open at once.
+    /// Most orders the maker has open at once, Sell orders included: it bounds the USDC the maker
+    /// locks (its approval is sized by it) and the free options its Sell quotes hand out (W-19).
     pub max_open_orders: usize,
+    /// W-19: most open orders of one taker (a quote names its taker on Sell, and on Buy when asked;
+    /// a Buy destination counts the taker's orders in payment), 1 to `max_open_orders`.
+    #[serde(default = "default_max_open_orders_per_taker")]
+    pub max_open_orders_per_taker: usize,
     /// H-05 (L23), W-10: a random 1 to `pay_delay_max_blocks` Zcash blocks between receiving a
     /// destination and broadcasting the payment, so the payment does not sit in the block right
     /// after the order opened on Base; and the proof's anchor, fixed before the payment, at
@@ -114,6 +119,10 @@ fn default_poll_secs() -> u64 {
     15
 }
 
+fn default_max_open_orders_per_taker() -> usize {
+    3
+}
+
 /// The most a spread may be (20 %).
 pub const MAX_SPREAD_BPS: u16 = 2_000;
 
@@ -159,6 +168,10 @@ impl MakerConfig {
         ensure!(self.spread_bps <= MAX_SPREAD_BPS, "spread_bps is at most {MAX_SPREAD_BPS}");
         ensure!(self.min_order_zat > 0 && self.min_order_zat <= self.max_order_zat, "order bounds");
         ensure!(self.max_order_usdc > 0 && self.max_open_orders > 0, "order caps");
+        ensure!(
+            (1..=self.max_open_orders).contains(&self.max_open_orders_per_taker),
+            "max_open_orders_per_taker is 1 to max_open_orders (W-19)"
+        );
         ensure!(self.quote_ttl_secs >= 10, "quote_ttl_secs is at least 10");
         ensure!(self.block_secs > 0 && self.poll_secs > 0, "block_secs and poll_secs");
         // The payments' Zcash network goes with the Base chain (or is named on a local fork).
@@ -225,6 +238,7 @@ pub mod tests {
             max_order_zat: 1_000_000_000,
             max_order_usdc: 200_000_000,
             max_open_orders: 10,
+            max_open_orders_per_taker: 3,
             pay_delay_max_blocks: 8,
             block_secs: 75,
             confirm_estimate_secs: 1_200,
@@ -288,6 +302,15 @@ pub mod tests {
         let mut c = judge_like();
         c.sides.clear();
         assert!(c.check().is_err());
+        let mut c = judge_like();
+        c.max_open_orders_per_taker = 0;
+        assert!(c.check().is_err(), "W-19: no taker could open an order");
+        c.max_open_orders_per_taker = c.max_open_orders + 1;
+        assert!(c.check().is_err(), "W-19: above the maker's own cap");
+        let mut raw = serde_json::to_value(judge_like()).unwrap();
+        raw.as_object_mut().unwrap().remove("max_open_orders_per_taker");
+        let c: MakerConfig = serde_json::from_value(raw).unwrap();
+        assert_eq!(c.max_open_orders_per_taker, 3, "the default of a config written before W-19");
     }
 
     /// The payments' Zcash network goes with the Base chain unless named, and another pairing is

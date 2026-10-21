@@ -50,7 +50,7 @@ use crate::{
     api::ApiError,
     config::MakerConfig,
     gate::{Destination, check_destination},
-    quoting::ChainLimits,
+    quoting::{ChainLimits, PAYMENT_FEE_HEADROOM},
     state::{Book, MakerStatus, OrderRecord},
 };
 
@@ -274,6 +274,11 @@ pub struct DestinationFacts {
     pub now: u64,
     /// W-7: whether a proof could land now.
     pub proofs: ProofPath,
+    /// W-19: the zatoshi the maker can still pay: its scanned balance less what orders with a
+    /// destination reserved (this order has none yet).
+    pub zcash_free: u64,
+    /// W-19: the taker's other open orders already given a destination (in payment).
+    pub taker_paying: usize,
 }
 
 /// `POST /swap/orders/:id/destination`: whether the maker takes the taker's destination for `rec`
@@ -308,6 +313,14 @@ pub fn accept_destination(
         }
         if d.proofs.relay_lag > cfg.max_relay_lag_blocks {
             return Err(ApiError::RELAY_BEHIND);
+        }
+        // W-19: from here on the order reserves its ZEC: the maker must have it, and one taker's
+        // orders in payment stay within its cap.
+        if d.zcash_free < rec.zatoshi.saturating_add(PAYMENT_FEE_HEADROOM) {
+            return Err(ApiError::NO_INVENTORY);
+        }
+        if d.taker_paying >= cfg.max_open_orders_per_taker {
+            return Err(ApiError::TAKER_BUSY);
         }
     }
     Ok(destination)
@@ -935,6 +948,8 @@ mod tests {
                 version_working: true,
                 relay_lag: 1,
             },
+            zcash_free: 2_000_000_000,
+            taker_paying: 0,
         }
     }
 
@@ -1329,6 +1344,27 @@ mod tests {
         );
         r.status = MakerStatus::DestinationReceived;
         assert!(accept_destination(&cfg, &Network::TestNetwork, &r, &d, &ua, &hex::encode(salt)).is_ok());
+    }
+
+    /// W-19: a first destination the maker could not pay now is refused (its order reserves the ZEC
+    /// from then on), and so is one of a taker whose other orders in payment reach its cap.
+    #[test]
+    fn w19_a_destination_the_maker_could_not_pay_is_refused() {
+        let cfg = judge_like();
+        let (r, ua, salt, now) = awaiting(&cfg);
+        let mut d = dest(now);
+        d.zcash_free = r.zatoshi + PAYMENT_FEE_HEADROOM - 1;
+        assert_eq!(
+            accept_destination(&cfg, &Network::TestNetwork, &r, &d, &ua, &hex::encode(salt)).err(),
+            Some(ApiError::NO_INVENTORY)
+        );
+        d.zcash_free = r.zatoshi + PAYMENT_FEE_HEADROOM;
+        assert!(accept_destination(&cfg, &Network::TestNetwork, &r, &d, &ua, &hex::encode(salt)).is_ok());
+        d.taker_paying = 3;
+        assert_eq!(
+            accept_destination(&cfg, &Network::TestNetwork, &r, &d, &ua, &hex::encode(salt)).err(),
+            Some(ApiError::TAKER_BUSY)
+        );
     }
 
     /// W-7: the maker never pays while no proof could land (its Swap version removed or its
