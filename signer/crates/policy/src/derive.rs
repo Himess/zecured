@@ -11,7 +11,7 @@ const DEPOSIT_TAG: &[u8; 16] = b"Zecured_DepTag__";
 const PAYOUT_REF: &[u8; 16] = b"Zecured_PayRef__";
 const NOTE_ID: &[u8; 16] = b"Zecured_NoteId__";
 
-fn blake2b_256(personal: &[u8; 16], key: Option<&[u8; 32]>, parts: &[&[u8]]) -> [u8; 32] {
+pub(crate) fn blake2b_256(personal: &[u8; 16], key: Option<&[u8; 32]>, parts: &[&[u8]]) -> [u8; 32] {
     let mut params = blake2b_simd::Params::new();
     params.hash_length(32).personal(personal);
     if let Some(k) = key {
@@ -64,7 +64,12 @@ pub fn deposit_tag(ufvk: &str, cmx: &[u8; 32]) -> [u8; 32] {
 /// txid in internal byte order (the ZIP 244 digest itself, which for these transactions is also
 /// the sighash the signers sign). The one value that names a payout on Base.
 pub fn payout_ref(ufvk: &str, txid: &[u8; 32]) -> [u8; 32] {
-    blake2b_256(PAYOUT_REF, Some(&tag_key(ufvk)), &[txid])
+    payout_ref_with_key(&tag_key(ufvk), txid)
+}
+
+/// [`payout_ref`] under the vault's tag key `k` (from [`tag_key`]), for a search over many txids.
+pub fn payout_ref_with_key(k: &[u8; 32], txid: &[u8; 32]) -> [u8; 32] {
+    blake2b_256(PAYOUT_REF, Some(k), &[txid])
 }
 
 /// Opaque id of a received note, used off-chain (e.g. in refund requests).

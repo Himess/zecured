@@ -127,13 +127,13 @@ abstract contract PreLiquidationBase is ZecuredFixture {
 
     function _preLiquidate(address acct, uint256 repaidShares) internal returns (uint256 repaid, uint64 seized) {
         vm.prank(preLiquidator);
-        return adapter.preLiquidate(acct, repaidShares, PRE_COMMITMENT);
+        return adapter.preLiquidate(acct, repaidShares, PRE_COMMITMENT, 0);
     }
 
     function _expectPreLiquidateRevert(address acct, uint256 repaidShares, bytes memory err) internal {
         vm.prank(preLiquidator);
         vm.expectRevert(err);
-        adapter.preLiquidate(acct, repaidShares, PRE_COMMITMENT);
+        adapter.preLiquidate(acct, repaidShares, PRE_COMMITMENT, 0);
     }
 }
 
@@ -346,7 +346,7 @@ contract PreLiquidationTest is PreLiquidationBase {
         oracle.setPrice(3520e32 - 1); // $35.20 less a wei: collateral 1,759,999 units, LLTV of it 1,099,999
         vm.prank(preLiquidator);
         vm.expectRevert(abi.encodeWithSelector(ISettlementAdapter.PositionLiquidatable.selector, 1_100_000, 1_099_999));
-        adapter.preLiquidate(account, shares / 2, PRE_COMMITMENT);
+        adapter.preLiquidate(account, shares / 2, PRE_COMMITMENT, 0);
 
         oracle.setPrice(3520e32); // $35.20: collateral 1,760,000 units, 62.5 % of it is the debt exactly
         Quote memory r = _quote(account, t);
@@ -370,7 +370,7 @@ contract PreLiquidationTest is PreLiquidationBase {
         _fundAndApproveAdapter(preLiquidator, 2 * USDC);
         vm.prank(preLiquidator);
         vm.expectPartialRevert(ISettlementAdapter.PositionLiquidatable.selector);
-        adapter.preLiquidate(account, 1e9, PRE_COMMITMENT);
+        adapter.preLiquidate(account, 1e9, PRE_COMMITMENT, 0);
         uint256 shares = _position(account).borrowShares;
         vm.prank(preLiquidator);
         (uint256 seized,) = adapter.liquidate(account, 0, shares, PRE_COMMITMENT);
@@ -569,7 +569,7 @@ contract PreLiquidationTest is PreLiquidationBase {
         if (end.ltv <= t.preLltv) {
             vm.prank(preLiquidator);
             vm.expectPartialRevert(ISettlementAdapter.NotPreLiquidatable.selector);
-            adapter.preLiquidate(account, 1e9, PRE_COMMITMENT);
+            adapter.preLiquidate(account, 1e9, PRE_COMMITMENT, 0);
         }
         assertEq(zzec.totalSupply(), _outstanding(vaultId), "I1");
     }
@@ -582,9 +582,9 @@ contract PreLiquidationTest is PreLiquidationBase {
         oracle.setPrice(_priceForLtv(account, 0.6e18));
         vm.startPrank(preLiquidator);
         vm.expectRevert(ISettlementAdapter.ZeroCommitment.selector);
-        adapter.preLiquidate(account, 1e9, bytes32(0));
+        adapter.preLiquidate(account, 1e9, bytes32(0), 0);
         vm.expectRevert(ISettlementAdapter.ZeroRepay.selector);
-        adapter.preLiquidate(account, 0, PRE_COMMITMENT);
+        adapter.preLiquidate(account, 0, PRE_COMMITMENT, 0);
         vm.stopPrank();
         // An account without terms (and without a vault).
         _expectPreLiquidateRevert(
@@ -691,7 +691,7 @@ contract PreLiquidationTest is PreLiquidationBase {
                 IERC20Errors.ERC20InsufficientAllowance.selector, address(adapter), 0, expectedRepaid
             )
         );
-        adapter.preLiquidate(account, r.repayable, PRE_COMMITMENT);
+        adapter.preLiquidate(account, r.repayable, PRE_COMMITMENT, 0);
         assertEq(usdc.balanceOf(marketMaker), 1 * USDC);
     }
 
@@ -758,12 +758,12 @@ contract PreLiquidationShockTest is PreLiquidationBase {
         assertLe(_ltv(account), t.preLltv, "back under preLltv in one step");
         vm.prank(preLiquidator);
         vm.expectPartialRevert(ISettlementAdapter.NotPreLiquidatable.selector);
-        adapter.preLiquidate(account, 1e9, PRE_COMMITMENT);
+        adapter.preLiquidate(account, 1e9, PRE_COMMITMENT, 0);
 
         _lower(7_200); // $28.80: 80 % of the previous step
         vm.prank(preLiquidator);
         vm.expectPartialRevert(ISettlementAdapter.PositionLiquidatable.selector);
-        adapter.preLiquidate(account, 1e9, PRE_COMMITMENT);
+        adapter.preLiquidate(account, 1e9, PRE_COMMITMENT, 0);
         uint256 shares = _position(account).borrowShares;
         vm.prank(preLiquidator);
         (uint256 liqSeized,) = adapter.liquidate(account, 0, shares, PRE_COMMITMENT);

@@ -261,16 +261,22 @@ contract ZecuredCompensatorTest is Test {
         _assertBooks();
     }
 
-    function test_onCase_F4AndUnknownVaultsRegisterNothing() public {
+    /// W-1: an F4 compensates the claim its commitment hid, at the amount the slasher hands over (the claim's
+    /// `expected`), in the claim's layer, and takes no vault; a theft case without a vault registers nothing.
+    function test_onCase_F4RegistersTheHiddenClaim_unknownVaultsNothing() public {
         _openVault(VAULT_A, alice, 10 * ZEC, 0);
         bytes32 claimId = registry.addClaim(VAULT_A, ClaimKind.Liquidation, ZEC, liquidator, false);
         vm.recordLogs();
-        slasher.execute(keccak256("f4"), ViolationKind.WrongClaimRef, VAULT_A, claimId, 0);
         slasher.execute(keccak256("f1.zero"), ViolationKind.Uncommitted, bytes32(0), bytes32(0), 0);
         assertEq(vm.getRecordedLogs().length, 0);
         assertEq(comp.currentIncident(), 0);
-        assertEq(comp.victim(VAULT_A).incident, 0);
-        assertEq(comp.entitlement(claimId).incident, 0);
+        slasher.execute(keccak256("f4"), ViolationKind.WrongClaimRef, VAULT_A, claimId, ZEC);
+        assertEq(comp.victim(VAULT_A).incident, 0, "an F4 takes no vault");
+        Entitlement memory e = comp.entitlement(claimId);
+        assertEq(e.incident, 1);
+        assertEq(e.layer, 2);
+        assertEq(e.zat, ZEC);
+        assertEq(e.to, liquidator);
     }
 
     /// `onCase` runs inside the slasher's `executeSlash`: a Registry read that fails must not block the slash.

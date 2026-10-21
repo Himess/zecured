@@ -40,7 +40,7 @@ contract CompensationInvariantsTest is Tier3Base {
         usdc.transferOwnership(address(handler)); // MOCK mint for repayments
         oracle.transferOwnership(address(handler)); // MOCK price moves
 
-        bytes4[] memory selectors = new bytes4[](31);
+        bytes4[] memory selectors = new bytes4[](33);
         selectors[0] = CompensationHandler.open.selector;
         selectors[1] = CompensationHandler.open.selector;
         selectors[2] = CompensationHandler.borrow.selector;
@@ -73,6 +73,9 @@ contract CompensationInvariantsTest is Tier3Base {
         selectors[28] = CompensationHandler.reserveRefund.selector;
         selectors[29] = CompensationHandler.openRefund.selector;
         selectors[30] = CompensationHandler.dropRefund.selector;
+        // W-1, W-5: F4 cases, and liveness asked while a case about the claim is open.
+        selectors[31] = CompensationHandler.wrongRef.selector;
+        selectors[32] = CompensationHandler.livenessDuringCase.selector;
         targetSelector(FuzzSelector({addr: address(handler), selectors: selectors}));
         targetContract(address(handler));
         targetSender(makeAddr("zecured.comp.inv.caller"));
@@ -268,6 +271,24 @@ contract CompensationInvariantsTest is Tier3Base {
         invariant_bookkeeping();
     }
 
+    /// W-1, W-5: an F4 case on a committed payout counts against its claim, the bonds refuse that claim's liveness while
+    /// the case is open, and its execution makes the compensator owe the claim.
+    function test_handler_reachesTheW1W5Paths() public {
+        for (uint256 seed; handler.vaultCount() < 8 && seed < 64; ++seed) {
+            handler.open(seed);
+        }
+        handler.commit(_authorizedVault(0), 1);
+        handler.wrongRef(0);
+        assertEq(handler.calls("F4"), 1, "an F4 case opened");
+        handler.livenessDuringCase(0, 0);
+        assertEq(handler.calls("liveness (case open)"), 1, "the bonds refused the claim's liveness");
+        handler.execute(0);
+        assertEq(handler.calls("execute"), 1);
+        assertFalse(handler.violated(), handler.violation());
+        invariant_R7_R20_compensation();
+        invariant_bookkeeping();
+    }
+
     /// A seed that makes `theft` pick the vault at `index` without a refund in flight (the handler's `_mix` odd).
     function _theftSeed(uint256 index) internal view returns (uint256 seed) {
         uint256 n = handler.vaultCount();
@@ -300,7 +321,7 @@ contract CompensationInvariantsTest is Tier3Base {
     }
 
     function afterInvariant() external view {
-        string[34] memory names = [
+        string[36] memory names = [
             "open",
             "borrow",
             "repay",
@@ -334,7 +355,9 @@ contract CompensationInvariantsTest is Tier3Base {
             "open refund",
             "open refund (compromised)",
             "drop refund",
-            "tally vault (refunds reserved)"
+            "tally vault (refunds reserved)",
+            "F4",
+            "liveness (case open)"
         ];
         for (uint256 i; i < names.length; ++i) {
             console.log(names[i], handler.calls(names[i]));

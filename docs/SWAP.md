@@ -30,22 +30,37 @@ remove a broken one at once (D63).
 3. **Destination.** The app hands the maker the salt and the receiver off-chain
    (`POST /swap/orders/:id/destination`); the maker checks them against `C`. Base only ever sees
    `C`, and no authentication is needed: a receiver that does not match `C` is refused.
-4. **Payment.** After a random delay, the maker pays the receiver in one Ironwood-only
-   transaction, with `"ZSWP" ‖ orderId` at the start of the note's memo and no outgoing viewing
-   key.
-5. **Proof.** Once the payment's block has the work the order's size requires, plus a random
-   delay, the maker proves the payment with the payment guest and calls `proveSettlement` before
-   the order's deadline: the settlement is pending.
+4. **Payment.** The maker fixes the height of its proof's anchor, then, after a random delay,
+   pays the receiver in one Ironwood-only transaction, with `"ZSWP" ‖ orderId` at the start of
+   the note's memo and no outgoing viewing key (see "Privacy").
+5. **Proof.** Once the header at the anchor's height has the work the order's size requires on
+   top of it, the maker proves the payment under exactly that header with the payment guest and
+   calls `proveSettlement` before the order's deadline: the settlement is pending.
 6. **Finalize.** After `finalizeDepth` headers and `finalizeDelay` seconds, with the anchor still
    on the relay's best chain and the version still active, `finalizeSettlement` pays the USDC to
    the maker, less the fee (none on the judge deployment or the beta).
 7. **Refund.** If no valid proof stands when the deadline passes, `refund` returns the USDC to
-   the taker. A proof only needs to arrive by the deadline; finalizing may come later.
+   the taker. A proof only needs to arrive by the deadline while it stays valid: one whose anchor
+   leaves the best chain after the deadline cannot be proven again (W-27, docs/MAINNET.md § 7);
+   finalizing may come later.
 
 A Sell runs the same way with the roles swapped: the maker locks the USDC at `open` and names its
 own receiver commitment in the quote; the CLI checks the maker's receiver against it before it
 opens, pays, proves and finalizes, and keeps an order file (0600) marked paid before the broadcast,
-so a resumed run never pays twice.
+so a resumed run never pays twice. The CLI deals only with the `ZecuredSwap` of its pinned
+deployment record, which `script/DeploySwap.s.sol` writes (for example
+`contracts/deployments/base-sepolia.swap.json`): `--swap-deployment` or `ZECURED_SWAP_DEPLOYMENT` is
+required, with no default, since a default path would be read relative to the working directory. It
+refuses a quote that names another contract or chain, and a contract whose `usdc()`, `relay()` or
+`versions()` is not the record's. It opens, and pays, only while its payment guest is a working
+Swap version and the relay keeps up with the Zcash tip, and only while the payment's whole pipeline
+fits before the order's deadline: the blocks to the planned anchor and the order's tier of work on
+top of it (75 s each, the work estimated from the relay's last 24 headers), two blocks for building
+the payment, and `--prove-secs` (proving and submitting, 7,200 s by default). It does not open an
+order whose window could not hold that pipeline, and `--min-window` (10,800 s by default) must hold
+the anchor window, the payment's build and `--prove-secs`. It anchors its proof and pays as the
+maker does: the anchor's height fixed first, then a random delay before the payment, and a last
+look at the chains right before the broadcast (see "Privacy").
 
 ## What a payment proof shows
 
@@ -96,8 +111,8 @@ can start the first Swap version (`PAYMENT_IMAGE_ID`).
 | 5 | A journal replayed on another order, contract or chain | The order id binds the chain, the contract, the maker and its nonce | `test_orderId_formulaAndVector` |
 | 6 | A quote replayed | The nonce is spent at `open`; a quote naming a taker is that taker's | `test_open_replayOfAQuote`, `test_open_takerBinding` |
 | 7 | A proof at the deadline | A proof must come by the deadline; no refund while one stands | `test_prove_byTheDeadline`, `test_refund_notWhileAProofStands` |
-| 8 | A broken guest | Three signers remove the Swap version at once; pending settlements under it go stale and are dropped (R-14) | `test_finalize_versionRemoved` |
-| 9 | RISC Zero's emergency stop | Proofs revert; after the deadline the USDC goes back to whoever locked it (the payer's risk) | `test_refund_afterARouterEstop` |
+| 8 | A broken guest | Three signers remove the Swap version at once; pending settlements under it go stale and are dropped (R-14); the payers stop quoting and paying (W-7) | `test_finalize_versionRemoved`; `w7_refuses_to_pay_when_the_version_is_not_working` |
+| 9 | RISC Zero's emergency stop | Proofs revert; after the deadline the USDC goes back to whoever locked it (the payer's risk); the payers stop quoting and paying while it lasts (W-7) | `test_refund_afterARouterEstop`; `w7_refuses_a_destination_when_the_router_is_stopped` |
 | 10 | Rounding | Exact zatoshi; the fee rounds down | — |
 | 11 | Reentrancy | `nonReentrant` everywhere, SafeERC20, ERC-1271 checked by a static call | `test_reentrancy`, `test_open_erc1271MakerCannotMeddle` |
 | 12 | A leak through events | No event or calldata holds a Zcash identifier | `test_events_carryNoZcashIdentifier`; the leak scanner (docs/TESTING.md § 4) |
@@ -112,30 +127,91 @@ settled or refunded order stays so (docs/INVARIANTS.md I36 to I39).
 `swap/maker` (`zecured-swap-maker`) quotes from a price feed plus a spread within its inventory and
 the order caps, follows the `OrderOpened` events of its own address, pays, proves, submits and
 finalizes, drops stale records and proves again, and after a deadline refunds its own Sell orders
-and the Buy orders it did not pay (the USDC goes back to whoever locked it). It keeps
-one unmined payment at a time and records each payment's opening before broadcasting it. It refuses
-to start when its pay window is shorter than twice its worst-case pipeline, when its guest is not
-an active Swap version, or when its chain does not match the RPC; it refuses a quote while the
-relay lags or the price is stale, and a destination when too little of the window is left. It never
-logs a receiver, salt, transaction id, key or IP, and erases them once an order is done. In the
-mainnet beta it quotes only to holders of an invite code (`X-Zecured-Invite`; only the codes'
-hashes are configured).
+and the Buy orders it did not pay (the USDC goes back to whoever locked it). It keeps one unmined
+payment at a time, decides each payment again on what the chains say right before broadcasting it
+(the Zcash tip, Base's clock, the relay and the Swap version: a payment that could no longer land
+below its planned anchor, whose proof could not land or that is too late is dropped unsent), and
+records its opening before the broadcast. A proof runs in a task of its own, one at a time, so the
+engine's passes, and the view of the chains the API decides on, never wait for one. It refuses to
+start when its pay window is shorter than twice its worst-case pipeline, when its guest was never
+scheduled as a Swap version, or when its chain does not match the RPC; a config still naming the
+old `prove_delay_max_blocks` is refused with a message naming what replaced it.
+
+It quotes, takes a destination and pays only while a proof could land: its guest's Swap version
+is working (`ZecuredVersions.isWorking`: active, its router selector routed and not stopped) and
+the relay keeps up with the Zcash tip, as read in a recent pass (and, for a payment, again right
+before its broadcast); a removed version or a router emergency stop therefore stops new payments at
+once, while the maker keeps finalizing and refunding. It refuses a quote while the price is stale, a
+destination when too little of the window is left, and a payment whose anchor window and the
+order's tier of work would not fit before a known network upgrade activation (a payment and its
+anchor must share an epoch). The same destination given again once taken is acknowledged from the
+order book, whatever the maker's view of the chains.
+
+It has `max_open_orders` places, one taker at most `max_open_orders_per_taker` of them. A quote
+takes one, with its ZEC (Buy) or USDC (Sell), from the moment it is given until its order is read
+from Base or it can no longer be opened; a quote naming a taker counts toward that taker's cap. An
+order holds its place while open, Sell orders included (they bound the USDC the maker locks), but a
+Buy order still waiting for its destination only during its reservation: `reservation_secs` (10
+minutes) from when the maker reads it, given only within the cap of its taker on Base (orders
+opened from open Buy quotes included) and while the maker has a place and the ZEC. The reservation
+keeps the order's ZEC for its destination; an order left without one holds nothing afterwards, so
+orders opened and left tie nothing up for long, and a taker's order beyond its cap holds no place
+and takes no destination. A destination for an order that no longer holds a place takes one again
+only if one is free and the maker can pay it.
+
+It pays an order a second time only when its wallet's scan shows, three blocks past the first
+payment's expiry height, that the payment's input notes are still unspent: a payment it has seen
+mined never counts as expired, and a light wallet server's transport error leaves the order for the
+next pass. It never logs a receiver, salt, transaction id, key or IP, nor the height of a payment's
+block next to its order, and erases them once an order is done. In the mainnet beta it quotes only
+to holders of an invite code (`X-Zecured-Invite`; only the codes' hashes are configured).
 
 ## Privacy
 
 On a swap, the taker's Base account and the order's amount are public, and where the ZEC went is
-not: Base holds only the receiver's salted commitment, and the payment's block stays hidden behind
-a later anchor header among its epoch's blocks. The maker pays after a random delay of 1 to
-`pay_delay_max_blocks` blocks and proves after a further random 0 to `prove_delay_max_blocks`
-blocks (threat model L26), and its payment carries no outgoing viewing key.
+not: Base holds only the receiver's salted commitment, and the payment carries no outgoing viewing
+key (threat model L26).
+
+The proof's anchor header is public (the journal's `anchor`); the payment's block is not, and the
+anchor's height does not depend on it. When a Buy order's destination reaches the maker (for the
+CLI, when its Sell order lands on Base), the payer takes `c`, the height of the Zcash block then
+being mined, draws `r` uniformly in 0 to `pay_delay_max_blocks` once for the order (kept in its
+order book or order file, across restarts), and fixes the anchor at
+`a = c + pay_delay_max_blocks + 1 + 2 + r`. Only then does it pay, after a random delay of 1 to
+`pay_delay_max_blocks` blocks (at least 2 outside a local fork, where 0 counts as 1 for the plan; 8
+for the judge maker and by default in the CLI): the payment lands in one of the blocks `c + 1` to
+`c + pay_delay_max_blocks` (uniformly, plus any wait in the mempool), below `a`. The two blocks of
+headroom are for building the payment (the CLI scans its wallet, both payers prove Halo 2): the
+payer decides to pay once its delay is over, builds the payment, then decides again on the chains
+as they are right before the broadcast, and does not send a payment that could no longer land below
+`a`. The payer proves under the header at exactly `a`, once the order's tier of work is on top of
+it. Base thus shows the order's opening, which puts `c` within a block or so, the anchor, and that
+the payment's block is below the anchor in the same epoch: the payment hides among the
+`pay_delay_max_blocks` blocks after `c` (8 on the judge deployment; a block or two more when it was
+slow to build), and the anchor says nothing about which. There is no separate proving delay any
+more: the draw `r` does that work, and a delay after the anchor would hide nothing. The time a
+proof reaches Base follows the anchor's work and the proving time, not the payment.
+
+Two cases fall outside that set. A payment mined at or after `a` (late: one that waited long in
+the mempool) anchors at `h + 1 + r'`, `h` its block and `r'` a draw of its own in 0 to
+`pay_delay_max_blocks`, made when the payment is first seen late and kept (the order's `r` would tie
+the late anchor to the plan); a payment held back before it is sent (another payment in flight, a
+stopped verifier, a tip that moved past the plan while it was built) until it could no longer land
+below `a` is planned again from the current height instead, with the same `r`, and so is one made
+again after it expired unmined. And an anchor never leaves the payment's epoch: near a known network
+upgrade activation the payer does not pay at all, a late anchor is cut at the epoch's last height,
+and a payment mined in an epoch's very last block cannot be proven.
 
 ## Limits, said plainly
 
 - **No maker stake.** A maker who never pays costs its taker only time: the USDC comes back after
   the window. A stake needs a provable delivery of the receiver (docs/MAINNET.md § 4).
 - **Payer risk.** A router emergency stop or a version removal during the window keeps the payer's
-  proof out; the order then refunds to whoever locked the USDC. The CLI asks for a window of at
-  least two hours, and the contract bounds every quote's window.
+  proof out; the order then refunds to whoever locked the USDC. Both payers check that the version
+  works right before they broadcast a payment (once it is built), so only a stop between a payment
+  and its proof costs one. The CLI asks for a window of at least three hours (`--min-window`, its
+  privacy delays included) and pays only while the payment's whole pipeline fits before the
+  deadline, and the contract bounds every quote's window.
 - **USDC's blocklist.** A blocklisted counterparty cannot be paid: its order's USDC stays in the
   contract.
 - **Testnet first.** The payment fixture is synthetic (the disposable test vault's real deposit

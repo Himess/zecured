@@ -50,9 +50,10 @@ struct BondConfig {
 ///      - `requestUnbond(amount)`: moves `amount` from `bondOf` to `unbondingOf` (ready after `unbondingPeriod`;
 ///        a new request adds to a running one and restarts its clock). Partial: the rest stays >= `minBond`, no case
 ///        is open, and the Intake confirms the coverage still holds without it. Full (rest 0): no case open, no vault
-///        open, and `challengeWindow` passed since the last vault settled (v1's rule). Unbonding amounts stay slashable
-///        (theft and liveness) until withdrawn.
-///      - `withdrawUnbonded(to)`: once ready, while no case is open.
+///        open, no refund pending on the Intake (v4.1, W-14), and `challengeWindow` passed since the last vault
+///        settled (v1's rule). Unbonding amounts stay slashable (theft and liveness) until withdrawn.
+///      - `withdrawUnbonded(to)`: once ready, while no case is open; a full exit (no bond left) also while no vault is
+///        open and no refund is pending (W-14: either may have arrived during the unbonding).
 ///      Slash (`slash`, the slasher only): takes `bondOf + unbondingOf` of every signer in the bitmap, credits the
 ///      bounty (pulled with `claimBounty`), sends the rest to the compensator (`onFunds`), and halts minting for good.
 ///      Liveness receipts (R-5; EIP-712 domain "ZecuredSignerBond" "1"):
@@ -65,11 +66,14 @@ struct BondConfig {
 ///      Liveness (`slashLiveness(claimId)`, the claimant only; T-05):
 ///      - the claim is pending, not bond-paid, has a commitment, its kind is Liquidation, CloseMarketMaker, Release,
 ///        CloseUser or Refund, it is armed (R-5), its vault is not frozen, the compensator owes it nothing (R-7: an F3
-///        shortfall is paid there), and the oracle is not stale (R-9). No claim exists on a pending vault (R-8);
+///        shortfall is paid there), no F3 or F4 case about it is open (v4.1, W-5), and the oracle is not stale (R-9).
+///        No claim exists on a pending vault (R-8);
 ///      - with `payableAt` the arming's, at least the claim's `createdAt`: `deadline = payableAt + livenessPeriod`; if
-///        the claim is bound to an input, `protectedUntil = min(lastCommitAt(input), deadline) + commitGrace`; it is
-///        due at `max(deadline, protectedUntil)`, so the longest wait is `livenessPeriod + commitGrace` however often
-///        the signers re-commit;
+///        the claim is bound to an input, `protectedUntil = min(lastCommitAt(input), max(deadline, armedAt)) +
+///        commitGrace` (v4.1, W-4: `armedAt` is when the claim was first armed for its commitment, so a commitment made
+///        before a late arming is protected in full); it is due at `max(deadline, protectedUntil)`, so the longest wait
+///        is `livenessPeriod + commitGrace` after the later of `payableAt` and the arming, however often the signers
+///        re-commit or re-arm with an earlier receipt (which moves `armedAt` to the deadline it replaces at most);
 ///      - pays the claimant `amount * price * (10,000 + livenessPremiumBps) / 10,000` (USDC units), taken from every
 ///        signer's slashable amount pro rata, or reverts `InsufficientBond` (the claimant can wait); then
 ///        `registry.markBondPaid`.
@@ -107,6 +111,8 @@ interface ISignerBond {
     error ReceiptFromTheFuture(uint64 receivedAt);
     /// @notice R-9: the oracle reports a stale price; try again once a source is fresh.
     error PriceStale();
+    /// @notice v4.1 (W-14): a full exit waits while `total` zatoshi of proven refunds wait on the Intake.
+    error PendingRefunds(uint256 total);
 
     function deposit(uint256 amount) external;
     function requestUnbond(uint256 amount) external;
@@ -132,9 +138,19 @@ interface ISignerBond {
     function livenessArming(bytes32 claimId) external view returns (bytes32 commitment, uint64 payableAt);
 
     /// @notice T-05: when `claimId` can be paid from the bonds and how much it would pay at the current price; `(0, 0)`
-    ///         while it cannot be (wrong kind or status, not armed, a frozen vault, a compensator entitlement, a stale
-    ///         price).
+    ///         while it cannot be (wrong kind or status, not armed, a frozen vault, a compensator entitlement, an open
+    ///         F3 or F4 case about it, a stale price).
     function livenessDue(bytes32 claimId) external view returns (uint64 dueAt, uint256 amount);
+
+    /// @notice v4.1 (W-4): when the bonds may pay `claimId` by its arming alone, ignoring what only delays that payment
+    ///         (a stale price, a frozen vault, an open claim case): what the signers' planners use, so that no payout is
+    ///         committed that could land after it (R-10). Zero for a claim not armed, not eligible, without a claimant
+    ///         or with a compensator entitlement.
+    function livenessDeadline(bytes32 claimId) external view returns (uint64);
+
+    /// @notice v4.1 (W-4): the arming's `armedAt` (zero if never armed); it counts only while the claim's commitment is
+    ///         the arming's.
+    function livenessArmedAt(bytes32 claimId) external view returns (uint64);
     /// @notice R-9: whether the oracle reports a feed state, so that liveness waits while it is `Stale`.
     function priceStateChecked() external view returns (bool);
     /// @notice The EIP-712 domain separator of the receipts ("ZecuredSignerBond", "1").

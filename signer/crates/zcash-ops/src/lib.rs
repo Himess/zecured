@@ -6,4 +6,5 @@ pub mod network;
 pub mod scan;
 pub mod spend;
 pub mod tx;
+pub mod txindex;
 pub mod witness;

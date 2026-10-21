@@ -212,7 +212,8 @@ a witness RPC (set by default outside the local fork).
   on Base with a destination: a Refund claim once its account gave one, from its own note alone (its
   own lineage; the main lineage backs only the main claims, I10); a Fee claim rides with the vault's
   first exit, behind it, and heads a payout only when nothing else waits; a claim the bonds paid goes
-  to the destination all five signers gave for their reimbursement (v4, R-6), without the vault's ovk. A disputed
+  to its own treasury destination, which three signers gave after each derived it from the claim id
+  (W-6), without the vault's ovk. A disputed
   claim counts unpaid but is not payable until it is reopened, and then only by a payout of its input
   with the same claim list (RT-4), which may name the list's confirmed claims again (D57): while the
   input is unspent, no payout of it landed. A node that confirmed the payout itself keeps it paid,
@@ -306,9 +307,11 @@ redirect the reward (`test_prove_revertsOnABadJournalOrSeal`: a seal for another
     wallet, a ciphertext that decrypts to more than its `cmx` commits, or an index X does not have,
     all count as 0. Honest nodes always pay the committed receiver in the committed output, so this
     raises no false alarm.
-- Base checks: `claimPayment(ref)` exists for `outputIndex`, its claim's commitment is
-  `destCommitment`, and `value < expected`.
-- Slashes the payout's signers.
+- Base checks: `claimPayment(ref)` exists for `outputIndex`, the commitment of its payout recorded the
+  claim under `destCommitment` (`claimRefOf(payoutRef, destCommitment) == ref`: what the payout was
+  committed to, so that a liveness payment that cleared the claim's destination since cannot hide
+  the misdirection, W-5), and `value < expected`.
+- Slashes the payout's signers; the compensator owes the claimant the shortfall.
 
 **F4 WrongClaimRef (the borrower, and every signer).**
 - Private input: the vault's tag key K, and a claim's salt and receiver. A wrong K gives a `payoutRef`
@@ -317,7 +320,11 @@ redirect the reward (`test_prove_revertsOnABadJournalOrSeal`: a seal for another
   honest commitment of X gives the claim) and `destCommitment = keccak256(salt ‖ receiver)`.
 - Base checks: `spendRecord(ref)` exists, and `claimRefOf(ref, destCommitment)` is set and differs
   from `noteTag`.
-- Slashes the record's signers: they signed a reference that hides X from the claimant.
+- Slashes the record's signers: they signed a reference that hides X from the claimant. W-1: the
+  hidden claim (`claimPayment` of the committed reference) is compensated in full, its `expected`,
+  pending or already final; a claim the bonds paid is not (its claimant has its USDC).
+- W-5: while an F3 or F4 case about a claim is open (`claimCaseOpen`), the bonds pay no liveness for
+  it.
 
 **Included (kind 5): not a violation.**
 - Private input: the vault's tag key K.
@@ -328,13 +335,29 @@ redirect the reward (`test_prove_revertsOnABadJournalOrSeal`: a seal for another
   then the Registry checks that `ref` is a committed payout of each claim's own input and vault; it
   upholds a disputed confirmation (D53) or a reopened one (D57) the same way. `proveViolation` refuses it (`ViolationKind` stops at
   `WrongClaimRef`).
+- What it does not show (W-11): that X spent the committed input, nor that X was mined after the
+  commitment. Three colluding signers can commit an input a second time naming a transaction mined
+  months before, and make its claims final with an `Included` proof of that old transaction. Finality
+  stays safe because every claimant still has its remedy against the named X: F3 when X's committed
+  output did not pay it, F4 when the commitment named its claim under a reference it cannot find. For
+  that, the watchers search the whole Ironwood history for X, not the blocks after the claim (below);
+  a payout the scan does not show is resolved the same way by the borrower and the coordinator. A
+  version of `Included` and F4 that also proves X spent the committed input is a mainnet design
+  (MAINNET.md, W-22).
 
 **Cases.** `proveViolation(kind, journal, seal, imageId)`:
 - checks the seal (an active Violation version of `ZecuredVersions`: its router selector and image id,
   D54) and the anchor (best chain, at least `slashConfirmationWork`);
 - checks the kind's condition and a beneficiary that is not a vault's smart account (smart accounts
   never receive ETH);
-- then opens case `keccak256(kind, ref, noteTag)`: one case per violation, whoever proves it first.
+- then opens case `keccak256(kind, ref, noteTag)`, for F1 `keccak256(kind, ref, noteTag, vaultId)`:
+  one case per violation, whoever proves it first.
+- W-2: an F1 case belongs to the vault that owns its note's tag. When a deposit takes the tag over
+  from a (false) change record, the case moves to the deposit's vault (`followNote`, anyone, open or
+  executed; also at execution): a new case from the same verified fields, a new challenge window, that
+  vault frozen; the old case, if open, is dismissed. While an F1 case is about a note, or one was
+  executed (`openF1CasesOf`, `noteSpendProven`), the Intake activates no deposit of that note and drops
+  it only once its anchor leaves the best chain.
 
 `executeSlash(caseId)`, after the challenge window:
 - checks the anchor and the condition again;
@@ -367,6 +390,15 @@ redirect the reward (`test_prove_revertsOnABadJournalOrSeal`: a seal for another
   `zecured-wallet watch-claims --destinations <the bot's file>`. The bots keep every commitment's
   salt (RT-2). For each `SpendCommitted` naming one of its claims, the claimant finds X among the
   Zcash transactions by its reference and decrypts the committed output.
+- **W-11: the whole Ironwood history.** A commitment may name a transaction mined long before it
+  (above), so both watchers search every Ironwood transaction since the network's NU6.3 activation,
+  from an index kept next to the wallet (`zecured_zcash_ops::txindex`: the txids of the transactions
+  with Ironwood actions, public data; the first run reads the history once, later runs only the new
+  blocks, and the last 100 blocks are read again each time). The claimant finds X by each committed
+  claim reference wherever it was mined; `watch --tier3` also resolves every `SpendCommitted` of the
+  vault by its payout reference, and reports an X that spent no lineage note: F2 if its committed
+  change never came, and its claims are checked for F3 and F4 like any payout's. The coordinator does
+  the same for commitments its scan does not show, and proves each hidden claim's F4 (W-1).
 
 Each finding is written to an evidence file (0600) and prints the `build-violation uncommitted |
 withheld-change | misdirected | wrong-claim-ref` command that builds its witness (`build-violation

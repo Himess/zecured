@@ -91,10 +91,15 @@ contract SpendLogicWiringStub {
     function signers() external view returns (address[5] memory) {
         return _signers;
     }
+
+    /// W-18: the Registry's constructor checks its `refundAbandonPeriod` against it (the logic etched here has 2 days).
+    function refundDormancy() external pure returns (uint64) {
+        return 2 days;
+    }
 }
 
 /// @notice Test harness: the real Registry, with its internal I6 check callable. Every entry point that takes signer
-///         signatures calls it: setReimburseDestination with all 5 (v4, R-6), and (through the spend logic) commitSpend
+///         signatures calls it: setReimburseDestination with 3 (W-6), and (through the spend logic) commitSpend
 ///         and confirmPayout with 3; the Intake checks `VaultOpened` with all 5 the same way.
 contract RegistryHarness is ZecuredRegistry {
     constructor(RegistryConfig memory c) ZecuredRegistry(c) {}
@@ -223,9 +228,9 @@ contract RegistryRulesCheck is Test {
         assert(abi.decode(ret, (uint8)) == signed);
     }
 
-    /// R1 at an entry point: setReimburseDestination takes all five signers (v4, R-6: every signer's bond paid the
-    ///    claimant, so three must not name where its ZEC reimburses them).
-    function check_I6_reimburseDestinationNeedsAllFiveSigners(
+    /// R1 at an entry point: setReimburseDestination takes three distinct signers (W-6: each signs only the claim's own
+    ///    treasury destination, which it derives from the claim id, so three cannot name another one).
+    function check_I6_reimburseDestinationNeedsThreeDistinctSigners(
         uint8 count,
         bytes32 commitment,
         uint64 deadline,
@@ -265,14 +270,13 @@ contract RegistryRulesCheck is Test {
         (bool ok,) = address(registry)
             .call(abi.encodeCall(IZecuredRegistry.setReimburseDestination, (claimId, commitment, deadline, sigs)));
         if (!ok) return;
-        assert(n == 5);
+        assert(n >= 3);
         uint256 signed;
         for (uint256 i; i < n; ++i) {
             uint256 index = _signerIndex(ecrecover(digest, v[i], r[i], s[i]));
-            assert(index < 5 && signed & (1 << index) == 0);
+            assert(index < 5 && signed & (1 << index) == 0); // a signer, a different one
             signed |= 1 << index;
         }
-        assert(signed == 0x1f); // every signer
         assert(commitment != bytes32(0) && block.timestamp <= deadline);
         (,,, bytes32 set, ClaimStatus status) = registry.claim(claimId);
         assert(set == commitment && status == ClaimStatus.Pending);

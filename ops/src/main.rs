@@ -28,7 +28,7 @@ use serde::{Serialize, de::DeserializeOwned};
 use zecured_base::{events::version_id, operator::VersionKind};
 use zecured_ops::{
     Deployment, Network, Request, SignatureFile, Spec, check_submission, collect, list_versions, load_key,
-    parse_branch, parse_time, prepare, scrub, send, sign, simulate,
+    parse_branch, parse_time, prepare, read_treasury, scrub, send, sign, simulate,
 };
 
 #[derive(Parser)]
@@ -58,6 +58,19 @@ enum Cmd {
     },
     /// Show what a request or bundle asks to sign, and the signatures it holds.
     Show { file: PathBuf },
+    /// W-6: make the treasury keys file from the treasury's unified full viewing key (a fresh salt
+    /// key); share it privately with the other operators and the coordinator. Never printed.
+    TreasuryKeys {
+        /// File holding the treasury's unified full viewing key.
+        #[arg(long)]
+        ufvk_file: PathBuf,
+        /// The keys file to create (refused if it exists).
+        #[arg(long)]
+        out: PathBuf,
+        /// The treasury's Zcash network.
+        #[arg(long, default_value = "testnet", value_parser = ["testnet", "mainnet"])]
+        zcash_network: String,
+    },
     /// List the deployment's verifier versions (ids to remove, which ones work).
     Versions {
         /// One JSON array instead of a table.
@@ -78,6 +91,10 @@ enum Cmd {
         /// Sign: without it, only show what would be signed.
         #[arg(long)]
         yes: bool,
+        /// W-6: the treasury keys file; a reimbursement destination is signed only if it is the claim's
+        /// derived one.
+        #[arg(long)]
+        treasury: Option<PathBuf>,
     },
     /// Merge signature files into a bundle (or into an earlier bundle).
     Collect {
@@ -173,13 +190,14 @@ enum Prepare {
         #[command(flatten)]
         common: Common,
     },
-    /// T-05, R-6: the destination that reimburses the bonds for a claim they paid (5 of 5).
+    /// T-05, W-6: the destination that reimburses the bonds for a claim they paid (3 of 5): the
+    /// claim's own treasury destination, derived from the treasury keys.
     ReimburseDestination {
         #[arg(long)]
         claim: B256,
-        /// keccak256(salt || Ironwood receiver) of the destination, revealed to the signers first.
+        /// The treasury keys file (W-6); the destination's commitment is derived from it.
         #[arg(long)]
-        commitment: B256,
+        treasury: PathBuf,
         #[command(flatten)]
         common: Common,
     },
@@ -192,6 +210,18 @@ fn now() -> u64 {
 fn read_json<T: DeserializeOwned>(path: &Path) -> Result<T> {
     let raw = std::fs::read(path).with_context(|| format!("read {}", path.display()))?;
     serde_json::from_slice(&raw).with_context(|| format!("parse {}", path.display()))
+}
+
+/// Creates `path` (refused if it exists) readable by its owner only, with `bytes`.
+fn write_private_new(path: &Path, bytes: &[u8]) -> Result<()> {
+    use std::io::Write;
+    let mut options = std::fs::OpenOptions::new();
+    options.write(true).create_new(true);
+    #[cfg(unix)]
+    std::os::unix::fs::OpenOptionsExt::mode(&mut options, 0o600);
+    let mut f = options.open(path).with_context(|| format!("create {} (it must not exist)", path.display()))?;
+    f.write_all(bytes)?;
+    Ok(f.sync_all()?)
 }
 
 fn write_json<T: Serialize>(path: &Path, value: &T) -> Result<()> {
@@ -247,15 +277,19 @@ fn spec_of(what: &Prepare, now: u64) -> Result<(Spec, &Common)> {
         }
         Prepare::ReimburseDestination {
             claim,
-            commitment,
+            treasury,
             common,
-        } => (
-            Spec::ReimburseDestination {
-                claim_id: *claim,
-                commitment: *commitment,
-            },
-            common,
-        ),
+        } => {
+            let keys = read_treasury(treasury)?;
+            let commitment = B256::from(keys.reimbursement(&claim.0).commitment());
+            (
+                Spec::ReimburseDestination {
+                    claim_id: *claim,
+                    commitment,
+                },
+                common,
+            )
+        }
     })
 }
 
@@ -292,6 +326,20 @@ async fn run(cli: Cli, rpc: &str) -> Result<()> {
             write_json(&common.out, &prepared.request)?;
             println!("{}", prepared.request.describe());
             println!("  needs {} signer signatures; written to {}", prepared.needed, common.out.display());
+        }
+        Cmd::TreasuryKeys {
+            ufvk_file,
+            out,
+            zcash_network,
+        } => {
+            let network = match zcash_network.as_str() {
+                "mainnet" => zecured_zcash_ops::network::ZcashNetwork::Mainnet,
+                _ => zecured_zcash_ops::network::ZcashNetwork::Testnet,
+            };
+            let ufvk = std::fs::read_to_string(&ufvk_file).with_context(|| format!("read {}", ufvk_file.display()))?;
+            let keys = zecured_ops::new_treasury_keys(network, &ufvk)?;
+            write_private_new(&out, &serde_json::to_vec_pretty(&keys)?)?;
+            println!("wrote the treasury keys to {} (owner only; share it privately, never print it)", out.display());
         }
         Cmd::Show { file } => {
             let request: Request = read_json(&file)?;
@@ -330,6 +378,7 @@ async fn run(cli: Cli, rpc: &str) -> Result<()> {
             key_env,
             out,
             yes,
+            treasury,
         } => {
             let request: Request = read_json(&file)?;
             request.checked_digest()?;
@@ -347,8 +396,9 @@ async fn run(cli: Cli, rpc: &str) -> Result<()> {
                     eprintln!("warning: this key is not in the network config's signer set");
                 }
             }
+            let treasury = treasury.as_deref().map(read_treasury).transpose()?;
             ensure!(yes, "nothing signed: check the message above, then run again with --yes");
-            write_json(&out, &sign(&request, &key, now())?)?;
+            write_json(&out, &sign(&request, &key, now(), treasury.as_ref())?)?;
             println!("signed: {}", out.display());
         }
         Cmd::Collect { file, signatures, out } => {

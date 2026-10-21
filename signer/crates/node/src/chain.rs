@@ -616,6 +616,7 @@ pub fn apply(store: &mut Store, ev: &VaultEvent) -> Result<bool> {
         | RegistryEvent::LivenessArmed { .. }
         | RegistryEvent::PreLiquidated { .. }
         | RegistryEvent::CaseExecuted { .. }
+        | RegistryEvent::CaseProven { .. }
         | RegistryEvent::VaultCompromised { .. }
         | RegistryEvent::CollateralBurned { .. }
         | RegistryEvent::VaultCompensated { .. } => return Ok(false),

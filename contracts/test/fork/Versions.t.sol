@@ -406,6 +406,10 @@ contract VersionsTest is ZecuredFixture {
         assertFalse(versions.isWorking(_depositId()));
         _remove(_depositId());
         assertEq(versions.versionIds(VersionKind.Violation).length, 1);
+        // W-15: no violation verifier works, so a backup comes in on the estop delay.
+        assertTrue(versions.violationStopped());
+        bytes32 backup = _schedule(versions, VersionKind.Violation, selector, NEW_VIOLATION, noBranches);
+        assertEq(versions.version(backup).activeAt, block.timestamp + versions.estopDelay());
     }
 
     /// R-22: a verifier read that fails for lack of gas reverts, instead of counting the verifier as stopped (which

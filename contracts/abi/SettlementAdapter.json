@@ -601,6 +601,11 @@
         "name": "mmCommitment",
         "type": "bytes32",
         "internalType": "bytes32"
+      },
+      {
+        "name": "minSeizedZat",
+        "type": "uint64",
+        "internalType": "uint64"
       }
     ],
     "outputs": [
@@ -1144,6 +1149,22 @@
         "name": "minimum",
         "type": "uint256",
         "internalType": "uint256"
+      }
+    ]
+  },
+  {
+    "type": "error",
+    "name": "PreLiquidationSlippage",
+    "inputs": [
+      {
+        "name": "seized",
+        "type": "uint64",
+        "internalType": "uint64"
+      },
+      {
+        "name": "minSeizedZat",
+        "type": "uint64",
+        "internalType": "uint64"
       }
     ]
   },

@@ -370,6 +370,7 @@ pub async fn check_event<R: RegistryReader>(reader: &R, ev: &VaultEvent, at: At)
         | RegistryEvent::LivenessArmed { .. }
         | RegistryEvent::PreLiquidated { .. }
         | RegistryEvent::CaseExecuted { .. }
+        | RegistryEvent::CaseProven { .. }
         | RegistryEvent::VaultCompromised { .. }
         | RegistryEvent::CollateralBurned { .. }
         | RegistryEvent::VaultCompensated { .. } => {

@@ -263,20 +263,25 @@ event MintingUnpaused(uint8 signerBitmap, uint256 nonce);
   `vaultOpenedHash` is `VaultOpened` v2's struct hash (§ 2.5). The deposit tag is the same in both
   modes, so a note lands once, as collateral or as a refund.
 - `finalizeActivation` (anyone): the relay's tip `>= readyHeight`, `now >= readyTime`, the anchor
-  still on the best chain under the same work, its deposit version still active (R-14), no open
-  violation case on the vault (E2), not halted, all five bonded, not paused; mints zZEC straight
-  into the account's Morpho position (less the opening fee, § 3.3). `dropPendingActivation`
-  (anyone) once the anchor left the best chain or the version is no longer active (R-14), never
-  while a violation case is open on the vault (R-17).
+  still on the best chain under the same work, its deposit version still working (active and its
+  router not stopped: `VersionNotWorking`, W-13; R-14), no open violation case on the vault (E2), no
+  F1 case open about its note on any vault and none executed (`NoteSpendCase`, W-2), not halted,
+  all five bonded, not paused; mints zZEC straight into the account's Morpho position (less the
+  opening fee, § 3.3). `dropPendingActivation` (anyone) once the anchor left the best chain or the
+  version is no longer active (R-14), never while a violation case is open on the vault (R-17); for
+  a note an F1 case is about (W-2), or on a compromised vault (W-3), only once the anchor left the
+  best chain, whatever the version's state (`AnchorStillOnBestChain`).
 - `refundPending`: the activation ready and its anchor on the best chain (R-12); after a halt,
   anyone; otherwise the vault's account, once `readyTime + pendingRefundDelay` has passed, whatever
-  gate holds the activation (R-13). The pending activation becomes a Refund claim.
+  gate holds the activation (R-13). The pending activation becomes a Refund claim. On a compromised
+  vault it skips the version check (W-3: the claim is the compensator's).
 - **Pending refunds** (v4, R-12): `finalizeRefund` (anyone) needs the relay's tip `>= readyHeight`,
   `now >= readyTime`, the anchor on the best chain under the same work, the version active, and the
   vault no longer Pending (`VaultPending`: no claim ever exists on a pending vault, R-8); the
   Registry then opens the Refund claim (`RefundOpened`) and the Intake emits `DepositRefunded`.
   `dropPendingRefund` (anyone) once the anchor left the best chain or the version is no longer
-  active, never while a case is open. A pending refund's note is a lineage note that no payout may
+  active, never while a case is open; on a compromised vault only once the anchor left the best
+  chain (`RefundStillValid`, W-3), and `finalizeRefund` there skips the version check. A pending refund's note is a lineage note that no payout may
   spend (`RefundNotOpen`). A refund reserved before its vault was compromised still opens on it, for the
   compensator only (V-4, D80): the signers cannot pay it, and the vault's tally waits while
   `reservedRefundCount` is not zero; a proof landing after the compromise is refused.
@@ -288,7 +293,8 @@ event MintingUnpaused(uint8 signerBitmap, uint256 nonce);
   (`IZecuredCapPrice.priceHigh`), within `coverageBps` of the bond's effective bond (I18); a
   dormant refund does not count (R-11, § 3.3).
 - Constructor checks (R-18): `finalizeDelay > 0`, `pendingRefundDelay > 0`, and work tiers that
-  never ask less work for a larger amount.
+  never ask less work for a larger amount; W-18: `coverageBps <= 10,000` and `maxPause <= 30 days`
+  (`MAX_PAUSE`; every configuration uses exactly 2,592,000 s).
 
 ### 3.3 `ZecuredRegistry` and `ZecuredSpendLogic`
 
@@ -376,8 +382,13 @@ function payoutDispute(bytes32 claimId) external view returns (uint64 paidAt, ui
   the v4 refund functions run in `ZecuredSpendLogic` (`IZecuredRefunds`), the first two through
   stubs that keep their selectors on the Registry.
 - **The bonds' claims** (T-05): when the bond pays a claim's claimant (`slashLiveness`),
-  `markBondPaid` zeroes its commitment; all five signers then give the destination that
-  reimburses the bonds (`setReimburseDestination`, v4: R-6).
+  `markBondPaid` zeroes its commitment; three signers then give the destination that reimburses
+  the bonds (`setReimburseDestination`). W-6: it is the claim's own treasury destination, derived
+  from the claim id under the signers' treasury keys (`zecured_policy::treasury`: a diversified
+  receiver of the treasury's incoming viewing key at an index drawn from the claim id, and a salt
+  keyed by the treasury's salt key), and each signer signs it only after deriving the same
+  commitment (`zecured-ops sign --treasury`). Two claims never share it (one payout may reimburse
+  several, and the Registry refuses one commitment for two claims of a payout).
 - **Confirmations** (v4, R-1, R-3): `confirmPayout` needs a payout committed for the vault, confirms
   each payout once (`payoutConfirmed`), and every claim must be pending, of the vault and bound to
   that payout's input; never a reopened claim (proof only), never on a frozen vault. A confirmation
@@ -433,8 +444,8 @@ function minSeize(uint64 outstanding) external view returns (uint256);   // max(
 struct PreLiquidationTerms { uint256 preLltv; uint256 preLcf1; uint256 preLcf2; uint256 preLif1; uint256 preLif2; uint64 expiry; }
 function setPreLiquidation(PreLiquidationTerms calldata t) external;     // msg.sender = the account of an Active vault
 function clearPreLiquidation() external;                                 // msg.sender = account; never reverts
-function preLiquidate(address account, uint256 repaidShares, bytes32 mmCommitment)
-    external returns (uint256 repaidAssets, uint64 seized);
+function preLiquidate(address account, uint256 repaidShares, bytes32 mmCommitment, uint64 minSeizedZat)
+    external returns (uint256 repaidAssets, uint64 seized);                // v4.1 (W-17): minSeizedZat
 function preLiquidationTerms(address account) external view returns (PreLiquidationTerms memory);
 
 function onMorphoLiquidate(uint256 repaidAssets, bytes calldata data) external;   // Morpho only
@@ -472,7 +483,9 @@ event PreLiquidated(bytes32 indexed vaultId, address indexed account, address in
   is never pre-liquidated); `q = (ltv - preLltv) / (LLTV - preLltv)` with `ltv` rounded up and `q`
   down; the close factor and the incentive linear in `q`; `repaidShares <= borrowShares * preLcf`;
   `seized = assets(repaidShares, rounded down) * preLif / price`, rounded down, at least
-  `minSeize(outstanding)` taken and left; the caller's USDC repays through `onMorphoRepay`, the
+  `minSeize(outstanding)` taken and left, and at least the caller's `minSeizedZat` (v4.1, W-17:
+  `PreLiquidationSlippage` otherwise, so that a price or debt move before the transaction lands
+  never makes the caller repay for less); the caller's USDC repays through `onMorphoRepay`, the
   collateral comes to the Adapter and `Registry.recordLiquidation` names the caller as claimant.
 
 ### 3.5 Tier 3: `SignerBondV2`, `ZecuredSlasher`, `ZecuredCompensator`
@@ -487,7 +500,9 @@ function slashLiveness(bytes32 claimId) external returns (uint256 paid);   // th
 function armLiveness(bytes32 claimId, uint64 receivedAt, bytes calldata signature) external;   // v4: anyone (R-5)
 function hashDestinationReceived(bytes32 claimId, bytes32 commitment, uint64 receivedAt) external view returns (bytes32);
 function livenessArming(bytes32 claimId) external view returns (bytes32 commitment, uint64 payableAt);
+function livenessArmedAt(bytes32 claimId) external view returns (uint64);   // W-4: when it was first armed for its commitment
 function livenessDue(bytes32 claimId) external view returns (uint64 dueAt, uint256 amount);   // (0, 0): not payable now
+function livenessDeadline(bytes32 claimId) external view returns (uint64);  // W-4: dueAt from the arming alone (0: none)
 function priceStateChecked() external view returns (bool);         // v4: the oracle reports a feed state (R-9)
 function effectiveBond() external view returns (uint256);          // min(sum, 5/3 x the three smallest)
 function fullyBonded() external view returns (bool);
@@ -511,6 +526,12 @@ function frozenSince(bytes32 vaultId) external view returns (uint64);     // v4 
 function proveInclusion(bytes calldata journal, bytes calldata seal, bytes32 imageId, bytes32 claimId) external;   // D53
 function vaultFrozen(bytes32 vaultId) external view returns (bool);          // an open F1/F2 case, or compromised
 function isCompromised(bytes32 vaultId) external view returns (bool);
+function caseIdOf(ViolationKind kind, bytes32 ref, bytes32 noteTag, bytes32 vaultId) external pure returns (bytes32);
+    // W-2: F1's id includes its vault; the other kinds' do not
+function followNote(bytes32 caseId) external returns (bytes32 newCaseId);   // W-2: anyone; an F1 case moves to its tag's owner
+function openF1CasesOf(bytes32 noteTag) external view returns (uint256);   // W-2: open F1 cases about the note
+function noteSpendProven(bytes32 noteTag) external view returns (bool);    // W-2: an F1 case about it was executed
+function claimCaseOpen(bytes32 claimId) external view returns (bool);      // W-5: an open F3 or F4 case about the claim
 
 // ZecuredCompensator (IZecuredCompensator): pulled by anyone, one vault or claim per call
 function tallyClaim(bytes32 claimId) external;
@@ -523,22 +544,33 @@ function sweepLeftover() external returns (uint256 amount);                  // 
 ```
 
 - **Bonds** (D43): a full exit needs no open vault, no open case and the challenge window since the
-  last vault settled; a partial exit keeps `minBond` and the coverage cap;
+  last vault settled, and no proven refund waiting on the Intake, when requested and when withdrawn
+  (`PendingRefunds`, W-14); a partial exit keeps `minBond` and the coverage cap;
   `unbondingPeriod >= challengeWindow + livenessPeriod + commitGrace` and
   `unbondingPeriod >= disputeWindow + inclusionWindow` (R-18).
 - **Liveness** (D47; v4: R-5, R-7, R-9): a Release, Liquidation, CloseUser, CloseMarketMaker or
   Refund claim with a destination, not of a frozen vault, armed by a signer's receipt for its
   current commitment (`armLiveness`: the signer one of the Registry's, `receivedAt <= now`,
   `payableAt = max(createdAt, receivedAt)`, the earliest receipt stands, a new commitment voids
-  it), is due at `max(payableAt + livenessPeriod, min(lastCommitAt, payableAt + livenessPeriod) +
-  commitGrace)`; the claimant then takes its value at the oracle price plus `livenessPremiumBps`,
-  pro rata from the bonds (I26). Never a claim the compensator owes (R-7), nor while an oracle that
-  reports a feed state reports it stale (`PriceStale`, R-9; required on mainnet).
+  it), is due at `max(deadline, min(lastCommitAt, max(deadline, armedAt)) + commitGrace)` with
+  `deadline = payableAt + livenessPeriod` and `armedAt` the time of its first arming for that
+  commitment (W-4: a commitment made before a late arming is protected in full; a lower re-arming
+  sets `armedAt` to the deadline it replaces, never to now); the claimant then takes its value at the
+  oracle price plus `livenessPremiumBps`, pro rata from the bonds (I26). Never a claim the compensator
+  owes (R-7), nor while an F3 or F4 case about it is open (`claimCaseOpen`, W-5), nor while an oracle
+  that reports a feed state reports it stale (`PriceStale`, R-9; required on mainnet).
+  `livenessDeadline` gives the due time from the arming alone (a stale price, a freeze and an open
+  claim case only delay the payment), which the signers' planner defers payouts by.
 - **Violations**: the journal's kinds, the Registry records each is checked against, and the
   dismissal rules are in docs/TIER3.md § 6; the seal must come from an active Violation version.
   The beneficiary is bound in the proof and is never a vault's smart account. An executed F1/F2
   case slashes, halts minting, marks the vault compromised and registers it with the compensator;
-  F3 registers the claim's shortfall.
+  F3 registers the claim's shortfall, and F4 the hidden claim's whole `expected` (W-1), pending or
+  final, never a claim the bonds paid. F3 checks the claim's recipient against the commitment's own
+  record (`claimRefOf(payoutRef, destCommitment) == ref`, W-5). W-2: an F1 case whose note's tag a
+  deposit took over moves to the deposit's vault (`followNote`, also inside `executeSlash`): a new
+  case from the same verified fields, a new challenge window, that vault frozen, the old case
+  dismissed if still open.
 - **`proveInclusion`, `proveInclusionBatch`**: the violation guest's kind 5, `Included`: journal
   `{5, anchor, 0, payoutRef(txid_X), 0, 0, 0, 0}` under the slash's confirmation work; it makes final
   every claim of the payout `payoutRef` names (§ 3.3, proven delivery). The batch verifies once and
@@ -569,7 +601,7 @@ function isActive(bytes32 versionId) external view returns (bool);
 function isWorking(bytes32 versionId) external view returns (bool);  // v4: active, routed and not stopped
 function activeVersion(VersionKind kind, bytes4 selector, bytes32 imageId) external view returns (Version memory);
 function versionIds(VersionKind kind) external view returns (bytes32[] memory);
-function violationStopped() external view returns (bool);   // every active violation verifier stopped by the router
+function violationStopped() external view returns (bool);   // W-15: no violation version works (none active, or every active one's router stopped)
 ```
 
 - A version takes effect `depositDelay` (deposit and swap versions) or `violationDelay` after it is
@@ -748,12 +780,12 @@ beta) quotes need the header `X-Zecured-Invite`; the maker stores only the codes
 
 | Method and path | Answer |
 |---|---|
-| `GET /swap/quote?side=buy\|sell&zatoshi=N` (or `usdc=N`) `[&taker=0x…]` | `{ quote, signature, swap, chainId, orderId, expiresAt }` (integers as strings; a Sell adds the maker's receiver and salt); errors `bad_request`, `invite_required`, `side_disabled`, `taker_required`, `too_small`, `too_large`, `no_inventory`, `busy`, `relay_behind`, `price_stale`, `unavailable` |
-| `POST /swap/orders/:orderId/destination` | body `{ receiver, salt }` (a unified address or 43 raw bytes, and 32 bytes); 202 `{ orderId, status: "destination_received" }`, idempotent; errors `unknown_order`, `not_buy`, `not_awaiting`, `too_late`, `bad_destination` (a receiver that does not match the order's commitment) |
+| `GET /swap/quote?side=buy\|sell&zatoshi=N` (or `usdc=N`) `[&taker=0x…]` | `{ quote, signature, swap, chainId, orderId, expiresAt }` (integers as strings; a Sell adds the maker's receiver and salt); errors `bad_request`, `invite_required`, `side_disabled`, `taker_required`, `too_small`, `too_large`, `no_inventory`, `busy` (the maker's `maxOpenOrders` places are taken, or the quote's taker already holds `maxOpenOrdersPerTaker` of them; quotes given and not opened yet hold places too), `relay_behind`, `price_stale`, `unavailable` (also: the maker's payment guest is not a working Swap version, so no proof could land) |
+| `POST /swap/orders/:orderId/destination` | body `{ receiver, salt }` (a unified address or 43 raw bytes, and 32 bytes); 202 `{ orderId, status: "destination_received" }` when taken; the same destination given again once taken (the order waiting for its payment, paid or proven): 200 with the same body, from the maker's order book before anything is read from the chains; errors `unknown_order`, `not_buy`, `not_awaiting`, `too_late`, `bad_destination` (a receiver that does not match the order's commitment), and for a first destination `no_inventory` (the maker could not pay it now), `busy` (the taker on Base holds `maxOpenOrdersPerTaker` places with its other orders and quotes, or the order's reservation, 10 minutes by default, lapsed and no place is free), `relay_behind` and `unavailable` (no working Swap version, or the maker's view of the chains is stale); a refused destination may be given again while the window allows |
 | `GET /swap/orders/:orderId` | `{ orderId, side, status, zatoshi, usdc, payDeadline, note }`, status `awaiting_destination`, `destination_received`, `paid`, `proven`, `taker_pays`, `abandoned`, `settled` or `refunded` |
-| `GET /swap/status` | what the maker quotes now: `{ maker, swap, chainId, sides, payWindow, minOrderZat, maxOrderZat, maxOrderUsdc, spreadBps, inviteOnly, openOrders, maxOpenOrders }` |
+| `GET /swap/status` | what the maker quotes now: `{ maker, swap, chainId, sides, payWindow, minOrderZat, maxOrderZat, maxOrderUsdc, spreadBps, inviteOnly, openOrders, maxOpenOrders, maxOpenOrdersPerTaker }`; `openOrders` is the places taken (orders holding one, quotes given) |
 
 Operators only: with `status_bind` set (a loopback address other than `bind`, never added to the backend's
 proxy), the maker serves `GET /inventory` → `{ "zecFreeZat", "usdcFree" }` (decimal strings: the last scan's
-spendable ZEC less what open Buy orders reserved, and the USDC it can lock, capped at its allowance to
-`ZecuredSwap`), for the watchdog.
+spendable ZEC less what open Buy orders and Buy quotes hold, and the USDC it can lock, capped at its allowance
+to `ZecuredSwap`, less what its Sell quotes would lock), for the watchdog.

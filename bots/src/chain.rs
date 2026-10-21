@@ -103,7 +103,7 @@ sol! {
         function liquidate(address borrower, uint256 seizedAssets, uint256 repaidShares, bytes32 liquidatorCommitment) external returns (uint256 seized, uint256 repaid);
         function closeWithCollateral(CloseRequest req, bytes userSig, bytes32 mmCommitment, uint256 maxRepayAssets, uint64 minMmAmount) external;
         function deleverageWithCollateral(DeleverageRequest req, bytes userSig, bytes32 mmCommitment, uint64 minMmAmount) external returns (uint64 mmAmount);
-        function preLiquidate(address account, uint256 repaidShares, bytes32 mmCommitment) external returns (uint256 repaidAssets, uint64 seized);
+        function preLiquidate(address account, uint256 repaidShares, bytes32 mmCommitment, uint64 minSeizedZat) external returns (uint256 repaidAssets, uint64 seized);
         function preLiquidationTerms(address account) external view returns (PreLiquidationTerms terms);
         function minSeize(uint64 outstanding) external view returns (uint256);
     }
@@ -1132,7 +1132,7 @@ mod tests {
         use alloy::sol_types::SolCall;
         assert_eq!(IIrm::borrowRateViewCall::SELECTOR, [0x8c, 0x00, 0xbf, 0x6b]);
         assert_eq!(IMorpho::marketCall::SELECTOR, [0x5c, 0x60, 0xe3, 0x9a]);
-        assert_eq!(ISettlementAdapter::preLiquidateCall::SELECTOR, [0x75, 0x82, 0xc3, 0x58]);
+        assert_eq!(ISettlementAdapter::preLiquidateCall::SELECTOR, [0xcc, 0xe2, 0x72, 0x66]);
         assert_eq!(ISettlementAdapter::preLiquidationTermsCall::SELECTOR, [0x97, 0xab, 0xd7, 0x32]);
         assert_eq!(ISettlementAdapter::minSeizeCall::SELECTOR, [0xe0, 0x3d, 0x3a, 0x8e]);
     }

@@ -7455,6 +7455,7 @@ dependencies = [
  "serde_json",
  "sha2 0.10.9",
  "tokio",
+ "tracing",
  "zcash_client_backend",
  "zcash_history",
  "zcash_keys",
@@ -7526,10 +7527,14 @@ dependencies = [
  "axum",
  "clap",
  "hex",
+ "orchard",
+ "rand_core 0.6.4",
  "serde",
  "serde_json",
  "tokio",
  "zecured-base",
+ "zecured-policy",
+ "zecured-zcash-ops",
 ]
 
 [[package]]
@@ -7574,6 +7579,7 @@ dependencies = [
  "rand 0.10.3",
  "rand_core 0.6.4",
  "serde",
+ "serde_json",
  "sha3 0.10.9",
  "thiserror 2.0.21",
  "zcash_note_encryption",

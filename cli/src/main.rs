@@ -60,6 +60,23 @@ pub(crate) fn zcash_params() -> Network {
     zcash_network().params()
 }
 
+/// W-11: the index of the network's Ironwood transactions kept next to the wallet, read up to `tip`
+/// (the whole history on its first use, only the new blocks afterwards).
+async fn ironwood_index(
+    wallet: &Path,
+    client: &mut lwd::LwdClient,
+    tip: u32,
+) -> Result<zecured_zcash_ops::txindex::IronwoodIndex> {
+    let path = wallet.with_file_name(format!("ironwood-txids.{}.bin", zcash_network()));
+    let mut index = zecured_zcash_ops::txindex::IronwoodIndex::open(&path, zcash_network())?;
+    let (start, read) = index.range();
+    if read < start {
+        eprintln!("reading the Ironwood history once from block {start} (W-11); later runs read only new blocks");
+    }
+    index.update(client, tip).await?;
+    Ok(index)
+}
+
 /// A light wallet server connection, once the server has said it follows this run's network.
 pub(crate) async fn lwd_connect(url: &str) -> Result<lwd::LwdClient> {
     let mut client = lwd::connect(url).await?;
@@ -106,6 +123,12 @@ enum Cmd {
     Init,
     /// Print the wallet's Ironwood-only unified address.
     Address,
+    /// Write the wallet's unified full viewing key to a file readable by its owner only (never
+    /// printed): for a watcher, or a treasury's keys file (`zecured-ops treasury-keys`, W-6).
+    ViewingKey {
+        #[arg(long)]
+        out: PathBuf,
+    },
     /// Scan and show the wallet's notes and balance.
     Balance,
     /// Send ZEC to an address's Ironwood receiver.
@@ -151,9 +174,10 @@ enum Cmd {
     WatchClaims {
         #[arg(long)]
         destinations: PathBuf,
-        /// First Zcash block to search for payouts.
-        #[arg(long)]
-        from: u32,
+        /// Ignored (W-11): the whole Ironwood history is searched, from an index kept next to the
+        /// wallet, since a commitment may name a payout mined long before it.
+        #[arg(long, hide = true)]
+        from: Option<u32>,
         /// First Base block to read commitments from.
         #[arg(long)]
         base_from: u64,
@@ -498,6 +522,9 @@ struct SignerParams {
 struct NetworkParams {
     registry: Address,
     chain_id: u64,
+    /// The Registry's deployment block: where the vault's commitments are read from (W-11).
+    #[serde(default)]
+    registry_from_block: u64,
     /// The vaults' Zcash network, when the config names it (otherwise the one the Base chain goes
     /// with), and whether it is a local fork (where another pairing is allowed).
     #[serde(default)]
@@ -716,7 +743,9 @@ async fn send(w: &Wallet, url: &str, to: &str, amount: u64) -> Result<String> {
         &payments,
     )?;
     let pk = tokio::task::spawn_blocking(spend::proving_key).await?;
-    let pczt = spend::finalize_and_prove(unsigned.pczt, &pk)?;
+    // Off the main thread: Halo 2 proving in a debug build needs more stack than Windows gives it (1 MiB).
+    let pczt = unsigned.pczt;
+    let pczt = tokio::task::spawn_blocking(move || spend::finalize_and_prove(pczt, &pk)).await??;
     let mut signer = Signer::new(pczt).map_err(|e| anyhow!("signer: {e:?}"))?;
     let ask = SpendAuthorizingKey::from(&w.sk);
     for i in &unsigned.spend_action_indices {
@@ -761,6 +790,14 @@ async fn main() -> Result<()> {
         Cmd::Address => {
             let w = load_wallet(&cli.wallet)?;
             println!("{}", encode_ironwood_ua(&zcash_params(), w.fvk.address_at(0u32, Scope::External))?);
+        }
+        Cmd::ViewingKey { out } => {
+            let w = load_wallet(&cli.wallet)?;
+            let ufvk = zecured_zcash_ops::keys::encode_ufvk(&zcash_params(), &w.fvk)?;
+            let mut f = create_private_file(&out)?;
+            f.write_all(ufvk.as_bytes())?;
+            f.sync_all()?;
+            println!("wrote the wallet's viewing key to {} (owner only)", out.display());
         }
         Cmd::Balance => {
             let w = load_wallet(&cli.wallet)?;
@@ -810,7 +847,24 @@ async fn main() -> Result<()> {
             println!("unspent {} zat (scanned {from}..={tip}, tree root verified)", state.balance());
             if tier3 {
                 let net = network_params()?;
-                let findings = watch::check_lineage(&ufvk, &state.notes, net.registry, &rpc).await?;
+                let watch::Lineage { mut findings, vault_id } =
+                    watch::check_lineage(&ufvk, &state.notes, net.registry, &rpc).await?;
+                // W-11: every commitment of the vault, resolved over the whole Ironwood history.
+                if let Some(vault_id) = vault_id {
+                    let index = ironwood_index(&cli.wallet, &mut client, tip).await?;
+                    let more = watch::check_commitments(
+                        &ufvk,
+                        vault_id,
+                        &state.notes,
+                        &findings,
+                        net.registry,
+                        &rpc,
+                        net.registry_from_block,
+                        &index,
+                    )
+                    .await?;
+                    findings.extend(more);
+                }
                 watch::report(&findings);
                 let audit = match (claims_of, &destinations) {
                     (Some(vault), _) => {
@@ -869,10 +923,14 @@ async fn main() -> Result<()> {
                 .iter()
                 .map(|d| watch::own_recipient(&d.salt, &d.receiver, &w.fvk))
                 .collect::<Result<Vec<_>>>()?;
+            if from.is_some() {
+                eprintln!("--from is ignored: the whole Ironwood history is searched (W-11)");
+            }
             let net = network_params()?;
             let mut client = lwd_connect(&cli.lwd).await?;
             let tip = u32::try_from(lwd::latest_block(&mut client).await?.height)?;
-            let claims = watch::check_third_party(&mut client, &own, net.registry, &rpc, base_from, from, tip).await?;
+            let index = ironwood_index(&cli.wallet, &mut client, tip).await?;
+            let claims = watch::check_third_party(&mut client, &own, net.registry, &rpc, base_from, &index).await?;
             for f in &claims {
                 if let watch::ClaimFinding::Misdirected { evidence, .. } = f {
                     let path = destinations.with_file_name(format!("f3-{}.json", evidence.txid));
@@ -886,8 +944,10 @@ async fn main() -> Result<()> {
                 println!("tier 3: no commitment names a claim of these destinations yet");
             }
         }
-        Cmd::Loan(cmd) => loan(&cli.wallet, &cli.lwd, &cli.backend, cmd).await?,
-        Cmd::Swap(cmd) => swap::run(&cli.wallet, &cli.lwd, cmd).await?,
+        // Boxed: these futures are large in a debug build, and `main`'s lives on the main thread's
+        // stack (1 MiB on Windows).
+        Cmd::Loan(cmd) => Box::pin(loan(&cli.wallet, &cli.lwd, &cli.backend, cmd)).await?,
+        Cmd::Swap(cmd) => Box::pin(swap::run(&cli.wallet, &cli.lwd, cmd)).await?,
     }
     Ok(())
 }
@@ -1271,6 +1331,7 @@ mod vault_checks {
             net: NetworkParams {
                 registry: Address::repeat_byte(0x11),
                 chain_id: 84_532,
+                registry_from_block: 0,
                 zcash_network: None,
                 local_fork: false,
                 nodes,
@@ -1337,6 +1398,7 @@ mod vault_checks {
         let bare = NetworkParams {
             registry: f.net.registry,
             chain_id: f.net.chain_id,
+            registry_from_block: 0,
             zcash_network: None,
             local_fork: false,
             nodes: vec![],

@@ -89,6 +89,37 @@ pub struct NetworkConfig {
     /// unless `local_fork` ([`ZcashNetwork::resolve`]).
     #[serde(default)]
     pub zcash_network: Option<ZcashNetwork>,
+    /// W-10, N-1: what the coordinator counts with when a claim's deadline is near (docs/OPERATORS.md).
+    #[serde(default)]
+    pub proof_timing: ProofTiming,
+}
+
+/// W-10, N-1: the coordinator's estimates near a claim's deadline (a dispute's end, a pending claim's
+/// liveness deadline). A payout's proof drops the delay of its planned anchor, and its confirmation by
+/// signatures stops waiting for that anchor, when waiting would not leave `deadline_margin_secs`
+/// before the deadline: the bonds or the compensator would pay the claim twice otherwise.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(default)]
+pub struct ProofTiming {
+    /// Seconds a Zcash block takes, to estimate when an anchor gets the slasher's work: 75, Mainnet's
+    /// spacing before its NU7 (an overestimate on Testnet's 25 s blocks, which errs toward the claim).
+    pub zcash_block_secs: u64,
+    /// Seconds a delivery proof takes at most from its job to Base: the queue, the STARK, its Groth16
+    /// wrap and the submission. 20 minutes on a GPU prover; with a CPU prover a proof takes hours, and
+    /// this must grow with it.
+    pub proof_secs: u64,
+    /// Seconds before a claim's deadline its payout's proof, or its confirmation, must be on Base.
+    pub deadline_margin_secs: u64,
+}
+
+impl Default for ProofTiming {
+    fn default() -> Self {
+        Self {
+            zcash_block_secs: 75,
+            proof_secs: 20 * 60,
+            deadline_margin_secs: 10 * 60,
+        }
+    }
 }
 
 /// Zcash's target block spacing from NU7 (ZIP 218), in seconds.
@@ -321,6 +352,7 @@ mod tests {
             open_vault: OpenVaultLimits::default(),
             payout_lifetime_secs: None,
             zcash_network: None,
+            proof_timing: Default::default(),
         }
     }
 

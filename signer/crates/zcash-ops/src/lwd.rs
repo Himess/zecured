@@ -85,6 +85,41 @@ pub async fn compact_block(client: &mut LwdClient, height: u32) -> Result<Compac
     Ok(block)
 }
 
+/// W-11: the txid (internal byte order) and block height of every transaction with Ironwood actions
+/// in blocks `from..=to`: the only ones that can pay a claim (`crate::txindex`).
+pub async fn ironwood_txids(client: &mut LwdClient, from: u32, to: u32) -> Result<Vec<(u32, [u8; 32])>> {
+    if from > to {
+        return Ok(vec![]);
+    }
+    let block = |height: u32| BlockId {
+        height: height.into(),
+        hash: vec![],
+    };
+    let mut stream = client
+        .get_block_range(service::BlockRange {
+            start: Some(block(from)),
+            end: Some(block(to)),
+            pool_types: vec![service::PoolType::Ironwood as i32],
+        })
+        .await
+        .map_err(|s| anyhow!("GetBlockRange({from}..={to}): {s}"))?
+        .into_inner();
+    let mut out = vec![];
+    while let Some(b) = tokio::time::timeout(STREAM_MESSAGE_TIMEOUT, stream.message())
+        .await
+        .context("GetBlockRange: the stream stalled")?
+        .map_err(|s| anyhow!("GetBlockRange: {s}"))?
+    {
+        let height = u32::try_from(b.height)?;
+        for tx in b.vtx.into_iter().filter(|tx| !tx.ironwood_actions.is_empty()) {
+            let txid: [u8; 32] =
+                tx.txid.try_into().map_err(|_| anyhow!("a compact transaction's txid is not 32 bytes"))?;
+            out.push((height, txid));
+        }
+    }
+    Ok(out)
+}
+
 /// The txid (internal byte order) of every transaction the server lists in blocks `from..=to`,
 /// with its block height, every pool requested. Lets a claimant find a payout by testing its
 /// claim reference `keccak256(salt || txid)` against each one (Tier 3, F3).
@@ -185,5 +220,20 @@ mod tests {
         let deposit = TxId::from_hex("61a4fdc0dff08cff313eb34bc233d265ea1a70b49bc33098ef25194f01305ebe").unwrap();
         assert!(txids.iter().all(|(h, _)| *h == 4_488_543));
         assert!(txids.iter().any(|(_, t)| t == deposit.as_ref()), "{txids:?}");
+    }
+
+    /// W-11, network: the Ironwood transactions of the deposit's block hold the deposit (an Ironwood
+    /// v6 transaction), and none of a block range holds a transaction without Ironwood actions.
+    /// `cargo test -p zecured-zcash-ops -- --ignored ironwood_txids`
+    #[tokio::test]
+    #[ignore = "needs the Testnet light wallet server"]
+    async fn ironwood_txids_lists_a_known_deposit() {
+        let mut client = connect("https://testnet.zec.rocks:443").await.unwrap();
+        let all = block_txids(&mut client, 4_488_500, 4_488_600).await.unwrap();
+        let ironwood = ironwood_txids(&mut client, 4_488_500, 4_488_600).await.unwrap();
+        let deposit = TxId::from_hex("61a4fdc0dff08cff313eb34bc233d265ea1a70b49bc33098ef25194f01305ebe").unwrap();
+        assert!(ironwood.iter().any(|(h, t)| *h == 4_488_543 && t == deposit.as_ref()), "{ironwood:?}");
+        assert!(ironwood.iter().all(|x| all.contains(x)));
+        assert!(ironwood.len() < all.len(), "the coinbase transactions are not Ironwood ones");
     }
 }

@@ -87,4 +87,19 @@ contract IntakeConfigTest is Test {
         c.finalizeDepth = 0;
         _expectInvalid(c);
     }
+
+    /// W-18: a coverage above 100 % of the effective bond, or a pause longer than 30 days, was accepted.
+    function test_W18_refusesCoverageAboveTheBondAndPausesBeyondThirtyDays() public {
+        IntakeConfig memory c = _good();
+        (c.signerBond, c.capOracle, c.capPriceMaxAge, c.maxTotalZat) = (address(0x2001), address(0x2002), 1 hours, 1e9);
+        c.coverageBps = 10_001;
+        _expectInvalid(c);
+        c.coverageBps = 10_000;
+        _deploy(c);
+        c = _good();
+        c.maxPause = 30 days + 1;
+        _expectInvalid(c);
+        c.maxPause = 30 days; // every deployment's value: the bound itself is allowed
+        _deploy(c);
+    }
 }

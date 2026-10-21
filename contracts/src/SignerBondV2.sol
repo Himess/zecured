@@ -58,10 +58,13 @@ contract SignerBondV2 is ISignerBond, ReentrancyGuardTransient, EIP712 {
         uint64 readyAt;
     }
 
-    /// @notice R-5: what a receipt armed: the claim's commitment it was for, and when the claim became payable.
+    /// @notice R-5: what a receipt armed: the claim's commitment it was for, and when the claim became payable. W-4:
+    ///         `armedAt`, the first arming's time for that commitment (moved by a lower receipt to the deadline it
+    ///         replaced at most, never to the present), bounds which commitments still defer the liveness.
     struct Arming {
         bytes32 commitment;
         uint64 payableAt;
+        uint64 armedAt;
     }
 
     /// @inheritdoc ISignerBond
@@ -170,6 +173,8 @@ contract SignerBondV2 is ISignerBond, ReentrancyGuardTransient, EIP712 {
             if (openVaults != 0 || openCases != 0 || block.timestamp < unlocksAt) {
                 revert FullExitLocked(openVaults, openCases, unlocksAt);
             }
+            // W-14: nor while a proven refund waits for the relay: its claim opens later, and must find the bonds in.
+            _checkNoPendingRefund();
         } else {
             if (rest < minBond) revert BelowMinBond(rest, minBond);
             if (openCases != 0) revert CaseOpen(openCases);
@@ -206,6 +211,13 @@ contract SignerBondV2 is ISignerBond, ReentrancyGuardTransient, EIP712 {
         if (block.timestamp < u.readyAt) revert UnbondingNotReady(u.readyAt);
         uint256 openCases = IZecuredSlasher(slasher).openCaseCount();
         if (openCases != 0) revert CaseOpen(openCases);
+        if (bondOf[signer] == 0) {
+            // W-14: a full exit is withdrawn only while no vault is open and no refund waits, as it was requested:
+            // either may have arrived during the unbonding.
+            uint256 openVaults = IZecuredSpendCommits(registry).openVaultCount();
+            if (openVaults != 0) revert FullExitLocked(openVaults, 0, 0);
+            _checkNoPendingRefund();
+        }
         delete unbondingOf[signer];
         emit BondWithdrawn(signer, to, u.amount);
         usdc.safeTransfer(to, u.amount);
@@ -265,11 +277,22 @@ contract SignerBondV2 is ISignerBond, ReentrancyGuardTransient, EIP712 {
         _signerIndex(ECDSA.recoverCalldata(_hashDestinationReceived(claimId, c.commitment, receivedAt), signature));
         uint64 payableAt = receivedAt > c.createdAt ? receivedAt : uint64(c.createdAt);
         Arming storage a = _armings[claimId];
-        if (a.commitment == c.commitment && a.payableAt != 0 && a.payableAt <= payableAt) {
-            payableAt = a.payableAt; // the earlier receipt stands
+        if (a.commitment == c.commitment && a.payableAt != 0) {
+            if (a.payableAt <= payableAt) {
+                payableAt = a.payableAt; // the earlier receipt stands
+            } else {
+                // W-4: an earlier receipt lowers the deadline; the commitments it protected stay protected up to the
+                // deadline it replaces, and no later: re-arming lower and committing again never defers beyond that.
+                uint64 replaced = a.payableAt + livenessPeriod;
+                if (replaced > a.armedAt) a.armedAt = replaced;
+                a.payableAt = payableAt;
+            }
         } else {
             a.commitment = c.commitment;
             a.payableAt = payableAt;
+            // A uint64 of seconds outlasts the chain.
+            // forge-lint: disable-next-line(unsafe-typecast)
+            a.armedAt = uint64(block.timestamp);
         }
         emit LivenessArmed(claimId, c.commitment, payableAt);
     }
@@ -283,8 +306,9 @@ contract SignerBondV2 is ISignerBond, ReentrancyGuardTransient, EIP712 {
         // Also refuses a claim without a claimant: no caller is the zero address.
         if (msg.sender != c.claimant) revert NotTheClaimant(claimId, msg.sender);
         if (IZecuredSlasher(slasher).vaultFrozen(c.vaultId)) revert NotLivenessEligible(claimId);
-        // R-7: a claim the compensator owes (an F3 shortfall) is paid there, never twice.
-        if (_entitled(claimId)) revert NotLivenessEligible(claimId);
+        // R-7: a claim the compensator owes (an F3 shortfall) is paid there, never twice. W-5: nor while an F3 or F4
+        // case about it is open, whose execution may make it so.
+        if (_entitled(claimId) || IZecuredSlasher(slasher).claimCaseOpen(claimId)) revert NotLivenessEligible(claimId);
         uint64 dueAt = _livenessDueAt(claimId, payableAt);
         if (block.timestamp < dueAt) revert LivenessNotDue(claimId, dueAt);
         // R-9: never at a price no source confirms any more.
@@ -309,12 +333,28 @@ contract SignerBondV2 is ISignerBond, ReentrancyGuardTransient, EIP712 {
         uint64 payableAt = _payableAt(claimId, c);
         if (
             !_livenessEligible(c) || payableAt == 0 || c.claimant == address(0)
-                || IZecuredSlasher(slasher).vaultFrozen(c.vaultId) || _entitled(claimId) || _priceStale()
+                || IZecuredSlasher(slasher).vaultFrozen(c.vaultId) || _entitled(claimId)
+                || IZecuredSlasher(slasher).claimCaseOpen(claimId) || _priceStale()
         ) {
             return (0, 0);
         }
         dueAt = _livenessDueAt(claimId, payableAt);
         amount = _livenessAmount(c.amount, oracle.price());
+    }
+
+    /// @inheritdoc ISignerBond
+    /// @dev `livenessDue`'s `dueAt` from the arming alone: a stale price, a frozen vault or an open claim case only
+    ///      delay the payment from the bonds, never the time by which a payout must have landed.
+    function livenessDeadline(bytes32 claimId) external view returns (uint64) {
+        ClaimDetails memory c = IZecuredRegistry(registry).claimDetails(claimId);
+        uint64 payableAt = _payableAt(claimId, c);
+        if (!_livenessEligible(c) || payableAt == 0 || c.claimant == address(0) || _entitled(claimId)) return 0;
+        return _livenessDueAt(claimId, payableAt);
+    }
+
+    /// @inheritdoc ISignerBond
+    function livenessArmedAt(bytes32 claimId) external view returns (uint64) {
+        return _armings[claimId].armedAt;
     }
 
     /// @inheritdoc ISignerBond
@@ -423,9 +463,15 @@ contract SignerBondV2 is ISignerBond, ReentrancyGuardTransient, EIP712 {
         return payableAt > c.createdAt ? payableAt : uint64(c.createdAt);
     }
 
-    /// @dev R-7: the compensator registered an entitlement for the claim (an F3 shortfall, or its tally).
+    /// @dev R-7: the compensator registered an entitlement for the claim (an F3 or F4 loss, or its tally).
     function _entitled(bytes32 claimId) internal view returns (bool) {
         return IZecuredCompensator(compensator).entitlement(claimId).incident != 0;
+    }
+
+    /// @dev W-14: no proven refund waits on the Intake (its claim would open with a signer gone).
+    function _checkNoPendingRefund() internal view {
+        uint256 pending = IZecuredIntake(intake).pendingRefundTotal();
+        if (pending != 0) revert PendingRefunds(pending);
     }
 
     /// @dev R-9: the oracle reports a feed state and it is `Stale`.
@@ -447,17 +493,21 @@ contract SignerBondV2 is ISignerBond, ReentrancyGuardTransient, EIP712 {
         return _hashTypedDataV4(keccak256(abi.encode(DESTINATION_RECEIVED_TYPEHASH, claimId, commitment, receivedAt)));
     }
 
-    /// @dev T-05, deferrals bounded (design review): `deadline = payableAt + livenessPeriod`; a claim bound to an input
-    ///      waits `commitGrace` after its input's latest commitment, but a commitment made after the deadline never
-    ///      extends that: the claim is due at `max(deadline, min(lastCommitAt, deadline) + commitGrace)`, at most
-    ///      `livenessPeriod + commitGrace` after it became payable, however often the signers re-commit.
+    /// @dev T-05, deferrals bounded (design review), W-4: `deadline = payableAt + livenessPeriod`; a claim bound to an
+    ///      input waits `commitGrace` after its input's latest commitment made before the arming's bound `cap =
+    ///      max(deadline, armedAt)`: it is due at `max(deadline, min(lastCommitAt, cap) + commitGrace)`. A commitment
+    ///      made before the claim was armed (a receipt armed late, after its deadline) is protected in full, so that the
+    ///      bonds never pay a claim whose payout can still land; a later one never extends the bound, however often the
+    ///      signers re-commit or re-arm.
     function _livenessDueAt(bytes32 claimId, uint64 payableAt) internal view returns (uint64 dueAt) {
         uint64 deadline = payableAt + livenessPeriod;
         dueAt = deadline;
         bytes32 input = IZecuredSpendCommits(registry).claimInput(claimId);
         if (input != bytes32(0)) {
             uint64 lastCommit = IZecuredSpendCommits(registry).lastCommitAt(input);
-            uint64 protectedUntil = (lastCommit < deadline ? lastCommit : deadline) + commitGrace;
+            uint64 armedAt = _armings[claimId].armedAt;
+            uint64 cap = deadline > armedAt ? deadline : armedAt;
+            uint64 protectedUntil = (lastCommit < cap ? lastCommit : cap) + commitGrace;
             if (protectedUntil > dueAt) dueAt = protectedUntil;
         }
     }

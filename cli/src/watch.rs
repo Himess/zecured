@@ -13,6 +13,14 @@
 //! written to an evidence file for `build-violation misdirected`. With the vault's viewing key it
 //! also checks that the commitment of X names the claim by that very reference (F4, review RT-1):
 //! `claimRefOf(payoutRef(X), commitment)` must be `keccak256(salt || txid_X)`.
+//!
+//! W-11: `Included` proves only that a named X is in a block, not that X spent the committed input
+//! nor that it came after the commitment: colluding signers can name a transaction mined months
+//! before. So both watchers search the whole Ironwood history (`zecured_zcash_ops::txindex`, kept
+//! next to the wallet): a claimant finds X by each committed claim reference wherever it was mined,
+//! and the borrower resolves every commitment of the vault on Base by its payout reference. An X
+//! that is no spend of the vault's lineage is reported: F2 when its committed change never came,
+//! and its claims are checked like any payout's (F3, F4).
 
 use std::path::Path;
 
@@ -30,10 +38,10 @@ use zcash_protocol::TxId;
 use zecured_base::events::IZecuredRegistry;
 use zecured_deposit_witness::violation::{ClaimEvidence, claim_output_value};
 use zecured_policy::{
-    derive::{deposit_tag, payout_ref},
+    derive::{deposit_tag, payout_ref, payout_ref_with_key, tag_key},
     ledger::{claim_ref, commitment},
 };
-use zecured_zcash_ops::{lwd::LwdClient, scan::ReceivedNote};
+use zecured_zcash_ops::{lwd::LwdClient, scan::ReceivedNote, txindex::IronwoodIndex};
 
 /// What the watchtower found about one lineage note.
 #[derive(Debug, PartialEq, Eq)]
@@ -54,19 +62,34 @@ pub enum Finding {
         change_tag: B256,
         change_value: u64,
     },
+    /// W-11: a commitment of the vault names `payout`, a mined transaction that spent no lineage note
+    /// this scan saw (its committed change, if any, came): its claims are checked (F3, F4).
+    Unlinked { payout: TxId, input_tag: B256 },
+    /// W-11: a commitment of the vault names a transaction no Ironwood block has: an expired payout
+    /// that was rebuilt, one not mined yet, or a reference no transaction has.
+    NotMined { payout_ref: B256 },
+}
+
+/// The lineage findings of a vault, and the vault its lineage notes back on Base (none: no note of
+/// this viewing key backs zZEC).
+pub struct Lineage {
+    pub findings: Vec<Finding>,
+    pub vault_id: Option<B256>,
 }
 
 /// Checks the scanned notes of the vault with viewing key `ufvk` against the Registry.
-pub async fn check_lineage(ufvk: &str, notes: &[ReceivedNote], registry: Address, rpc: &str) -> Result<Vec<Finding>> {
+pub async fn check_lineage(ufvk: &str, notes: &[ReceivedNote], registry: Address, rpc: &str) -> Result<Lineage> {
     let provider = ProviderBuilder::new().connect_http(rpc.parse().context("Base RPC URL")?);
     let registry = IZecuredRegistry::new(registry, &provider);
     let tags: Vec<B256> = notes.iter().map(|n| note_tag(ufvk, n)).collect();
     let mut findings = vec![];
+    let mut vault_id = None;
     for (n, tag) in notes.iter().zip(&tags) {
         let lineage = registry.lineageOf(*tag).call().await.context("Registry.lineageOf")?;
         if lineage.vaultId == B256::ZERO {
             continue; // not backing zZEC: a non-conforming or foreign note
         }
+        vault_id = Some(lineage.vaultId);
         let Some(x) = n.spent_in else {
             findings.push(Finding::Unspent {
                 tag: *tag,
@@ -81,6 +104,88 @@ pub async fn check_lineage(ufvk: &str, notes: &[ReceivedNote], registry: Address
             .context("Registry.spendRecord")?;
         let received: Vec<(B256, u64)> = notes.iter().zip(&tags).map(|(m, t)| (*t, m.value())).collect();
         findings.push(spent(n.txid, x, *tag, &record, &received));
+    }
+    Ok(Lineage { findings, vault_id })
+}
+
+/// W-11: the transaction of the Ironwood history whose payout reference under the vault's viewing
+/// key `ufvk` is `payout_ref`, if any.
+pub fn resolve_payout<'a>(
+    ufvk: &str,
+    txs: impl Iterator<Item = &'a (u32, [u8; 32])>,
+    payout_ref: B256,
+) -> Option<TxId> {
+    let k = tag_key(ufvk);
+    txs.map(|(_, txid)| txid)
+        .find(|txid| B256::from(payout_ref_with_key(&k, txid)) == payout_ref)
+        .map(|t| TxId::from_bytes(*t))
+}
+
+/// W-11: the finding about `x`, named by a commitment of the vault (input `input_tag`, committed
+/// change `change_tag` of `change_value`) and no spend of a lineage note the scan saw, given the
+/// (tag, value) of every note the vault received: F2 if the change never came.
+pub fn unlinked(x: TxId, input_tag: B256, change_tag: B256, change_value: u64, received: &[(B256, u64)]) -> Finding {
+    if change_value == 0 || received.contains(&(change_tag, change_value)) {
+        Finding::Unlinked { payout: x, input_tag }
+    } else {
+        Finding::WithheldChange {
+            payout: x,
+            change_tag,
+            change_value,
+        }
+    }
+}
+
+/// W-11: every commitment of the vault `vault_id` on Base (from Base block `base_from`) whose payout
+/// the lineage findings do not already judge, resolved by its payout reference over the whole
+/// Ironwood history in `index`.
+#[allow(clippy::too_many_arguments)]
+pub async fn check_commitments(
+    ufvk: &str,
+    vault_id: B256,
+    notes: &[ReceivedNote],
+    judged: &[Finding],
+    registry_address: Address,
+    rpc: &str,
+    base_from: u64,
+    index: &IronwoodIndex,
+) -> Result<Vec<Finding>> {
+    use alloy::sol_types::SolEvent;
+    let provider = ProviderBuilder::new().connect_http(rpc.parse().context("Base RPC URL")?);
+    let head = provider.get_block_number().await.context("Base block number")?;
+    let logs = zecured_base::events::get_logs_chunked(base_from, head, |a, b| {
+        let filter = Filter::new()
+            .address(registry_address)
+            .event_signature(IZecuredRegistry::SpendCommitted::SIGNATURE_HASH)
+            .topic1(vault_id)
+            .from_block(a)
+            .to_block(b);
+        let provider = &provider;
+        async move { provider.get_logs(&filter).await.map_err(anyhow::Error::from) }
+    })
+    .await?;
+    let known: Vec<B256> = judged
+        .iter()
+        .filter_map(|f| match f {
+            Finding::Committed { payout, .. } | Finding::WithheldChange { payout, .. } => {
+                Some(B256::from(payout_ref(ufvk, payout.as_ref())))
+            }
+            _ => None,
+        })
+        .collect();
+    let received: Vec<(B256, u64)> = notes.iter().map(|n| (note_tag(ufvk, n), n.value())).collect();
+    let mut findings = vec![];
+    for log in logs.iter().filter(|l| !l.removed) {
+        let ev = IZecuredRegistry::SpendCommitted::decode_log(&log.inner).context("SpendCommitted")?;
+        if known.contains(&ev.payoutRef) {
+            continue;
+        }
+        findings.push(match resolve_payout(ufvk, index.txs(), ev.payoutRef) {
+            Some(x) => unlinked(x, ev.inputTag, ev.changeTag, ev.changeValue, &received),
+            None => Finding::NotMined {
+                payout_ref: ev.payoutRef,
+            },
+        });
     }
     Ok(findings)
 }
@@ -153,6 +258,14 @@ pub fn report(findings: &[Finding]) {
                     "  build the witness: build-violation withheld-change --ufvk-file <file> --txid {payout} --change-tag {change_tag} --change-value {change_value} --tip <anchor> --beneficiary <your EOA>"
                 );
             }
+            Finding::Unlinked { payout, input_tag } => println!(
+                "tier 3: a commitment of this vault names {payout}, which spent no lineage note this scan saw (input {}): its claims are checked below (W-11)",
+                short(input_tag)
+            ),
+            Finding::NotMined { payout_ref } => println!(
+                "tier 3: a commitment of this vault names a transaction no Ironwood block has (payout reference {}): an expired payout that was rebuilt, or one not mined yet",
+                short(payout_ref)
+            ),
         }
     }
 }
@@ -201,19 +314,36 @@ pub enum ClaimFinding {
     },
 }
 
+/// W-11: for each wanted (committed reference, salt), the transaction of the Ironwood history with
+/// `keccak256(salt || txid)` equal to the reference, wherever it was mined.
+pub fn find_by_claim_ref<'a>(
+    txs: impl Iterator<Item = &'a (u32, [u8; 32])>,
+    wanted: &[(B256, [u8; 32])],
+) -> Vec<Option<TxId>> {
+    let mut found: Vec<Option<TxId>> = vec![None; wanted.len()];
+    for (_, txid) in txs {
+        for (k, (committed_ref, salt)) in wanted.iter().enumerate() {
+            if found[k].is_none() && B256::from(claim_ref(salt, txid)) == *committed_ref {
+                found[k] = Some(TxId::from_bytes(*txid));
+            }
+        }
+    }
+    found
+}
+
 /// RT-2: a claimant without the vault's viewing key (a liquidator, a market maker) finds each
 /// payout of its claims on its own. Every `SpendCommitted` on Base that names a claim of one of
 /// its destinations gives the claim's reference; the payout is the Zcash transaction X with
-/// `keccak256(salt || txid_X)` equal to it (Zcash blocks `zcash_from..=zcash_to`); the committed
-/// output of X is then decrypted with the claimant's own key, as in [`check_claims`].
+/// `keccak256(salt || txid_X)` equal to it, searched over the whole Ironwood history (`index`,
+/// W-11); the committed output of X is then decrypted with the claimant's own key, as in
+/// [`check_claims`].
 pub async fn check_third_party(
     client: &mut LwdClient,
     own: &[OwnRecipient],
     registry_address: Address,
     rpc: &str,
     base_from: u64,
-    zcash_from: u32,
-    zcash_to: u32,
+    index: &IronwoodIndex,
 ) -> Result<Vec<ClaimFinding>> {
     use alloy::sol_types::SolEvent;
     let provider = ProviderBuilder::new().connect_http(rpc.parse().context("Base RPC URL")?);
@@ -241,20 +371,9 @@ pub async fn check_third_party(
             }
         }
     }
-    // The payouts, among the Zcash transactions, by their reference.
-    let mut found: Vec<Option<TxId>> = vec![None; wanted.len()];
-    let mut from = zcash_from;
-    while from <= zcash_to && found.iter().any(Option::is_none) {
-        let to = from.saturating_add(999).min(zcash_to);
-        for (_, txid) in zecured_zcash_ops::lwd::block_txids(client, from, to).await? {
-            for (k, (_, committed_ref, d)) in wanted.iter().enumerate() {
-                if found[k].is_none() && B256::from(claim_ref(&own[*d].salt, &txid)) == *committed_ref {
-                    found[k] = Some(TxId::from_bytes(txid));
-                }
-            }
-        }
-        from = to.saturating_add(1);
-    }
+    // The payouts, among the Ironwood transactions of the whole history, by their reference.
+    let refs: Vec<(B256, [u8; 32])> = wanted.iter().map(|(_, r, d)| (*r, own[*d].salt)).collect();
+    let found = find_by_claim_ref(index.txs(), &refs);
     let mut findings = vec![];
     for ((claim_id, committed_ref, d), x) in wanted.into_iter().zip(found) {
         let r = &own[d];
@@ -275,15 +394,24 @@ pub async fn check_third_party(
     Ok(findings)
 }
 
-/// The committed payouts among the lineage findings: the transactions that can pay claims.
+/// The committed payouts among the findings: the transactions that can pay claims, an unlinked one
+/// too (W-11).
 pub fn committed_payouts(findings: &[Finding]) -> Vec<TxId> {
     findings
         .iter()
         .filter_map(|f| match f {
-            Finding::Committed { payout, .. } | Finding::WithheldChange { payout, .. } => Some(*payout),
+            Finding::Committed { payout, .. }
+            | Finding::WithheldChange { payout, .. }
+            | Finding::Unlinked { payout, .. } => Some(*payout),
             _ => None,
         })
         .collect()
+}
+
+/// F4: the commitment of `x` names a destination's claim (`named`, zero if it names none) under a
+/// reference other than the one its claimant computes, `keccak256(salt || txid_X)`.
+pub fn wrong_ref(named: B256, salt: &[u8; 32], x: &TxId) -> bool {
+    named != B256::ZERO && named != B256::from(claim_ref(salt, x.as_ref()))
 }
 
 /// Checks every committed payment of the claims behind `own` among `payouts` of the vault with
@@ -305,7 +433,7 @@ pub async fn check_claims(
             let claim_ref = B256::from(claim_ref(&r.salt, x.as_ref()));
             let commitment = B256::from(commitment(&r.salt, &r.receiver));
             let named = registry.claimRefOf(payout, commitment).call().await.context("Registry.claimRefOf")?;
-            if named != B256::ZERO && named != claim_ref {
+            if wrong_ref(named, &r.salt, x) {
                 findings.push(ClaimFinding::WrongClaimRef {
                     payout: *x,
                     evidence: evidence(*x, 0, r, None),
@@ -485,6 +613,56 @@ mod tests {
             Finding::Unspent { tag, value: 1 },
         ];
         assert_eq!(committed_payouts(&findings), vec![a, c]);
+    }
+
+    /// W-11: a claimant finds a payout mined long before it looked (below any `--from` it used to
+    /// give): the whole Ironwood history is searched.
+    #[test]
+    fn w11_a_payout_mined_before_the_old_search_start_is_found() {
+        let salt = [5u8; 32];
+        let old = [0x0d; 32]; // mined months before the claim
+        let txs = [(4_134_100, [0x01; 32]), (4_200_000, old), (4_530_000, [0x02; 32])];
+        let committed = B256::from(claim_ref(&salt, &old));
+        let found = find_by_claim_ref(txs.iter(), &[(committed, salt), (B256::repeat_byte(0xee), salt)]);
+        assert_eq!(found, vec![Some(TxId::from_bytes(old)), None]);
+    }
+
+    /// W-11: a commitment of the vault that names an old transaction, no spend of its lineage, is
+    /// resolved by its payout reference over the whole history; with committed change that never
+    /// came it is F2, and otherwise its claims are checked, where a wrong reference is F4.
+    #[test]
+    fn w11_an_unlinked_payout_with_a_wrong_reference_is_f4() {
+        let ufvk = "uviewtest1vault";
+        let old = [0x0d; 32];
+        let txs = [(4_134_100, [0x01; 32]), (4_200_000, old)];
+        let reference = B256::from(payout_ref(ufvk, &old));
+        let x = resolve_payout(ufvk, txs.iter(), reference).expect("found by its payout reference");
+        assert_eq!(x, TxId::from_bytes(old));
+        assert_eq!(resolve_payout(ufvk, txs.iter(), B256::repeat_byte(0xaa)), None);
+        let input = B256::repeat_byte(9);
+        let (change_tag, change_value) = (B256::repeat_byte(7), 600_000);
+        assert_eq!(
+            unlinked(x, input, change_tag, change_value, &[]),
+            Finding::WithheldChange {
+                payout: x,
+                change_tag,
+                change_value
+            },
+            "its change never came: F2"
+        );
+        let f = unlinked(x, input, B256::ZERO, 0, &[]);
+        assert_eq!(
+            f,
+            Finding::Unlinked {
+                payout: x,
+                input_tag: input
+            }
+        );
+        assert_eq!(committed_payouts(&[f]), vec![x], "its claims are checked");
+        let salt = [5u8; 32];
+        assert!(wrong_ref(B256::repeat_byte(0xee), &salt, &x), "named under another reference: F4");
+        assert!(!wrong_ref(B256::from(claim_ref(&salt, &old)), &salt, &x));
+        assert!(!wrong_ref(B256::ZERO, &salt, &x), "a commitment that names none of its claims");
     }
 
     /// The wallet checks a destination with the viewing key that owns its receiver, at any

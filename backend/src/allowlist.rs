@@ -864,7 +864,7 @@ pub(crate) mod tests {
     }
 
     sol! {
-        function preLiquidate(address account, uint256 repaidShares, bytes32 mmCommitment);
+        function preLiquidate(address account, uint256 repaidShares, bytes32 mmCommitment, uint64 minSeizedZat);
         function upholdPayout(bytes32 claimId, bytes32 payoutRef);
         function finalizeActivation(bytes32 vaultId);
         function dropPendingActivation(bytes32 vaultId);
@@ -894,6 +894,7 @@ pub(crate) mod tests {
                     account: Address::repeat_byte(0xab),
                     repaidShares: U256::from(1u8),
                     mmCommitment: id,
+                    minSeizedZat: 0,
                 }
                 .abi_encode(),
             ),

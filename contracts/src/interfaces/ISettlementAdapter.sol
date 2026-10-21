@@ -109,6 +109,8 @@ interface ISettlementAdapter is IMorphoLiquidateCallback, IMorphoRepayCallback {
     error PreLiquidationTooLarge(uint256 repaidShares, uint256 repayableShares);
     /// @notice A pre-liquidation must leave at least the D11 floor in the vault.
     error PreLiquidationRemainderTooSmall(uint256 remaining, uint256 minimum);
+    /// @notice v4.1 (W-17): the repayment buys less collateral than the caller asked for at least.
+    error PreLiquidationSlippage(uint64 seized, uint64 minSeizedZat);
 
     // ------------------------------------------------------------------ functions (docs/INTERFACES.md § 3.3)
 
@@ -177,13 +179,16 @@ interface ISettlementAdapter is IMorphoLiquidateCallback, IMorphoRepayCallback {
     ///         5. `repaidShares <= borrowShares * preLcf`;
     ///         6. `seized = assets(repaidShares) * preLif / price`, every step rounded down (the borrower's way), at
     ///            least the D11 floor `minSeize(outstanding)` and leaving at least that floor in the vault;
-    ///         7. the Adapter withdraws `seized` and the Registry burns it into a Liquidation claim of `mmCommitment`
+    ///         7. `seized >= minSeizedZat` (v4.1, W-17: the caller's quote, so that the price or the debt moving
+    ///            before its transaction lands cannot make it repay for less);
+    ///         8. the Adapter withdraws `seized` and the Registry burns it into a Liquidation claim of `mmCommitment`
     ///            whose claimant is the caller (I2, I9).
     ///         Since `preLif <= LIF(LLTV)` and `ltv <= LLTV`, `ltv * preLif < 1`: the position's LTV always falls.
     /// @param mmCommitment Salted commitment of the caller's Ironwood receiver (the claim's destination).
+    /// @param minSeizedZat The least collateral the caller accepts for `repaidShares`, in zatoshi.
     /// @return repaidAssets The USDC repaid (6-decimal units), what Morpho pulled.
     /// @return seized The collateral taken, in zatoshi.
-    function preLiquidate(address account, uint256 repaidShares, bytes32 mmCommitment)
+    function preLiquidate(address account, uint256 repaidShares, bytes32 mmCommitment, uint64 minSeizedZat)
         external
         returns (uint256 repaidAssets, uint64 seized);
 

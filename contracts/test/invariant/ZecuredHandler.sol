@@ -437,8 +437,10 @@ contract ZecuredHandler is Test {
         if (block.timestamp < p.readyTime) vm.warp(p.readyTime);
         // Half the time the finalizer waits a pause out.
         if (seed % 2 == 0 && block.timestamp < intake.pausedUntil()) vm.warp(intake.pausedUntil());
+        // W-2: nor against a note an F1 case is about, open on whichever vault held its tag, or executed.
         bool closed = gates.halted() || !gates.fullyBonded() || intake.mintingPaused()
-            || gates.openCasesOf(vaultId) != 0 || !relay.isInBestChain(p.anchor);
+            || gates.openCasesOf(vaultId) != 0 || !relay.isInBestChain(p.anchor)
+            || gates.openF1CasesOf(p.depositTag) != 0 || gates.noteSpendProven(p.depositTag);
         uint256 supply = zzec.totalSupply();
         try intake.finalizeActivation(vaultId) {
             if (closed) _flag("I23: minted through a closed gate");
@@ -452,6 +454,24 @@ contract ZecuredHandler is Test {
             if (!closed) _flag("a finalization reverted with every gate open");
             calls["finalize (gated)"]++;
         }
+    }
+
+    /// W-2: three colluders recorded a pending deposit's tag as their own vault's change and proved an F1 about the note
+    /// there (MOCK: the case is open on the tag, sometimes executed); the deposit later took the tag over. The note then
+    /// backs no mint (`finalize` checks it), while the deposit can still be dropped once its anchor leaves the best chain
+    /// or taken back as a refund. The case closes again half the time (dismissed, or moved and settled).
+    function usurpedTagCase(uint256 seed) external {
+        if (pendingIds.length == 0) return;
+        bytes32 tag = intake.pendingActivation(pendingIds[seed % pendingIds.length]).depositTag;
+        uint256 op = _mix(seed) % 4;
+        if (op == 0) {
+            gates.setOpenF1Cases(tag, gates.openF1CasesOf(tag) + 1);
+        } else if (op == 1 && gates.openF1CasesOf(tag) != 0) {
+            gates.setOpenF1Cases(tag, gates.openF1CasesOf(tag) - 1);
+        } else if (op == 2 && seed % 8 == 2) {
+            gates.setNoteSpendProven(tag, true); // executed: for good
+        }
+        calls["usurped tag case"]++;
     }
 
     /// K3: a reorganisation takes the anchor off the best chain; anyone drops the reservation, and the note may be proven
@@ -1750,7 +1770,7 @@ contract ZecuredHandler is Test {
             && r.seized + floor <= outstandingBefore && !frozen;
         uint64 claimsBefore = registry.claimCount(vaultId);
         vm.prank(liquidator);
-        try adapter.preLiquidate(account, repaidShares, keccak256("zecured.inv.preLiquidator")) returns (
+        try adapter.preLiquidate(account, repaidShares, keccak256("zecured.inv.preLiquidator"), 0) returns (
             uint256, uint64 seized
         ) {
             if (!allowed) _flag("a pre-liquidation outside the terms, the floors or a freeze went through");
@@ -1803,7 +1823,7 @@ contract ZecuredHandler is Test {
         uint256 shares = bound(seed, 1, morpho.position(marketId, account).borrowShares);
         _fund(stranger, address(adapter), 100 * 1e6);
         vm.prank(stranger);
-        try adapter.preLiquidate(account, shares, keccak256("zecured.inv.x")) {
+        try adapter.preLiquidate(account, shares, keccak256("zecured.inv.x"), 0) {
             attackSucceeded = true;
         } catch {}
         calls["attack: pre-liquidation"]++;

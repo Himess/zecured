@@ -89,6 +89,11 @@ struct Entitlement {
 ///      - R-20: a vault that stays active after `settleVault` (partly covered, or unauthorized) leaves the Registry's
 ///        open vaults and locked zatoshi; anyone burns its collateral again later (`burnCollateral`), and retires it
 ///        once its debt is gone.
+///      Changes in v4.1:
+///      - W-1: an executed F4 case compensates the claim its commitment hid, at the claim's `expected` in its layer, as
+///        an F3 shortfall is (and closes it in the Registry), also when a proof made the claim final first.
+///      - W-16: a victim no longer active at its tally (retired at its compromise, R-19) counts as authorized: nothing is
+///        left to withdraw, so revoking the Registry's Morpho authorization no longer costs its owner the equity.
 interface IZecuredCompensator {
     event FundsReceived(bytes32 indexed caseId, uint256 amount);
     event IncidentOpened(uint256 indexed incident, uint64 closesAt);
@@ -136,7 +141,7 @@ interface IZecuredCompensator {
     error ConfirmationsUnsettled(bytes32 vaultId, uint256 left);
     /// @notice R-19, R-20: the vault is not an active victim vault.
     error NotBurnable(bytes32 vaultId);
-    /// @notice R-7: an F3 case's execution left `onCase` less than `F3_GAS`.
+    /// @notice R-7, W-1: an F3 or F4 case's execution left `onCase` less than `F3_GAS`.
     error InsufficientGasForCase();
     /// @notice R-12: refunds of the vault reserved before its compromise are neither opened nor released yet
     ///         (`ZecuredIntake.finalizeRefund` opens each once it is ready, `dropPendingRefund` releases one whose proof

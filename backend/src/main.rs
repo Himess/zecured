@@ -137,6 +137,10 @@ struct Cli {
     /// with their uses, `inviteOnly`, and the `openings` switch); unset: openings are open to all.
     #[arg(long, env = "ZECURED_INVITES")]
     invites: Option<PathBuf>,
+    /// W-6: the signers' treasury keys file (`{"ivk", "saltKey"}`, never logged); with it, each
+    /// bond-paid claim's derived treasury recipient is registered with the signers.
+    #[arg(long, env = "ZECURED_TREASURY_KEYS")]
+    treasury: Option<PathBuf>,
 }
 
 // ------------------------------------------------------------------------- errors (L-2)
@@ -1285,6 +1289,10 @@ async fn main() -> Result<()> {
             concurrency = cli.deposit_proof_concurrency,
             "deposits are activated with Tier 2 proofs"
         );
+    }
+    if let Some(file) = &cli.treasury {
+        coordinator = coordinator.with_treasury(zecured_coordinator::TreasuryKeys::read_file(file)?);
+        info!("bond-paid claims' treasury recipients are registered with the signers (W-6)");
     }
     if let Some(file) = &cli.invites {
         coordinator = coordinator.with_invites(file, &cli.data)?;

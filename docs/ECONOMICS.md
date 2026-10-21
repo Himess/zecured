@@ -68,7 +68,10 @@ liquidators and market makers, whose claims the vault owed; (3) the lenders: the
 debt is repaid on Morpho, with a 1 % allowance for interest, and its unbacked zZEC is burned; (4) the
 owners: their own claims and their equity. Cases within one incident window (*judge*: 3 days) share
 one price. A compromised vault's collateral is burned down to the LLTV as soon as its case is
-executed, so its owner cannot borrow against stolen collateral meanwhile; when the bonds cover only
+executed, and again whenever a higher price frees collateral above it (W-12), so that its owner
+cannot borrow more against stolen collateral afterwards. Before the execution, during the challenge
+window, the owner can still borrow up to the LLTV, and what it borrowed is the compensator's (W-24,
+a mainnet design in docs/MAINNET.md § 7). When the bonds cover only
 part of its debt, the repayment is made and the collateral stays burned down to the LLTV, so the
 repayment cannot be borrowed again. A payout in flight at the theft is proven rather than paid twice:
 the tally waits for proofs of committed payouts and of confirmations made just before the freeze. What is left goes

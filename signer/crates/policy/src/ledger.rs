@@ -694,8 +694,10 @@ pub fn overdue(claims: &[Claim], now: u64, age: u64) -> Vec<&Claim> {
 
 /// O-4 rules 1 and 2 (R-10): no payout is committed for a claim closer than one payout lifetime
 /// (`lifetime` seconds: its expiry, the broadcast delay and the reorganisation margin) to the time
-/// the bonds may pay its claimant (`due_of(claim)`, the bond's `livenessDue`; 0: never, an unarmed
-/// claim or one the bonds do not cover). Such a payout could land after that time and pay the
+/// the bonds may pay its claimant (`due_of(claim)`, the bond's `livenessDeadline`; 0: never, an
+/// unarmed claim or one the bonds do not cover). W-4: that time ignores a stale price, a freeze and
+/// an open claim case, which only delay the bonds' payment: a claim past it waits for the bonds
+/// rather than a payout that could land after they paid (DECISIONS). Such a payout could land after that time and pay the
 /// claimant twice, in ZEC and from the bonds; so does a new payout of a reopened claim that is
 /// already due. The claim is set aside in `claims`, a planning copy (its destination cleared, so
 /// the planner skips it and its value stays in the vault, I10), until the bonds pay it, its payout is

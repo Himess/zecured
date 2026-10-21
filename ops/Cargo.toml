@@ -9,6 +9,10 @@ description = "Operator messages of the Zecured signers: prepare, sign, collect 
 
 [dependencies]
 zecured-base = { path = "../signer/crates/base-client" }
+zecured-policy = { path = "../signer/crates/policy" }
+zecured-zcash-ops = { path = "../signer/crates/zcash-ops" }
+orchard.workspace = true
+rand_core_06.workspace = true
 alloy.workspace = true
 anyhow.workspace = true
 clap.workspace = true

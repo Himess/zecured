@@ -282,7 +282,7 @@ contract SettlementAdapter is ISettlementAdapter, EIP712, ReentrancyGuardTransie
     }
 
     /// @inheritdoc ISettlementAdapter
-    function preLiquidate(address account, uint256 repaidShares, bytes32 mmCommitment)
+    function preLiquidate(address account, uint256 repaidShares, bytes32 mmCommitment, uint64 minSeizedZat)
         external
         nonReentrant
         returns (uint256 repaidAssets, uint64 seized)
@@ -292,6 +292,8 @@ contract SettlementAdapter is ISettlementAdapter, EIP712, ReentrancyGuardTransie
         (bytes32 vaultId, uint64 outstanding) = _preLiquidatableVault(account);
         // Steps 2 to 6, before any transfer: the collateral the repayment buys, within the floors.
         seized = _preLiquidationSeize(account, repaidShares, outstanding);
+        // W-17: never less than the caller quoted (the price or the debt may have moved since).
+        if (seized < minSeizedZat) revert PreLiquidationSlippage(seized, minSeizedZat);
 
         // The repayment, with the caller's USDC pulled inside onMorphoRepay (the path of a close).
         _op = OP_CLOSE;

@@ -212,6 +212,12 @@ interface IZecuredIntake {
     error CapExceeded(uint64 amount);
     /// @notice R-14: the deposit version that proved a pending activation or refund is no longer active.
     error VersionNotActive(bytes32 versionId);
+    /// @notice v4.1 (W-13): the pending activation's deposit version is active but its verifier was stopped by the
+    ///         router: it mints nothing (it can still be converted to a refund).
+    error VersionNotWorking(bytes32 versionId);
+    /// @notice v4.1 (W-2): an F1 case about the deposit's note is open, or one was executed: the note never backs a
+    ///         mint (the activation can be converted to a refund).
+    error NoteSpendCase(bytes32 depositTag);
     error NoPendingRefund(bytes32 depositTag);
     error RefundNotReady(bytes32 depositTag, uint256 readyHeight, uint256 readyTime);
     /// @notice R-12: a pending refund whose anchor is still on the best chain, under an active version, is not dropped.

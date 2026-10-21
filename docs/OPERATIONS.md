@@ -96,9 +96,10 @@ shows:
   This is the honest minority's job: with three colluding signers, the other two can still prove
   any of these.
 - **The bots:** `zecured-wallet --wallet <bot wallet> watch-claims --destinations <bot's
-  destinations file> --from <height> --base-from <block>` checks every payment of the liquidator's
-  and the market maker's claims (F3). The destination files hold salts: back them up, never share
-  them.
+  destinations file> --base-from <block>` checks every payment of the liquidator's and the market
+  maker's claims (F3). It searches the whole Ironwood history (W-11) from an index kept next to the
+  wallet (`ironwood-txids.<network>.bin`, public chain data); the first run reads the history once.
+  The destination files hold salts: back them up, never share them.
 
 ## 7. Soak test (G6)
 
