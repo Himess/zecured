@@ -1774,6 +1774,12 @@ impl Coordinator {
         if !self.payable_on_base(&v.vault_id).await? {
             return Ok(false);
         }
+        // W-20: a payout mined too close to a known network upgrade could never be proven (the
+        // statement needs it and its anchor in one epoch): none starts then.
+        if self.near_activation(notes.tip).await? {
+            info!(vault = %short(&v.vault_id), "a known network upgrade is too close for a payout's proof: payouts wait (W-20)");
+            return Ok(false);
+        }
         let planning = self.planning(v, notes, now()).await?;
         let claims = planning.claims;
         let bound = planning.bound;
@@ -2176,6 +2182,11 @@ impl Coordinator {
             Action::Wait => Ok(()),
             Action::Rebroadcast if tip < inflight.broadcast_from => Ok(()), // L23: held back
             Action::Rebroadcast => {
+                // W-20: a committed payout is not sent while a known upgrade is too close for its
+                // proof (it expires and is rebuilt after the upgrade).
+                if inflight.spend_commit.is_some() && self.near_activation(tip).await? {
+                    return Ok(());
+                }
                 // "Already in the mempool" rejections are expected and harmless.
                 if let Some(raw) = inflight.raw_tx.as_deref().and_then(|h| hex::decode(h).ok()) {
                     let _ = self.broadcast(raw).await;

@@ -57,7 +57,7 @@ use zecured_base::{
     events::{
         ISignerBond, IZcashHeaderRelay, IZecuredRegistry, IZecuredSlasher, VERSION_VIOLATION, VIOLATION_WRONG_CLAIM_REF,
     },
-    relay::{anchor_above, anchor_at},
+    relay::{anchor_above, anchor_at, blocks_for_work},
 };
 use zecured_deposit_witness::{p2p, violation};
 use zecured_policy::{
@@ -126,6 +126,13 @@ pub(crate) fn epoch_last_height(network: ZcashNetwork, height: u32) -> Option<u3
     let params = network.params();
     let (_, end) = BranchId::for_height(&params, BlockHeight::from_u32(height)).height_bounds(&params)?;
     end.map(|e| u32::from(e).saturating_sub(1))
+}
+
+/// W-20: whether a payout broadcast at the tip `tip` could not be proven before the activation of a
+/// known network upgrade: its anchor (at most `window` blocks on) and the slasher's work on top of it
+/// (`work` blocks) would cross `last`, the last block of the tip's epoch (`None`: none known).
+pub(crate) fn too_close_to_activation(tip: u32, window: u32, work: u32, last: Option<u32>) -> bool {
+    last.is_some_and(|last| tip.saturating_add(window).saturating_add(work) > last)
 }
 
 /// W-10: whether a payout's proof drops its delay: its delayed anchor `a` is not under the work yet,
@@ -609,6 +616,27 @@ impl Coordinator {
 }
 
 impl Coordinator {
+    /// W-20: whether a known network upgrade is too close for the proof of a payout broadcast now
+    /// (its anchor window of `2 * payout_delay_max_blocks + 2` blocks and the slasher's work); `false`
+    /// while zcash_protocol knows no later activation.
+    pub(crate) async fn near_activation(&self, tip: u32) -> Result<bool> {
+        let Some(last) = epoch_last_height(self.cfg.zcash(), tip.saturating_add(1)) else {
+            return Ok(false);
+        };
+        let slasher = self.v3().await?.slasher;
+        let work = if slasher == Address::ZERO {
+            0
+        } else {
+            let provider = ProviderBuilder::new().connect_http(self.cfg.base_rpc_url.parse()?);
+            let s = IZecuredSlasher::new(slasher, &provider);
+            let relay = s.relay().call().await.context("slasher.relay")?;
+            let min = s.slashConfirmationWork().call().await.context("slasher.slashConfirmationWork")?;
+            blocks_for_work(&provider, relay, min).await?
+        };
+        let window = self.cfg.payout_delay_max_blocks.saturating_mul(2).saturating_add(2);
+        Ok(too_close_to_activation(tip, window, work, Some(last)))
+    }
+
     /// W-10: the payout's anchor plan, as kept; a payout this coordinator did not plan gets its `r`
     /// now, kept at once so that every proof of the payout takes the same anchor.
     pub(crate) async fn anchor_plan(&self, vault_id: &B256, reference: B256) -> Result<(Option<u32>, u32)> {
@@ -876,6 +904,16 @@ mod tests {
         assert_eq!(anchor_height(Some(120), 4, 110, Some(110)), None, "the epoch's last block: unprovable");
         assert_eq!(epoch_last_height(ZcashNetwork::Testnet, 4_500_000), None);
         assert_eq!(epoch_last_height(ZcashNetwork::Testnet, 4_200_000), Some(4_465_025), "until NU7 activated");
+    }
+
+    /// W-20: no payout is broadcast when its anchor window and the slasher's work would cross a known
+    /// activation; with none known, payouts go on.
+    #[test]
+    fn w20_no_payout_near_a_known_activation() {
+        assert!(!too_close_to_activation(1_000, 18, 24, None), "no known activation");
+        assert!(!too_close_to_activation(1_000, 18, 24, Some(1_042)));
+        assert!(too_close_to_activation(1_001, 18, 24, Some(1_042)), "the work would cross the activation");
+        assert!(too_close_to_activation(1_000, 18, u32::MAX, Some(5_000)), "a relay without work: wait");
     }
 
     /// W-10: the delay is dropped only when the delayed proof would miss a claim's deadline by the

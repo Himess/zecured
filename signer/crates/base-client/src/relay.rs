@@ -14,6 +14,8 @@ use crate::events::{IZcashHeaderRelay, IZecuredIntake, IZecuredSlasher};
 
 /// How far below the relay's tip an anchor is looked for.
 pub const MAX_ANCHOR_DEPTH: u64 = 200;
+/// W-20: the relay headers whose average work estimates how many blocks a work tier takes.
+pub const WORK_SAMPLE: u64 = 24;
 
 /// The highest best-chain height above `height` with at least `min_work` on top of it in the
 /// relay at `relay`, or `None` if the relay has not got that far yet.
@@ -49,6 +51,22 @@ pub async fn anchor_at<P: Provider>(provider: &P, relay: Address, height: u32, m
     let hash = relay.bestBlockHashAt(U256::from(height)).call().await.context("relay.bestBlockHashAt")?;
     let work = relay.confirmationWork(hash).call().await.context("relay.confirmationWork")?;
     Ok((work >= min_work).then_some(height))
+}
+
+/// W-20: about how many headers `min_work` takes on the relay at `relay` now: that work over the
+/// average work of its last [`WORK_SAMPLE`] best-chain headers (`u32::MAX` while it has none).
+pub async fn blocks_for_work<P: Provider>(provider: &P, relay: Address, min_work: U256) -> Result<u32> {
+    let relay = IZcashHeaderRelay::new(relay, provider);
+    let tip = relay.bestChainTip().call().await.context("relay tip")?;
+    let n = WORK_SAMPLE.min(u64::try_from(tip.height)?);
+    let hash = relay.bestBlockHashAt(tip.height - U256::from(n)).call().await.context("relay.bestBlockHashAt")?;
+    // The work of the `n` headers above that one.
+    let work = relay.confirmationWork(hash).call().await.context("relay.confirmationWork")?;
+    let per = work / U256::from(n.max(1));
+    if per.is_zero() {
+        return Ok(u32::MAX);
+    }
+    Ok(u32::try_from((min_work + per - U256::from(1)) / per).unwrap_or(u32::MAX))
 }
 
 /// The anchor of a deposit proof of `amount` zatoshi mined at `deposit_height`: the Intake's relay
