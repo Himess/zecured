@@ -7,7 +7,8 @@
 //! - `POST /swap/orders/{orderId}/destination` `{ receiver, salt }`: the taker's Ironwood receiver
 //!   (a unified address, or the raw 43 bytes as 0x-hex) and the salt of the order's commitment.
 //!   The commitment is on Base: a destination that does not open it is refused, so no
-//!   authentication is needed. Never logged; erased once the order is done.
+//!   authentication is needed. Never logged; erased once the order is done. 202 when taken; given
+//!   again once taken, 200 from the book before anything is read from the chains (N-8).
 //! - `GET /swap/orders/{orderId}`: the maker's view of one of its orders (no receiver, salt or
 //!   txid).
 //! - `GET /swap/status`: what the maker quotes now.
@@ -39,7 +40,7 @@ use zecured_swap::{
 use zecured_zcash_ops::keys::encode_ironwood_ua;
 
 use crate::{
-    engine::{DestinationFacts, Maker, accept_destination},
+    engine::{DestinationFacts, Maker, accept_destination, destination_again},
     gate::{INVITE_HEADER, admitted},
     quoting::{Market, QuoteJson, QuoteRequest, quote, terms},
     state::MakerStatus,
@@ -241,6 +242,18 @@ async fn post_destination(
     let Ok(Json(body)) = body else {
         return Err(ApiError::BAD_REQUEST);
     };
+    let taken = json!({ "orderId": order_id, "status": "destination_received" });
+    // N-8: a destination given again once taken is acknowledged from the book (200), before
+    // anything is read from the chains: neither a stale view of them nor a busy engine refuses it.
+    let again = {
+        let book = m.book.lock().await;
+        let rec = book.orders.get(&order_id);
+        rec.and_then(|rec| destination_again(&m.network, rec, &body.receiver, &body.salt))
+    };
+    if let Some(again) = again {
+        again?;
+        return Ok((StatusCode::OK, Json(taken)));
+    }
     let now = m.now().await?;
     // W-7: whether a proof could land, read before the book is locked.
     let proofs = m.proof_path().await?;
@@ -272,14 +285,16 @@ async fn post_destination(
     };
     let d = accept_destination(&m.cfg, &m.network, &rec, &facts, &body.receiver, &body.salt)?;
     let entry = book.orders.get_mut(&order_id).expect("read above");
-    if entry.status == MakerStatus::AwaitingDestination {
-        entry.receiver = Some(hex::encode(d.receiver));
-        entry.salt = Some(hex::encode(d.salt));
-        entry.status = MakerStatus::DestinationReceived;
-        book.save(&m.cfg.state)?;
-        info!(order = %order_id, "destination received");
+    if entry.status != MakerStatus::AwaitingDestination {
+        // Taken by an earlier request meanwhile: this same destination (it opens the commitment).
+        return Ok((StatusCode::OK, Json(taken)));
     }
-    Ok((StatusCode::ACCEPTED, Json(json!({ "orderId": order_id, "status": "destination_received" }))))
+    entry.receiver = Some(hex::encode(d.receiver));
+    entry.salt = Some(hex::encode(d.salt));
+    entry.status = MakerStatus::DestinationReceived;
+    book.save(&m.cfg.state)?;
+    info!(order = %order_id, "destination received");
+    Ok((StatusCode::ACCEPTED, Json(taken)))
 }
 
 async fn get_order(
@@ -399,6 +414,61 @@ mod tests {
             birthday: 1,
             scan: None,
         }
+    }
+
+    /// N-8: a destination given again once the maker took it is acknowledged from the book (200)
+    /// before anything is read from the chains: a stale view of them (a long pass, a proof) never
+    /// turns it into a refusal. One that does not open the order's commitment is still refused.
+    #[tokio::test]
+    async fn n8_a_destination_given_again_is_acknowledged_from_the_book() {
+        use std::sync::Mutex;
+
+        use crate::testkit::{Chain, base_stub, maker};
+        let sk = (1u8..).find_map(|b| Option::<SpendingKey>::from(SpendingKey::from_bytes([b; 32]))).unwrap();
+        let address = FullViewingKey::from(&sk).address_at(9u32, Scope::External);
+        let ua = encode_ironwood_ua(&zcash_protocol::consensus::Network::TestNetwork, address).unwrap();
+        let salt = [0x5a; 32];
+        let id = B256::repeat_byte(7);
+        let mut rec = new_record(
+            id,
+            Side::Buy,
+            Address::repeat_byte(2),
+            50_000_000,
+            U256::from(20_000_000u64),
+            1_000_000 + 21_600,
+            zecured_swap::receiver_commitment(&salt, &address.to_raw_address_bytes()),
+        );
+        rec.status = MakerStatus::DestinationReceived;
+        rec.receiver = Some(hex::encode(address.to_raw_address_bytes()));
+        rec.salt = Some(hex::encode(salt));
+        let mut book = Book::default();
+        book.orders.insert(id, rec);
+        let chain = Arc::new(Mutex::new(Chain::default()));
+        // No pass yet: the maker's view of the chains is stale.
+        let m = maker(&base_stub(chain.clone()).await, judge_like(), book);
+        let post = |salt: [u8; 32]| {
+            let body = json!({ "receiver": ua, "salt": hex::encode(salt) }).to_string();
+            let app = router(m.clone());
+            async move {
+                let req = axum::http::Request::post(format!("/swap/orders/{id}/destination"))
+                    .header("content-type", "application/json")
+                    .body(Body::from(body))
+                    .unwrap();
+                let r = app.oneshot(req).await.unwrap();
+                let status = r.status();
+                let body = axum::body::to_bytes(r.into_body(), 1 << 16).await.unwrap();
+                (status, serde_json::from_slice::<serde_json::Value>(&body).unwrap_or_default())
+            }
+        };
+        let (status, body) = post(salt).await;
+        assert_eq!(status, StatusCode::OK, "{body}");
+        assert_eq!(body, json!({ "orderId": id, "status": "destination_received" }));
+        let (status, body) = post([0x5b; 32]).await;
+        assert_eq!((status, body["code"].as_str()), (StatusCode::UNPROCESSABLE_ENTITY, Some("bad_destination")));
+        assert_eq!(chain.lock().unwrap().calls, 0, "nothing read from the chains");
+        // Paid since: still acknowledged.
+        m.book.lock().await.orders.get_mut(&id).unwrap().status = MakerStatus::Paid;
+        assert_eq!(post(salt).await.0, StatusCode::OK);
     }
 
     /// O-7: the operators' endpoint answers the free ZEC (the scanned balance less what open Buy

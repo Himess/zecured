@@ -362,6 +362,23 @@ pub fn accept_destination(
     Ok(destination)
 }
 
+/// N-8: a destination given again for `rec` once the maker took one (the order waits for its
+/// payment, or is paid or proven): answered from the book alone, `Ok` when it opens the order's
+/// commitment (only the destination taken does). `None` while `rec` has taken none, or is done.
+pub fn destination_again(
+    network: &Network,
+    rec: &OrderRecord,
+    receiver: &str,
+    salt: &str,
+) -> Option<Result<(), ApiError>> {
+    let taken = matches!(rec.status, MakerStatus::DestinationReceived | MakerStatus::Paid | MakerStatus::Proven);
+    (rec.side == Side::Buy && taken).then(|| {
+        check_destination(network, receiver, salt, rec.receiver_commitment)
+            .map(|_| ())
+            .map_err(|_| ApiError::BAD_DESTINATION)
+    })
+}
+
 /// The maker's Ironwood wallet: the file `zecured-wallet init` writes.
 #[derive(Deserialize)]
 struct WalletFile {
