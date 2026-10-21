@@ -39,13 +39,26 @@ impl TreasuryKeys {
     }
 
     /// From the treasury keys file, `{"ivk": <128 hex>, "saltKey": <64 hex>}`, private to the signers
-    /// and their coordinator.
+    /// and their coordinator. N-12: on Unix, refused while its group or anyone else has access to it
+    /// (`zecured-ops treasury-keys` writes it with mode 0600).
     pub fn read_file(path: &Path) -> Result<Self> {
         #[derive(Deserialize)]
         #[serde(rename_all = "camelCase")]
         struct KeysFile {
             ivk: String,
             salt_key: String,
+        }
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            let mode =
+                std::fs::metadata(path).with_context(|| format!("read {}", path.display()))?.permissions().mode();
+            ensure!(
+                mode & 0o077 == 0,
+                "the treasury keys file {} is open to others (mode {:o}): make it the operator's alone (chmod 600)",
+                path.display(),
+                mode & 0o777
+            );
         }
         let raw = std::fs::read(path).with_context(|| format!("read {}", path.display()))?;
         let f: KeysFile = serde_json::from_slice(&raw).with_context(|| format!("parse {}", path.display()))?;
@@ -127,5 +140,27 @@ mod tests {
         let ivk = hex::encode(keys().ivk.to_bytes());
         assert!(TreasuryKeys::from_hex(&ivk, &"00".repeat(32)).is_err(), "a zero salt key");
         assert!(TreasuryKeys::from_hex(&ivk, &"09".repeat(32)).is_ok());
+    }
+
+    /// N-12: a keys file its group or anyone else may read is refused; the operator's alone (0600,
+    /// as `zecured-ops treasury-keys` writes it) is read.
+    #[cfg(unix)]
+    #[test]
+    fn n12_a_keys_file_open_to_others_is_refused() {
+        use std::os::unix::fs::PermissionsExt;
+        let dir = std::env::temp_dir().join(format!("zecured-n12-treasury-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let path = dir.join("treasury-keys.json");
+        let ivk = hex::encode(keys().ivk.to_bytes());
+        let body = serde_json::json!({ "ivk": ivk, "saltKey": "09".repeat(32) });
+        std::fs::write(&path, serde_json::to_vec(&body).unwrap()).unwrap();
+        for open in [0o644, 0o640, 0o604, 0o660] {
+            std::fs::set_permissions(&path, std::fs::Permissions::from_mode(open)).unwrap();
+            let e = TreasuryKeys::read_file(&path).err().expect("refused");
+            assert!(e.to_string().contains("open to others"), "{e}");
+        }
+        std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o600)).unwrap();
+        assert!(TreasuryKeys::read_file(&path).is_ok());
+        std::fs::remove_dir_all(&dir).unwrap();
     }
 }
