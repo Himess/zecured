@@ -87,6 +87,8 @@ fn setup() -> (NetworkConfig, Vec<TestNode>) {
         commit_depth_secs: 120,
         local_fork: true,
         open_vault: Default::default(),
+        payout_lifetime_secs: None,
+        zcash_network: None,
     };
     (cfg, nodes)
 }
@@ -204,6 +206,38 @@ fn five_nodes_agree_on_the_vault() {
     assert!(shares.windows(2).all(|w| w[0] != w[1]));
 }
 
+/// The vault's address and viewing key are encoded for the deployment's Zcash network, which the
+/// network config gives or the Base chain implies: Testnet's `utest1`/`uviewtest1` with Base
+/// Sepolia, Mainnet's `u1`/`uview1` with Base.
+#[test]
+fn the_vault_is_encoded_for_the_deployments_zcash_network() {
+    use zecured_node::config::ZcashNetwork;
+    for (chain_id, configured, address, ufvk) in [
+        (84_532, None, "utest1", "uviewtest1"),
+        (8_453, None, "u1", "uview1"),
+        (8_453, Some(ZcashNetwork::Mainnet), "u1", "uview1"),
+        (84_532, Some(ZcashNetwork::Testnet), "utest1", "uviewtest1"),
+    ] {
+        let (mut cfg, mut nodes) = setup();
+        cfg.chain_id = chain_id;
+        cfg.zcash_network = configured;
+        cfg.local_fork = false;
+        cfg.attest_delay_max_blocks = 2;
+        cfg.payout_delay_max_blocks = 8;
+        cfg.check().unwrap();
+        let outs: Vec<dkg::Round3Out> = run_dkg(&cfg, &mut nodes, false).into_iter().map(|r| r.unwrap()).collect();
+        assert!(outs[0].address.starts_with(address), "{chain_id}: {}", outs[0].address);
+        assert!(outs[0].ufvk.starts_with(ufvk), "{chain_id}: {}", outs[0].ufvk);
+        // The address decodes as an Ironwood receiver on that network only.
+        let network = cfg.zcash().params();
+        assert!(zecured_zcash_ops::keys::ironwood_receiver(&network, &outs[0].address).is_ok());
+        let other = match cfg.zcash() {
+            ZcashNetwork::Testnet => ZcashNetwork::Mainnet,
+            ZcashNetwork::Mainnet => ZcashNetwork::Testnet,
+        };
+        assert!(zecured_zcash_ops::keys::ironwood_receiver(&other.params(), &outs[0].address).is_err());
+    }
+}
 /// L-9: a second opening for the same account (or owner) that was still running when the
 /// first one completed saves no vault.
 #[test]

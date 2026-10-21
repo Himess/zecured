@@ -9,6 +9,7 @@ import qrcode from "qrcode-generator";
 import { useEffect, useMemo, useState } from "react";
 import { api } from "@/lib/api";
 import { config } from "@/lib/config";
+import { loanTokenName, realAndMock } from "@/lib/labels";
 import { formatDenominations } from "@/lib/zcash";
 import { cx, Notice } from "./ui";
 
@@ -119,6 +120,8 @@ export function BackendStatus() {
 const NAV = [
   { href: "/borrow", label: "Borrow" },
   { href: "/loans", label: "My loans" },
+  { href: "/buy", label: "Buy shielded ZEC" },
+  { href: "/market", label: "Market" },
   { href: "/prepare", label: "Prepare" },
   { href: "/world", label: "What the world sees" },
 ] as const;
@@ -156,6 +159,32 @@ export function Nav() {
  */
 export function Denominations() {
   return <>{formatDenominations(config.denominations)}</>;
+}
+
+/** The market's loan token as the deployment names it ("USDC", "MockUSDC" on a fork); below ConfigGate. */
+export function LoanTokenName() {
+  return <>{loanTokenName()}</>;
+}
+
+/** What is real and what is a mock on this deployment (home page), from GET /config and the build. */
+export function RealAndMockList() {
+  const { real, mock } = realAndMock();
+  return (
+    <ul className="list-disc space-y-2 pl-5 text-sm text-muted">
+      {real.map((r) => (
+        <li key={r}>
+          <span className="text-ok">Real: </span>
+          {r}
+        </li>
+      ))}
+      {mock.map((m) => (
+        <li key={m}>
+          <span className="text-warn">Mock: </span>
+          {m}
+        </li>
+      ))}
+    </ul>
+  );
 }
 
 /** What a vault page shows when its URL fragment holds no vault id (lib/routes.ts). */

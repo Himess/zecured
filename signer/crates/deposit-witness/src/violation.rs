@@ -17,19 +17,27 @@ use zcash_note_encryption::try_note_decryption;
 use zcash_primitives::transaction::Transaction;
 use zcash_protocol::{
     TxId,
-    consensus::{BlockHeight, BranchId, Network},
+    consensus::{BlockHeight, BranchId},
 };
 use zecured_deposit_statement::{
     tag_key,
-    violation::{Detail, Kind, ViolationJournal, ViolationWitness, paid_to, verify_violation},
+    violation::{Detail, Kind, ViolationJournal, ViolationWitness, paid_to, verify_violation_on},
 };
-use zecured_zcash_ops::lwd::{self, LwdClient};
+use zecured_zcash_ops::{
+    lwd::{self, LwdClient},
+    network::ZcashNetwork,
+};
 
-use crate::witness::{Located, locate, ufvk_fvk};
+use crate::{
+    statement_network,
+    witness::{Located, locate, ufvk_fvk},
+};
 
-fn witness(kind: Kind, beneficiary: [u8; 20], at: Located, detail: Detail) -> Result<ViolationWitness> {
+/// A witness, with the Zcash network its transaction was read from.
+fn witness(kind: Kind, beneficiary: [u8; 20], at: Located, detail: Detail) -> Result<(ZcashNetwork, ViolationWitness)> {
     let branch_id = u32::from(at.transaction()?.consensus_branch_id());
-    Ok(ViolationWitness {
+    let network = at.network;
+    let w = ViolationWitness {
         kind,
         beneficiary,
         branch_id,
@@ -44,11 +52,14 @@ fn witness(kind: Kind, beneficiary: [u8; 20], at: Located, detail: Detail) -> Re
         tip_header: at.tip_header,
         tip_auth_data_root: at.tip_auth_data_root,
         detail,
-    })
+    };
+    Ok((network, w))
 }
 
-fn checked(w: ViolationWitness) -> Result<(ViolationWitness, ViolationJournal)> {
-    let journal = verify_violation(&w).map_err(|e| anyhow::anyhow!("the statement refuses the witness: {e:?}"))?;
+/// Checks a witness with the statement on the network it was read from.
+fn checked((network, w): (ZcashNetwork, ViolationWitness)) -> Result<(ViolationWitness, ViolationJournal)> {
+    let journal = verify_violation_on(statement_network(network), &w)
+        .map_err(|e| anyhow::anyhow!("the statement refuses the witness: {e:?}"))?;
     Ok((w, journal))
 }
 
@@ -58,6 +69,7 @@ fn checked(w: ViolationWitness) -> Result<(ViolationWitness, ViolationJournal)> 
 #[allow(clippy::too_many_arguments)]
 pub async fn uncommitted(
     client: &mut LwdClient,
+    network: ZcashNetwork,
     headers_path: &Path,
     summaries_path: &Path,
     ufvk: &str,
@@ -66,11 +78,11 @@ pub async fn uncommitted(
     tip: u32,
     beneficiary: [u8; 20],
 ) -> Result<(ViolationWitness, ViolationJournal)> {
-    let fvk = ufvk_fvk(ufvk)?;
+    let fvk = ufvk_fvk(network, ufvk)?;
     let (raw, height) = lwd::raw_transaction(client, &note_txid).await?;
-    let branch = BranchId::for_height(&Network::TestNetwork, BlockHeight::from_u32(u32::try_from(height)?));
+    let branch = BranchId::for_height(&network.params(), BlockHeight::from_u32(u32::try_from(height)?));
     let note_tx = Transaction::read(&raw[..], branch)?;
-    let at = locate(client, headers_path, summaries_path, spend_txid, tip).await?;
+    let at = locate(client, network, headers_path, summaries_path, spend_txid, tip).await?;
     let spent: Vec<[u8; 32]> = at
         .transaction()?
         .ironwood_bundle()
@@ -108,6 +120,7 @@ pub async fn uncommitted(
 #[allow(clippy::too_many_arguments)]
 pub async fn withheld_change(
     client: &mut LwdClient,
+    network: ZcashNetwork,
     headers_path: &Path,
     summaries_path: &Path,
     ufvk: &str,
@@ -117,7 +130,7 @@ pub async fn withheld_change(
     tip: u32,
     beneficiary: [u8; 20],
 ) -> Result<(ViolationWitness, ViolationJournal)> {
-    let at = locate(client, headers_path, summaries_path, txid, tip).await?;
+    let at = locate(client, network, headers_path, summaries_path, txid, tip).await?;
     let detail = Detail::WithheldChange {
         vault_ufvk: ufvk.to_owned(),
         change_tag,
@@ -132,6 +145,7 @@ pub async fn withheld_change(
 #[allow(clippy::too_many_arguments)]
 pub async fn misdirected(
     client: &mut LwdClient,
+    network: ZcashNetwork,
     headers_path: &Path,
     summaries_path: &Path,
     txid: TxId,
@@ -142,7 +156,7 @@ pub async fn misdirected(
     tip: u32,
     beneficiary: [u8; 20],
 ) -> Result<(ViolationWitness, ViolationJournal)> {
-    let at = locate(client, headers_path, summaries_path, txid, tip).await?;
+    let at = locate(client, network, headers_path, summaries_path, txid, tip).await?;
     let detail = Detail::Misdirected {
         salt,
         receiver: receiver.to_vec(),
@@ -159,6 +173,7 @@ pub async fn misdirected(
 #[allow(clippy::too_many_arguments)]
 pub async fn wrong_claim_ref(
     client: &mut LwdClient,
+    network: ZcashNetwork,
     headers_path: &Path,
     summaries_path: &Path,
     ufvk: &str,
@@ -168,7 +183,7 @@ pub async fn wrong_claim_ref(
     tip: u32,
     beneficiary: [u8; 20],
 ) -> Result<(ViolationWitness, ViolationJournal)> {
-    let at = locate(client, headers_path, summaries_path, txid, tip).await?;
+    let at = locate(client, network, headers_path, summaries_path, txid, tip).await?;
     let detail = Detail::WrongClaimRef {
         tag_key: tag_key(ufvk),
         salt,
@@ -178,17 +193,19 @@ pub async fn wrong_claim_ref(
 }
 
 /// Included (design notes T-05): payout `txid` of the vault (tag key `K`) is in a block under
-/// header `tip`. Not a violation: the journal names the payout by its `payoutRef` for a contract
-/// that confirms payouts by proof; the v2 slasher refuses it. The witness carries K only.
+/// header `tip`. Not a violation: the journal names the payout by its `payoutRef`, and
+/// `ZecuredSlasher.proveInclusion` makes the payout's claims final with it (proven delivery, D76;
+/// `proveViolation` refuses kind 5). The witness carries K only.
 pub async fn included(
     client: &mut LwdClient,
+    network: ZcashNetwork,
     headers_path: &Path,
     summaries_path: &Path,
     tag_key: [u8; 32],
     txid: TxId,
     tip: u32,
 ) -> Result<(ViolationWitness, ViolationJournal)> {
-    let at = locate(client, headers_path, summaries_path, txid, tip).await?;
+    let at = locate(client, network, headers_path, summaries_path, txid, tip).await?;
     checked(witness(Kind::Included, [0; 20], at, Detail::Included { tag_key })?)
 }
 
@@ -214,13 +231,14 @@ pub struct ClaimEvidence {
 /// as the holder of `ivk` sees it, by the statement's own rule ([`paid_to`]).
 pub async fn claim_output_value(
     client: &mut LwdClient,
+    network: ZcashNetwork,
     txid: TxId,
     output_index: u8,
     ivk: &IncomingViewingKey,
     receiver: &Address,
 ) -> Result<u64> {
     let (raw, height) = lwd::raw_transaction(client, &txid).await?;
-    let branch = BranchId::for_height(&Network::TestNetwork, BlockHeight::from_u32(u32::try_from(height)?));
+    let branch = BranchId::for_height(&network.params(), BlockHeight::from_u32(u32::try_from(height)?));
     let tx = Transaction::read(&raw[..], branch)?;
     let bundle = tx.ironwood_bundle().context("the payout has no Ironwood bundle")?;
     let prepared = PreparedIncomingViewingKey::new(ivk);

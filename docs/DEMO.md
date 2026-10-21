@@ -31,7 +31,7 @@
 
 Three signers really steal from a vault, and the theft is proven and slashed on Base. This runs on
 a separate deployment with its own five signers, where three nodes can be compromised (review
-T3-6, docs/TIER3.md § 8). Its binaries refuse to start against the judge deployment.
+T3-6, docs/TIER3.md § 8). Its binaries refuse to start against the lending deployment (its signers are compiled in).
 
 Setup, once:
 1. `THEFT_DEMO=1 scripts/signer-network.sh init`: five fresh node identities in
@@ -42,7 +42,9 @@ Setup, once:
 3. `THEFT_DEMO=1 scripts/signer-network.sh init` again (the network config now names the
    deployment), `THEFT_DEMO=1 scripts/bond-signers.sh`, `THEFT_DEMO=1 scripts/signer-network.sh start`.
 4. Open a vault on the theft demo's backend (port 8180) and deposit until it is active; keep its
-   viewing key (`loan viewing-key`).
+   viewing key (`loan viewing-key`). Borrow once from it (the app's first transaction, or `loan borrow`): that
+   authorizes the Registry on Morpho, without which the compensator cannot retire the vault's zZEC and pays the
+   victim nothing.
 
 | Scene | Command | On screen |
 |---|---|---|
@@ -51,18 +53,41 @@ Setup, once:
 | Detect | `zecured-wallet watch --ufvk-file vault.ufvk --from <birthday> --tier3` | `VIOLATION F1` and the command that builds the witness |
 | Prove | `build-violation uncommitted ... --out f1.json`, then `zecured-tier2-host violation prove f1.json f1.receipt` and `... violation groth16 f1.receipt f1.seal.json` | The journal: an anchor header, a tag, a reference; no Zcash transaction, note or address |
 | Slash | `cast send <ZecuredSlasher> "proveViolation(uint8,bytes,bytes,bytes32)" 1 <journal> <seal> <violation image id>`; two minutes later `cast send <ZecuredSlasher> "executeSlash(bytes32)" <caseId>` | All five bonds slashed, the bounty owed to the prover, `halted()` true: no new vault can be activated |
+| Compensate | `cast send <ZecuredCompensator> "tallyVault(bytes32)" <vault id>`; once the incident window is over (10 minutes here), `finalizeIncident(uint256)` with `currentIncident()`, then `settleVault(bytes32)` and `withdrawEquity(bytes32)` | The slashed bonds repay the vault's debt, its unbacked zZEC is retired, and the rest of its value goes to its account in USDC: the victim is made whole up to the bonds |
+
+## Try with demo TAZ (P-1, DEMO)
+
+On a testnet deployment the deposit step offers "Try with demo TAZ" to a visitor without testnet ZEC:
+the operators' demo wallet pays the vault its exact amount from its own Ironwood notes. It is a real
+Zcash testnet payment, proven on Base like any deposit. Each vault gets one demo payment, within a
+daily budget, after a second of proof of work in the browser. When the loan is closed its ZEC goes
+back to the demo wallet, unless the judge gives an Ironwood address of their own (the destination
+form offers the demo wallet's address).
+
+Operators: run `zecured-wallet --wallet data/demo/wallet.json init`, fund the address it prints with
+TAZ, then set `DEMO_WALLET_SPENDING_KEY` (the file's `spending_key`: secret, never logged) and
+`DEMO_WALLET_BIRTHDAY` (the file's `birthday`), optionally `DEMO_DAILY_CAP_ZAT`,
+`DEMO_LOW_BALANCE_ZAT` and `DEMO_ALARM_WEBHOOK`. Restart the backend, build the app with
+`NEXT_PUBLIC_DEMO_PATH=1`, and check that `GET /demo/status` says `enabled`. The demo path never
+runs on Base mainnet, and the mainnet-beta app never shows it.
+
+**Public pages.** `/status`: the signers, the relay, the proof queue, the minting gates, the cap's
+fill, the bonds (ΣB, B_eff), the anonymity sets, the proof versions and the running commit.
+`/evidence`: the deployment's manifest and real transactions, from `ZECURED_EVIDENCE`. `/market`: the
+market's size and rates, the collateral, the bonds, the compensation order, and optional lending.
+`/buy`: the swap's Buy side.
 
 ## Two-minute video
 
 | Time | Scene | Narration |
 |---|---|---|
-| 0:00–0:10 | Title | "Every way to use ZEC in DeFi today starts with unshielding it. Zecured doesn't." |
+| 0:00–0:10 | Title | "Using ZEC in DeFi today usually means taking it out of the shielded pool. Zecured doesn't." |
 | 0:10–0:28 | Deposit by QR from Ironwood | "Pay a fresh 3-of-5 threshold vault from your Ironwood notes. No pool crossing, nothing revealed." |
 | 0:28–0:45 | Mint and borrow | "A non-transferable collateral receipt is minted straight into a Morpho position for a brand-new, gasless account. Borrow USDC." |
 | 0:45–1:02 | What the world sees | "Here's what the world sees: an anonymous account and a loan. No wallet, no balance, no history." |
 | 1:02–1:22 | Close from collateral | "No need to bring USDC back. A market maker closes the debt, takes ZEC for it, and the rest returns to a new shielded address — in one transaction." |
 | 1:22–1:35 | Liquidation | "If the price drops, a liquidator repays and receives ZEC — shielded." |
-| 1:35–1:52 | Threshold demo + UFVK | "Two signers compromised — nothing moves. And you can verify your vault yourself with its viewing key." |
+| 1:35–1:52 | Threshold demo + UFVK | "Two signers can't move anything; if three collude, the theft is provable and their bonds pay the victims. And you can watch your vault yourself with its viewing key." |
 | 1:52–2:00 | Close | "Sell nothing. Reveal nothing. Zecured." |
 
 Rules for the recording: testnet only; no real personal addresses on screen; only features

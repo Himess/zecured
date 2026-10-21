@@ -19,7 +19,8 @@ import {IZcashHeaderRelay} from "./relay/IZcashHeaderRelay.sol";
 ///         the case is checked again and the signers it names are slashed through the SignerBond, which halts minting.
 ///         v2 (design notes T-04): an open F1/F2 case freezes its vault's exits, an executed one marks the vault
 ///         compromised, and the loss is handed to the compensator. The same guest's `Included` kind upholds a disputed
-///         payout confirmation (T-05 (a)). No owner, no upgrade path.
+///         payout confirmation (T-05 (a)) and, since v4, proves any committed payout (proven delivery). No owner, no
+///         upgrade path.
 /// @dev The guest proves facts about one Zcash transaction X in a relay-anchored block; this contract compares them with
 ///      the Registry's records. Every journal field a kind does not use must be zero, so a violation has exactly one
 ///      journal shape and one case id.
@@ -30,6 +31,11 @@ contract ZecuredSlasher is IZecuredSlasher {
     uint8 private constant ALL_SIGNERS = 0x1f;
     /// @dev The violation guest's `Included` kind (tier2/statement, `violation::Kind`).
     uint256 private constant INCLUDED = 5;
+    /// @inheritdoc IZecuredSlasher
+    /// @dev The burn accrues Morpho's interest (calling its IRM), reads the price, and withdraws, transfers and burns
+    ///      zZEC: at most about 245,000 gas from cold storage in the R-19 tests on a Base Sepolia fork (which check it
+    ///      stays below this), so this leaves about twice that.
+    uint256 public constant BURN_GAS = 500_000;
 
     /// @inheritdoc IZecuredSlasher
     address public immutable registry;
@@ -59,6 +65,10 @@ contract ZecuredSlasher is IZecuredSlasher {
     mapping(bytes32 vaultId => uint256) public theftCasesOf;
     /// @inheritdoc IZecuredSlasher
     mapping(bytes32 vaultId => bool) public isCompromised;
+    /// @inheritdoc IZecuredSlasher
+    mapping(bytes32 vaultId => uint64) public compromisedAt;
+    /// @inheritdoc IZecuredSlasher
+    mapping(bytes32 vaultId => uint64) public frozenSince;
 
     /// @param registry_ The Registry (v3) whose records the violations are checked against.
     /// @param signerBond_ The SignerBond whose `slasher` is this contract and whose `registry` is `registry_`.
@@ -142,6 +152,8 @@ contract ZecuredSlasher is IZecuredSlasher {
         openCasesOf[vaultId] += 1;
         if (_isTheft(kind)) {
             openTheftCaseCount += 1;
+            // R-3: the vault's freeze begins with its first open theft case.
+            if (theftCasesOf[vaultId] == 0 && !isCompromised[vaultId]) frozenSince[vaultId] = uint64(block.timestamp);
             theftCasesOf[vaultId] += 1;
         }
         emit ViolationProven(caseId, kind, vaultId, signerBitmap, j.beneficiary, executableAt);
@@ -169,12 +181,16 @@ contract ZecuredSlasher is IZecuredSlasher {
         bool stillHolds = c.kind != ViolationKind.Uncommitted || _uncommitted(c.ref, c.noteTag);
         if (!anchorHolds || !stillHolds) {
             delete _cases[caseId];
+            // R-3: the freeze ends with the vault's last open theft case, unless an executed one compromised it.
+            if (theft && theftCasesOf[c.vaultId] == 0 && !isCompromised[c.vaultId]) delete frozenSince[c.vaultId];
             emit ViolationDismissed(caseId);
             return;
         }
         _cases[caseId].executed = true;
-        if (theft && !isCompromised[c.vaultId]) {
+        bool compromises = theft && !isCompromised[c.vaultId];
+        if (compromises) {
             isCompromised[c.vaultId] = true;
+            compromisedAt[c.vaultId] = uint64(block.timestamp);
             emit VaultCompromised(c.vaultId, caseId);
         }
         uint256 slashed = ISignerBond(signerBond).slash(caseId, c.signerBitmap, c.beneficiary);
@@ -190,16 +206,40 @@ contract ZecuredSlasher is IZecuredSlasher {
             shortfall = p.expected - c.value; // value < expected was checked when the case opened
         }
         IZecuredCompensator(compensator).onCase(caseId, c.kind, c.vaultId, claimId, shortfall);
+        // R-19: nothing more is borrowed against the vault's unbacked zZEC from now on. The burn may fail (an account
+        // that revoked the Registry's authorization, a pending vault): the slash stands, and anyone retries it.
+        if (compromises) {
+            if (gasleft() < BURN_GAS + BURN_GAS / 63 + 10_000) revert InsufficientGasForBurn();
+            try IZecuredCompensator(compensator).burnCollateral{gas: BURN_GAS}(c.vaultId) {} catch {}
+        }
     }
 
     /// @inheritdoc IZecuredSlasher
     function proveInclusion(bytes calldata journal, bytes calldata seal, bytes32 imageId, bytes32 claimId) external {
-        (bytes32 anchor, bytes32 payoutRef) = _inclusion(journal);
-        _checkVersion(seal, imageId);
-        _checkAnchor(anchor);
-        IRiscZeroVerifier(verifier).verify(seal, imageId, sha256(journal));
+        (bytes32 anchor, bytes32 payoutRef) = _verifyInclusion(journal, seal, imageId);
         emit PayoutInclusionProven(claimId, payoutRef, anchor);
         IZecuredDisputes(registry).upholdPayout(claimId, payoutRef);
+    }
+
+    /// @inheritdoc IZecuredSlasher
+    function proveInclusionBatch(
+        bytes calldata journal,
+        bytes calldata seal,
+        bytes32 imageId,
+        bytes32[] calldata claimIds
+    ) external returns (uint256 upheld) {
+        (bytes32 anchor, bytes32 payoutRef) = _verifyInclusion(journal, seal, imageId);
+        return _upholdEach(claimIds, payoutRef, anchor);
+    }
+
+    /// @inheritdoc IZecuredSlasher
+    function proveInclusionByCase(bytes32 caseId, bytes32[] calldata claimIds) external returns (uint256 upheld) {
+        ViolationCase storage c = _cases[caseId];
+        ViolationKind kind = c.kind;
+        if (!c.executed || (kind != ViolationKind.WithheldChange && kind != ViolationKind.WrongClaimRef)) {
+            revert NotAnInclusionCase(caseId);
+        }
+        return _upholdEach(claimIds, c.ref, c.anchor);
     }
 
     // ------------------------------------------------------------------ views
@@ -236,6 +276,33 @@ contract ZecuredSlasher is IZecuredSlasher {
         uint256 work = IZcashHeaderRelay(relay).confirmationWork(anchor);
         if (!IZcashHeaderRelay(relay).isInBestChain(anchor) || work < slashConfirmationWork) {
             revert AnchorNotConfirmed(anchor, work);
+        }
+    }
+
+    /// @dev An `Included` proof: its journal's shape, an active Violation version, the anchor under the slash's work, the
+    ///      seal. Returns the anchor and the proven payout's reference.
+    function _verifyInclusion(bytes calldata journal, bytes calldata seal, bytes32 imageId)
+        internal
+        view
+        returns (bytes32 anchor, bytes32 payoutRef)
+    {
+        (anchor, payoutRef) = _inclusion(journal);
+        _checkVersion(seal, imageId);
+        _checkAnchor(anchor);
+        IRiscZeroVerifier(verifier).verify(seal, imageId, sha256(journal));
+    }
+
+    /// @dev Proves `payoutRef`'s payment of each claim; a claim the Registry refuses (already final, compensated, or not
+    ///      of this payout) is skipped, so that nobody who proves one claim first makes the batch fail.
+    function _upholdEach(bytes32[] calldata claimIds, bytes32 payoutRef, bytes32 anchor)
+        internal
+        returns (uint256 upheld)
+    {
+        for (uint256 i; i < claimIds.length; ++i) {
+            try IZecuredDisputes(registry).upholdPayout(claimIds[i], payoutRef) {
+                emit PayoutInclusionProven(claimIds[i], payoutRef, anchor);
+                ++upheld;
+            } catch {}
         }
     }
 
@@ -296,9 +363,13 @@ contract ZecuredSlasher is IZecuredSlasher {
         revert NoViolation(j.kind, j.ref);
     }
 
-    /// @dev F1's condition: `noteTag` is a lineage note and the commitment of `payoutRef` (if any) spends another note.
+    /// @dev F1's condition: `noteTag` is a lineage note and no commitment of its vault under `payoutRef` spends it. R-16:
+    ///      a commitment of another vault, made while a false change record held the tag, never covers it.
     function _uncommitted(bytes32 payoutRef, bytes32 noteTag) internal view returns (bool) {
         IZecuredSpendCommits r = IZecuredSpendCommits(registry);
-        return r.lineageOf(noteTag).vaultId != bytes32(0) && r.spendRecord(payoutRef).inputTag != noteTag;
+        bytes32 vaultId = r.lineageOf(noteTag).vaultId;
+        if (vaultId == bytes32(0)) return false;
+        SpendRecord memory s = r.spendRecord(payoutRef);
+        return s.inputTag != noteTag || s.vaultId != vaultId;
     }
 }

@@ -12,6 +12,7 @@ import { isNonceUsed, type PositionSnapshot } from "@/lib/chain";
 import { CLOSE_TTL_SECONDS, deadlineIn, randomNonce128, type CloseRequestMessage } from "@/lib/eip712";
 import { notifyLoansChanged, useAction } from "@/lib/hooks";
 import { loanStore, short, type StoredLoan } from "@/lib/keys";
+import { loanTokenName } from "@/lib/labels";
 import { formatUsdc, parseUsdc } from "@/lib/morpho";
 import { formatTaz } from "@/lib/zcash";
 
@@ -203,7 +204,7 @@ function RepayFlow({ loan, vault, snapshot, commitment, onChanged }: FlowProps) 
       {!enough ? (
         <Notice tone="info" title="Not enough USDC in the loan account">
           <p>
-            Send at least {formatUsdc(needed - snapshot.usdcBalance)} more MockUSDC to <Mono>{loan.account}</Mono>, then
+            Send at least {formatUsdc(needed - snapshot.usdcBalance)} more {loanTokenName()} to <Mono>{loan.account}</Mono>, then
             refresh. That transfer is public: send it from an address with no link to you, or close from collateral
             instead.
           </p>

@@ -2,14 +2,20 @@
  * EIP-712 domains and types, exactly as docs/INTERFACES.md § 2 (tests pin the type strings
  * against that file and against the Solidity golden vectors).
  *
- * - Registry domain ("ZecuredRegistry", "1", 84532, Registry): PayoutConfirmation, VaultOpened
- *   (signed by the signer nodes; the app checks VaultOpened: lib/signers.ts) and every off-chain
- *   owner request (OpenVault, Destination, ViewKeyRequest). v3 has no signer-attested deposit
- *   (DepositAttestation), no vault cancellation (VaultCancellation) and no off-chain refund
- *   (RefundRequest): a deposit that cannot back a loan comes back as a Refund claim on Base,
- *   whose destination is a `Destination` like any payout's.
- * - Adapter domain ("ZecuredSettlementAdapter", "1", 84532, Adapter): CloseRequest, which the
- *   owner signs *through the Safe* (ERC-1271, SafeMessage wrapping; see docs/spikes/SPIKE_C.md).
+ * - Registry domain ("ZecuredRegistry", "1", chain id, Registry): VaultOpened (signed by the
+ *   signer nodes; the app checks it: lib/signers.ts) and every off-chain owner request (OpenVault,
+ *   Destination, ViewKeyRequest, and v4's ProveRefund, R-11). The app neither signs nor checks
+ *   PayoutConfirmation (the signers sign it, the Registry checks it). v3 has no signer-attested
+ *   deposit (DepositAttestation), no vault cancellation (VaultCancellation) and no off-chain refund
+ *   from the app (RefundRequest): a deposit that cannot back a loan comes back as a Refund claim on
+ *   Base, whose destination is a `Destination` like any payout's.
+ * - Adapter domain ("ZecuredSettlementAdapter", "1", chain id, Adapter): CloseRequest and
+ *   DeleverageRequest (P-7), which the owner signs *through the Safe* (ERC-1271, SafeMessage
+ *   wrapping; see docs/spikes/SPIKE_C.md).
+ * - SignerBondV2's domain: R-5's DestinationReceived receipts, checked in lib/receipt.ts.
+ *
+ * The chain id is Base Sepolia's (84532) on the judge deployment and Base's (8453) on the
+ * mainnet beta (lib/deployment.ts).
  */
 import {
   hashTypedData,
@@ -36,11 +42,6 @@ export function adapterDomain(adapter: Address) {
 
 /** Every Zecured EIP-712 struct (field order matters: it defines the type string). */
 export const types = {
-  // § 2.2 — signed by signer nodes
-  PayoutConfirmation: [
-    { name: "vaultId", type: "bytes32" },
-    { name: "claimIdsHash", type: "bytes32" },
-  ],
   // § 2.3 — signed by the per-loan owner key, verified off-chain by every signer node
   OpenVault: [
     { name: "owner", type: "address" },
@@ -60,6 +61,12 @@ export const types = {
     { name: "nonce", type: "uint64" },
     { name: "deadline", type: "uint64" },
   ],
+  // v4 (R-11): verified by the coordinator only, `POST /vaults/:id/prove-refund`
+  ProveRefund: [
+    { name: "vaultId", type: "bytes32" },
+    { name: "nonce", type: "uint64" },
+    { name: "deadline", type: "uint64" },
+  ],
   // § 2.4 — signed by the owner through the smart account (ERC-1271)
   CloseRequest: [
     { name: "vaultId", type: "bytes32" },
@@ -68,6 +75,17 @@ export const types = {
     { name: "marginBps", type: "uint16" },
     { name: "minUserAmount", type: "uint64" },
     { name: "userCommitment", type: "bytes32" },
+    { name: "nonce", type: "uint256" },
+    { name: "deadline", type: "uint64" },
+  ],
+  // S18, P-7: self-deleverage (the nonce space is the CloseRequest's)
+  DeleverageRequest: [
+    { name: "vaultId", type: "bytes32" },
+    { name: "account", type: "address" },
+    { name: "executor", type: "address" },
+    { name: "marginBps", type: "uint16" },
+    { name: "repayAssets", type: "uint256" },
+    { name: "maxCollateral", type: "uint64" },
     { name: "nonce", type: "uint256" },
     { name: "deadline", type: "uint64" },
   ],
@@ -120,6 +138,23 @@ export interface CloseRequestMessage {
   nonce: bigint;
   deadline: bigint;
 }
+/** S18 / P-7: repay exactly `repayAssets` of the debt from collateral, at most `maxCollateral` zatoshi. */
+export interface DeleverageRequestMessage {
+  vaultId: Hex;
+  account: Address;
+  executor: Address;
+  marginBps: number;
+  repayAssets: bigint;
+  maxCollateral: bigint;
+  nonce: bigint;
+  deadline: bigint;
+}
+/** R-11: prove the vault's deposit as a refund instead of waiting for room under the coverage cap. */
+export interface ProveRefundMessage {
+  vaultId: Hex;
+  nonce: bigint;
+  deadline: bigint;
+}
 export interface VaultOpenedMessage {
   vaultId: Hex;
   owner: Address;
@@ -169,6 +204,24 @@ export function closeRequestTypedData(adapter: Address, message: CloseRequestMes
   } as const;
 }
 
+export function deleverageRequestTypedData(adapter: Address, message: DeleverageRequestMessage) {
+  return {
+    domain: adapterDomain(adapter),
+    types: { DeleverageRequest: types.DeleverageRequest },
+    primaryType: "DeleverageRequest",
+    message,
+  } as const;
+}
+
+export function proveRefundTypedData(registry: Address, message: ProveRefundMessage) {
+  return {
+    domain: registryDomain(registry),
+    types: { ProveRefund: types.ProveRefund },
+    primaryType: "ProveRefund",
+    message,
+  } as const;
+}
+
 export function vaultOpenedTypedData(registry: Address, message: VaultOpenedMessage) {
   return {
     domain: registryDomain(registry),
@@ -192,6 +245,11 @@ export async function signWithOwnerKey<
 /** EIP-712 digest of a CloseRequest under the Adapter domain (what the Safe validates). */
 export function closeRequestDigest(adapter: Address, req: CloseRequestMessage): Hex {
   return hashTypedData(closeRequestTypedData(adapter, req));
+}
+
+/** EIP-712 digest of a DeleverageRequest under the Adapter domain (what the Safe validates). */
+export function deleverageRequestDigest(adapter: Address, req: DeleverageRequestMessage): Hex {
+  return hashTypedData(deleverageRequestTypedData(adapter, req));
 }
 
 // ------------------------------------------------------------------ Safe ERC-1271
@@ -226,7 +284,22 @@ export async function signCloseRequestAsSafe(
   req: CloseRequestMessage,
 ): Promise<Hex> {
   if (req.account.toLowerCase() !== account.toLowerCase()) throw new Error("CloseRequest.account must be the Safe");
-  const digest = closeRequestDigest(adapter, req);
+  return signDigestAsSafe(ownerKey, account, closeRequestDigest(adapter, req));
+}
+
+/** ERC-1271 signature of a DeleverageRequest (P-7), exactly as a CloseRequest's. */
+export async function signDeleverageRequestAsSafe(
+  ownerKey: Hex,
+  adapter: Address,
+  account: Address,
+  req: DeleverageRequestMessage,
+): Promise<Hex> {
+  if (req.account.toLowerCase() !== account.toLowerCase()) throw new Error("DeleverageRequest.account must be the Safe");
+  return signDigestAsSafe(ownerKey, account, deleverageRequestDigest(adapter, req));
+}
+
+/** The owner signs SafeMessage(digest) under the Safe's domain (what Safe's ERC-1271 checks). */
+function signDigestAsSafe(ownerKey: Hex, account: Address, digest: Hex): Promise<Hex> {
   return privateKeyToAccount(ownerKey).signTypedData({
     domain: safeDomain(account),
     types: SAFE_MESSAGE_TYPES,

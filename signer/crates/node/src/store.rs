@@ -129,6 +129,10 @@ pub struct VaultRecord {
     /// heads its main lineage.
     #[serde(default)]
     pub activated_tag: Option<[u8; 32]>,
+    /// R-1: claims reopened on Base after a dispute. Only a proof of their payout settles them
+    /// again: this node never signs their confirmation.
+    #[serde(default)]
+    pub reopened: Vec<[u8; 32]>,
 }
 
 impl VaultRecord {
@@ -156,6 +160,9 @@ pub struct Store {
     dir: PathBuf,
     pub vaults: BTreeMap<B256, VaultRecord>,
     pub recipients: BTreeMap<String, Recipient>,
+    /// R-5: when this node first held each recipient (Unix seconds), by commitment: the
+    /// `receivedAt` of its liveness receipts.
+    pub received_at: BTreeMap<String, u64>,
     /// Last Base block whose Registry events were applied.
     pub base_cursor: u64,
 }
@@ -181,13 +188,17 @@ impl Store {
                 vaults.insert(v.vault_id, v);
             }
         }
-        for name in ["recipients.json", "meta.json"] {
+        for name in ["recipients.json", "recipients-received.json", "meta.json"] {
             let path = dir.join(name);
             if path.is_file() {
                 private_file(&path)?;
             }
         }
         let recipients = match fs::read(dir.join("recipients.json")) {
+            Ok(raw) => serde_json::from_slice(&raw)?,
+            Err(_) => BTreeMap::new(),
+        };
+        let received_at = match fs::read(dir.join("recipients-received.json")) {
             Ok(raw) => serde_json::from_slice(&raw)?,
             Err(_) => BTreeMap::new(),
         };
@@ -199,6 +210,7 @@ impl Store {
             dir: dir.to_owned(),
             vaults,
             recipients,
+            received_at,
             base_cursor: meta.base_cursor,
         })
     }
@@ -214,11 +226,24 @@ impl Store {
         let c = r.commitment();
         self.recipients.insert(hex::encode(c), r);
         write_atomic(&self.dir.join("recipients.json"), &serde_json::to_vec(&self.recipients)?)?;
+        self.held_since(&c, crate::now())?;
         Ok(c)
     }
 
     pub fn recipient(&self, c: &Commitment) -> Option<Recipient> {
         self.recipients.get(&hex::encode(c)).copied()
+    }
+
+    /// R-5: since when this node holds the recipient of `c`, recording `now` the first time (a
+    /// recipient stored before the time was kept gets the time it is first asked about).
+    pub fn held_since(&mut self, c: &Commitment, now: u64) -> Result<u64> {
+        let key = hex::encode(c);
+        if let Some(t) = self.received_at.get(&key) {
+            return Ok(*t);
+        }
+        self.received_at.insert(key, now);
+        write_atomic(&self.dir.join("recipients-received.json"), &serde_json::to_vec(&self.received_at)?)?;
+        Ok(now)
     }
 
     pub fn set_base_cursor(&mut self, block: u64) -> Result<()> {

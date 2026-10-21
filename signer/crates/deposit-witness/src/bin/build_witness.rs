@@ -4,7 +4,7 @@
 //!
 //!   cargo run -p zecured-deposit-witness --bin build-witness -- \
 //!     --deposit-txid <txid> --vault vault.json --tip <height> [--mode refund [--action <i>]] \
-//!     --headers data/tier2/headers_nu7.json [--update-headers] --out witness.json
+//!     --headers data/tier2/headers_nu7.json [--update-headers] [--network mainnet] --out witness.json
 //!
 //! `vault.json` holds `vault_id`, `owner`, `account`, `address`, `ufvk`, `expiry_height` and
 //! `amount`, the values of the vault's `VaultOpened` (a coordinator vault record has them). The
@@ -17,7 +17,7 @@ use anyhow::{Context, Result, anyhow};
 use clap::Parser;
 use zcash_protocol::TxId;
 use zecured_deposit_witness::{
-    p2p,
+    ZcashNetwork, p2p,
     witness::{self, Mode, Vault},
 };
 use zecured_zcash_ops::lwd;
@@ -40,12 +40,16 @@ struct Args {
     /// The action of the transaction that creates the note (default: the first that fits).
     #[arg(long)]
     action: Option<u32>,
-    /// JSON Lines headers from NU7 activation on.
+    /// JSON Lines headers from the epoch's activation on (NU7 on Testnet).
     #[arg(long)]
     headers: PathBuf,
-    /// First extend the header file to the Testnet tip over the P2P network.
+    /// First extend the header file to the network's tip over the P2P network.
     #[arg(long)]
     update_headers: bool,
+    /// The Zcash network of the transaction (`testnet` or `mainnet`): its peers, encodings and
+    /// epochs, and the statement the witness is checked with (prove it with that network's guest).
+    #[arg(long, default_value = "testnet", value_parser = ["testnet", "mainnet"])]
+    network: String,
     /// Cache of per-block summaries (built on first use; a few minutes).
     #[arg(long, default_value = "data/tier2/summaries.json")]
     summaries: PathBuf,
@@ -75,13 +79,16 @@ fn vault_from_json(path: &PathBuf) -> Result<Vault> {
 #[tokio::main]
 async fn main() -> Result<()> {
     let args = Args::parse();
+    let network = ZcashNetwork::from_name(&args.network)?;
     let vault = vault_from_json(&args.vault)?;
     if args.update_headers {
         let path = args.headers.clone();
-        let height = tokio::task::spawn_blocking(move || p2p::extend_file(&path, &p2p::seed_peers())).await??;
+        let height =
+            tokio::task::spawn_blocking(move || p2p::extend_file(network, &path, &p2p::seed_peers(network))).await??;
         println!("headers up to {height}");
     }
     let mut client = lwd::connect(&args.lwd).await?;
+    lwd::check_network(&mut client, network).await?;
     let txid = TxId::from_hex(&args.deposit_txid).context("txid")?;
     let mode = if args.mode == "refund" {
         Mode::Refund
@@ -89,7 +96,8 @@ async fn main() -> Result<()> {
         Mode::Activate
     };
     let b =
-        witness::build(&mut client, &args.headers, &args.summaries, txid, &vault, mode, args.action, args.tip).await?;
+        witness::build(&mut client, network, &args.headers, &args.summaries, txid, &vault, mode, args.action, args.tip)
+            .await?;
     fs::write(&args.out, serde_json::to_vec(&b.witness)?)?;
     println!(
         "deposit at {} (tx {} of {}), leaf {} of {}, path {} steps, peak {} of {}",

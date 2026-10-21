@@ -32,7 +32,7 @@ use zecured_deposit_witness::{
 };
 use zecured_zcash_ops::lwd;
 
-use crate::{LoanFile, NetworkParams};
+use crate::{LoanFile, NetworkParams, lwd_connect, zcash_network};
 
 pub struct Paths {
     pub host: PathBuf,
@@ -94,7 +94,7 @@ pub async fn make_seal(
         "this loan's vault was opened under VaultOpened v1, which the deposit guest no longer proves"
     );
     let txid = TxId::from_hex(txid).context("deposit txid")?;
-    let mut client = lwd::connect(lwd_url).await?;
+    let mut client = lwd_connect(lwd_url).await?;
     let (_, height) = lwd::raw_transaction(&mut client, &txid).await?;
     let height = u32::try_from(height)?;
 
@@ -103,8 +103,9 @@ pub async fn make_seal(
     let anchor = deposit_anchor(&provider, intake, height, l.amount)
         .await?
         .context("the header relay has not reached the deposit with enough work on top yet; try again later")?;
-    let headers = paths.headers.clone();
-    let tip = tokio::task::spawn_blocking(move || p2p::extend_file(&headers, &p2p::seed_peers())).await??;
+    let (headers, network) = (paths.headers.clone(), zcash_network());
+    let tip =
+        tokio::task::spawn_blocking(move || p2p::extend_file(network, &headers, &p2p::seed_peers(network))).await??;
     ensure!(tip >= anchor, "the P2P peers are behind the relay");
     eprintln!("deposit at {height}, anchored at {anchor}: building the witness");
 
@@ -117,9 +118,18 @@ pub async fn make_seal(
         expiry_height,
         amount: l.amount,
     };
-    let built =
-        witness::build(&mut client, &paths.headers, &paths.summaries, txid, &vault, Mode::Activate, None, anchor)
-            .await?;
+    let built = witness::build(
+        &mut client,
+        network,
+        &paths.headers,
+        &paths.summaries,
+        txid,
+        &vault,
+        Mode::Activate,
+        None,
+        anchor,
+    )
+    .await?;
     fs::create_dir_all(&paths.work)?;
     #[cfg(unix)]
     {

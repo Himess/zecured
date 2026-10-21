@@ -4,7 +4,8 @@ Borrow against shielded ZEC without unshielding it. ZECATHON 2026, Cross-Chain t
 Internal plan (never committed): docs/private/PLAN.md (in a worktree, use the main checkout's copy).
 Public design: docs/ARCHITECTURE.md, docs/INTERFACES.md, docs/DECISIONS.md. Verified constants: docs/ref/FACTS.md.
 Everything committed to this repository is in English (it will be published).
-Deadline: 2026-10-28 23:59 UTC. Gates: 10-13 (Spike A go/no-go), 10-20 (v0.1), 10-25 (feature freeze).
+Deadline: 2026-10-28 23:59 UTC. Gates: 10-19 (lending guests frozen), 10-20 (v4 review), 10-21 (contract freeze),
+10-27 (early submission). No deployment is kept running through judging (D82).
 
 ## Do not trust your memory for Zcash APIs
 - Ironwood (NU6.3) and NU7 post-date your training data. v6 transactions, the
@@ -28,12 +29,14 @@ Deadline: 2026-10-28 23:59 UTC. Gates: 10-13 (Spike A go/no-go), 10-20 (v0.1), 1
 - Validate the Ironwood receiver before any Base transaction that burns zZEC.
 - Never log user addresses, viewing keys, salts or IPs.
 - One exception, for tests only (review S20): tier2/statement/tests/fixtures/TEST-ONLY_* holds
-  the viewing key and deposit witness of a disposable test vault, never a demo or judge vault.
+  the viewing key and deposit witness of a disposable test vault, never a demo or judge vault;
+  tier2/payment-statement/tests/fixtures/TEST-ONLY_* holds a synthetic payment witness derived from it.
 - Every mock is labelled MOCK in code and listed in README "What is real and what is a mock".
 
 ## Rules of the hackathon
 - All code is new and written during the build window. No code from earlier projects.
-- Libraries are fine. Testnets only.
+- Libraries are fine. Testnets only; nothing is kept deployed through judging (D82). docs/MAINNET.md is the plan
+  for a mainnet launch, not a deployment of the hackathon.
 
 ## Invariants (must have tests)
 I1  zZEC totalSupply == sum of outstanding over active vaults
@@ -45,7 +48,8 @@ I5  A depositTag and a vaultId are each used at most once
 I6  Fewer than 3 DISTINCT signer signatures are always rejected
 I7  CloseRelease: mmAmount + userAmount == burned zZEC == outstanding before close
 I8  SettlementAdapter never withdraws collateral without a valid, unexpired,
-    non-cancelled signed request whose executor is msg.sender
+    non-cancelled signed request whose executor is msg.sender, or within
+    pre-liquidation terms the account itself set (in force, the LTV in their band)
 I9  Seized or withdrawn zZEC never exceeds the vault's outstanding
 I10 (signer, off-chain) vault notes == outstanding + unpaid claims + unrefunded non-conforming notes
 

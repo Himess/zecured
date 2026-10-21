@@ -795,7 +795,11 @@ contract ZecuredCompensatorTest is Test {
         assertEq(comp.withdrawEntitlement(liq), 12 * USD);
         assertEq(comp.withdrawEntitlement(rel), 40 * USD);
         assertEq(usdc.balanceOf(liquidator), 12 * USD);
-        assertEq(uint8(registry.claimDetails(rel).status), uint8(ClaimStatus.Pending), "F3 settles nothing");
+        // R-7: the F3 case closed the pending claim in the Registry (its payout landed, short): the compensator owes the
+        // shortfall, and the bonds see no pending claim to pay a second time. A final one is left as it is.
+        assertEq(uint8(registry.claimDetails(rel).status), uint8(ClaimStatus.Compensated), "F3 closes the claim");
+        assertEq(uint8(registry.claimDetails(liq).status), uint8(ClaimStatus.Paid));
+        assertEq(registry.vaultDetails(VAULT_B).unpaidClaims, 0);
         _assertBooks();
     }
 
@@ -809,21 +813,176 @@ contract ZecuredCompensatorTest is Test {
         _misdirect(paidByBonds, ZEC);
         _misdirect(liq, 0);
         _misdirect(keccak256("unknown claim"), ZEC);
-        assertEq(vm.getRecordedLogs().length, 0);
+        Vm.Log[] memory logs = vm.getRecordedLogs();
+        for (uint256 i; i < logs.length; ++i) {
+            assertTrue(logs[i].emitter != address(comp), "the compensator registers nothing");
+        }
         assertEq(comp.currentIncident(), 0);
     }
 
     function test_F3_neverAddsToAClaimItCovers() public {
         _openVault(VAULT_A, alice, 10 * ZEC, 0);
         bytes32 liq = registry.addClaim(VAULT_A, ClaimKind.Liquidation, ZEC, liquidator, false);
-        _misdirect(liq, 3 * ZEC / 10);
+        _misdirect(liq, 3 * ZEC / 10); // R-7: closed in the Registry at once
         _steal(VAULT_A); // later the vault itself is compromised
-        vm.expectEmit(address(comp));
-        emit IZecuredCompensator.ClaimTallied(liq, 0, 0); // settled; the shortfall is what it is owed
-        comp.tallyClaim(liq);
+        vm.expectRevert(abi.encodeWithSelector(IZecuredCompensator.AlreadyTallied.selector, liq));
+        comp.tallyClaim(liq); // nothing to tally: the shortfall is what it is owed
         assertEq(comp.entitlement(liq).zat, 3 * ZEC / 10);
         assertEq(comp.victim(VAULT_A).pendingClaims, 0);
-        assertEq(comp.victim(VAULT_A).talliedClaims, 1);
+        comp.tallyVault(VAULT_A); // it no longer holds the vault's tally up
+    }
+
+    // ------------------------------------------------------------------ v4: R-2, R-3, R-19, R-20, R-21
+
+    /// R-2: a committed claim's payout may have landed: it is tallied only `inclusionWindow` after the compromise.
+    function test_R2_aCommittedClaimWaitsForTheProofWindow() public {
+        _openVault(VAULT_A, alice, 10 * ZEC, 0);
+        bytes32 rel = registry.addClaim(VAULT_A, ClaimKind.Release, ZEC, alice, false);
+        registry.setClaimInput(rel, keccak256("zecured.comp.input"));
+        _steal(VAULT_A);
+        uint64 at = slasher.compromisedAt(VAULT_A) + registry.inclusionWindow();
+        vm.expectRevert(abi.encodeWithSelector(IZecuredCompensator.ProofWindowOpen.selector, rel, at));
+        comp.tallyClaim(rel);
+        vm.warp(at);
+        comp.tallyClaim(rel);
+        assertEq(comp.entitlement(rel).zat, ZEC);
+    }
+
+    /// R-3: a claim confirmed within the dispute window before the freeze is tallied like a pending one (after the proof
+    /// window); an older confirmation is not, and the vault waits until no confirmation is left open.
+    function test_R3_confirmationsShortlyBeforeTheFreezeAreTallied() public {
+        _openVault(VAULT_A, alice, 10 * ZEC, 0);
+        bytes32 old = registry.addClaim(VAULT_A, ClaimKind.Release, ZEC, alice, false);
+        bytes32 recent = registry.addClaim(VAULT_A, ClaimKind.Liquidation, ZEC, liquidator, false);
+        registry.confirmClaim(old, keccak256("zecured.comp.input.old"));
+        vm.warp(block.timestamp + registry.disputeWindow() + 1);
+        registry.confirmClaim(recent, keccak256("zecured.comp.input.recent"));
+        vm.warp(block.timestamp + 1 hours);
+        _fund(1_000 * USD);
+        _steal(VAULT_A); // frozen and compromised now
+        vm.expectRevert(abi.encodeWithSelector(IZecuredCompensator.ConfirmationsUnsettled.selector, VAULT_A, 2));
+        comp.tallyVault(VAULT_A);
+        vm.expectRevert(abi.encodeWithSelector(IZecuredCompensator.NotVictimClaim.selector, old));
+        comp.tallyClaim(old);
+        vm.warp(slasher.compromisedAt(VAULT_A) + registry.inclusionWindow());
+        vm.expectEmit(address(comp));
+        emit IZecuredCompensator.ClaimTallied(recent, 2, ZEC);
+        comp.tallyClaim(recent);
+        assertEq(uint8(registry.claimDetails(recent).status), uint8(ClaimStatus.Compensated));
+        vm.expectRevert(abi.encodeWithSelector(IZecuredCompensator.ConfirmationsUnsettled.selector, VAULT_A, 1));
+        comp.tallyVault(VAULT_A);
+    }
+
+    /// R-21: an abandoned refund is tallied on request (layer 4), without holding up the vault's tally.
+    function test_R21_anAbandonedRefundIsTallied() public {
+        _openVault(VAULT_A, alice, 10 * ZEC, 0);
+        bytes32 refund = registry.addClaim(VAULT_A, ClaimKind.Refund, ZEC, alice, false);
+        bytes32 dust = registry.addClaim(VAULT_A, ClaimKind.Liquidation, ZEC / 1000, liquidator, false);
+        registry.setClaimStatus(refund, ClaimStatus.WrittenOff);
+        registry.setClaimStatus(dust, ClaimStatus.WrittenOff);
+        _fund(1_000 * USD);
+        _steal(VAULT_A);
+        comp.tallyVault(VAULT_A); // does not wait for it
+        vm.expectRevert(abi.encodeWithSelector(IZecuredCompensator.NotVictimClaim.selector, dust));
+        comp.tallyClaim(dust); // a written-off dust claim is no refund
+        comp.tallyClaim(refund);
+        Entitlement memory e = comp.entitlement(refund);
+        assertEq(e.layer, 4);
+        assertEq(e.zat, ZEC);
+        assertEq(e.to, alice);
+        _finalize(1);
+        assertEq(comp.withdrawEntitlement(refund), 40 * USD);
+        _assertBooks();
+    }
+
+    /// R-12: while a refund of the victim reserved before its compromise is neither opened nor released, the vault's
+    /// tally waits (and with it the incident's finalization); once it opens, its claim is tallied like any other.
+    function test_R12_theTallyWaitsForReservedRefunds() public {
+        _openVault(VAULT_A, alice, 10 * ZEC, 0);
+        registry.setReservedRefunds(VAULT_A, 2);
+        _fund(1_000 * USD);
+        _steal(VAULT_A);
+        vm.expectRevert(abi.encodeWithSelector(IZecuredCompensator.RefundsReserved.selector, VAULT_A, 2));
+        comp.tallyVault(VAULT_A);
+        vm.warp(comp.incident(1).closesAt);
+        vm.expectRevert(abi.encodeWithSelector(IZecuredCompensator.VictimsNotTallied.selector, 1, 1));
+        comp.finalizeIncident(1);
+        // One is released (its proof fell), the other opens its claim, which is tallied first.
+        registry.setReservedRefunds(VAULT_A, 0);
+        bytes32 refund = registry.addClaim(VAULT_A, ClaimKind.Refund, ZEC, alice, false);
+        vm.expectRevert(abi.encodeWithSelector(IZecuredCompensator.ClaimsNotTallied.selector, VAULT_A, 1));
+        comp.tallyVault(VAULT_A);
+        comp.tallyClaim(refund);
+        comp.tallyVault(VAULT_A);
+        _finalize(1);
+        assertEq(comp.withdrawEntitlement(refund), 40 * USD);
+        _assertBooks();
+    }
+
+    /// R-19: the collateral burned before the tally still counts in the vault's equity, and the settlement retires what
+    /// is left of the outstanding.
+    function test_R19_burnBeforeTheTally_keepsTheEquity() public {
+        _openVault(VAULT_A, alice, 10 * ZEC, 200 * USD);
+        _fund(10_000 * USD);
+        _steal(VAULT_A);
+        vm.expectEmit(address(comp));
+        emit IZecuredCompensator.CollateralBurned(VAULT_A, 10 * ZEC - uint64(_collateralNeededFor(200 * USD)));
+        uint64 burned = comp.burnCollateral(VAULT_A);
+        (, uint64 left,) = registry.vault(VAULT_A);
+        assertEq(left, _collateralNeededFor(200 * USD));
+        assertEq(burned + left, 10 * ZEC);
+        vm.prank(alice);
+        vm.expectRevert(bytes("MockMorpho: insufficient collateral"));
+        morpho.borrow(params, 1 * USD, 0, alice, alice);
+
+        _tally(VAULT_A);
+        assertEq(comp.victim(VAULT_A).outstanding, 10 * ZEC, "what the vault held when compromised");
+        _finalize(1);
+        comp.settleVault(VAULT_A);
+        (, uint64 outstanding, VaultStatus status) = registry.vault(VAULT_A);
+        assertEq(outstanding, 0);
+        assertEq(uint8(status), uint8(VaultStatus.Closed));
+        assertEq(comp.equityOf(VAULT_A), 200 * USD, "$400 of collateral less $200 of debt, as without the burn");
+        _assertBooks();
+    }
+
+    /// R-19 without debt: the whole vault is retired at once; its equity is still its full value.
+    function test_R19_burnWithoutDebtRetiresTheVault() public {
+        _openVault(VAULT_A, alice, 10 * ZEC, 0);
+        _fund(1_000 * USD);
+        _steal(VAULT_A);
+        assertEq(comp.burnCollateral(VAULT_A), 10 * ZEC);
+        (,, VaultStatus status) = registry.vault(VAULT_A);
+        assertEq(uint8(status), uint8(VaultStatus.Closed));
+        vm.expectRevert(abi.encodeWithSelector(IZecuredCompensator.NotBurnable.selector, VAULT_A));
+        comp.burnCollateral(VAULT_A);
+        _tally(VAULT_A);
+        _finalize(1);
+        comp.settleVault(VAULT_A);
+        assertEq(comp.withdrawEquity(VAULT_A), 400 * USD);
+        _assertBooks();
+    }
+
+    /// R-20: a victim left active by its settlement (unauthorized here) leaves the open vaults; once it authorizes the
+    /// Registry again and has no debt, anyone retires it.
+    function test_R20_anActiveVictimLeavesTheOpenVaults() public {
+        _openVault(VAULT_A, alice, 10 * ZEC, 0, false);
+        _fund(1_000 * USD);
+        _steal(VAULT_A);
+        _tally(VAULT_A);
+        _finalize(1);
+        assertEq(registry.openVaultCount(), 1);
+        vm.expectEmit(address(registry));
+        emit MockCompensatorRegistry.VaultCompensated(VAULT_A, 10 * ZEC);
+        comp.settleVault(VAULT_A);
+        assertTrue(registry.vaultCompensated(VAULT_A));
+        assertEq(registry.openVaultCount(), 0);
+        vm.prank(alice);
+        morpho.setAuthorization(address(registry), true);
+        assertEq(comp.burnCollateral(VAULT_A), 10 * ZEC);
+        (,, VaultStatus status) = registry.vault(VAULT_A);
+        assertEq(uint8(status), uint8(VaultStatus.Closed));
+        assertEq(comp.victim(VAULT_A).outstanding, 10 * ZEC, "the tally is not touched after it");
     }
 
     function test_F3_lowersAnEntitlementTalliedInFull() public {

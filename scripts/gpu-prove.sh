@@ -5,12 +5,13 @@
 #   scripts/gpu-prove.sh setup                                   # once: Rust, rzup, the native Groth16 prover, the host
 #   scripts/gpu-prove.sh prove deposit <witness.json> <out-dir>  # the succinct receipt
 #   scripts/gpu-prove.sh prove violation <witness.json> <out-dir>
+#   scripts/gpu-prove.sh prove payment <witness.json> <out-dir>     # Zecured Swap's payment guest
 #
 # The host is built with the `cuda` feature, so the STARK is proven on the GPU. The Groth16 wrap is not made
 # here: risc0-groth16 3.0.5's CUDA prover fails on our receipts (docs/TESTING.md § 2b), so the wrap runs with
 # Docker on x86 (`zecured-tier2-host groth16`), from the succinct receipt, which holds no viewing key.
 # GROTH16=cuda still tries it here, in two processes (`p254`, then `shrink-wrap`). The guests are not
-# built here: ZECURED_DEPOSIT_ELF / ZECURED_VIOLATION_ELF name the pinned ELFs (the `guests`
+# built here: ZECURED_DEPOSIT_ELF / ZECURED_VIOLATION_ELF / ZECURED_PAYMENT_ELF name the pinned ELFs (the `guests`
 # workflow's artifact), so every receipt is for the deployed image id.
 #
 # A deposit witness holds its vault's tag key K (statement v2), which links the vault's notes and payouts
@@ -38,10 +39,10 @@ setup() {
     export PATH="/usr/local/cuda-12.8/bin:$PATH" CUDA_PATH=/usr/local/cuda-12.8 CUDA_HOME=/usr/local/cuda-12.8 \
       CUDA_ROOT=/usr/local/cuda-12.8
   fi
-  # bindgen (circom-witnesscalc, in the Groth16 prover) needs libclang.
-  if ! command -v clang >/dev/null; then
+  # circom-witnesscalc (in the Groth16 prover) needs libclang for bindgen and protoc for its build script.
+  if ! command -v clang >/dev/null || ! command -v protoc >/dev/null; then
     apt-get update -qq
-    DEBIAN_FRONTEND=noninteractive apt-get install -y -qq clang libclang-dev pkg-config libssl-dev
+    DEBIAN_FRONTEND=noninteractive apt-get install -y -qq clang libclang-dev pkg-config libssl-dev protobuf-compiler
   fi
   if ! command -v cargo >/dev/null; then
     curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh -s -- -y --profile minimal --default-toolchain none
@@ -63,7 +64,8 @@ prove() {
   case "$statement" in
     deposit) : "${ZECURED_DEPOSIT_ELF:?ZECURED_DEPOSIT_ELF: the pinned deposit guest}" ;;
     violation) : "${ZECURED_VIOLATION_ELF:?ZECURED_VIOLATION_ELF: the pinned violation guest}"; prefix=(violation) ;;
-    *) echo "statement: deposit | violation" >&2; exit 1 ;;
+    payment) : "${ZECURED_PAYMENT_ELF:?ZECURED_PAYMENT_ELF: the pinned payment guest}"; prefix=(payment) ;;
+    *) echo "statement: deposit | violation | payment" >&2; exit 1 ;;
   esac
   mkdir -p "$out"
   # 2^20-cycle segments suit a 24 GB GPU (the host's default, 2^18, suits an 8 GB laptop).
@@ -84,7 +86,7 @@ prove() {
 
 case "${1:-}" in
   setup) setup ;;
-  prove) [[ $# -eq 4 ]] || { echo "usage: $0 prove deposit|violation <witness.json> <out-dir>" >&2; exit 1; }
+  prove) [[ $# -eq 4 ]] || { echo "usage: $0 prove deposit|violation|payment <witness.json> <out-dir>" >&2; exit 1; }
          prove "$2" "$3" "$4" ;;
-  *) echo "usage: $0 setup | prove deposit|violation <witness.json> <out-dir>" >&2; exit 1 ;;
+  *) echo "usage: $0 setup | prove deposit|violation|payment <witness.json> <out-dir>" >&2; exit 1 ;;
 esac

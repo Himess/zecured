@@ -9,6 +9,7 @@ import {
   CLAIM_KIND,
   CLAIM_STATUS,
   compensatorAbi,
+  depositRefundedEvent,
   disputesAbi,
   erc20Abi,
   intakeAbi,
@@ -18,15 +19,21 @@ import {
   REFUND_REASON,
   registryAbi,
   registryErrorsAbi,
+  registryEventsAbi,
   relayAbi,
   revertErrorsAbi,
   slasherAbi,
 } from "./abi";
+import { adapterV4Abi, bondV4Abi, refundPendingEvent, v4ErrorsAbi } from "./abi4";
+import { PRE_LIQUIDATION_PRESETS, termsOf } from "./preliq";
 import {
+  armLivenessCalls,
   assertAllowlisted,
   authorizeAdapterCalls,
   borrowCalls,
+  clearPreLiquidationCalls,
   describeRevert,
+  setPreLiquidationCalls,
   disputePayoutCalls,
   formatUtc,
   invalidateNonceCalls,
@@ -150,6 +157,7 @@ describe("ABI fragments match the compiled contracts (contracts/abi)", () => {
   interface Param {
     type: string;
     components?: readonly Param[];
+    indexed?: boolean;
   }
   interface Item {
     type: string;
@@ -177,6 +185,19 @@ describe("ABI fragments match the compiled contracts (contracts/abi)", () => {
     // Served by the Registry's fallback: not in its own ABI.
     expect(compiled("ZecuredRegistry").some((i) => i.name === "disputePayout")).toBe(false);
     expect(compiled("ZecuredRegistry").some((i) => i.type === "fallback")).toBe(true);
+  });
+
+  it("every event the app decodes, with its indexed fields, where the contracts emit it (v4's at the Registry's address)", () => {
+    const flagged = (p: Param): string => `${shape(p)}${p.indexed ? " indexed" : ""}`;
+    const eventSig = (e: Item) => `${e.name}(${(e.inputs ?? []).map(flagged).join(",")})`;
+    const emitted = (files: string[]) => new Set(files.flatMap((f) => compiled(f).filter((i) => i.type === "event").map(eventSig)));
+    // The Registry's own events, and those its fallback (the spend logic) emits at its address.
+    const atRegistry = emitted(["ZecuredRegistry", "IZecuredPayouts", "IZecuredDisputes", "IZecuredRefunds"]);
+    for (const e of registryEventsAbi) expect(atRegistry.has(eventSig(e)), eventSig(e)).toBe(true);
+    const atIntake = emitted(["ZecuredIntake"]);
+    for (const e of [depositRefundedEvent, refundPendingEvent]) expect(atIntake.has(eventSig(e)), eventSig(e)).toBe(true);
+    // R-1: the confirmation names its payout.
+    expect(eventSig(registryEventsAbi.find((e) => e.name === "PayoutConfirmed")!)).toBe("PayoutConfirmed(bytes32 indexed,bytes32 indexed,bytes32[])");
   });
 
   it("the Intake, the relay, the slasher, the bond and the compensator", () => {
@@ -283,6 +304,79 @@ describe("v3 calls: the bonds pay an overdue claim (T-05)", () => {
     reject([{ to: config.registry, data: slash[0]!.data }], /unknown Registry function/);
     // A "bond" that is a pinned contract never widens that contract's rules.
     reject([{ to: config.registry, data: slash[0]!.data }], /unknown Registry function/, { bond: config.registry });
+  });
+});
+
+describe("v4 calls: arming a claim's liveness (R-5) and pre-liquidation terms (section 4)", () => {
+  const CLAIM: Hex = `0x${"c1".repeat(32)}`;
+  const BOND: Address = "0xf42821eF06F68a01bba08c91a16368A83C002586";
+  const named: NamedTargets = { bond: BOND };
+  const SIGNATURE: Hex = `0x${"1b".repeat(65)}`;
+
+  it("armLiveness goes to the bond the Registry names, with the receipt, each claim once", () => {
+    const calls = armLivenessCalls({ claimId: CLAIM, receivedAt: 1_800_000_000n, signature: SIGNATURE, bond: BOND });
+    expect(calls).toEqual([{ to: BOND, data: calls[0]!.data }]);
+    expect(decodeFunctionData({ abi: bondV4Abi, data: calls[0]!.data })).toMatchObject({
+      functionName: "armLiveness",
+      args: [CLAIM, 1_800_000_000n, SIGNATURE],
+    });
+    assertAllowlisted(calls, ACCOUNT, config, named);
+    // Arming and having the bonds pay are two calls about one claim; arming it twice is one too many.
+    assertAllowlisted([...calls, ...slashLivenessCalls({ claimId: CLAIM, bond: BOND })], ACCOUNT, config, named);
+    expect(() => assertAllowlisted([...calls, ...calls], ACCOUNT, config, named)).toThrow(/armed twice/);
+    // Without the Registry's bond nothing to a bond is sponsorable; elsewhere it is unknown.
+    expect(() => assertAllowlisted(calls, ACCOUNT, config)).toThrow(/call to/);
+    expect(() => assertAllowlisted([{ to: config.registry, data: calls[0]!.data }], ACCOUNT, config, named)).toThrow(
+      /unknown Registry function/,
+    );
+    expect(() => armLivenessCalls({ claimId: CLAIM, receivedAt: 1n << 64n, signature: SIGNATURE, bond: BOND })).toThrow(/range/);
+  });
+
+  it("the account's own terms go to the pinned Adapter, within its bounds, alone or with the first borrow", () => {
+    const terms = termsOf(PRE_LIQUIDATION_PRESETS[1]!, 1_800_000_000n);
+    const set = setPreLiquidationCalls({ terms, config });
+    expect(set).toEqual([{ to: config.adapter, data: set[0]!.data }]);
+    expect(decodeFunctionData({ abi: adapterV4Abi, data: set[0]!.data })).toMatchObject({ functionName: "setPreLiquidation", args: [terms] });
+    assertAllowlisted(set, ACCOUNT, config);
+    const clear = clearPreLiquidationCalls({ config });
+    expect(decodeFunctionData({ abi: adapterV4Abi, data: clear[0]!.data }).functionName).toBe("clearPreLiquidation");
+    assertAllowlisted(clear, ACCOUNT, config);
+    const first = borrowCalls({ account: ACCOUNT, assets: 1_000_000n, registryAuthorized: false, adapterAuthorized: false, config });
+    assertAllowlisted([...first, ...set], ACCOUNT, config);
+    // Out of bounds: refused when built, and by the mirror if built by hand.
+    expect(() => setPreLiquidationCalls({ terms: { ...terms, preLltv: config.lltv }, config })).toThrow(/below the market's/);
+    const raw = encodeFunctionData({ abi: adapterV4Abi, functionName: "setPreLiquidation", args: [{ ...terms, preLcf1: 0n }] });
+    expect(() => assertAllowlisted([{ to: config.adapter, data: raw }], ACCOUNT, config)).toThrow(/out of bounds/);
+    expect(() => assertAllowlisted([{ to: config.registry, data: set[0]!.data }], ACCOUNT, config)).toThrow(/unknown Registry function/);
+    // Pre-liquidating a position is the liquidator's own business, never the account's.
+    const preLiquidate = encodeFunctionData({
+      abi: [
+        {
+          type: "function",
+          name: "preLiquidate",
+          stateMutability: "nonpayable",
+          inputs: [
+            { name: "account", type: "address" },
+            { name: "repaidShares", type: "uint256" },
+            { name: "mmCommitment", type: "bytes32" },
+          ],
+          outputs: [],
+        },
+      ],
+      functionName: "preLiquidate",
+      args: [STRANGER, 1n, COMMITMENT],
+    });
+    expect(() => assertAllowlisted([{ to: config.adapter, data: preLiquidate }], ACCOUNT, config)).toThrow(/unknown Adapter function/);
+  });
+
+  it("explains the bond's and the Adapter's v4 refusals", () => {
+    const encode = (errorName: string, args: readonly unknown[]) => encodeErrorResult({ abi: v4ErrorsAbi, errorName, args } as never) as Hex;
+    expect(describeRevert(new Error(encode("ReceiptFromTheFuture", [1_800_000_000n])))).toMatch(/dated after the latest block/);
+    expect(describeRevert(new Error(encode("NotASigner", [STRANGER])))).toMatch(/not signed by one of the five signers/);
+    expect(describeRevert(new Error(encode("PriceStale", [])))).toMatch(/price feed is stale/);
+    expect(describeRevert(new Error(encode("NotAVaultAccount", [ACCOUNT])))).toMatch(/only the account of an active vault/);
+    expect(describeRevert(new Error(encode("InvalidPreLif", [1n, 2n, 3n])))).toMatch(/outside its bounds/);
+    expect(describeRevert(new Error(encode("InvalidExpiry", [1n])))).toMatch(/expiry has passed/);
   });
 });
 

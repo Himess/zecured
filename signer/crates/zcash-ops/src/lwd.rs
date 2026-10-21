@@ -10,7 +10,10 @@
 use std::time::Duration;
 
 use anyhow::{Context, Result, anyhow, ensure};
-use tonic::transport::{Channel, ClientTlsConfig, Endpoint};
+use tonic::{
+    Code,
+    transport::{Channel, ClientTlsConfig, Endpoint},
+};
 use zcash_client_backend::proto::{
     compact_formats::CompactBlock,
     service::{self, BlockId, ChainSpec, Empty, TxFilter, compact_tx_streamer_client::CompactTxStreamerClient},
@@ -46,6 +49,17 @@ pub async fn connect(url: &str) -> Result<LwdClient> {
 /// Server identity and chain tip as reported by the server.
 pub async fn lightd_info(client: &mut LwdClient) -> Result<service::LightdInfo> {
     Ok(client.get_lightd_info(Empty {}).await.map_err(|s| anyhow!("GetLightdInfo: {s}"))?.into_inner())
+}
+
+/// That the server follows `network`: a deployment's light wallet server on the wrong Zcash network
+/// is refused before anything is read from it.
+pub async fn check_network(client: &mut LwdClient, network: crate::network::ZcashNetwork) -> Result<()> {
+    let chain = lightd_info(client).await?.chain_name;
+    ensure!(
+        chain == network.lightd_chain_name(),
+        "the light wallet server follows Zcash chain {chain:?}, the deployment Zcash {network}"
+    );
+    Ok(())
 }
 
 /// Height and hash of the latest block known to the server.
@@ -118,6 +132,43 @@ pub async fn raw_transaction(client: &mut LwdClient, txid: &TxId) -> Result<(Vec
         .map_err(|s| anyhow!("GetTransaction: {s}"))?
         .into_inner();
     Ok((raw.data, raw.height))
+}
+
+/// True if a `GetTransaction` error status definitely means "no such transaction" (neither mined
+/// nor in the server's node's mempool): lightwalletd answers `NotFound`; Zebra-backed servers may
+/// relay the node's RPC error ("No such mempool or main chain transaction") with another code.
+pub fn is_not_found(code: Code, message: &str) -> bool {
+    match code {
+        Code::NotFound => true,
+        // Transport and load problems never mean "not found".
+        Code::Unavailable
+        | Code::DeadlineExceeded
+        | Code::Cancelled
+        | Code::ResourceExhausted
+        | Code::Unauthenticated
+        | Code::PermissionDenied => false,
+        _ => message.contains("No such mempool or main chain transaction"),
+    }
+}
+
+/// [`raw_transaction`], or `None` when the server definitely has no such transaction: one just
+/// broadcast may not have reached its node yet, or the node dropped it (the payer rebroadcasts).
+pub async fn raw_transaction_if_known(client: &mut LwdClient, txid: &TxId) -> Result<Option<(Vec<u8>, u64)>> {
+    let answer = client
+        .get_transaction(TxFilter {
+            hash: txid.as_ref().to_vec(),
+            ..Default::default()
+        })
+        .await;
+    match answer {
+        Ok(raw) => {
+            let raw = raw.into_inner();
+            Ok(Some((raw.data, raw.height)))
+        }
+        Err(status) if is_not_found(status.code(), status.message()) => Ok(None),
+        // The message may carry server details; the code is enough.
+        Err(status) => Err(anyhow!("GetTransaction failed ({:?})", status.code())),
+    }
 }
 
 #[cfg(test)]

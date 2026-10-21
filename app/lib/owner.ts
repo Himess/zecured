@@ -11,12 +11,14 @@ import type { Address, Hex } from "viem";
 import { api as defaultApi, type Api, type OpenVaultResult } from "./api";
 import { prepareDestination, decodeUnifiedAddress, isIronwoodOnly } from "./commitment";
 import { config as appConfig, type AppConfig } from "./config";
+import { DEPLOYMENT } from "./deployment";
 import { signerSet, storedVault, tagKeyHash, verifyVaultOpened, VaultProofError, type VaultCheck } from "./signers";
 import { solveStamp, STAMP_DEFAULT_BITS } from "./stamp";
 import {
   deadlineIn,
   destinationTypedData,
   openVaultTypedData,
+  proveRefundTypedData,
   randomNonce64,
   REQUEST_TTL_SECONDS,
   signWithOwnerKey,
@@ -35,6 +37,8 @@ export interface OwnerContext {
   now?: number;
   /** Compute the open-vault stamp with these zero bits instead of the backend's (tests). */
   stampBits?: number;
+  /** The mainnet beta's invite code, sent with the opening (lib/deployment.ts). */
+  invite?: string;
 }
 
 /** The configuration forbids owner signatures (H-6: pins and backend disagree, or no Registry pin). */
@@ -67,15 +71,17 @@ export interface VaultAddressCheck {
 }
 
 /**
- * The vault must be an Ironwood-only testnet UA (D4: a single Orchard-protocol receiver), and
- * the payment request must be for exactly the loan's denomination.
+ * The vault must be an Ironwood-only UA of the deployment's Zcash network (D4: a single
+ * Orchard-protocol receiver), and the payment request must be for exactly the loan's denomination.
  */
 export function checkVaultAddress(address: string, amount: bigint, backendZip321?: string): VaultAddressCheck {
   const problems: string[] = [];
   let uri: string | null = null;
   try {
     const d = decodeUnifiedAddress(address);
-    if (d.network !== "test") problems.push("The vault address is not a testnet address.");
+    if (d.network !== DEPLOYMENT.zcashNetwork) {
+      problems.push(`The vault address is not a ${DEPLOYMENT.zcashNetwork === "test" ? "testnet" : "mainnet"} address.`);
+    }
     if (!isIronwoodOnly(d)) problems.push("The vault address is not Ironwood-only (it must have a single Orchard-protocol receiver).");
     if (d.expiryHeight !== undefined || d.expiryTime !== undefined) problems.push("The vault address carries an expiry.");
     uri = zip321Uri(address.trim(), amount);
@@ -116,7 +122,8 @@ export async function openVault(loan: StoredLoan, ctx: OwnerContext = {}): Promi
   const deadline = deadlineIn(REQUEST_TTL_SECONDS, ctx.now);
   const message = { owner: loan.owner, account: loan.account, amount, requestId: loan.requestId, deadline };
   const signature = await signWithOwnerKey(loan.ownerKey, openVaultTypedData(registry, message));
-  const res = await a.openVault({ ...message, signature, stamp });
+  const invite = ctx.invite?.trim();
+  const res = await a.openVault({ ...message, signature, stamp, ...(invite ? { invite } : {}) });
   if (res.amount !== amount) throw new Error("The backend opened a vault for a different amount.");
   const check = await verifyVaultOpened(
     {
@@ -147,7 +154,7 @@ export async function submitDestination(
 ): Promise<{ commitment: Hex; hasOtherReceivers: boolean }> {
   const a = ctx.api ?? defaultApi;
   const registry = signingRegistry(ctx);
-  const dest = prepareDestination(ua, "test");
+  const dest = prepareDestination(ua, DEPLOYMENT.zcashNetwork);
   const nonce = randomNonce64();
   const deadline = deadlineIn(REQUEST_TTL_SECONDS, ctx.now);
   const signature = await signWithOwnerKey(
@@ -159,6 +166,22 @@ export async function submitDestination(
     throw new Error("The signers acknowledged a different commitment than the one computed here. Nothing was sent to Base.");
   }
   return { commitment: dest.commitment, hasOtherReceivers: dest.hasOtherReceivers };
+}
+
+/**
+ * R-11: asks the coordinator to prove the vault's deposit as a refund (Refund mode) instead of
+ * waiting for room under the coverage cap (`POST /vaults/:id/prove-refund`, owner-signed
+ * `ProveRefund`). The deposit then comes back as a Refund claim on Base, whose destination the
+ * account gives; nothing is minted for it.
+ */
+export async function requestRefundProof(loan: StoredLoan, vaultId: Hex, ctx: OwnerContext = {}): Promise<void> {
+  const a = ctx.api ?? defaultApi;
+  const registry = signingRegistry(ctx);
+  if (loan.vaultId && loan.vaultId.toLowerCase() !== vaultId.toLowerCase()) throw new Error("This loan belongs to another vault.");
+  const nonce = randomNonce64();
+  const deadline = deadlineIn(REQUEST_TTL_SECONDS, ctx.now);
+  const signature = await signWithOwnerKey(loan.ownerKey, proveRefundTypedData(registry, { vaultId, nonce, deadline }));
+  await a.proveRefund(vaultId, { nonce, deadline, signature });
 }
 
 /** A vault's viewing key, as the backend returned it. */

@@ -6,9 +6,16 @@
  */
 import { decodeErrorResult, decodeFunctionData, encodeFunctionData, getAddress, type Address, type Hex } from "viem";
 import { adapterAbi, bondAbi, disputesAbi, erc20Abi, intakeAbi, morphoAbi, registryAbi, revertErrorsAbi } from "./abi";
+import { adapterV4Abi, bondV4Abi, v4ErrorsAbi } from "./abi4";
 import { config as defaultConfig, marketParams, ZERO_BYTES32, type AppConfig, type MarketParams } from "./config";
 import { formatUsdc, MIN_RELEASE } from "./morpho";
+import { termsProblem, type PreLiquidationTerms } from "./preliq";
 import { formatTaz } from "./zcash";
+
+/** SignerBondV2's calls the account makes: T-05's payment by the bonds and R-5's arming. */
+const bondCallsAbi = [...bondAbi, ...bondV4Abi] as const;
+/** The Settlement Adapter's calls the account makes (v4: its own pre-liquidation terms). */
+const adapterCallsAbi = [...adapterAbi, ...adapterV4Abi] as const;
 
 /** The Registry's own functions and the dispute path its fallback serves (IZecuredDisputes). */
 const registryCallsAbi = [...registryAbi, ...disputesAbi] as const;
@@ -211,6 +218,38 @@ export function slashLivenessCalls(p: { claimId: Hex; bond: Address }): Call[] {
   return [{ to: p.bond, data: encodeFunctionData({ abi: bondAbi, functionName: "slashLiveness", args: [p.claimId] }) }];
 }
 
+/**
+ * R-5: arms the account's claim with a signer's `DestinationReceived` receipt
+ * (`SignerBondV2.armLiveness`): from then on, the claim unpaid for the liveness period is paid by
+ * the bonds. `bond` is the one the pinned Registry names.
+ */
+export function armLivenessCalls(p: { claimId: Hex; receivedAt: bigint; signature: Hex; bond: Address }): Call[] {
+  if (p.receivedAt < 0n || p.receivedAt >= 1n << 64n) throw new Error("receivedAt out of range");
+  return [
+    {
+      to: p.bond,
+      data: encodeFunctionData({ abi: bondV4Abi, functionName: "armLiveness", args: [p.claimId, p.receivedAt, p.signature] }),
+    },
+  ];
+}
+
+/**
+ * v4 pre-liquidation: the account's own terms on the Settlement Adapter (it keeps them for
+ * `msg.sender`); refused here when they are outside the Adapter's bounds.
+ */
+export function setPreLiquidationCalls(p: { terms: PreLiquidationTerms; config?: AppConfig }): Call[] {
+  const c = p.config ?? defaultConfig;
+  const problem = termsProblem(p.terms, c.lltv);
+  if (problem) throw new Error(problem);
+  return [{ to: c.adapter, data: encodeFunctionData({ abi: adapterV4Abi, functionName: "setPreLiquidation", args: [p.terms] }) }];
+}
+
+/** v4 pre-liquidation: withdraws the account's consent (`clearPreLiquidation`). */
+export function clearPreLiquidationCalls(p: { config?: AppConfig } = {}): Call[] {
+  const c = p.config ?? defaultConfig;
+  return [{ to: c.adapter, data: encodeFunctionData({ abi: adapterV4Abi, functionName: "clearPreLiquidation" }) }];
+}
+
 // ------------------------------------------------------------------ allowlist mirror
 
 export class NotAllowlistedError extends Error {
@@ -254,11 +293,13 @@ export function pinnedTargets(c: AppConfig = defaultConfig): Address[] {
  * Throws `NotAllowlistedError` unless every call is on the paymaster allowlist:
  * Registry.requestRelease / requestPartialRelease, setRefundDestination (non-zero commitment),
  * disputePayout / reopenDisputedClaim (served by the Registry's fallback); Intake.refundPending;
- * the bond's slashLiveness (each claim once); Adapter.invalidateNonce; Morpho.setAuthorization
- * (Registry or Adapter only), borrow / repay (Zecured market, onBehalf = account, no callback
- * data); the loan token's approve (spender = Morpho) and transfer. No ETH value anywhere. Mirrors
- * backend/src/allowlist.rs; what needs the chain (the claim is the account's own, the vault is
- * its own, the bonds can pay the claim now) only the backend checks.
+ * the bond's slashLiveness (each claim once) and armLiveness (R-5, each claim once);
+ * Adapter.invalidateNonce, setPreLiquidation (within the Adapter's bounds) and
+ * clearPreLiquidation; Morpho.setAuthorization (Registry or Adapter only), borrow / repay (Zecured
+ * market, onBehalf = account, no callback data); the loan token's approve (spender = Morpho) and
+ * transfer. No ETH value anywhere. Mirrors backend/src/allowlist.rs; what needs the chain (the claim
+ * is the account's own, the vault is its own, the bonds can pay the claim now, the bond and the
+ * Adapter take the call now) only the backend checks.
  */
 export function assertAllowlisted(
   calls: readonly Call[],
@@ -271,15 +312,23 @@ export function assertAllowlisted(
   // A "bond" that is one of the pinned contracts never widens that contract's rules.
   const bond = named.bond !== null && !pinnedTargets(c).includes(getAddress(named.bond)) ? getAddress(named.bond) : null;
   const bondPaid = new Set<string>();
+  const armed = new Set<string>();
   for (const call of calls) {
     if (call.value !== undefined && call.value !== 0n) throw new NotAllowlistedError("ETH value");
     const to = getAddress(call.to);
     if (to === bond) {
-      const d = decode(bondAbi, call.data, "SignerBond");
-      if (d.functionName !== "slashLiveness") throw new NotAllowlistedError(`SignerBond.${d.functionName}`);
-      const claimId = d.args[0].toLowerCase();
-      if (bondPaid.has(claimId)) throw new NotAllowlistedError("the same claim paid from the bonds twice");
-      bondPaid.add(claimId);
+      const d = decode(bondCallsAbi, call.data, "SignerBond");
+      if (d.functionName === "slashLiveness") {
+        const claimId = d.args[0].toLowerCase();
+        if (bondPaid.has(claimId)) throw new NotAllowlistedError("the same claim paid from the bonds twice");
+        bondPaid.add(claimId);
+      } else if (d.functionName === "armLiveness") {
+        const claimId = d.args[0].toLowerCase();
+        if (armed.has(claimId)) throw new NotAllowlistedError("the same claim armed twice");
+        armed.add(claimId);
+      } else {
+        throw new NotAllowlistedError(`SignerBond.${d.functionName}`);
+      }
     } else if (to === getAddress(c.registry)) {
       const d = decode(registryCallsAbi, call.data, "Registry");
       if (d.functionName === "setRefundDestination") {
@@ -296,8 +345,13 @@ export function assertAllowlisted(
       const d = decode(intakeAbi, call.data, "Intake");
       if (d.functionName !== "refundPending") throw new NotAllowlistedError(`Intake.${d.functionName}`);
     } else if (to === getAddress(c.adapter)) {
-      const d = decode(adapterAbi, call.data, "Adapter");
-      if (d.functionName !== "invalidateNonce") throw new NotAllowlistedError(`Adapter.${d.functionName}`);
+      const d = decode(adapterCallsAbi, call.data, "Adapter");
+      if (d.functionName === "setPreLiquidation") {
+        const problem = termsProblem(d.args[0], c.lltv);
+        if (problem) throw new NotAllowlistedError(`pre-liquidation terms out of bounds (${problem})`);
+      } else if (d.functionName !== "invalidateNonce" && d.functionName !== "clearPreLiquidation") {
+        throw new NotAllowlistedError(`Adapter.${d.functionName}`);
+      }
     } else if (to === getAddress(c.morpho)) {
       const d = decode(morphoAbi, call.data, "Morpho");
       if (d.functionName === "setAuthorization") {
@@ -352,7 +406,7 @@ export function describeRevert(e: unknown): string | null {
   for (const data of hexCandidates(e)) {
     let decoded: { errorName: string; args?: readonly unknown[] };
     try {
-      decoded = decodeErrorResult({ abi: revertErrorsAbi, data });
+      decoded = decodeErrorResult({ abi: [...revertErrorsAbi, ...v4ErrorsAbi], data });
     } catch {
       continue;
     }
@@ -410,6 +464,22 @@ export function describeRevert(e: unknown): string | null {
         return `The bonds can pay this claim only from ${formatUtc(n(1))}.`;
       case "InsufficientBond":
         return `The bonds hold ${formatUsdc(n(1))} USDC right now, less than the ${formatUsdc(n(0))} USDC this claim needs. The claim stays payable on Zcash; try again later.`;
+      // v4 (R-5): arming a claim with a signer's receipt.
+      case "ReceiptFromTheFuture":
+        return "The bonds refused the receipt: it is dated after the latest block. Try again in a minute.";
+      case "NotASigner":
+        return "The bonds refused the receipt: it is not signed by one of the five signers for this claim's current destination.";
+      case "PriceStale":
+        return "The bonds refused: the price feed is stale, so they pay nothing until it is fresh again. The claim stays payable on Zcash.";
+      // v4: pre-liquidation terms (the Settlement Adapter).
+      case "NotAVaultAccount":
+        return "The Settlement Adapter refused: only the account of an active vault can set pre-liquidation terms.";
+      case "InvalidPreLltv":
+      case "InvalidPreLcf":
+      case "InvalidPreLif":
+        return "The Settlement Adapter refused these pre-liquidation terms: they are outside its bounds.";
+      case "InvalidExpiry":
+        return "The Settlement Adapter refused these pre-liquidation terms: their expiry has passed. Try again.";
       case "Error":
         if (a[0] === "insufficient collateral") {
           return "Morpho refused the withdrawal: the position would no longer be healthy. Try a smaller amount.";

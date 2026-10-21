@@ -10,9 +10,11 @@ import {
     IntakeConfig,
     WorkTier,
     PendingActivation,
+    PendingRefund,
     RefundReason
 } from "../../src/interfaces/v3/IZecuredIntake.sol";
 import {IRiscZeroVerifier} from "../../src/interfaces/IRiscZeroVerifier.sol";
+import {IZecuredSpendCommitsEvents} from "../../src/interfaces/v3/IZecuredSpendCommits.sol";
 import {IZecuredVersions, VersionKind} from "../../src/interfaces/v3/IZecuredVersions.sol";
 import {ZecuredEIP712} from "../../src/libraries/ZecuredEIP712.sol";
 import {MockRiscZeroVerifier} from "../../src/mocks/MockRiscZeroVerifier.sol";
@@ -350,13 +352,35 @@ contract DepositProofsTest is ZecuredFixture, RelayFixtures {
 
     // ------------------------------------------------------------------ T-02: what cannot activate lands as a refund
 
+    /// R-12: lets the REAL relay reach a pending refund's ready height and time.
+    function _readyRefundOnRelay(bytes32 tag) internal {
+        PendingRefund memory p = intake.pendingRefund(tag);
+        _relayHeaders(CONFIRMED + FINALIZE_DEPTH);
+        (, uint256 height,) = relay.bestChainTip();
+        assertGe(height, p.readyHeight, "the fixture reaches the ready height");
+        if (block.timestamp < p.readyTime) vm.warp(p.readyTime);
+    }
+
     function test_accountWithAnotherVault_landsAsARefund() public {
         _relayHeaders(CONFIRMED);
         bytes32 other = _attest(ACCOUNT, VAULT_001);
         bytes memory journal = _realJournal();
+        (, uint256 tipHeight,) = relay.bestChainTip();
+        vm.expectEmit(address(intake));
+        emit IZecuredIntake.RefundPending(
+            VAULT_ID,
+            TAG,
+            uint8(RefundReason.AccountHasVault),
+            tipHeight + FINALIZE_DEPTH,
+            block.timestamp + FINALIZE_DELAY
+        );
+        _prove(journal);
+        assertEq(registry.claimCount(VAULT_ID), 0, "R-12: no claim before the relay moves on");
+        assertEq(registry.lineageOf(TAG).value, AMOUNT, "a lineage note from the proof on");
+        _readyRefundOnRelay(TAG);
         vm.expectEmit(address(intake));
         emit IZecuredIntake.DepositRefunded(VAULT_ID, registry.claimIdOf(VAULT_ID, 0), RefundReason.AccountHasVault);
-        _prove(journal);
+        intake.finalizeRefund(TAG);
         (address account,, VaultStatus status) = registry.vault(VAULT_ID);
         assertEq(uint8(status), uint8(VaultStatus.Cancelled));
         assertEq(account, ACCOUNT);
@@ -368,6 +392,8 @@ contract DepositProofsTest is ZecuredFixture, RelayFixtures {
         assertEq(zzec.totalSupply(), VAULT_001, "nothing minted for the refund");
     }
 
+    /// R-8: the second deposit's refund waits for the vault's pending activation (no claim on a pending vault), then
+    /// opens on the active vault.
     function test_secondProofForAPendingVault_landsAsARefund() public {
         _relayHeaders(CONFIRMED);
         _prove(_realJournal());
@@ -376,14 +402,18 @@ contract DepositProofsTest is ZecuredFixture, RelayFixtures {
         intake.attestDepositWithProof(journal2, _seal(journal2), proofs.imageId, _openedSigs(OPENED));
         (,, VaultStatus status) = registry.vault(VAULT_ID);
         assertEq(uint8(status), uint8(VaultStatus.Pending), "the first deposit still pends");
-        _assertClaim(
-            registry.claimIdOf(VAULT_ID, 0), VAULT_ID, ClaimKind.Refund, AMOUNT, bytes32(0), ClaimStatus.Pending
-        );
-        // The first one still activates.
-        _finalize(VAULT_ID);
+        assertEq(uint8(intake.pendingRefund(tag2).reason), uint8(RefundReason.PendingExists));
+        _makeReady(VAULT_ID);
+        vm.expectRevert(abi.encodeWithSelector(IZecuredSpendCommitsEvents.VaultPending.selector, VAULT_ID));
+        intake.finalizeRefund(tag2);
+        // The first one still activates; then the refund opens.
+        intake.finalizeActivation(VAULT_ID);
         (,, status) = registry.vault(VAULT_ID);
         assertEq(uint8(status), uint8(VaultStatus.Active));
         assertEq(zzec.totalSupply(), AMOUNT);
+        bytes32 claimId = intake.finalizeRefund(tag2);
+        _assertClaim(claimId, VAULT_ID, ClaimKind.Refund, AMOUNT, bytes32(0), ClaimStatus.Pending);
+        assertEq(registry.lockedZatoshi(), 2 * AMOUNT);
     }
 
     /// The cross-language VaultOpened vector of signer/crates/base-client (also asserted by the app and by

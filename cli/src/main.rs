@@ -8,6 +8,7 @@ use std::{
     fs,
     io::Write,
     path::{Path, PathBuf},
+    sync::OnceLock,
     time::{SystemTime, UNIX_EPOCH},
 };
 
@@ -24,12 +25,13 @@ use serde::{Deserialize, Serialize};
 use serde_json::json;
 use zcash_protocol::consensus::{BlockHeight, Network};
 use zecured_base::{
-    Destination, OpenVault, RefundRequest, VaultOpened, ViewKeyRequest, check_signed_by_all, registry_domain,
-    sign_typed, tag_key_hash, text_hash,
+    Destination, OpenVault, ProveRefund, RefundRequest, VaultOpened, ViewKeyRequest, check_signed_by_all,
+    registry_domain, sign_typed, tag_key_hash, text_hash,
 };
 use zecured_zcash_ops::{
     keys::{encode_ironwood_ua, ironwood_receiver},
     lwd,
+    network::ZcashNetwork,
     scan::ScanState,
     spend::{self, OutputPrivacy, Payment},
 };
@@ -37,14 +39,33 @@ use zecured_zcash_ops::{
 mod base_test;
 mod claims;
 mod prove;
+mod swap;
 mod watch;
 
-const NETWORK: Network = Network::TestNetwork;
+/// The Zcash network of this run (`--network`), set once at start.
+static ZCASH_NETWORK: OnceLock<ZcashNetwork> = OnceLock::new();
 const ZATS_PER_ZEC: f64 = 100_000_000.0;
 /// Signer nodes that must all vouch for a new vault (C-4).
 const SIGNERS: usize = 5;
 /// Owner requests expire after this many seconds.
 const REQUEST_TTL_SECS: u64 = 600;
+
+/// The Zcash network of this run (`--network`; Testnet until it is set).
+pub(crate) fn zcash_network() -> ZcashNetwork {
+    ZCASH_NETWORK.get().copied().unwrap_or(ZcashNetwork::Testnet)
+}
+
+/// Its consensus parameters: address and key encodings, branch ids by height.
+pub(crate) fn zcash_params() -> Network {
+    zcash_network().params()
+}
+
+/// A light wallet server connection, once the server has said it follows this run's network.
+pub(crate) async fn lwd_connect(url: &str) -> Result<lwd::LwdClient> {
+    let mut client = lwd::connect(url).await?;
+    lwd::check_network(&mut client, zcash_network()).await?;
+    Ok(client)
+}
 
 #[derive(Parser)]
 #[command(about = "Zecured CLI wallet (Ironwood only) and loan owner actions")]
@@ -65,6 +86,16 @@ struct Cli {
         global = true
     )]
     backend: String,
+    /// The Zcash network (`testnet` or `mainnet`): addresses and viewing keys are read and written
+    /// for it, the light wallet server must follow it, and the network config's vaults must be on it.
+    #[arg(
+        long,
+        env = "ZECURED_ZCASH_NETWORK",
+        default_value = "testnet",
+        value_parser = ["testnet", "mainnet"],
+        global = true
+    )]
+    network: String,
     #[command(subcommand)]
     cmd: Cmd,
 }
@@ -131,6 +162,9 @@ enum Cmd {
     },
     #[command(subcommand)]
     Loan(LoanCmd),
+    /// Zecured Swap: sell shielded ZEC for USDC with no custodian (cli/src/swap.rs).
+    #[command(subcommand)]
+    Swap(swap::SwapCmd),
 }
 
 #[derive(Subcommand)]
@@ -203,6 +237,22 @@ enum LoanCmd {
         #[arg(long, env = "BASE_SEPOLIA_RPC_URL", default_value = "https://sepolia.base.org")]
         rpc: String,
     },
+    /// R-5 (v4): arm the liveness clock of one of the loan's claims for its current destination.
+    /// The backend serves the earliest receipt a signer gave for it; the receipt is checked here
+    /// against the claim's commitment on Base and the network config's signers, then
+    /// `SignerBondV2.armLiveness` is sent. TEST ONLY: the owner EOA pays the gas (the call is
+    /// permissionless; the app sends it gaslessly from the account).
+    Arm {
+        vault: B256,
+        #[arg(long)]
+        claim: B256,
+        #[arg(long, env = "BASE_SEPOLIA_RPC_URL", default_value = "https://sepolia.base.org")]
+        rpc: String,
+    },
+    /// R-11.1 (v4): ask for the deposit back when the coverage cap leaves no room for the vault's
+    /// activation: the coordinator proves the deposit as a refund, which lands as a Refund claim
+    /// of the vault's account (then `refund-destination`).
+    ProveRefund { vault: B256 },
     /// Fetch the vault's viewing key (UFVK) to verify it independently; refused unless it is
     /// the key the signers signed when the vault opened.
     ViewingKey { vault: B256 },
@@ -448,6 +498,12 @@ struct SignerParams {
 struct NetworkParams {
     registry: Address,
     chain_id: u64,
+    /// The vaults' Zcash network, when the config names it (otherwise the one the Base chain goes
+    /// with), and whether it is a local fork (where another pairing is allowed).
+    #[serde(default)]
+    zcash_network: Option<ZcashNetwork>,
+    #[serde(default)]
+    local_fork: bool,
     #[serde(default)]
     nodes: Vec<SignerParams>,
     /// H-01: the network's open-vault limits; only the stamp's bits matter here.
@@ -477,7 +533,15 @@ fn network_params() -> Result<NetworkParams> {
     let cfg: serde_json::Value = read_json(Path::new(
         &std::env::var("ZECURED_NETWORK_CONFIG").unwrap_or_else(|_| "signer/data/network.json".into()),
     ))?;
-    Ok(serde_json::from_value(cfg)?)
+    let net: NetworkParams = serde_json::from_value(cfg)?;
+    // The signers' vaults must be on this run's Zcash network.
+    let theirs = ZcashNetwork::resolve(net.zcash_network, net.chain_id, net.local_fork)?;
+    ensure!(
+        theirs == zcash_network(),
+        "the network config's vaults are on Zcash {theirs}, this run on Zcash {} (--network)",
+        zcash_network()
+    );
+    Ok(net)
 }
 
 /// A vault as `POST /vaults` returns it.
@@ -558,11 +622,21 @@ fn check_viewing_key(ufvk: &str, l: &LoanFile) -> Result<bool> {
     Ok(true)
 }
 
+/// The next nonce of the loan's owner requests, spent and saved before the request is sent. A
+/// request can reach some signers and still fail (too few available): those signers keep its nonce
+/// as used, so it is never sent again (they keep a set of used nonces; the app draws random ones).
+fn spend_nonce(wallet: &Path, vault: &B256, l: &mut LoanFile) -> Result<u64> {
+    let nonce = l.next_nonce;
+    l.next_nonce += 1;
+    write_json(&loan_path(wallet, vault), l)?;
+    Ok(nonce)
+}
+
 /// The vault's viewing key from the backend (owner-signed `ViewKeyRequest`), refused unless it
 /// is the key every signer signed when the vault opened; `false` for loans opened before that.
 async fn viewing_key(wallet: &Path, backend: &str, vault: &B256) -> Result<(String, bool)> {
     let (mut l, owner, _) = owner_ctx(wallet, vault, Some(String::new()))?;
-    let nonce = l.next_nonce;
+    let nonce = spend_nonce(wallet, vault, &mut l)?;
     let deadline = now() + REQUEST_TTL_SECS;
     let msg = ViewKeyRequest {
         vaultId: *vault,
@@ -576,8 +650,6 @@ async fn viewing_key(wallet: &Path, backend: &str, vault: &B256) -> Result<(Stri
         json!({ "nonce": nonce.to_string(), "deadline": deadline.to_string(), "signature": sig }),
     )
     .await?;
-    l.next_nonce += 1;
-    write_json(&loan_path(wallet, vault), &l)?;
     let ufvk = r["ufvk"].as_str().context("the backend returned no viewing key")?.to_owned();
     let checked = check_viewing_key(&ufvk, &l)?;
     Ok((ufvk, checked))
@@ -611,7 +683,7 @@ async fn post(backend: &str, path: &str, body: serde_json::Value) -> Result<serd
 }
 
 async fn scan(w: &Wallet, url: &str) -> Result<ScanState> {
-    let mut client = lwd::connect(url).await?;
+    let mut client = lwd_connect(url).await?;
     let tip = u32::try_from(lwd::latest_block(&mut client).await?.height)?;
     let mut state = ScanState::from_birthday(&mut client, w.fvk.clone(), w.birthday).await?;
     state.scan_to(&mut client, tip).await?;
@@ -631,12 +703,12 @@ async fn send(w: &Wallet, url: &str, to: &str, amount: u64) -> Result<String> {
         inputs.push(n);
     }
     let payments = [Payment {
-        recipient: ironwood_receiver(&NETWORK, to)?,
+        recipient: ironwood_receiver(&zcash_params(), to)?,
         value: amount,
         privacy: OutputPrivacy::VaultOvk,
     }];
     let unsigned = spend::build(
-        &NETWORK,
+        &zcash_params(),
         BlockHeight::from_u32(state.scanned_to + 1),
         &w.fvk,
         state.anchor(),
@@ -651,7 +723,7 @@ async fn send(w: &Wallet, url: &str, to: &str, amount: u64) -> Result<String> {
         signer.sign_ironwood(rand_010::rng(), *i, &ask).map_err(|e| anyhow!("sign: {e:?}"))?;
     }
     let tx = spend::extract(signer.finish())?;
-    let mut client = lwd::connect(url).await?;
+    let mut client = lwd_connect(url).await?;
     Ok(spend::broadcast(&mut client, &tx).await?.to_string())
 }
 
@@ -664,6 +736,7 @@ fn fresh_salt() -> [u8; 32] {
 #[tokio::main]
 async fn main() -> Result<()> {
     let cli = Cli::parse();
+    let _ = ZCASH_NETWORK.set(ZcashNetwork::from_name(&cli.network)?);
     match cli.cmd {
         Cmd::Init => {
             ensure!(!cli.wallet.exists(), "{} exists", cli.wallet.display());
@@ -674,7 +747,7 @@ async fn main() -> Result<()> {
                     break sk;
                 }
             };
-            let tip = u32::try_from(lwd::latest_block(&mut lwd::connect(&cli.lwd).await?).await?.height)?;
+            let tip = u32::try_from(lwd::latest_block(&mut lwd_connect(&cli.lwd).await?).await?.height)?;
             write_json(
                 &cli.wallet,
                 &WalletFile {
@@ -683,11 +756,11 @@ async fn main() -> Result<()> {
                 },
             )?;
             let w = load_wallet(&cli.wallet)?;
-            println!("{}", encode_ironwood_ua(&NETWORK, w.fvk.address_at(0u32, Scope::External))?);
+            println!("{}", encode_ironwood_ua(&zcash_params(), w.fvk.address_at(0u32, Scope::External))?);
         }
         Cmd::Address => {
             let w = load_wallet(&cli.wallet)?;
-            println!("{}", encode_ironwood_ua(&NETWORK, w.fvk.address_at(0u32, Scope::External))?);
+            println!("{}", encode_ironwood_ua(&zcash_params(), w.fvk.address_at(0u32, Scope::External))?);
         }
         Cmd::Balance => {
             let w = load_wallet(&cli.wallet)?;
@@ -715,12 +788,12 @@ async fn main() -> Result<()> {
                 .with_context(|| format!("read {}", ufvk_file.display()))?
                 .trim()
                 .to_owned();
-            let fvk = zcash_keys::keys::UnifiedFullViewingKey::decode(&NETWORK, &ufvk)
+            let fvk = zcash_keys::keys::UnifiedFullViewingKey::decode(&zcash_params(), &ufvk)
                 .map_err(|e| anyhow!("invalid UFVK: {e}"))?
                 .orchard()
                 .cloned()
                 .context("UFVK has no Orchard-protocol key")?;
-            let mut client = lwd::connect(&cli.lwd).await?;
+            let mut client = lwd_connect(&cli.lwd).await?;
             let tip = u32::try_from(lwd::latest_block(&mut client).await?.height)?;
             let mut state = ScanState::from_birthday(&mut client, fvk.clone(), from).await?;
             state.scan_to(&mut client, tip).await?;
@@ -797,7 +870,7 @@ async fn main() -> Result<()> {
                 .map(|d| watch::own_recipient(&d.salt, &d.receiver, &w.fvk))
                 .collect::<Result<Vec<_>>>()?;
             let net = network_params()?;
-            let mut client = lwd::connect(&cli.lwd).await?;
+            let mut client = lwd_connect(&cli.lwd).await?;
             let tip = u32::try_from(lwd::latest_block(&mut client).await?.height)?;
             let claims = watch::check_third_party(&mut client, &own, net.registry, &rpc, base_from, from, tip).await?;
             for f in &claims {
@@ -814,6 +887,7 @@ async fn main() -> Result<()> {
             }
         }
         Cmd::Loan(cmd) => loan(&cli.wallet, &cli.lwd, &cli.backend, cmd).await?,
+        Cmd::Swap(cmd) => swap::run(&cli.wallet, &cli.lwd, cmd).await?,
     }
     Ok(())
 }
@@ -906,8 +980,8 @@ async fn loan(wallet: &Path, lwd_url: &str, backend: &str, cmd: LoanCmd) -> Resu
         LoanCmd::Refund { vault, note, to } => {
             let (mut l, owner, to) = owner_ctx(wallet, &vault, to)?;
             let salt = fresh_salt();
-            let receiver = ironwood_receiver(&NETWORK, &to)?.to_raw_address_bytes();
-            let nonce = l.next_nonce;
+            let receiver = ironwood_receiver(&zcash_params(), &to)?.to_raw_address_bytes();
+            let nonce = spend_nonce(wallet, &vault, &mut l)?;
             let deadline = now() + REQUEST_TTL_SECS;
             let msg = RefundRequest {
                 vaultId: vault,
@@ -924,8 +998,6 @@ async fn loan(wallet: &Path, lwd_url: &str, backend: &str, cmd: LoanCmd) -> Resu
                         "deadline": deadline.to_string(), "signature": sig }),
             )
             .await?;
-            l.next_nonce += 1;
-            write_json(&loan_path(wallet, &vault), &l)?;
             println!("{}", serde_json::to_string_pretty(&r)?);
         }
         LoanCmd::Refunds { vault, rpc } => {
@@ -979,6 +1051,39 @@ async fn loan(wallet: &Path, lwd_url: &str, backend: &str, cmd: LoanCmd) -> Resu
                 );
             }
             base_test::dispute(wallet, &vault, claim, reopen, &rpc).await?;
+        }
+        LoanCmd::Arm { vault, claim, rpc } => {
+            let net = network_params()?;
+            ensure!(
+                net.nodes.len() == SIGNERS,
+                "the network config must list the {SIGNERS} signer nodes (index and eth address) to check the receipt"
+            );
+            let on_base = claims::vault_claims(net.registry, vault, &rpc).await?;
+            let c = on_base.iter().find(|c| c.id == claim).context("no such claim of this vault on Base")?;
+            claims::arming_allowed(c)?;
+            let receipt = claims::parse_receipt(&post(backend, &format!("/claims/{claim}/receipt"), json!({})).await?)?;
+            let bond = claims::signer_bond(net.registry, &rpc).await?;
+            let signers: Vec<Address> = net.nodes.iter().map(|n| n.eth).collect();
+            claims::check_receipt(net.chain_id, bond, &signers, c, &receipt)?;
+            base_test::arm_liveness(wallet, &vault, bond, claim, receipt.received_at, receipt.signature, &rpc).await?;
+        }
+        LoanCmd::ProveRefund { vault } => {
+            let (mut l, owner, _) = owner_ctx(wallet, &vault, Some(String::new()))?;
+            let nonce = spend_nonce(wallet, &vault, &mut l)?;
+            let deadline = now() + REQUEST_TTL_SECS;
+            let msg = ProveRefund {
+                vaultId: vault,
+                nonce,
+                deadline,
+            };
+            let sig = sign_typed(&owner, &registry_domain(l.chain_id, l.registry), &msg)?;
+            let r = post(
+                backend,
+                &format!("/vaults/{vault}/prove-refund"),
+                json!({ "nonce": nonce.to_string(), "deadline": deadline.to_string(), "signature": sig }),
+            )
+            .await?;
+            println!("{}", serde_json::to_string_pretty(&r)?);
         }
         LoanCmd::ViewingKey { vault } => {
             let (ufvk, checked) = viewing_key(wallet, backend, &vault).await?;
@@ -1082,8 +1187,8 @@ async fn loan(wallet: &Path, lwd_url: &str, backend: &str, cmd: LoanCmd) -> Resu
 async fn destination(wallet: &Path, backend: &str, vault: &B256, to: Option<String>) -> Result<B256> {
     let (mut l, owner, to) = owner_ctx(wallet, vault, to)?;
     let salt = fresh_salt();
-    let receiver = ironwood_receiver(&NETWORK, &to)?.to_raw_address_bytes();
-    let nonce = l.next_nonce;
+    let receiver = ironwood_receiver(&zcash_params(), &to)?.to_raw_address_bytes();
+    let nonce = spend_nonce(wallet, vault, &mut l)?;
     let deadline = now() + REQUEST_TTL_SECS;
     let c = B256::from(commitment(&salt, &receiver));
     let msg = Destination {
@@ -1100,7 +1205,6 @@ async fn destination(wallet: &Path, backend: &str, vault: &B256, to: Option<Stri
                 "deadline": deadline.to_string(), "signature": sig }),
     )
     .await?;
-    l.next_nonce += 1;
     l.destinations.push(KeptDestination {
         commitment: c,
         receiver: hex::encode(receiver),
@@ -1123,7 +1227,7 @@ fn owner_ctx(wallet: &Path, vault: &B256, to: Option<String>) -> Result<(LoanFil
         Some(t) => t,
         None => {
             let w = load_wallet(wallet)?;
-            encode_ironwood_ua(&NETWORK, w.fvk.address_at(0u32, Scope::External))?
+            encode_ironwood_ua(&zcash_params(), w.fvk.address_at(0u32, Scope::External))?
         }
     };
     Ok((l, owner, to))
@@ -1167,6 +1271,8 @@ mod vault_checks {
             net: NetworkParams {
                 registry: Address::repeat_byte(0x11),
                 chain_id: 84_532,
+                zcash_network: None,
+                local_fork: false,
                 nodes,
                 open_vault: OpenVaultParams::default(),
             },
@@ -1231,6 +1337,8 @@ mod vault_checks {
         let bare = NetworkParams {
             registry: f.net.registry,
             chain_id: f.net.chain_id,
+            zcash_network: None,
+            local_fork: false,
             nodes: vec![],
             open_vault: OpenVaultParams::default(),
         };

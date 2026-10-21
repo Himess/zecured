@@ -39,16 +39,24 @@ use zecured_coordinator::{
 use zecured_node::config::NetworkConfig;
 
 mod allowlist;
+mod app_routes;
+mod demo;
+mod evidence;
 mod limits;
 mod minting;
 mod onchain;
 mod paymaster;
 mod proxy;
+mod stats;
+mod swap_relay;
 mod versions;
 
 #[derive(Parser)]
 #[command(about = "Zecured backend: coordinator + public API")]
 struct Cli {
+    /// The v4 app's routes (demo wallet, evidence, anonymity sets, swap relay): app_routes.rs.
+    #[command(flatten)]
+    app: app_routes::AppArgs,
     #[arg(long, env = "ZECURED_NETWORK_CONFIG", default_value = "signer/data/network.json")]
     config: PathBuf,
     #[arg(long, env = "ZECURED_COORDINATOR_DATA", default_value = "signer/data/coordinator")]
@@ -122,9 +130,13 @@ struct Cli {
     #[arg(long, env = "DEPOSIT_PROOF_SUMMARIES", default_value = "data/tier2/summaries.json")]
     deposit_proof_summaries: PathBuf,
     /// Deposit proofs run at once, 1 or 2 (review H-12: a proof takes about 10 GB of RAM on a CPU,
-    /// 13 GB of GPU memory); the others wait in a first-in-first-out queue, one job per vault.
+    /// 13 GB of GPU memory); the others wait in the proving queue, one job per vault.
     #[arg(long, env = "DEPOSIT_PROOF_CONCURRENCY", default_value_t = 1)]
     deposit_proof_concurrency: usize,
+    /// Mainnet beta (section 6): the operator's invite file (keccak256 hashes of the invite codes
+    /// with their uses, `inviteOnly`, and the `openings` switch); unset: openings are open to all.
+    #[arg(long, env = "ZECURED_INVITES")]
+    invites: Option<PathBuf>,
 }
 
 // ------------------------------------------------------------------------- errors (L-2)
@@ -246,6 +258,9 @@ struct OpenBody {
     /// H-01: the nonce of the request's hashcash stamp (decimal string or number).
     #[serde(default)]
     stamp: serde_json::Value,
+    /// Mainnet beta: the invite code, when openings are invite-only (never logged).
+    #[serde(default)]
+    invite: Option<String>,
 }
 
 /// `POST /vaults`'s rate limit. Only a request whose stamp checks out takes a token (H-01), so
@@ -266,7 +281,12 @@ async fn open_vault(
         deadline: num(&b.deadline)?,
         signature: b.signature,
         stamp: if b.stamp.is_null() { 0 } else { num(&b.stamp)? },
+        invite: b.invite,
     };
+    // Section 6: closed openings are refused before the stamp is even looked at.
+    if !c.openings().open {
+        return Err(PublicError::OpeningsClosed.into());
+    }
     c.check_open_stamp(&req)?;
     if !limiter.0.try_take() {
         return Err(ApiError::RATE_LIMITED);
@@ -303,11 +323,54 @@ async fn get_vault(State(c): App, Param(id): Param<B256>) -> ApiResult {
         "payoutInFlight": v.inflight,
         "birthdayHeight": v.birthday_height,
         "tipHeight": v.tip_height,
-        // Deposits that have not landed on Base: each is refunded once a proof lands it (T-02), or,
-        // when no guest of the deployment can land it (`offChain`), off-chain on request (P5, I30).
-        "nonConforming": v.non_conforming.iter().map(|n| json!({ "noteId": n.note_id, "amount": n.amount.to_string(), "offChain": n.offchain })).collect::<Vec<_>>(),
-        // A Refund claim waits for its account's destination (`destinationSet`, T-02).
-        "claims": v.claims.iter().map(|c| json!({ "claimId": c.claim_id, "kind": c.kind, "amount": c.amount.to_string(), "paid": c.paid, "status": zecured_coordinator::claim_status(c.state), "destinationSet": c.destination_set })).collect::<Vec<_>>(),
+        // Payments that cannot back the loan, not landed on Base: each is refunded once a proof
+        // lands it (T-02), or, when no guest of the deployment can land it (`offChain`), off-chain
+        // on request (P5, I30). The vault's own deposit, while it waits to land, is not one of them.
+        "nonConforming": v.non_conforming.iter().filter(|n| !n.candidate).map(|n| json!({ "noteId": n.note_id, "amount": n.amount.to_string(), "offChain": n.offchain })).collect::<Vec<_>>(),
+        // R-11.1: the vault's conforming deposit is mined, with its confirmations.
+        "depositSeen": v.deposit_seen,
+        // A Refund claim waits for its account's destination (`destinationSet`, T-02). v4: `proven`
+        // (section 3: its payout's delivery is proven on Base, final), `disputableUntil` (confirmed
+        // by the signers, disputable until then, Unix seconds; null otherwise) and `livenessArmed`
+        // (R-5: its liveness clock is armed for its current destination).
+        "claims": v.claims.iter().map(|c| json!({
+            "claimId": c.claim_id, "kind": c.kind, "amount": c.amount.to_string(), "paid": c.paid,
+            "status": zecured_coordinator::claim_status(c.state), "destinationSet": c.destination_set,
+            "proven": c.proven, "disputableUntil": c.disputable_until, "livenessArmed": c.liveness_armed,
+        })).collect::<Vec<_>>(),
+    })))
+}
+
+#[derive(Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct ProveRefundBody {
+    nonce: serde_json::Value,
+    deadline: serde_json::Value,
+    signature: Bytes,
+}
+
+/// R-11.1: the vault's owner asks for its deposit back when the coverage cap leaves no room for its
+/// activation (`ProveRefund`, signed like the other owner requests): the coordinator proves the
+/// deposit in Refund mode. `{ queued: true }`, or a fixed refusal: `not_blocked`, `no_deposit`,
+/// `already_landed`, `refund_unavailable`, `not_owner`, `expired`, `nonce_used`, `not_configured`.
+async fn prove_refund(State(c): App, Param(id): Param<B256>, Body(b): Body<ProveRefundBody>) -> ApiResult {
+    c.request_refund_proof(id, num(&b.nonce)?, num(&b.deadline)?, &b.signature).await?;
+    Ok(Json(json!({ "queued": true })))
+}
+
+/// R-5 (v4 freeze § 3): the first valid liveness receipt any signer gives for the claim, for its
+/// current destination: `{ claimId, commitment, receivedAt, signer, signature }`, which the claim's
+/// claimant passes to `SignerBondV2.armLiveness(claimId, receivedAt, signature)`; `404 no_receipt`
+/// while no signer holds a validated destination for it. Public (the receipt only says a signer
+/// holds the destination; the claim and its commitment are on Base) and rate-limited.
+async fn claim_receipt(State(c): App, Param(claim_id): Param<B256>) -> ApiResult {
+    let r = c.claim_receipt(claim_id).await?;
+    Ok(Json(json!({
+        "claimId": r.claim_id,
+        "commitment": r.commitment,
+        "receivedAt": r.received_at,
+        "signer": r.signer,
+        "signature": r.signature,
     })))
 }
 
@@ -803,9 +866,15 @@ async fn admin_set_shock(
 #[derive(Clone)]
 struct PublicConfig(Arc<serde_json::Value>);
 
-/// Public deployment parameters, so the app and the signers cannot drift apart.
-async fn public_config(axum::Extension(c): axum::Extension<PublicConfig>) -> Json<serde_json::Value> {
-    Json((*c.0).clone())
+/// Public deployment parameters, so the app and the signers cannot drift apart; `openings` (section
+/// 6) is read on every request, as the operator may switch it at any time.
+async fn public_config(
+    State(coordinator): App,
+    axum::Extension(c): axum::Extension<PublicConfig>,
+) -> Json<serde_json::Value> {
+    let mut out = (*c.0).clone();
+    out["openings"] = serde_json::to_value(coordinator.openings()).unwrap_or_default();
+    Json(out)
 }
 
 async fn health() -> Json<serde_json::Value> {
@@ -1029,7 +1098,13 @@ fn cors_layer(origins: &str) -> Result<CorsLayer> {
     Ok(CorsLayer::new()
         .allow_origin(AllowOrigin::list(list))
         .allow_methods([Method::GET, Method::POST])
-        .allow_headers([CONTENT_TYPE, ACCEPT, HeaderName::from_static("x-admin-token")])
+        .allow_headers([
+            CONTENT_TYPE,
+            ACCEPT,
+            HeaderName::from_static("x-admin-token"),
+            // The swap maker's invite code on the mainnet beta (swap_relay.rs).
+            HeaderName::from_static(swap_relay::INVITE_HEADER),
+        ])
         .max_age(Duration::from_secs(600)))
 }
 
@@ -1080,7 +1155,13 @@ fn router(
                 .route("/vaults/{id}/refund", post(refund))
                 .route("/vaults/{id}/viewing-key", post(viewing_key))
                 .route("/vaults/{id}/deposit-proof", post(deposit_proof))
+                .route("/vaults/{id}/prove-refund", post(prove_refund))
                 .route_layer(limited(&limits.owner)),
+        )
+        .merge(
+            Router::new()
+                .route("/claims/{claimId}/receipt", post(claim_receipt))
+                .route_layer(limited(&limits.receipts)),
         )
         .merge(
             Router::new()
@@ -1205,6 +1286,11 @@ async fn main() -> Result<()> {
             "deposits are activated with Tier 2 proofs"
         );
     }
+    if let Some(file) = &cli.invites {
+        coordinator = coordinator.with_invites(file, &cli.data)?;
+        let o = coordinator.openings();
+        info!(open = o.open, invite_only = o.invite_only, "vault openings follow the operator's invite file");
+    }
     let coordinator = Arc::new(coordinator);
 
     let worker = coordinator.clone();
@@ -1228,7 +1314,13 @@ async fn main() -> Result<()> {
             http: reqwest::Client::builder().timeout(Duration::from_secs(180)).build()?,
         },
     };
-    let app = router(coordinator, proxy, wiring, &limits::Limits::default(), cors);
+    let app_wiring = app_routes::AppWiring::new(&cli.app, coordinator.clone(), &cli.data)?;
+    let limits = limits::Limits::default();
+    let app = router(coordinator, proxy, wiring, &limits, cors.clone()).merge(app_routes::router(
+        app_wiring,
+        &limits.global,
+        cors,
+    ));
     let listener = tokio::net::TcpListener::bind(cli.bind).await?;
     info!(bind = %cli.bind, "backend listening");
     axum::serve(listener, app).await.map_err(|e| anyhow!("server: {e}"))?;
@@ -1542,8 +1634,20 @@ mod tests {
             .header("access-control-request-method", "POST")
             .body(HttpBody::empty())
             .unwrap();
-        let r = app.oneshot(preflight).await.unwrap();
+        let r = app.clone().oneshot(preflight).await.unwrap();
         assert_eq!(r.headers().get("access-control-allow-origin").unwrap(), "http://127.0.0.1:3000");
+        // The swap maker's invite code (mainnet beta) is the one custom header the app adds.
+        let invite = axum::http::Request::builder()
+            .method(Method::OPTIONS)
+            .uri("/health")
+            .header("origin", "http://127.0.0.1:3000")
+            .header("access-control-request-method", "GET")
+            .header("access-control-request-headers", "x-zecured-invite")
+            .body(HttpBody::empty())
+            .unwrap();
+        let r = app.oneshot(invite).await.unwrap();
+        let allowed = r.headers().get("access-control-allow-headers").unwrap().to_str().unwrap().to_ascii_lowercase();
+        assert!(allowed.contains("x-zecured-invite"), "{allowed}");
 
         assert!(cors_layer("*").is_err());
         assert!(cors_layer("").is_err());
@@ -1683,6 +1787,109 @@ mod tests {
         // Other routes have their own buckets.
         let (status, _, _) = call(Method::POST, "/recipients", "{}").await;
         assert_eq!(status, StatusCode::BAD_REQUEST);
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// v4: the invite gate's switches in `/config` and on `POST /vaults` (section 6), the public
+    /// liveness receipt with its own limit (R-5), and the owner's refund-proof request (R-11.1), each
+    /// refusing with its fixed code on a coordinator whose nodes and chains are unreachable.
+    #[tokio::test]
+    async fn the_v4_routes_are_wired() {
+        let dir = std::env::temp_dir().join(format!("zecured-backend-test-{}", hex::encode(keccak256(b"v4-routes"))));
+        std::fs::create_dir_all(&dir).unwrap();
+        let invites = dir.join("invites.json");
+        let write = |v: serde_json::Value| std::fs::write(&invites, v.to_string()).unwrap();
+        write(
+            json!({ "openings": false, "inviteOnly": true, "codes": [{ "hash": keccak256(b"beta-7f3k"), "uses": 1 }] }),
+        );
+        let nodes: Vec<serde_json::Value> = (1..=5u8)
+            .map(|i| json!({ "index": i, "url": "http://127.0.0.1:9", "x25519": "00", "eth": Address::repeat_byte(i) }))
+            .collect();
+        let cfg: NetworkConfig = serde_json::from_value(json!({
+            "lightwalletd_url": "http://127.0.0.1:9", "base_rpc_url": "http://127.0.0.1:9", "chain_id": 84_532,
+            "registry": Address::repeat_byte(0x11), "adapter": Address::repeat_byte(0x22), "registry_from_block": 1,
+            "confirmations": 3, "vault_expiry_blocks": 288, "denominations": [1_000_000], "nodes": nodes,
+        }))
+        .unwrap();
+        let key = hex::encode(alloy::signers::local::PrivateKeySigner::random().to_bytes());
+        let coordinator = Arc::new(Coordinator::new(cfg, &dir, &key).unwrap().with_invites(&invites, &dir).unwrap());
+        let proxy = Arc::new(
+            proxy::Proxy::new("http://127.0.0.1:9".into(), "http://127.0.0.1:9".into(), None, None, None, None)
+                .unwrap(),
+        );
+        let wiring = Wiring {
+            public_config: PublicConfig(Arc::new(json!({ "chainId": 84_532 }))),
+            status: status_info(&serde_json::Value::Null, &coordinator.cfg),
+            admin_token: AdminToken(Arc::new(String::new())),
+            modes: ModePolicy::parse("4,5", &[1, 2, 3, 4, 5]).unwrap(),
+            oracle: Oracle::from_deployment(String::new(), &serde_json::Value::Null, String::new()),
+            market_maker: MarketMaker {
+                url: Arc::new("http://127.0.0.1:9".into()),
+                http: reqwest::Client::new(),
+            },
+        };
+        let app = router(
+            coordinator,
+            proxy,
+            wiring,
+            &limits::Limits::default(),
+            cors_layer("http://localhost:3000").unwrap(),
+        );
+        let call = |method: Method, uri: String, body: String| {
+            let req = axum::http::Request::builder()
+                .method(method)
+                .uri(uri)
+                .header("content-type", "application/json")
+                .body(HttpBody::from(body))
+                .unwrap();
+            let app = app.clone();
+            async move {
+                let r = app.oneshot(req).await.unwrap();
+                let status = r.status();
+                let body = axum::body::to_bytes(r.into_body(), 1 << 16).await.unwrap();
+                (status, serde_json::from_slice::<serde_json::Value>(&body).unwrap_or_default())
+            }
+        };
+
+        // Section 6: `/config` says whether openings are open and invite-only, read on each request.
+        let (status, body) = call(Method::GET, "/config".into(), String::new()).await;
+        assert_eq!(status, StatusCode::OK);
+        assert_eq!(body["chainId"], 84_532, "the deployment's parameters stay");
+        assert_eq!(body["openings"], json!({ "open": false, "inviteOnly": true }));
+        // Closed: refused before anything else, an unstamped request included.
+        let open = json!({
+            "owner": Address::repeat_byte(1), "account": Address::repeat_byte(2), "amount": "1000000",
+            "requestId": B256::repeat_byte(3), "deadline": "99999999999", "signature": "0x", "invite": "beta-7f3k",
+        });
+        let (status, body) = call(Method::POST, "/vaults".into(), open.to_string()).await;
+        assert_eq!((status, body["code"].as_str()), (StatusCode::FORBIDDEN, Some("openings_closed")));
+        write(json!({ "openings": true }));
+        let (_, body) = call(Method::GET, "/config".into(), String::new()).await;
+        assert_eq!(body["openings"], json!({ "open": true, "inviteOnly": false }));
+        let (status, body) = call(Method::POST, "/vaults".into(), open.to_string()).await;
+        assert_eq!((status, body["code"].as_str()), (StatusCode::UNPROCESSABLE_ENTITY, Some("bad_stamp")));
+
+        // R-5: no receipt for a claim this coordinator does not know; a malformed id is a bad request.
+        let receipt = format!("/claims/{}/receipt", B256::repeat_byte(0x77));
+        let (status, body) = call(Method::POST, receipt.clone(), String::new()).await;
+        assert_eq!((status, body["code"].as_str()), (StatusCode::NOT_FOUND, Some("no_receipt")));
+        let (status, body) = call(Method::POST, "/claims/0x12/receipt".into(), String::new()).await;
+        assert_eq!((status, body["code"].as_str()), (StatusCode::BAD_REQUEST, Some("bad_request")));
+        // Its own bucket: 20 a minute, then 429, while the owner routes still answer.
+        for _ in 0..18 {
+            call(Method::POST, receipt.clone(), String::new()).await;
+        }
+        let (status, body) = call(Method::POST, receipt.clone(), String::new()).await;
+        assert_eq!((status, body["code"].as_str()), (StatusCode::TOO_MANY_REQUESTS, Some("rate_limited")));
+
+        // R-11.1: a malformed request is a bad request; a backend that makes no deposit proofs
+        // cannot prove a refund either.
+        let prove = format!("/vaults/{}/prove-refund", B256::repeat_byte(9));
+        let (status, body) = call(Method::POST, prove.clone(), "{}".into()).await;
+        assert_eq!((status, body["code"].as_str()), (StatusCode::BAD_REQUEST, Some("bad_request")));
+        let signed = json!({ "nonce": "1", "deadline": "99999999999", "signature": format!("0x{}", "11".repeat(65)) });
+        let (status, body) = call(Method::POST, prove, signed.to_string()).await;
+        assert_eq!((status, body["code"].as_str()), (StatusCode::SERVICE_UNAVAILABLE, Some("not_configured")));
         let _ = std::fs::remove_dir_all(&dir);
     }
 

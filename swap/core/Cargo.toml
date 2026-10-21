@@ -1,0 +1,30 @@
+[package]
+name = "zecured-swap"
+description = "Zecured Swap, shared by the maker bot and the CLI: ZecuredSwap's ABI and EIP-712 quote, order ids, the payment (one Ironwood note with the swap memo, ovk = None) and its proof"
+version = "0.1.0"
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+publish.workspace = true
+
+[dependencies]
+zecured-zcash-ops = { path = "../../signer/crates/zcash-ops" }
+zecured-deposit-witness = { path = "../../signer/crates/deposit-witness" }
+zecured-base = { path = "../../signer/crates/base-client" }
+# The payment statement (tier2/ workspace): the memo, the receiver commitment, the witness; and the
+# deposit statement's rule D5, which the payment statement applies.
+zecured-payment-statement = { path = "../../tier2/payment-statement" }
+zecured-deposit-statement = { path = "../../tier2/statement" }
+orchard.workspace = true
+pczt.workspace = true
+zcash_primitives.workspace = true
+zcash_protocol.workspace = true
+zcash_note_encryption.workspace = true
+alloy.workspace = true
+anyhow.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+hex.workspace = true
+tokio.workspace = true
+rand_010.workspace = true
+rand_core_06.workspace = true

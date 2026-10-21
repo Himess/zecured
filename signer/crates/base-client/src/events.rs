@@ -1,5 +1,6 @@
-//! The v3 contracts' ABIs (Registry, Intake, slasher, bond, verifier versions) and ingestion of
-//! the Registry's events up to Base's `safe` head.
+//! The contracts' ABIs (Registry, Intake, slasher, bond, verifier versions, Adapter), as of the v4
+//! interface freeze, and ingestion of their events up to Base's `safe` head: the Registry's for
+//! the signer nodes, every contract's for the coordinator.
 //!
 //! Logs only say what an RPC provider claims happened; signer nodes check every event they
 //! apply against the Registry's state (see [`crate::verify`]).
@@ -12,7 +13,7 @@ use std::{
 
 use alloy::{
     eips::BlockNumberOrTag,
-    primitives::{Address, B256},
+    primitives::{Address, B256, U256},
     providers::Provider,
     rpc::types::{Filter, Log},
     sol,
@@ -22,9 +23,11 @@ use anyhow::{Context, Result, anyhow};
 use zecured_policy::ledger::{Claim, ClaimKind, ClaimState};
 
 sol! {
-    /// The Registry v3 (contracts/src/interfaces/v3/IZecuredRegistry.sol, IZecuredSpendCommits.sol
-    /// and IZecuredDisputes.sol, which the Registry serves through its fallback), as far as the
-    /// signer network, the CLI and the bots use it.
+    /// The Registry (contracts/src/interfaces/v3/IZecuredRegistry.sol, IZecuredSpendCommits.sol
+    /// and IZecuredDisputes.sol, which the Registry serves through its fallback, with v4's changes:
+    /// R-1's `confirmPayout` and `PayoutConfirmed`, section 3's `PayoutProven`, R-11's
+    /// `RefundDormant`, R-16's `ChangeTagOverridden`), as far as the signer network, the CLI and
+    /// the bots use it.
     // `SpendCommitted` has eight fields, and so does the constructor sol! generates for it.
     #[sol(rpc)]
     #[allow(clippy::too_many_arguments)]
@@ -95,7 +98,12 @@ sol! {
         event ReleaseRequested(bytes32 indexed vaultId, bytes32 indexed claimId, uint64 amount, bytes32 destCommitment);
         event LiquidationRelease(bytes32 indexed vaultId, bytes32 indexed claimId, uint64 amount, bytes32 recipientCommitment);
         event CloseRelease(bytes32 indexed vaultId, bytes32 userClaimId, bytes32 mmClaimId, uint64 userAmount, uint64 mmAmount, bytes32 userCommitment, bytes32 mmCommitment);
-        event PayoutConfirmed(bytes32 indexed vaultId, bytes32[] claimIds);
+        event PayoutConfirmed(bytes32 indexed vaultId, bytes32 indexed payoutRef, bytes32[] claimIds);
+        event PayoutProven(bytes32 indexed vaultId, bytes32 indexed claimId, bytes32 payoutRef);
+        event ConfirmationExpired(bytes32 indexed vaultId, bytes32 indexed claimId);
+        event VaultCompensated(bytes32 indexed vaultId, uint64 outstanding);
+        event RefundDormant(bytes32 indexed vaultId, bytes32 indexed claimId);
+        event ChangeTagOverridden(bytes32 indexed tag, bytes32 indexed oldVaultId);
         event DustWrittenOff(bytes32 indexed vaultId, bytes32 indexed claimId, uint64 amount);
         event ClaimBondPaid(bytes32 indexed vaultId, bytes32 indexed claimId);
         event ReimburseDestinationSet(bytes32 indexed vaultId, bytes32 indexed claimId, bytes32 commitment);
@@ -108,10 +116,20 @@ sol! {
 
         function requestRelease(bytes32 vaultId, bytes32 destCommitment) external returns (bytes32 claimId);
         function setRefundDestination(bytes32 claimId, bytes32 destCommitment) external;
-        function confirmPayout(bytes32 vaultId, bytes32[] claimIds, bytes[] sigs) external;
+        function confirmPayout(bytes32 vaultId, bytes32 payoutRef, bytes32[] claimIds, bytes[] sigs) external;
+        function hashPayoutConfirmation(bytes32 vaultId, bytes32 payoutRef, bytes32[] claimIds) external view returns (bytes32);
+        function payoutConfirmed(bytes32 payoutRef) external view returns (bool);
+        function unprovenConfirmations(bytes32 vaultId) external view returns (uint256);
+        function expireConfirmation(bytes32 claimId) external;
+        function setReimburseDestination(bytes32 claimId, bytes32 commitment, uint64 deadline, bytes[] sigs) external;
+        function hashReimburseDestination(bytes32 claimId, bytes32 commitment, uint64 deadline) external view returns (bytes32);
+        function markRefundDormant(bytes32 claimId) external;
         function commitSpend(SpendCommit c, bytes[] sigs) external;
         function disputePayout(bytes32 claimId) external;
         function reopenDisputedClaim(bytes32 claimId) external;
+        function lastCommitAt(bytes32 inputTag) external view returns (uint40);
+        function inclusionWindow() external view returns (uint64);
+        function lockedZatoshi() external view returns (uint256);
         function vaultOf(address account) external view returns (bytes32 vaultId);
         function vault(bytes32 vaultId) external view returns (address account, uint64 outstanding, uint8 status);
         function vaultDetails(bytes32 vaultId) external view returns (VaultDetails memory);
@@ -132,17 +150,21 @@ sol! {
         function openVaultCount() external view returns (uint256);
         function intake() external view returns (address);
         function slasher() external view returns (address);
+        function compensator() external view returns (address);
         function signerBond() external view returns (address);
         function signers() external view returns (address[5] memory);
     }
 }
 
 sol! {
-    /// The Intake (contracts/src/interfaces/v3/IZecuredIntake.sol): deposit proofs and pending
-    /// activations (K3). The image id a seal was made for is an argument, which the Intake checks
-    /// against the verifier version registry (design notes T-07a).
+    /// The Intake (contracts/src/interfaces/v3/IZecuredIntake.sol, with v4's pending refunds,
+    /// R-12): deposit proofs, pending activations and refunds (K3), and the gates of minting. The
+    /// image id a seal was made for is an argument, which the Intake checks against the verifier
+    /// version registry (design notes T-07a).
     #[sol(rpc)]
     interface IZecuredIntake {
+        /// `versionId` (v4, R-14): the deposit version whose seal proved it; once that version is
+        /// no longer active the activation can only be dropped.
         #[derive(Debug, PartialEq, Eq)]
         struct PendingActivation {
             address account;
@@ -151,17 +173,53 @@ sol! {
             bytes32 anchor;
             uint256 readyHeight;
             uint256 readyTime;
+            bytes32 versionId;
         }
+        /// v4 (R-12): a proven deposit landing as a refund, waiting like an activation; keyed by
+        /// its deposit tag. `reason` is the Intake's `RefundReason`.
+        #[derive(Debug, PartialEq, Eq)]
+        struct PendingRefund {
+            bytes32 vaultId;
+            address account;
+            uint64 amount;
+            uint8 reason;
+            bytes32 anchor;
+            uint256 readyHeight;
+            uint256 readyTime;
+            bytes32 versionId;
+        }
+        #[derive(Debug, PartialEq, Eq)]
+        struct WorkTier {
+            uint64 maxAmountZat;
+            uint256 minWork;
+        }
+
+        event RefundPending(bytes32 indexed vaultId, bytes32 indexed depositTag, uint8 reason, uint256 readyHeight, uint256 readyTime);
+        event PendingRefundDropped(bytes32 indexed vaultId, bytes32 indexed depositTag);
 
         function attestDepositWithProof(bytes journal, bytes seal, bytes32 imageId, bytes[] openedSigs) external;
         function finalizeActivation(bytes32 vaultId) external;
         function dropPendingActivation(bytes32 vaultId) external;
         function refundPending(bytes32 vaultId) external returns (bytes32 claimId);
+        function finalizeRefund(bytes32 depositTag) external returns (bytes32 claimId);
+        function dropPendingRefund(bytes32 depositTag) external;
+        function pauseMinting(uint64 until, uint256 nonce, uint64 deadline, bytes[] sigs) external;
+        function unpauseMinting(uint256 nonce, uint64 deadline, bytes[] sigs) external;
         function pendingActivation(bytes32 vaultId) external view returns (PendingActivation memory);
+        function pendingRefund(bytes32 depositTag) external view returns (PendingRefund memory);
+        function pendingRefundTotal() external view returns (uint64);
         function journalV2() external view returns (bool);
         function minRefundZat() external view returns (uint64);
         function minConfirmationWorkFor(uint64 amount) external view returns (uint256);
+        function workTiers() external view returns (WorkTier[] memory);
         function mintingPaused() external view returns (bool);
+        function mintBlock(uint64 amount) external view returns (uint8);
+        function capRoom() external view returns (uint256);
+        function maxTotalZat() external view returns (uint64);
+        function pendingTotal() external view returns (uint64);
+        function guardNonce() external view returns (uint256);
+        function hashPauseMinting(uint64 until, uint256 nonce, uint64 deadline) external view returns (bytes32);
+        function hashUnpauseMinting(uint256 nonce, uint64 deadline) external view returns (bytes32);
         function relay() external view returns (address);
         function signerBond() external view returns (address);
         function versions() external view returns (address);
@@ -169,31 +227,88 @@ sol! {
 }
 
 sol! {
-    /// The slasher (contracts/src/interfaces/v3/IZecuredSlasher.sol), as far as the signer network
-    /// uses it: the compromised flag (T-04) and inclusion proofs of disputed payouts (T-05 (a)).
+    /// The slasher (contracts/src/interfaces/v3/IZecuredSlasher.sol, with v4's batch of inclusion
+    /// proofs, section 3), as far as the signer network uses it: the compromised and frozen flags
+    /// (T-04), inclusion proofs of payouts (T-05 (a), proven delivery), and the executed cases whose
+    /// journals prove a payout's inclusion too (R-2). `kind` is the slasher's `ViolationKind`
+    /// (values below).
     #[sol(rpc)]
     interface IZecuredSlasher {
+        /// The contract's `ViolationCase`; its `ref` field is named `reference` here (a Rust keyword
+        /// otherwise; the ABI is positional).
+        #[derive(Debug, PartialEq, Eq)]
+        struct ViolationCase {
+            uint8 kind;
+            bytes32 anchor;
+            address beneficiary;
+            bytes32 reference;
+            bytes32 noteTag;
+            bytes32 vaultId;
+            uint8 signerBitmap;
+            uint64 executableAt;
+            bool executed;
+            uint64 value;
+        }
+
+        event ViolationExecuted(bytes32 indexed caseId, uint256 slashed);
+        event VaultCompromised(bytes32 indexed vaultId, bytes32 indexed caseId);
+
         function isCompromised(bytes32 vaultId) external view returns (bool);
+        function vaultFrozen(bytes32 vaultId) external view returns (bool);
+        function compromisedAt(bytes32 vaultId) external view returns (uint64);
+        function frozenSince(bytes32 vaultId) external view returns (uint64);
+        function caseOf(bytes32 caseId) external view returns (ViolationCase memory);
         function proveInclusion(bytes journal, bytes seal, bytes32 imageId, bytes32 claimId) external;
+        function proveInclusionBatch(bytes journal, bytes seal, bytes32 imageId, bytes32[] claimIds) external returns (uint256 upheld);
+        function proveInclusionByCase(bytes32 caseId, bytes32[] claimIds) external returns (uint256 upheld);
         function slashConfirmationWork() external view returns (uint256);
         function relay() external view returns (address);
         function versions() external view returns (address);
+        function compensator() external view returns (address);
+    }
+}
+
+/// The slasher's `ViolationKind`: F2, a withheld change (the payout committed, its change missing).
+pub const VIOLATION_WITHHELD_CHANGE: u8 = 2;
+/// The slasher's `ViolationKind`: F4, a payout whose claim reference is wrong.
+pub const VIOLATION_WRONG_CLAIM_REF: u8 = 4;
+
+sol! {
+    /// The compensator (contracts/src/interfaces/v3/IZecuredCompensator.sol), as far as the
+    /// coordinator follows it: R-19's burn of a compromised vault's collateral down to the LLTV,
+    /// which anyone may run again when the one inside `executeSlash` failed.
+    #[sol(rpc)]
+    interface IZecuredCompensator {
+        event CollateralBurned(bytes32 indexed vaultId, uint64 retired);
+
+        function burnCollateral(bytes32 vaultId) external returns (uint64 retired);
     }
 }
 
 sol! {
-    /// SignerBond v2 (contracts/src/interfaces/v3/ISignerBond.sol): the liveness period (T-05) and
-    /// the halt.
+    /// SignerBond v2 (contracts/src/interfaces/v3/ISignerBond.sol, with v4's liveness receipts,
+    /// R-5): the liveness clock (T-05), the halt and the bonds.
     #[sol(rpc)]
     interface ISignerBond {
+        event LivenessArmed(bytes32 indexed claimId, bytes32 commitment, uint64 payableAt);
+
+        function armLiveness(bytes32 claimId, uint64 receivedAt, bytes signature) external;
+        function hashDestinationReceived(bytes32 claimId, bytes32 commitment, uint64 receivedAt) external view returns (bytes32);
+        function livenessDue(bytes32 claimId) external view returns (uint64 dueAt, uint256 amount);
+        function livenessArming(bytes32 claimId) external view returns (bytes32 commitment, uint64 payableAt);
+        function domainSeparator() external view returns (bytes32);
         function livenessPeriod() external view returns (uint64);
+        function commitGrace() external view returns (uint64);
         function halted() external view returns (bool);
+        function fullyBonded() external view returns (bool);
+        function effectiveBond() external view returns (uint256);
     }
 }
 
 sol! {
-    /// The verifier version registry (design notes T-07a): the guest image ids, with their RISC Zero
-    /// router selector and (deposits) consensus branch ids, that Base accepts proofs of.
+    /// The verifier version registry (design notes T-07a, with v4's `Swap` kind): the guest image
+    /// ids, with their RISC Zero router selector and (deposits) consensus branch ids, that Base
+    /// accepts proofs of.
     #[sol(rpc)]
     interface IZecuredVersions {
         #[derive(Debug, PartialEq, Eq)]
@@ -206,10 +321,24 @@ sol! {
             bool removed;
         }
 
+        function scheduleVersion(uint8 kind, bytes4 selector, bytes32 imageId, uint32[4] branches, uint256 nonce, uint64 deadline, bytes[] sigs) external returns (bytes32 versionId);
+        function removeVersion(bytes32 versionId, uint256 nonce, uint64 deadline, bytes[] sigs) external;
         function versionIds(uint8 kind) external view returns (bytes32[] memory);
         function version(bytes32 versionId) external view returns (Version memory);
         function isActive(bytes32 versionId) external view returns (bool);
+        /// v4 (R-22): active, and the router still verifies its selector's seals.
+        function isWorking(bytes32 versionId) external view returns (bool);
         function branchAllowed(bytes32 versionId, uint32 branchId) external view returns (bool);
+        function nonce() external view returns (uint256);
+        function hashScheduleVersion(uint8 kind, bytes4 selector, bytes32 imageId, uint32[4] branches, uint256 nonce, uint64 deadline) external view returns (bytes32);
+        function hashRemoveVersion(bytes32 versionId, uint256 nonce, uint64 deadline) external view returns (bytes32);
+    }
+}
+
+sol! {
+    /// The SettlementAdapter's events the coordinator follows (v4 pre-liquidation, section 4).
+    interface ISettlementAdapterEvents {
+        event PreLiquidated(bytes32 indexed vaultId, address indexed account, address indexed liquidator, uint256 repaidAssets, uint64 seized);
     }
 }
 
@@ -235,12 +364,19 @@ sol! {
         function bestChainTip() external view returns (bytes32 blockHash, uint256 height, uint256 chainWork);
         function bestBlockHashAt(uint256 height) external view returns (bytes32);
         function confirmationWork(bytes32 blockHash) external view returns (uint256);
+        function networkId() external view returns (bytes32);
     }
 }
 
-/// `VersionKind.Deposit` and `VersionKind.Violation` of the verifier version registry (T-07a).
+/// `VersionKind.Deposit`, `VersionKind.Violation` and (v4) `VersionKind.Swap` of the verifier
+/// version registry (T-07a).
 pub const VERSION_DEPOSIT: u8 = 0;
 pub const VERSION_VIOLATION: u8 = 1;
+pub const VERSION_SWAP: u8 = 2;
+
+/// `MintBlock.CapExceeded` of the Intake (`mintBlock(amount)`): the coverage cap has no room; from
+/// v4 a proof that would activate a new vault reverts instead of landing as a refund (R-11.1).
+pub const MINT_BLOCK_CAP_EXCEEDED: u8 = 4;
 
 /// The verifier version registry's id of `(kind, selector, imageId)`:
 /// `keccak256(abi.encode(kind, selector, imageId))` (`IZecuredVersions.versionIdOf`).
@@ -270,11 +406,21 @@ pub enum ClaimChange {
     /// `PayoutDisputed` (T-05 (a)): its claimant disputes the confirmation; unpaid on Base until a
     /// committed payout of its input is proven mined, or until the claim is reopened after `due_at`.
     Disputed { due_at: u64 },
-    /// `PayoutUpheld`: a committed payout of its input (`payout_ref`) was proven mined: paid.
+    /// `PayoutUpheld`: a committed payout of its input (`payout_ref`) was proven mined: paid, and
+    /// final (v4: `paidAt` cleared).
     Upheld { payout_ref: B256 },
     /// `DisputedClaimReopened`: nobody proved its payout in time: pending again, still bound to its
     /// input.
     Reopened,
+    /// v4 `PayoutProven` (proven delivery): a committed payout of its input (`payout_ref`) was
+    /// proven mined, outside a dispute: paid and final (`paidAt == 0`), never disputable again.
+    Proven { payout_ref: B256 },
+    /// v4 `ConfirmationExpired` (R-3): nobody disputed the claim's confirmation within its window:
+    /// paid and final (`paidAt == 0`), like a proven claim, though no payout was proven.
+    Expired,
+    /// v4 `RefundDormant` (R-11): a Refund claim without a destination for `refundDormancy` left the
+    /// coverage cap until its account gives one. Nothing changes in the books.
+    Dormant,
 }
 
 /// A Registry event, reduced to what the signer network needs.
@@ -302,14 +448,75 @@ pub enum RegistryEvent {
     Claims(Vec<Claim>),
     /// An existing claim changed.
     ClaimChanged { claim_id: B256, change: ClaimChange },
-    /// Claims were confirmed as paid on Base.
-    PayoutConfirmed(Vec<B256>),
+    /// Claims were confirmed as paid on Base by three signers' word, for the payout `payout_ref`
+    /// (R-1); disputable for `disputeWindow` until proven.
+    PayoutConfirmed { payout_ref: B256, claims: Vec<B256> },
+    /// R-16: a deposit took the tag `tag` that a commitment of this vault (the event's vault, the
+    /// old owner of the tag) had registered as a change tag: another vault's deposit, or a refund to
+    /// this same vault (R-12). An honest commitment's change can never carry a deposit's tag: the
+    /// commitment's signers registered a false record.
+    ChangeTagOverridden { tag: B256 },
+    /// Tier 3: a payout of `input_tag` was committed (`payout_ref`, for `claims`). The coordinator
+    /// follows it to prove the payout's delivery (section 3); signer nodes read the records they
+    /// signed straight from the Registry.
+    SpendCommitted {
+        payout_ref: B256,
+        input_tag: B256,
+        claims: Vec<B256>,
+    },
+    /// The Intake (R-12): a refund proof is pending until the relay has moved on.
+    RefundPending {
+        deposit_tag: B256,
+        reason: u8,
+        ready_height: u64,
+        ready_time: u64,
+    },
+    /// The Intake (R-12): a pending refund was dropped (its anchor left the best chain, or its
+    /// version was removed); the deposit can be proven again.
+    PendingRefundDropped { deposit_tag: B256 },
+    /// The bond (R-5): a claim's liveness clock was armed with a signer's receipt. The event names
+    /// no vault: [`VaultEvent::vault_id`] is zero, the claim says which.
+    LivenessArmed {
+        claim_id: B256,
+        commitment: B256,
+        payable_at: u64,
+    },
+    /// The Adapter (section 4): a pre-liquidation seized `seized` zatoshi for `repaid_assets` of the
+    /// debt; the Registry's `LiquidationRelease` creates the claim.
+    PreLiquidated { repaid_assets: U256, seized: u64 },
+    /// The slasher: case `case_id` was executed. `ViolationExecuted` names neither the case's vault
+    /// nor its kind: as decoded, [`VaultEvent::vault_id`] is zero, `kind` 0 and `payout_ref` zero, and
+    /// the coordinator reads the case (`caseOf`) to fill them in. An executed F2 or F4 case proves
+    /// its committed payout `payout_ref` is in a block (R-2: `proveInclusionByCase`).
+    CaseExecuted { case_id: B256, kind: u8, payout_ref: B256 },
+    /// The slasher: an executed F1 or F2 case compromised the vault (T-04): the compensator settles
+    /// its claims, and burns its collateral down to the LLTV (R-19).
+    VaultCompromised { case_id: B256 },
+    /// The compensator (R-19): `retired` zatoshi of the compromised vault's collateral were burned.
+    CollateralBurned { retired: u64 },
+    /// The Registry (R-20): the compensator settled the compromised vault while it stays active; it
+    /// no longer counts as open or locked.
+    VaultCompensated { outstanding: u64 },
 }
 
 impl RegistryEvent {
-    /// Whether signer nodes apply it: the reservation events matter to the coordinator only.
+    /// Whether signer nodes apply it: the reservation events, the Tier 3 commitments and the other
+    /// contracts' events matter to the coordinator only.
     pub fn for_signers(&self) -> bool {
-        !matches!(self, RegistryEvent::Reserved { .. } | RegistryEvent::ReservationReleased)
+        !matches!(
+            self,
+            RegistryEvent::Reserved { .. }
+                | RegistryEvent::ReservationReleased
+                | RegistryEvent::SpendCommitted { .. }
+                | RegistryEvent::RefundPending { .. }
+                | RegistryEvent::PendingRefundDropped { .. }
+                | RegistryEvent::LivenessArmed { .. }
+                | RegistryEvent::PreLiquidated { .. }
+                | RegistryEvent::CaseExecuted { .. }
+                | RegistryEvent::VaultCompromised { .. }
+                | RegistryEvent::CollateralBurned { .. }
+                | RegistryEvent::VaultCompensated { .. }
+        )
     }
 }
 
@@ -501,26 +708,87 @@ where
     Ok(logs)
 }
 
-//// Registry events in blocks `from..=to`, in chain order. A Fee claim's commitment, which its
-/// event does not carry, is the Registry's `feeCommitment` (the same for every vault, T-06).
+/// The contracts whose events the coordinator follows (a zero address: none on this deployment).
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub struct Contracts {
+    pub registry: Address,
+    pub intake: Address,
+    pub bond: Address,
+    pub adapter: Address,
+    pub slasher: Address,
+    pub compensator: Address,
+}
+
+impl Contracts {
+    fn addresses(&self) -> Vec<Address> {
+        [
+            self.registry,
+            self.intake,
+            self.bond,
+            self.adapter,
+            self.slasher,
+            self.compensator,
+        ]
+        .into_iter()
+        .filter(|a| *a != Address::ZERO)
+        .collect()
+    }
+}
+
+/// The Registry's events in blocks `from..=to` that signer nodes apply ([`RegistryEvent::for_signers`]),
+/// in chain order. A Fee claim's commitment, which its event does not carry, is the Registry's
+/// `feeCommitment` (the same for every vault, T-06).
 pub async fn fetch<P: Provider>(provider: &P, registry: Address, from: u64, to: u64) -> Result<Vec<VaultEvent>> {
+    let contracts = Contracts {
+        registry,
+        ..Contracts::default()
+    };
+    fetch_events(provider, &contracts, from, to, true).await
+}
+
+/// Every event of the deployment's contracts in blocks `from..=to`, in chain order: the Registry's
+/// (those signer nodes ignore included), the Intake's pending refunds, the bond's liveness arming
+/// and the Adapter's pre-liquidations (the coordinator's view).
+pub async fn fetch_deployment<P: Provider>(
+    provider: &P,
+    contracts: &Contracts,
+    from: u64,
+    to: u64,
+) -> Result<Vec<VaultEvent>> {
+    fetch_events(provider, contracts, from, to, false).await
+}
+
+async fn fetch_events<P: Provider>(
+    provider: &P,
+    contracts: &Contracts,
+    from: u64,
+    to: u64,
+    signers_only: bool,
+) -> Result<Vec<VaultEvent>> {
     if from > to {
         return Ok(vec![]);
     }
-    let logs = get_logs_chunked(from, to, |a, b| async move {
-        let filter = Filter::new().address(registry).from_block(a).to_block(b);
-        provider.get_logs(&filter).await.map_err(anyhow::Error::from)
+    let addresses = contracts.addresses();
+    let logs = get_logs_chunked(from, to, |a, b| {
+        let addresses = addresses.clone();
+        async move {
+            let filter = Filter::new().address(addresses).from_block(a).to_block(b);
+            provider.get_logs(&filter).await.map_err(anyhow::Error::from)
+        }
     })
     .await?;
-    let logs = registry_logs(logs, registry);
+    let registry = contracts.registry;
     let mut timestamps: HashMap<u64, u64> = HashMap::new();
     let mut fee_commitment: Option<B256> = None;
     let mut out = Vec::with_capacity(logs.len());
-    for log in logs {
-        // Logs the signer network does not use (Tier 3 commitments) cost no block lookup.
-        let Some(mut ev) = decode(&log, 0)? else {
+    for log in logs.into_iter().filter(|l| !l.removed) {
+        // Logs nobody here uses (and, for the nodes, those they do not apply) cost no block lookup.
+        let Some(mut ev) = decode_from(&log, 0, contracts)? else {
             continue;
         };
+        if signers_only && !ev.event.for_signers() {
+            continue;
+        }
         let block = ev.block;
         let timestamp = match log.block_timestamp {
             Some(t) => t,
@@ -567,16 +835,142 @@ pub fn registry_logs(logs: Vec<Log>, registry: Address) -> Vec<Log> {
     logs.into_iter().filter(|l| l.inner.address == registry && !l.removed).collect()
 }
 
-/// Decodes one Registry log; `created_at` is its block's timestamp. Unknown logs and Tier 3
-/// commitments (each node reads the record it signed straight from the Registry) are ignored. A
-/// Fee claim's commitment is left zero ([`fetch`] fills it in).
+/// Decodes one log of a deployment contract by its address (a log of any other address is
+/// ignored); `created_at` is its block's timestamp.
+pub fn decode_from(log: &Log, created_at: u64, contracts: &Contracts) -> Result<Option<VaultEvent>> {
+    let address = log.inner.address;
+    if address == Address::ZERO {
+        return Ok(None);
+    }
+    if address == contracts.registry {
+        decode(log, created_at)
+    } else if address == contracts.intake {
+        decode_intake(log, created_at)
+    } else if address == contracts.bond {
+        decode_bond(log, created_at)
+    } else if address == contracts.adapter {
+        decode_adapter(log, created_at)
+    } else if address == contracts.slasher {
+        decode_slasher(log, created_at)
+    } else if address == contracts.compensator {
+        decode_compensator(log, created_at)
+    } else {
+        Ok(None)
+    }
+}
+
+/// The block number and log index of a log.
+fn position(log: &Log) -> Result<(u64, u64)> {
+    Ok((log.block_number.context("log without block number")?, log.log_index.context("log without index")?))
+}
+
+fn vault_event(log: &Log, created_at: u64, vault_id: B256, event: RegistryEvent) -> Result<Option<VaultEvent>> {
+    let (block, log_index) = position(log)?;
+    Ok(Some(VaultEvent {
+        vault_id,
+        block,
+        log_index,
+        block_hash: log.block_hash,
+        timestamp: created_at,
+        event,
+    }))
+}
+
+/// Decodes one Intake log (R-12's pending refunds); other Intake events are ignored.
+pub fn decode_intake(log: &Log, created_at: u64) -> Result<Option<VaultEvent>> {
+    use IZecuredIntake::IZecuredIntakeEvents as E;
+    let Ok(decoded) = E::decode_log(&log.inner) else {
+        return Ok(None);
+    };
+    let (vault_id, event) = match decoded.data {
+        E::RefundPending(e) => (
+            e.vaultId,
+            RegistryEvent::RefundPending {
+                deposit_tag: e.depositTag,
+                reason: e.reason,
+                ready_height: u64::try_from(e.readyHeight).unwrap_or(u64::MAX),
+                ready_time: u64::try_from(e.readyTime).unwrap_or(u64::MAX),
+            },
+        ),
+        E::PendingRefundDropped(e) => (
+            e.vaultId,
+            RegistryEvent::PendingRefundDropped {
+                deposit_tag: e.depositTag,
+            },
+        ),
+    };
+    vault_event(log, created_at, vault_id, event)
+}
+
+/// Decodes one bond log (R-5's `LivenessArmed`, which names a claim, no vault).
+pub fn decode_bond(log: &Log, created_at: u64) -> Result<Option<VaultEvent>> {
+    use ISignerBond::ISignerBondEvents as E;
+    let Ok(decoded) = E::decode_log(&log.inner) else {
+        return Ok(None);
+    };
+    let E::LivenessArmed(e) = decoded.data;
+    let event = RegistryEvent::LivenessArmed {
+        claim_id: e.claimId,
+        commitment: e.commitment,
+        payable_at: e.payableAt,
+    };
+    vault_event(log, created_at, B256::ZERO, event)
+}
+
+/// Decodes one Adapter log (section 4's `PreLiquidated`).
+pub fn decode_adapter(log: &Log, created_at: u64) -> Result<Option<VaultEvent>> {
+    use ISettlementAdapterEvents::ISettlementAdapterEventsEvents as E;
+    let Ok(decoded) = E::decode_log(&log.inner) else {
+        return Ok(None);
+    };
+    let E::PreLiquidated(e) = decoded.data;
+    let event = RegistryEvent::PreLiquidated {
+        repaid_assets: e.repaidAssets,
+        seized: e.seized,
+    };
+    vault_event(log, created_at, e.vaultId, event)
+}
+
+/// Decodes one slasher log: an executed case (vault, kind and payout left for the coordinator to
+/// read, see [`RegistryEvent::CaseExecuted`]) or a compromised vault; other slasher events are
+/// ignored.
+pub fn decode_slasher(log: &Log, created_at: u64) -> Result<Option<VaultEvent>> {
+    use IZecuredSlasher::IZecuredSlasherEvents as E;
+    let Ok(decoded) = E::decode_log(&log.inner) else {
+        return Ok(None);
+    };
+    let (vault_id, event) = match decoded.data {
+        E::ViolationExecuted(e) => (
+            B256::ZERO,
+            RegistryEvent::CaseExecuted {
+                case_id: e.caseId,
+                kind: 0,
+                payout_ref: B256::ZERO,
+            },
+        ),
+        E::VaultCompromised(e) => (e.vaultId, RegistryEvent::VaultCompromised { case_id: e.caseId }),
+    };
+    vault_event(log, created_at, vault_id, event)
+}
+
+/// Decodes one compensator log (R-19's `CollateralBurned`); other compensator events are ignored.
+pub fn decode_compensator(log: &Log, created_at: u64) -> Result<Option<VaultEvent>> {
+    use IZecuredCompensator::IZecuredCompensatorEvents as E;
+    let Ok(decoded) = E::decode_log(&log.inner) else {
+        return Ok(None);
+    };
+    let E::CollateralBurned(e) = decoded.data;
+    vault_event(log, created_at, e.vaultId, RegistryEvent::CollateralBurned { retired: e.retired })
+}
+
+/// Decodes one Registry log; `created_at` is its block's timestamp. Unknown logs are ignored. A Fee
+/// claim's commitment is left zero ([`fetch`] fills it in).
 pub fn decode(log: &Log, created_at: u64) -> Result<Option<VaultEvent>> {
     use IZecuredRegistry::IZecuredRegistryEvents as E;
     let Ok(decoded) = E::decode_log(&log.inner) else {
         return Ok(None);
     };
-    let block = log.block_number.context("log without block number")?;
-    let log_index = log.log_index.context("log without index")?;
+    let (block, log_index) = position(log)?;
     let order = (block, log_index);
     let claim = |id: B256, kind, amount: u64, commitment: B256, partner: Option<B256>| Claim {
         id: id.0,
@@ -589,6 +983,8 @@ pub fn decode(log: &Log, created_at: u64) -> Result<Option<VaultEvent>> {
         state: ClaimState::Unpaid,
         refund_tag: None,
         bond_paid: false,
+        proven: false,
+        confirmed_at: 0,
     };
     let changed = |claim_id: B256, change: ClaimChange| RegistryEvent::ClaimChanged { claim_id, change };
     let (vault_id, event) = match decoded.data {
@@ -666,8 +1062,39 @@ pub fn decode(log: &Log, created_at: u64) -> Result<Option<VaultEvent>> {
             ),
         ),
         E::DisputedClaimReopened(e) => (e.vaultId, changed(e.claimId, ClaimChange::Reopened)),
-        E::PayoutConfirmed(e) => (e.vaultId, RegistryEvent::PayoutConfirmed(e.claimIds)),
-        E::SpendCommitted(_) => return Ok(None),
+        E::PayoutProven(e) => (
+            e.vaultId,
+            changed(
+                e.claimId,
+                ClaimChange::Proven {
+                    payout_ref: e.payoutRef,
+                },
+            ),
+        ),
+        E::ConfirmationExpired(e) => (e.vaultId, changed(e.claimId, ClaimChange::Expired)),
+        E::VaultCompensated(e) => (
+            e.vaultId,
+            RegistryEvent::VaultCompensated {
+                outstanding: e.outstanding,
+            },
+        ),
+        E::RefundDormant(e) => (e.vaultId, changed(e.claimId, ClaimChange::Dormant)),
+        E::PayoutConfirmed(e) => (
+            e.vaultId,
+            RegistryEvent::PayoutConfirmed {
+                payout_ref: e.payoutRef,
+                claims: e.claimIds,
+            },
+        ),
+        E::ChangeTagOverridden(e) => (e.oldVaultId, RegistryEvent::ChangeTagOverridden { tag: e.tag }),
+        E::SpendCommitted(e) => (
+            e.vaultId,
+            RegistryEvent::SpendCommitted {
+                payout_ref: e.payoutRef,
+                input_tag: e.inputTag,
+                claims: e.claimIds,
+            },
+        ),
     };
     Ok(Some(VaultEvent {
         vault_id,
@@ -809,6 +1236,7 @@ mod tests {
     fn only_live_registry_logs_are_kept() {
         let ev = IZecuredRegistry::PayoutConfirmed {
             vaultId: B256::repeat_byte(1),
+            payoutRef: B256::repeat_byte(3),
             claimIds: vec![B256::repeat_byte(2)],
         };
         let registry = Address::repeat_byte(0xaa);
@@ -956,12 +1384,232 @@ mod tests {
                 .encode_log_data(),
                 ClaimChange::Reopened,
             ),
+            (
+                IZecuredRegistry::PayoutProven {
+                    vaultId: vault,
+                    claimId: id,
+                    payoutRef: commitment,
+                }
+                .encode_log_data(),
+                ClaimChange::Proven { payout_ref: commitment },
+            ),
+            (
+                IZecuredRegistry::RefundDormant {
+                    vaultId: vault,
+                    claimId: id,
+                }
+                .encode_log_data(),
+                ClaimChange::Dormant,
+            ),
         ];
         for (data, change) in cases {
             let got = decode(&rpc_log(data, 12, 3), 100).unwrap().unwrap();
             assert_eq!(got.vault_id, vault);
             assert_eq!(got.event, RegistryEvent::ClaimChanged { claim_id: id, change });
+            assert!(got.event.for_signers());
         }
+    }
+
+    /// v4's Registry events: R-1's confirmation names its payout, R-16's override names the old
+    /// owner of the tag as the event's vault, and Tier 3 commitments are decoded for the coordinator.
+    #[test]
+    fn v4_registry_events_are_decoded() {
+        let (vault, payout) = (B256::repeat_byte(6), B256::repeat_byte(0xaa));
+        let ids = vec![B256::repeat_byte(7), B256::repeat_byte(8)];
+        let got = decode(
+            &rpc_log(
+                IZecuredRegistry::PayoutConfirmed {
+                    vaultId: vault,
+                    payoutRef: payout,
+                    claimIds: ids.clone(),
+                }
+                .encode_log_data(),
+                12,
+                3,
+            ),
+            100,
+        )
+        .unwrap()
+        .unwrap();
+        assert_eq!(
+            got.event,
+            RegistryEvent::PayoutConfirmed {
+                payout_ref: payout,
+                claims: ids.clone()
+            }
+        );
+        assert!(got.event.for_signers());
+
+        let old = B256::repeat_byte(9);
+        let got = decode(
+            &rpc_log(
+                IZecuredRegistry::ChangeTagOverridden {
+                    tag: B256::repeat_byte(0x7a),
+                    oldVaultId: old,
+                }
+                .encode_log_data(),
+                12,
+                4,
+            ),
+            100,
+        )
+        .unwrap()
+        .unwrap();
+        assert_eq!(got.vault_id, old);
+        assert_eq!(
+            got.event,
+            RegistryEvent::ChangeTagOverridden {
+                tag: B256::repeat_byte(0x7a)
+            }
+        );
+        assert!(got.event.for_signers());
+
+        let committed = IZecuredRegistry::SpendCommitted {
+            vaultId: vault,
+            payoutRef: payout,
+            inputTag: B256::repeat_byte(0x66),
+            claimIds: ids.clone(),
+            claimRefs: vec![B256::repeat_byte(1), B256::repeat_byte(2)],
+            changeTag: B256::repeat_byte(0xbb),
+            changeValue: 1_000,
+            signerBitmap: 7,
+        };
+        let got = decode(&rpc_log(committed.encode_log_data(), 12, 5), 100).unwrap().unwrap();
+        assert_eq!(
+            got.event,
+            RegistryEvent::SpendCommitted {
+                payout_ref: payout,
+                input_tag: B256::repeat_byte(0x66),
+                claims: ids
+            }
+        );
+        assert!(!got.event.for_signers(), "the coordinator's only");
+    }
+
+    /// The other contracts' events, by the address that emitted them: the Intake's pending refunds
+    /// (R-12), the bond's arming (R-5, which names no vault) and the Adapter's pre-liquidations.
+    #[test]
+    fn deployment_events_are_decoded_by_their_contract() {
+        let contracts = Contracts {
+            registry: Address::repeat_byte(0xaa),
+            intake: Address::repeat_byte(0xa1),
+            bond: Address::repeat_byte(0xa2),
+            adapter: Address::repeat_byte(0xa3),
+            slasher: Address::repeat_byte(0xa4),
+            compensator: Address::repeat_byte(0xa5),
+        };
+        let at = |data: LogData, address: Address| {
+            let mut log = rpc_log(data, 20, 1);
+            log.inner.address = address;
+            decode_from(&log, 300, &contracts).unwrap()
+        };
+        let (vault, tag) = (B256::repeat_byte(6), B256::repeat_byte(0x7a));
+        let pending = IZecuredIntake::RefundPending {
+            vaultId: vault,
+            depositTag: tag,
+            reason: 5,
+            readyHeight: U256::from(4_500_000),
+            readyTime: U256::from(1_800_000_000),
+        };
+        let got = at(pending.encode_log_data(), contracts.intake).unwrap();
+        assert_eq!(got.vault_id, vault);
+        assert_eq!(
+            got.event,
+            RegistryEvent::RefundPending {
+                deposit_tag: tag,
+                reason: 5,
+                ready_height: 4_500_000,
+                ready_time: 1_800_000_000
+            }
+        );
+        assert!(!got.event.for_signers());
+        let dropped = IZecuredIntake::PendingRefundDropped {
+            vaultId: vault,
+            depositTag: tag,
+        };
+        assert_eq!(
+            at(dropped.encode_log_data(), contracts.intake).unwrap().event,
+            RegistryEvent::PendingRefundDropped { deposit_tag: tag }
+        );
+        let armed = ISignerBond::LivenessArmed {
+            claimId: B256::repeat_byte(7),
+            commitment: B256::repeat_byte(8),
+            payableAt: 1_700_000_000,
+        };
+        let got = at(armed.encode_log_data(), contracts.bond).unwrap();
+        assert_eq!(got.vault_id, B256::ZERO, "the event names a claim, not a vault");
+        assert_eq!(
+            got.event,
+            RegistryEvent::LivenessArmed {
+                claim_id: B256::repeat_byte(7),
+                commitment: B256::repeat_byte(8),
+                payable_at: 1_700_000_000
+            }
+        );
+        let pre = ISettlementAdapterEvents::PreLiquidated {
+            vaultId: vault,
+            account: Address::repeat_byte(1),
+            liquidator: Address::repeat_byte(2),
+            repaidAssets: U256::from(1_500_000),
+            seized: 123_456,
+        };
+        let got = at(pre.encode_log_data(), contracts.adapter).unwrap();
+        assert_eq!(
+            (got.vault_id, got.event),
+            (
+                vault,
+                RegistryEvent::PreLiquidated {
+                    repaid_assets: U256::from(1_500_000),
+                    seized: 123_456
+                }
+            )
+        );
+        // The same log from an address that is not the deployment's: ignored.
+        assert!(at(pre.encode_log_data(), Address::repeat_byte(0xee)).is_none());
+        assert!(at(armed.encode_log_data(), contracts.intake).is_none(), "a bond event from the Intake");
+        // The slasher: an executed case names no vault (the coordinator reads the case), a
+        // compromise does; the compensator's burn and the Registry's R-20 settlement.
+        let case = B256::repeat_byte(0xca);
+        let executed = IZecuredSlasher::ViolationExecuted {
+            caseId: case,
+            slashed: U256::from(1),
+        };
+        let got = at(executed.encode_log_data(), contracts.slasher).unwrap();
+        assert_eq!(
+            (got.vault_id, got.event.clone()),
+            (
+                B256::ZERO,
+                RegistryEvent::CaseExecuted {
+                    case_id: case,
+                    kind: 0,
+                    payout_ref: B256::ZERO
+                }
+            )
+        );
+        assert!(!got.event.for_signers());
+        let compromised = IZecuredSlasher::VaultCompromised {
+            vaultId: vault,
+            caseId: case,
+        };
+        let got = at(compromised.encode_log_data(), contracts.slasher).unwrap();
+        assert_eq!((got.vault_id, got.event), (vault, RegistryEvent::VaultCompromised { case_id: case }));
+        let burned = IZecuredCompensator::CollateralBurned {
+            vaultId: vault,
+            retired: 400_000,
+        };
+        let got = at(burned.encode_log_data(), contracts.compensator).unwrap();
+        assert_eq!((got.vault_id, got.event), (vault, RegistryEvent::CollateralBurned { retired: 400_000 }));
+        let compensated = IZecuredRegistry::VaultCompensated {
+            vaultId: vault,
+            outstanding: 600_000,
+        };
+        let got = at(compensated.encode_log_data(), contracts.registry).unwrap();
+        assert_eq!(
+            (got.vault_id, got.event.clone()),
+            (vault, RegistryEvent::VaultCompensated { outstanding: 600_000 })
+        );
+        assert!(!got.event.for_signers(), "the coordinator's only");
+        assert!(at(burned.encode_log_data(), contracts.slasher).is_none(), "a compensator event from the slasher");
     }
 
     #[test]

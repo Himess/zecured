@@ -1,5 +1,5 @@
 {
-  "_comment": "A local anvil fork of Base Sepolia (scripts/local-fork.sh): a fresh MockUSDC, the MOCK verifier, short windows.",
+  "_comment": "A local anvil fork of Base Sepolia (scripts/local-fork.sh): a fresh MockUSDC, the MOCK verifier, short windows. slashConfirmationWork is about 8 Testnet blocks (about 353,500 work each in October 2026), so that a payout's inclusion proof can land within the fork's 10-minute dispute window; the public configurations keep 38,000,000 (about 108 blocks).",
   "network": "anvil",
   "chainId": 84532,
   "localFork": true,
@@ -17,7 +17,7 @@
   ],
   "capPriceMaxAge": 3600,
   "challengeWindow": 120,
-  "commitGrace": 120,
+  "commitGrace": 7200,
   "coverageBps": 10000,
   "disputeWindow": 600,
   "feeBps": 0,
@@ -40,7 +40,8 @@
   "minWorkFloor": "0",
   "pendingRefundDelay": 300,
   "refundAbandonPeriod": 86400,
-  "slashConfirmationWork": "38000000",
+  "refundDormancy": 600,
+  "slashConfirmationWork": "3000000",
   "slashWorkFloor": "0",
   "tierMaxAmountZat": [
     "18446744073709551615"
@@ -48,7 +49,7 @@
   "tierMinWork": [
     "1000000"
   ],
-  "unbondingPeriod": 1800,
+  "unbondingPeriod": 10800,
   "versionDepositDelay": 600,
   "versionEstopDelay": 600,
   "versionViolationDelay": 600,

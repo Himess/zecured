@@ -230,6 +230,33 @@ A non-conforming note MAY be refunded to an Ironwood receiver that the owner nam
 request. The conforming deposit of a vault that was never activated MAY be refunded once the
 settlement chain has recorded the vault as cancelled, which it MUST then never activate.
 
+## Payment proofs
+
+The same light client lets a settlement chain release an escrowed payment on a shielded payment,
+with no vault and no signer: an *order* on the settlement chain holds the escrow and names an order
+id and a recipient commitment, and whoever paid proves the payment.
+
+A payment proof MUST show, in zero knowledge:
+- a v6 transaction of an epoch the proof allows, with no transparent input or output and no
+  Sapling or Orchard-pool bundle, whose Ironwood bundle has an action creating a note whose
+  opening (recipient, value, `rseed`) the prover knows: the action's ciphertext decrypts, under
+  the ephemeral secret the note derives, to exactly that note, so its recipient can find and spend
+  it;
+- that the note's memo starts with a 4-byte tag and the 32-byte order id, so that one note pays
+  one order even when two orders share a recipient;
+- that `keccak256(salt ‖ receiver)` of the note's recipient equals the order's recipient
+  commitment;
+- that the transaction is in a block committed, through the epoch's ZIP 221 history tree, by a
+  later header the settlement chain has verified (§ Activation).
+
+Its public output MUST be only the epoch's branch id, the later header's hash, the order id, the
+recipient commitment and the note's value; never a transaction id, a note commitment, a nullifier
+or an address. The settlement chain MUST check the header and its confirmation work as for a
+deposit, that the order id and the recipient commitment are the order's, and that the value is at
+least the order's, and SHOULD wait as for an activation before it releases the escrow. The order
+id MUST bind the settlement chain, the escrow contract and the order, so that no proof can be
+replayed on another. A payer SHOULD send with no outgoing viewing key.
+
 # Rationale
 
 - **Ironwood only, exact denomination, one conforming note.** These rules make every signer's
@@ -258,7 +285,7 @@ transactions and the block-time and fee rules of the network the vault runs on.
 Zecured (ZECATHON 2026), in Rust and Solidity:
 - `signer/` holds the signer nodes and the coordinator;
 - `contracts/` holds the settlement contracts;
-- `tier2/` holds the deposit and violation statements and their RISC Zero guests.
+- `tier2/` holds the deposit, violation and payment statements and their RISC Zero guests.
 
 # Open issues
 

@@ -1,5 +1,10 @@
 import Link from "next/link";
+import { LoanTokenName, RealAndMockList } from "@/components/client";
 import { buttonClass, Card } from "@/components/ui";
+import { DEPLOYMENT } from "@/lib/deployment";
+import { SWAP_PRIVACY_SENTENCE } from "@/lib/v4";
+
+const TESTNET = DEPLOYMENT.kind === "testnet";
 
 const steps = [
   {
@@ -8,18 +13,18 @@ const steps = [
   },
   {
     title: "Borrow USDC",
-    body: "Once the signers see your deposit, a non-transferable receipt (zZEC) is minted straight into a Morpho Blue position of a brand-new, gasless smart account. Borrow MockUSDC up to 40 % loan-to-value.",
+    body: "Once a zero-knowledge proof that your deposit is in a Zcash block reaches Base, a non-transferable collateral receipt (zZEC) is minted straight into a Morpho Blue position of a brand-new, gasless smart account. No signer vouches for it. Borrow up to 40 % loan-to-value.",
   },
   {
     title: "Exit without unshielding",
-    body: "Repay and release, or close from collateral: a market maker repays the debt and takes ZEC from the vault, and the rest returns to a new Ironwood address. No outside funds touch your account.",
+    body: "Repay and release, or close from collateral: a market maker repays the debt and takes ZEC from the vault, and the rest returns to a new Ironwood address. Every payout's delivery is proven on Base.",
   },
 ];
 
 const world = [
   {
     who: "Everyone",
-    sees: "A fresh account with no history, a standard-size position, salted commitments.",
+    sees: "A fresh account with no history, a standard-size position, salted commitments. On a swap, the Base account that buys.",
     not: "Who you are, your wallet, your balance, where the ZEC goes.",
   },
   {
@@ -38,19 +43,23 @@ export default function Home() {
   return (
     <div className="space-y-16">
       <section className="space-y-6 pt-4" aria-labelledby="hero">
-        <p className="text-sm font-medium uppercase tracking-widest text-accent">Zecured · testnet</p>
+        <p className="text-sm font-medium uppercase tracking-widest text-accent">Zecured · {TESTNET ? "testnet" : "mainnet beta"}</p>
         <h1 id="hero" className="max-w-3xl text-4xl font-semibold leading-tight tracking-tight sm:text-5xl">
           Borrow against shielded ZEC. Sell nothing. Reveal nothing.
         </h1>
         <p className="max-w-2xl text-lg text-muted">
-          Your ZEC stays in Zcash&apos;s shielded Ironwood pool, in a vault no single party controls. A fresh account on
-          Base borrows USDC against it, and nothing on Base points back to you.
+          Using ZEC in DeFi today usually means taking it out of the shielded pool. Zecured doesn&apos;t: your ZEC stays in
+          Zcash&apos;s shielded Ironwood pool, in a vault no single party controls, and a fresh account on Base borrows{" "}
+          <LoanTokenName /> against it. Nothing on Base points back to you.
         </p>
         <div className="flex flex-wrap gap-3">
           <Link href="/borrow" className={buttonClass("primary", "no-underline")}>
-            Borrow on testnet
+            {TESTNET ? "Borrow on testnet" : "Borrow (invite only)"}
           </Link>
-          <Link href="/prepare" className={buttonClass("secondary", "no-underline")}>
+          <Link href="/buy" className={buttonClass("secondary", "no-underline")}>
+            Buy shielded ZEC
+          </Link>
+          <Link href="/prepare" className={buttonClass("ghost", "no-underline")}>
             Prepare your ZEC first
           </Link>
         </div>
@@ -69,6 +78,13 @@ export default function Home() {
             </li>
           ))}
         </ol>
+        <Card title="Swap USDC into shielded ZEC">
+          <p className="text-sm text-muted">
+            The same Zcash light client on Base lets anyone buy shielded ZEC with no custodian: your USDC waits in a contract on
+            Base, a market maker pays your Ironwood address, and proves the payment on Base in zero knowledge before it is paid.{" "}
+            {SWAP_PRIVACY_SENTENCE} <Link href="/buy">Buy shielded ZEC</Link>.
+          </p>
+        </Card>
       </section>
 
       <section aria-labelledby="world" className="space-y-6">
@@ -99,16 +115,23 @@ export default function Home() {
       <section aria-labelledby="trust" className="grid gap-4 md:grid-cols-2">
         <Card title={<span id="trust">Trust, stated plainly</span>}>
           <ul className="list-disc space-y-2 pl-5 text-sm text-muted">
-            <li>Any payout needs 3 of 5 signer nodes, and each checks Base, the exact Zcash outputs and the vault&apos;s books.</li>
-            <li>One or two compromised signers cannot move funds. Three colluding signers could: during the hackathon all five are run by us.</li>
+            <li>Base never takes the signers&apos; word: deposits are proven, payouts are proven, misbehaviour is proven.</li>
+            <li>Two signers can&apos;t move anything; if three collude, the theft is provable and their bonds pay the victims.</li>
+            <li>If the signers stop paying a claim, their bonds pay it instead, once a signer has confirmed its destination.</li>
             <li>You can fetch your vault&apos;s viewing key and verify it independently.</li>
+            <li>
+              {TESTNET
+                ? "During the hackathon all five signers are run by the team: the bonds show the mechanism, not independent economic security."
+                : "During the beta all five signers are run by the team, and caps are kept small."}
+            </li>
           </ul>
+          <p className="mt-3 text-xs">
+            <Link href="/status">System status</Link> · <Link href="/evidence">Evidence: real transactions</Link> ·{" "}
+            <Link href="/market">The market</Link>
+          </p>
         </Card>
         <Card title="What is real and what is a mock">
-          <ul className="list-disc space-y-2 pl-5 text-sm text-muted">
-            <li>Real: shielded Ironwood transactions on Zcash testnet, 3-of-5 FROST vaults, the Morpho Blue market on Base Sepolia.</li>
-            <li>Mock: the ZEC price (MockZecOracle, set by hand for the demo), the USDC (MockUSDC), and signer independence.</li>
-          </ul>
+          <RealAndMockList />
         </Card>
       </section>
     </div>

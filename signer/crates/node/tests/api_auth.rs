@@ -16,13 +16,14 @@ use tokio::{
 };
 use x25519_dalek::StaticSecret;
 use zcash_protocol::TxId;
-use zecured_base::{PayoutConfirmation, claim_ids_hash, recover_typed, registry_domain};
+use zecured_base::{payout_confirmation, recover_typed, registry_domain};
 use zecured_node::{
     ConfirmIn, Node, NodeOptions, api, auth,
     config::{Identity, NetworkConfig, NodeInfo},
     now,
     store::{ConfirmedPayout, VaultRecord},
 };
+use zecured_policy::derive::payout_ref;
 
 const TOKEN: &str = "demo-admin-token";
 
@@ -69,6 +70,8 @@ fn config(coordinator: Option<Address>) -> NetworkConfig {
         commit_depth_secs: 120,
         local_fork: true,
         open_vault: Default::default(),
+        payout_lifetime_secs: None,
+        zcash_network: None,
     }
 }
 
@@ -237,6 +240,7 @@ async fn a_confirmation_can_be_given_again() {
             }],
             last_event: None,
             activated_tag: None,
+            reopened: vec![],
         })
         .unwrap();
 
@@ -247,13 +251,15 @@ async fn a_confirmation_can_be_given_again() {
         txid: display,
     };
     let response = node.confirm(vault_id, again.clone()).await.unwrap();
-    let msg = PayoutConfirmation {
-        vaultId: vault_id,
-        claimIdsHash: claim_ids_hash(&again.claim_ids),
-    };
-    let signer =
-        recover_typed(&registry_domain(84_532, Address::repeat_byte(0xaa)), &msg, &response.signature).unwrap();
+    // R-1: the confirmation names the payout, by the reference the node derives from the
+    // transaction it confirmed (the vault's tag key over the txid, internal byte order).
+    let msg = payout_confirmation(vault_id, B256::from(payout_ref("", &txid)), &again.claim_ids);
+    let domain = registry_domain(84_532, Address::repeat_byte(0xaa));
+    let signer = recover_typed(&domain, &msg, &response.signature).unwrap();
     assert_eq!(signer, node.id.eth.address());
+    // Another payout's reference: not this signature.
+    let other = payout_confirmation(vault_id, B256::repeat_byte(0xab), &again.claim_ids);
+    assert_ne!(recover_typed(&domain, &other, &response.signature).unwrap(), node.id.eth.address());
 
     // Another transaction, or other claims: nothing in flight, nothing confirmed.
     let other_tx = ConfirmIn {

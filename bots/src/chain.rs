@@ -8,6 +8,7 @@ use std::{
 };
 
 use alloy::{
+    eips::{BlockId, BlockNumberOrTag},
     primitives::{Address, B256, U256, keccak256},
     providers::Provider,
     sol,
@@ -15,7 +16,7 @@ use alloy::{
 use anyhow::{Context, Result, anyhow, bail, ensure};
 use rand_core_06::{OsRng, RngCore};
 use serde_json::{Value, json};
-use zcash_protocol::consensus::Network;
+use zecured_zcash_ops::network::ZcashNetwork;
 
 sol! {
     #[derive(Debug)]
@@ -50,11 +51,39 @@ sol! {
         uint64 deadline;
     }
 
+    /// Morpho Blue's `Market` struct, as `market(id)` stores it (the IRM's `borrowRateView` takes it).
+    #[derive(Debug)]
+    struct Market {
+        uint128 totalSupplyAssets;
+        uint128 totalSupplyShares;
+        uint128 totalBorrowAssets;
+        uint128 totalBorrowShares;
+        uint128 lastUpdate;
+        uint128 fee;
+    }
+
+    /// The Adapter's pre-liquidation terms of an account (WAD; `expiry` in Unix seconds).
+    #[derive(Debug)]
+    struct PreLiquidationTerms {
+        uint256 preLltv;
+        uint256 preLcf1;
+        uint256 preLcf2;
+        uint256 preLif1;
+        uint256 preLif2;
+        uint64 expiry;
+    }
+
     #[sol(rpc)]
     interface IMorpho {
         function position(bytes32 id, address user) external view returns (uint256 supplyShares, uint128 borrowShares, uint128 collateral);
         function market(bytes32 id) external view returns (uint128 totalSupplyAssets, uint128 totalSupplyShares, uint128 totalBorrowAssets, uint128 totalBorrowShares, uint128 lastUpdate, uint128 fee);
         function accrueInterest(MarketParams marketParams) external;
+    }
+
+    /// Morpho Blue's interest rate model interface (IIrm).
+    #[sol(rpc)]
+    interface IIrm {
+        function borrowRateView(MarketParams marketParams, Market market) external view returns (uint256);
     }
 
     #[sol(rpc)]
@@ -74,6 +103,9 @@ sol! {
         function liquidate(address borrower, uint256 seizedAssets, uint256 repaidShares, bytes32 liquidatorCommitment) external returns (uint256 seized, uint256 repaid);
         function closeWithCollateral(CloseRequest req, bytes userSig, bytes32 mmCommitment, uint256 maxRepayAssets, uint64 minMmAmount) external;
         function deleverageWithCollateral(DeleverageRequest req, bytes userSig, bytes32 mmCommitment, uint64 minMmAmount) external returns (uint64 mmAmount);
+        function preLiquidate(address account, uint256 repaidShares, bytes32 mmCommitment) external returns (uint256 repaidAssets, uint64 seized);
+        function preLiquidationTerms(address account) external view returns (PreLiquidationTerms terms);
+        function minSeize(uint64 outstanding) external view returns (uint256);
     }
 
     #[sol(rpc)]
@@ -97,6 +129,9 @@ const WAD: u128 = 1_000_000_000_000_000_000;
 /// Addresses and market from `contracts/deployments/base-sepolia.json`.
 #[derive(Clone, Debug)]
 pub struct Deployment {
+    /// The Zcash network of the deployment's vaults: the one its Base chain (`chainId`) goes with,
+    /// unless `--zcash-network` names one.
+    pub zcash: ZcashNetwork,
     pub registry: Address,
     pub adapter: Address,
     pub usdc: Address,
@@ -120,7 +155,10 @@ impl Deployment {
         let m = |k: &str| -> Result<String> {
             Ok(raw["market"][k].as_str().context(format!("missing market.{k}"))?.to_owned())
         };
+        let chain_id = raw["chainId"].as_u64().context("missing chainId")?;
         Ok(Self {
+            zcash: ZcashNetwork::for_base_chain(chain_id)
+                .with_context(|| format!("Base chain {chain_id} goes with no Zcash network: pass --zcash-network"))?,
             registry: c("ZecuredRegistry")?,
             adapter: c("SettlementAdapter")?,
             usdc: m("loanToken")?.parse()?, // Circle USDC on Base Sepolia, MockUSDC on the local fork
@@ -142,14 +180,75 @@ impl Deployment {
 const LIQUIDATION_CURSOR: u128 = 300_000_000_000_000_000;
 const MAX_LIQUIDATION_INCENTIVE_FACTOR: u128 = 1_150_000_000_000_000_000;
 
-/// What Morpho's math needs of the market, read once per pass: the borrow totals as last stored
-/// (interest accrued since the market's last update is not in them), the oracle price and the LLTV.
-#[derive(Clone, Copy, Debug)]
+/// What Morpho's math needs of the market, read once per pass at one block (R-24): the borrow
+/// totals with the interest accrued up to that block's time, as Morpho counts them once anyone
+/// touches the market ([`expected_market_balances`]), the oracle price and the LLTV. The
+/// liquidator, the pre-liquidation round and the market maker's quotes all read the debt from it.
+#[derive(Clone, Copy, Debug, Default)]
 pub struct MarketState {
     pub total_borrow_assets: u128,
     pub total_borrow_shares: u128,
     pub price: u128,
     pub lltv: u128,
+    /// The block the state was read at, and its time (Unix seconds), which the interest is
+    /// accrued to.
+    pub block: u64,
+    pub timestamp: u64,
+}
+
+/// Morpho's market as `market(id)` stores it: the totals as of `last_update`. R-24: interest since
+/// then is not in them until someone accrues; [`expected_market_balances`] adds it.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub struct MarketTotals {
+    pub total_supply_assets: u128,
+    pub total_supply_shares: u128,
+    pub total_borrow_assets: u128,
+    pub total_borrow_shares: u128,
+    pub last_update: u64,
+    pub fee: u128,
+}
+
+/// R-24: Morpho's `MorphoBalancesLib.expectedMarketBalances` (morpho-blue
+/// `src/libraries/periphery/MorphoBalancesLib.sol`), the totals after accruing interest from
+/// `last_update` to `now` at `borrow_rate` (per second, WAD: the IRM's `borrowRateView` on the
+/// stored market):
+///
+/// - `interest = totalBorrowAssets * wTaylorCompounded(borrowRate, elapsed)`, rounded down, is added
+///   to the borrow and the supply assets;
+/// - the fee (`interest * fee`, rounded down) becomes supply shares at the supply share price
+///   without it, rounded down.
+///
+/// Nothing accrues without elapsed time, without borrows or without an IRM. A `now` before the
+/// last update (which an RPC answering from two blocks could show) counts as no time elapsed.
+/// `None` where Morpho would revert (a total past 2^128).
+pub fn expected_market_balances(m: MarketTotals, borrow_rate: u128, now: u64, has_irm: bool) -> Option<MarketTotals> {
+    let elapsed = now.saturating_sub(m.last_update);
+    if elapsed == 0 || m.total_borrow_assets == 0 || !has_irm {
+        return Some(m);
+    }
+    let growth = w_taylor_compounded(U256::from(borrow_rate), U256::from(elapsed))?;
+    let interest = U256::from(m.total_borrow_assets).checked_mul(growth)? / U256::from(WAD);
+    let mut out = m;
+    out.total_borrow_assets = u128::try_from(U256::from(m.total_borrow_assets).checked_add(interest)?).ok()?;
+    out.total_supply_assets = u128::try_from(U256::from(m.total_supply_assets).checked_add(interest)?).ok()?;
+    if m.fee != 0 {
+        let fee_amount = interest.checked_mul(U256::from(m.fee))? / U256::from(WAD);
+        // toSharesDown(feeAmount, totalSupplyAssets - feeAmount, totalSupplyShares)
+        let assets_without_fee = U256::from(out.total_supply_assets).checked_sub(fee_amount)?;
+        let fee_shares = fee_amount.checked_mul(U256::from(m.total_supply_shares) + U256::from(VIRTUAL_SHARES))?
+            / (assets_without_fee + U256::from(VIRTUAL_ASSETS));
+        out.total_supply_shares = u128::try_from(U256::from(m.total_supply_shares).checked_add(fee_shares)?).ok()?;
+    }
+    Some(out)
+}
+
+/// Morpho's `MathLib.wTaylorCompounded`: the first three terms of the Taylor expansion of
+/// `e^(x * n) - 1` (WAD), each rounded down. `None` on overflow.
+pub fn w_taylor_compounded(x: U256, n: U256) -> Option<U256> {
+    let first = x.checked_mul(n)?;
+    let second = first.checked_mul(first)? / (U256::from(2u8) * U256::from(WAD));
+    let third = second.checked_mul(first)? / (U256::from(3u8) * U256::from(WAD));
+    first.checked_add(second)?.checked_add(third)
 }
 
 /// A borrower's position, in asset units, with Morpho's rounding.
@@ -263,6 +362,195 @@ pub fn liquidation_attempts(plan: Liquidation, pos: &Position, outstanding: u64)
     }
 }
 
+// ------------------------------------------------------------------ pre-liquidation
+
+/// An account's pre-liquidation terms on the Adapter (`preLiquidationTerms`), WAD, `expiry` in Unix
+/// seconds.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub struct PreTerms {
+    pub pre_lltv: u128,
+    pub pre_lcf1: u128,
+    pub pre_lcf2: u128,
+    pub pre_lif1: u128,
+    pub pre_lif2: u128,
+    pub expiry: u64,
+}
+
+impl PreTerms {
+    /// The terms as the Adapter returns them; `None` for values no valid terms have (the Adapter
+    /// bounds them all by 1.15 WAD).
+    pub fn from_abi(t: &PreLiquidationTerms) -> Option<Self> {
+        let wad = |v: U256| u128::try_from(v).ok();
+        Some(Self {
+            pre_lltv: wad(t.preLltv)?,
+            pre_lcf1: wad(t.preLcf1)?,
+            pre_lcf2: wad(t.preLcf2)?,
+            pre_lif1: wad(t.preLif1)?,
+            pre_lif2: wad(t.preLif2)?,
+            expiry: t.expiry,
+        })
+    }
+
+    /// The Adapter applies terms while `block.timestamp < expiry` (never set or cleared: zero).
+    pub fn in_force(&self, now: u64) -> bool {
+        now < self.expiry
+    }
+}
+
+/// The Adapter's quote for a position in its account's band (`_preLiquidationQuote`).
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct PreQuote {
+    /// The most borrow shares one pre-liquidation may repay: `borrowShares * preLcf`, rounded down.
+    pub repayable: u128,
+    /// The incentive factor at the position's LTV (WAD).
+    pub pre_lif: u128,
+    /// The position's LTV (WAD), rounded up as the Adapter rounds it.
+    pub ltv: u128,
+}
+
+/// The Adapter's pre-liquidation quote of `pos` (read from an accrued [`MarketState`], R-24), with
+/// its arithmetic (Morpho's PreLiquidation): in the band when `collateral value * preLltv <
+/// debt <= collateral value * LLTV` (the upper bound is Morpho's health check), then `q = (ltv -
+/// preLltv) / (LLTV - preLltv)` and the close and incentive factors linear in `q`, rounded down.
+/// `None` outside the band.
+pub fn pre_liquidation_quote(pos: &Position, terms: &PreTerms, lltv: u128) -> Option<PreQuote> {
+    if pos.borrow_shares == 0 || pos.price == 0 || terms.pre_lltv >= lltv {
+        return None;
+    }
+    let collateral_quoted = mul_div_down(pos.collateral, pos.price, ORACLE_PRICE_SCALE);
+    if pos.debt > mul_div_down(collateral_quoted, lltv, WAD)
+        || pos.debt <= mul_div_down(collateral_quoted, terms.pre_lltv, WAD)
+    {
+        return None;
+    }
+    let ltv = mul_div_up(pos.debt, WAD, collateral_quoted);
+    let q = mul_div_down(ltv.checked_sub(terms.pre_lltv)?, WAD, lltv - terms.pre_lltv);
+    let pre_lcf = mul_div_down(q, terms.pre_lcf2.checked_sub(terms.pre_lcf1)?, WAD) + terms.pre_lcf1;
+    let pre_lif = mul_div_down(q, terms.pre_lif2.checked_sub(terms.pre_lif1)?, WAD) + terms.pre_lif1;
+    Some(PreQuote {
+        repayable: mul_div_down(pos.borrow_shares, pre_lcf, WAD),
+        pre_lif,
+        ltv,
+    })
+}
+
+/// The collateral the Adapter gives for `shares` at `pre_lif` (`_preLiquidationSeize`): the shares'
+/// assets rounded down, times the incentive, at the price, each step rounded down.
+pub fn pre_liquidation_seized(shares: u128, pre_lif: u128, m: &MarketState) -> u128 {
+    let assets = mul_div_down(shares, m.total_borrow_assets + VIRTUAL_ASSETS, m.total_borrow_shares + VIRTUAL_SHARES);
+    if m.price == 0 {
+        return u128::MAX;
+    }
+    mul_div_down(mul_div_down(assets, pre_lif, WAD), ORACLE_PRICE_SCALE, m.price)
+}
+
+/// A pre-liquidation the Adapter accepts at the state it was planned from.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct PreLiquidation {
+    pub repaid_shares: u128,
+    /// The USDC Morpho pulls for them (rounded up).
+    pub repaid_assets: u128,
+    /// The collateral they buy, in zatoshi.
+    pub seized: u64,
+    pub pre_lif: u128,
+    pub ltv: u128,
+}
+
+/// The pre-liquidation round: the largest pre-liquidation of `pos` the Adapter accepts at the accrued
+/// state `m` (R-24): terms in force at the state's time, the position in their band, at most the
+/// close factor's cap, at least `floor` (the Adapter's `minSeize(outstanding)`, D11) taken and at
+/// least `floor` left in the vault. `None` when there is none.
+pub fn plan_pre_liquidation(
+    pos: &Position,
+    m: &MarketState,
+    terms: &PreTerms,
+    outstanding: u64,
+    floor: u64,
+) -> Option<PreLiquidation> {
+    if !terms.in_force(m.timestamp) {
+        return None;
+    }
+    let quote = pre_liquidation_quote(pos, terms, m.lltv)?;
+    let max_seized = u128::from(outstanding).checked_sub(u128::from(floor))?;
+    let seized_for = |shares: u128| pre_liquidation_seized(shares, quote.pre_lif, m);
+    let mut shares = quote.repayable;
+    if seized_for(shares) > max_seized {
+        // The seizure grows with the shares: the most shares that still leave the floor.
+        let (mut fits, mut too_many) = (0u128, shares);
+        while too_many - fits > 1 {
+            let mid = fits + (too_many - fits) / 2;
+            if seized_for(mid) <= max_seized {
+                fits = mid;
+            } else {
+                too_many = mid;
+            }
+        }
+        shares = fits;
+    }
+    let seized = seized_for(shares);
+    if shares == 0 || seized < u128::from(floor) {
+        return None;
+    }
+    Some(PreLiquidation {
+        repaid_shares: shares,
+        repaid_assets: mul_div_up(
+            shares,
+            m.total_borrow_assets + VIRTUAL_ASSETS,
+            m.total_borrow_shares + VIRTUAL_SHARES,
+        ),
+        seized: u64::try_from(seized).ok()?,
+        pre_lif: quote.pre_lif,
+        ltv: quote.ltv,
+    })
+}
+
+/// The pre-liquidations to try, in order: the plan, then 95 % of its shares (the borrower may have
+/// repaid, or the price risen, since the state was read: either lowers the cap), if that still
+/// takes at least the floor.
+pub fn pre_liquidation_attempts(plan: &PreLiquidation, m: &MarketState, floor: u64) -> Vec<u128> {
+    let smaller = plan.repaid_shares / 100 * 95;
+    if smaller != 0 && pre_liquidation_seized(smaller, plan.pre_lif, m) >= u128::from(floor) {
+        vec![plan.repaid_shares, smaller]
+    } else {
+        vec![plan.repaid_shares]
+    }
+}
+
+/// What the bot logs about a pre-liquidation before it sends it (a profitability filter that only
+/// logs, never refuses), in USDC units: the incentive (the seized ZEC's value at the oracle price
+/// less the repayment), the gas at `eth_usd` dollars per ETH, and the price risk of waiting
+/// `wait_hours` for the signers' payout of the ZEC at `risk_bps_per_hour` of its value.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct PreEconomics {
+    pub incentive: i128,
+    pub gas: u128,
+    pub wait_risk: u128,
+    pub net: i128,
+}
+
+pub fn pre_liquidation_economics(
+    plan: &PreLiquidation,
+    price: u128,
+    gas_cost_wei: u128,
+    eth_usd: u64,
+    wait_hours: u64,
+    risk_bps_per_hour: u64,
+) -> PreEconomics {
+    let value = mul_div_down(u128::from(plan.seized), price, ORACLE_PRICE_SCALE);
+    let incentive =
+        i128::try_from(value).unwrap_or(i128::MAX) - i128::try_from(plan.repaid_assets).unwrap_or(i128::MAX);
+    // wei * (USD per ETH) * 1e6 USDC units per USD / 1e18 wei per ETH, rounded up.
+    let gas = mul_div_up(gas_cost_wei, u128::from(eth_usd) * 1_000_000, WAD);
+    let wait_risk = mul_div_up(value, u128::from(wait_hours) * u128::from(risk_bps_per_hour), 10_000);
+    let costs = i128::try_from(gas.saturating_add(wait_risk)).unwrap_or(i128::MAX);
+    PreEconomics {
+        incentive,
+        gas,
+        wait_risk,
+        net: incentive.saturating_sub(costs),
+    }
+}
+
 fn mul_div_up(a: u128, b: u128, d: u128) -> u128 {
     let p = U256::from(a) * U256::from(b);
     let d = U256::from(d);
@@ -275,15 +563,57 @@ fn mul_div_down(a: u128, b: u128, d: u128) -> u128 {
     u128::try_from(q).unwrap_or(u128::MAX)
 }
 
-/// The market's borrow totals, the oracle price and the LLTV.
+/// The market's state at the latest block (R-24): its borrow totals with the interest accrued up to
+/// that block's time ([`expected_market_balances`], with the IRM's `borrowRateView` on the stored
+/// market, as MorphoBalancesLib reads it), the oracle price and the LLTV. The market, the rate and
+/// the price are read at that one block, so the interest is exactly what Morpho would accrue there.
 pub async fn market_state<P: Provider>(p: &P, d: &Deployment) -> Result<MarketState> {
-    let mkt = IMorpho::new(d.morpho, p).market(d.market_id).call().await?;
-    let price = IOracle::new(d.market.oracle, p).price().call().await?;
-    Ok(MarketState {
+    let latest = p
+        .get_block_by_number(BlockNumberOrTag::Latest)
+        .await
+        .context("get latest block")?
+        .context("node has no latest block")?;
+    let (block, timestamp) = (latest.header.number, latest.header.timestamp);
+    let at = BlockId::number(block);
+    let mkt = IMorpho::new(d.morpho, p).market(d.market_id).call().block(at).await?;
+    let stored = MarketTotals {
+        total_supply_assets: mkt.totalSupplyAssets,
+        total_supply_shares: mkt.totalSupplyShares,
         total_borrow_assets: mkt.totalBorrowAssets,
         total_borrow_shares: mkt.totalBorrowShares,
+        last_update: u64::try_from(mkt.lastUpdate).map_err(|_| anyhow!("lastUpdate overflow"))?,
+        fee: mkt.fee,
+    };
+    let has_irm = d.market.irm != Address::ZERO;
+    let rate = if has_irm && stored.total_borrow_assets != 0 && timestamp > stored.last_update {
+        let market = Market {
+            totalSupplyAssets: mkt.totalSupplyAssets,
+            totalSupplyShares: mkt.totalSupplyShares,
+            totalBorrowAssets: mkt.totalBorrowAssets,
+            totalBorrowShares: mkt.totalBorrowShares,
+            lastUpdate: mkt.lastUpdate,
+            fee: mkt.fee,
+        };
+        let rate = IIrm::new(d.market.irm, p)
+            .borrowRateView(d.market.clone(), market)
+            .call()
+            .block(at)
+            .await
+            .context("the IRM's borrowRateView")?;
+        u128::try_from(rate).map_err(|_| anyhow!("borrow rate overflow"))?
+    } else {
+        0
+    };
+    let accrued = expected_market_balances(stored, rate, timestamp, has_irm)
+        .context("the interest would take a market total past Morpho's bounds")?;
+    let price = IOracle::new(d.market.oracle, p).price().call().block(at).await?;
+    Ok(MarketState {
+        total_borrow_assets: accrued.total_borrow_assets,
+        total_borrow_shares: accrued.total_borrow_shares,
         price: u128::try_from(price).map_err(|_| anyhow!("price overflow"))?,
         lltv: u128::try_from(d.market.lltv).map_err(|_| anyhow!("lltv overflow"))?,
+        block,
+        timestamp,
     })
 }
 
@@ -298,9 +628,10 @@ pub async fn position<P: Provider>(p: &P, d: &Deployment, user: Address) -> Resu
     position_in(p, d, &m, user).await
 }
 
-/// The raw 43-byte Orchard-protocol (Ironwood) receiver of the bot's unified address.
-pub fn ironwood_receiver(zcash_address: &str) -> Result<[u8; 43]> {
-    Ok(zecured_zcash_ops::keys::ironwood_receiver(&Network::TestNetwork, zcash_address)
+/// The raw 43-byte Orchard-protocol (Ironwood) receiver of the bot's unified address, an address
+/// of Zcash `network`.
+pub fn ironwood_receiver(network: ZcashNetwork, zcash_address: &str) -> Result<[u8; 43]> {
+    Ok(zecured_zcash_ops::keys::ironwood_receiver(&network.params(), zcash_address)
         .context("the bot's Zcash address has no Ironwood (Orchard-protocol) receiver")?
         .to_raw_address_bytes())
 }
@@ -338,7 +669,7 @@ fn keep_destination(commitment: B256, salt: &[u8; 32], receiver: &[u8; 43]) -> R
 }
 
 /// Writes `data` to `path` atomically, readable by its owner only.
-fn write_private(path: &Path, data: &[u8]) -> Result<()> {
+pub(crate) fn write_private(path: &Path, data: &[u8]) -> Result<()> {
     if let Some(dir) = path.parent().filter(|d| !d.as_os_str().is_empty()) {
         let mut builder = fs::DirBuilder::new();
         builder.recursive(true);
@@ -397,6 +728,61 @@ pub async fn fresh_commitment(backend: &str, zcash_address: &str, receiver: &[u8
     ensure!(returned == expected, "the backend answered with a commitment that is not ours; not using it");
     keep_destination(expected, &salt, receiver).context("keeping the commitment's salt")?;
     Ok(expected)
+}
+
+/// The nonces of one key whose transactions are sent concurrently in one process (the market
+/// maker's closes and deleverages, and its arming loop's `armLiveness`, R-5). Each send chooses its
+/// nonce under a lock held until the node has accepted the transaction, from a counter that starts
+/// at the node's pending count, advances with every accepted send and is forgotten after a refused
+/// one (read again from the node next time, so a refused send leaves no gap). Two sends through the
+/// same lock therefore never pick the same nonce. Every transaction of that key in the process must
+/// go through it: the provider's own nonce filler is bypassed (an explicit nonce is kept as is).
+#[derive(Debug)]
+pub struct NonceLock {
+    from: Address,
+    next: tokio::sync::Mutex<Option<u64>>,
+}
+
+impl NonceLock {
+    pub fn new(from: Address) -> Self {
+        Self {
+            from,
+            next: tokio::sync::Mutex::new(None),
+        }
+    }
+
+    /// Sends one transaction: `pending_count` reads the node's pending transaction count of the key
+    /// (awaited only while the counter is unknown), `send` broadcasts with the nonce it is given.
+    pub async fn send<T, C, S>(&self, pending_count: C, send: impl FnOnce(u64) -> S) -> Result<T>
+    where
+        C: Future<Output = Result<u64>>,
+        S: Future<Output = Result<T>>,
+    {
+        let mut next = self.next.lock().await;
+        let nonce = match *next {
+            Some(n) => n,
+            None => pending_count.await?,
+        };
+        match send(nonce).await {
+            Ok(sent) => {
+                *next = Some(nonce + 1);
+                Ok(sent)
+            }
+            Err(e) => {
+                *next = None;
+                Err(e)
+            }
+        }
+    }
+
+    /// [`Self::send`] with the pending count read through `p`.
+    pub async fn send_with<P: Provider, T, S>(&self, p: &P, send: impl FnOnce(u64) -> S) -> Result<T>
+    where
+        S: Future<Output = Result<T>>,
+    {
+        let from = self.from;
+        self.send(async move { Ok(p.get_transaction_count(from).pending().await?) }, send).await
+    }
 }
 
 /// Approves `spender` for unlimited USDC once.
@@ -494,6 +880,7 @@ mod tests {
             total_borrow_shares: 160_000 * VIRTUAL_SHARES,
             price,
             lltv: LLTV,
+            ..MarketState::default()
         };
         Position::new(160_000 * VIRTUAL_SHARES, 1_000_000, &market)
     }
@@ -589,6 +976,7 @@ mod tests {
                 total_borrow_shares: 160_000 * VIRTUAL_SHARES,
                 price,
                 lltv: LLTV,
+                ..MarketState::default()
             };
             assert_eq!(run(&pos, &market, plan), Ok((seized, 160_000 * VIRTUAL_SHARES)));
         }
@@ -606,6 +994,7 @@ mod tests {
                 total_borrow_shares: 160_000 * VIRTUAL_SHARES,
                 price,
                 lltv: LLTV,
+                ..MarketState::default()
             };
             assert_eq!(plan_liquidation(&pos, 1_000_000), Some(Liquidation::SeizeAll(1_000_000)));
             assert_eq!(
@@ -631,6 +1020,7 @@ mod tests {
             total_borrow_shares: 160_000 * VIRTUAL_SHARES,
             price: cents(1_800),
             lltv: LLTV,
+            ..MarketState::default()
         };
         let shares = 160_000 * VIRTUAL_SHARES;
         let at = |collateral: u128| Position::new(shares, collateral, &market);
@@ -679,6 +1069,7 @@ mod tests {
                 total_borrow_shares: total_shares,
                 price,
                 lltv: LLTV,
+                ..MarketState::default()
             };
             let pos = Position::new(borrow_shares, collateral, &market);
             let outstanding = u64::try_from(collateral).unwrap();
@@ -710,6 +1101,7 @@ mod tests {
             total_borrow_shares: 160_000 * VIRTUAL_SHARES,
             price: cents(1_800),
             lltv: LLTV,
+            ..MarketState::default()
         };
         let shares = 160_000 * VIRTUAL_SHARES;
         let pos = Position::new(shares, 1_001_561, &stored);
@@ -727,5 +1119,384 @@ mod tests {
         let under = Position::new(shares, 1_000_000, &stored);
         let plan = plan_liquidation(&under, 1_000_000).unwrap();
         assert_eq!(liquidation_attempts(plan, &under, 1_000_000), vec![Liquidation::SeizeAll(1_000_000)]);
+    }
+
+    // ----- R-24: the debt with the interest since the market's last update
+
+    const YEAR: u64 = 365 * 86_400;
+
+    /// The calls the R-24 accrual and the pre-liquidation round make have the selectors of Morpho's
+    /// IIrm and of the SettlementAdapter (forge's method identifiers).
+    #[test]
+    fn abi_selectors_match_the_contracts() {
+        use alloy::sol_types::SolCall;
+        assert_eq!(IIrm::borrowRateViewCall::SELECTOR, [0x8c, 0x00, 0xbf, 0x6b]);
+        assert_eq!(IMorpho::marketCall::SELECTOR, [0x5c, 0x60, 0xe3, 0x9a]);
+        assert_eq!(ISettlementAdapter::preLiquidateCall::SELECTOR, [0x75, 0x82, 0xc3, 0x58]);
+        assert_eq!(ISettlementAdapter::preLiquidationTermsCall::SELECTOR, [0x97, 0xab, 0xd7, 0x32]);
+        assert_eq!(ISettlementAdapter::minSeizeCall::SELECTOR, [0xe0, 0x3d, 0x3a, 0x8e]);
+    }
+
+    /// R-24, replayed from the contracts' fork test (`contracts/test/fork/AccruedDebt.t.sol`: the
+    /// real Morpho Blue and AdaptiveCurveIRM on Base Sepolia, keep the two in step). A 0.05 ZEC
+    /// vault borrows 62.45 % of its value at $40 and nobody touches the market for a year. On the
+    /// stored totals, what the liquidator used to read, the position is healthy; with the interest
+    /// the IRM's `borrowRateView` gives for the elapsed time it is not, and the liquidation the bot
+    /// plans is the one Morpho executed on the fork: every share repaid, 3,527,772 zat seized.
+    #[test]
+    fn r24_fork_vector() {
+        let stored = MarketTotals {
+            total_supply_assets: 1_000_000_000_000,
+            total_supply_shares: 10u128.pow(18),
+            total_borrow_assets: 1_249_000,
+            total_borrow_shares: 1_249_000_000_000,
+            last_update: 1_791_664_288,
+            fee: 0,
+        };
+        let now = 1_823_200_288;
+        assert_eq!(now - stored.last_update, YEAR);
+        let accrued = expected_market_balances(stored, 85_220_420, now, true).unwrap();
+        assert_eq!(accrued.total_borrow_assets, 1_252_361);
+        assert_eq!(accrued.total_supply_assets, 1_000_000_003_361);
+        assert_eq!(accrued.total_supply_shares, 10u128.pow(18), "no fee on this market");
+        assert_eq!(accrued.total_borrow_shares, stored.total_borrow_shares, "interest does not mint borrow shares");
+
+        let state = |t: MarketTotals| MarketState {
+            total_borrow_assets: t.total_borrow_assets,
+            total_borrow_shares: t.total_borrow_shares,
+            price: 40 * 10u128.pow(34),
+            lltv: LLTV,
+            block: 0,
+            timestamp: now,
+        };
+        let shares = 1_249_000_000_000;
+        let stale = Position::new(shares, 5_000_000, &state(stored));
+        assert_eq!((stale.debt, stale.max_debt), (1_249_000, 1_250_000));
+        assert_eq!(plan_liquidation(&stale, 5_000_000), None, "the stored totals miss it");
+        let current = Position::new(shares, 5_000_000, &state(accrued));
+        assert_eq!(current.debt, 1_252_361, "what Morpho charged on the fork");
+        assert_eq!(plan_liquidation(&current, 5_000_000), Some(Liquidation::RepayShares(shares)));
+        assert_eq!(current.seized_for_all_shares(), Some(3_527_772), "what Morpho seized on the fork");
+    }
+
+    /// MorphoBalancesLib's conditions and arithmetic, the fee's supply shares included.
+    #[test]
+    fn the_accrual_follows_morpho_balances_lib() {
+        let m = MarketTotals {
+            total_supply_assets: 1_000_000,
+            total_supply_shares: 10u128.pow(12),
+            total_borrow_assets: 500_000,
+            total_borrow_shares: 5 * 10u128.pow(11),
+            last_update: 1_000,
+            fee: 0,
+        };
+        // Nothing accrues without elapsed time, borrows or an IRM (and a time before the last
+        // update counts as none).
+        assert_eq!(expected_market_balances(m, 10u128.pow(9), 1_000, true), Some(m));
+        assert_eq!(expected_market_balances(m, 10u128.pow(9), 999, true), Some(m));
+        assert_eq!(expected_market_balances(m, 10u128.pow(9), 2_000, false), Some(m));
+        let empty = MarketTotals {
+            total_borrow_assets: 0,
+            ..m
+        };
+        assert_eq!(expected_market_balances(empty, 10u128.pow(9), 2_000, true), Some(empty));
+        // wTaylorCompounded(1e9, 1e6) = 1e15 + 5e11 + 166,666,666; interest = 500,000 * that / 1e18 = 500.
+        assert_eq!(
+            w_taylor_compounded(U256::from(10u64.pow(9)), U256::from(10u64.pow(6))),
+            Some(U256::from(1_000_500_166_666_666u64))
+        );
+        let later = expected_market_balances(m, 10u128.pow(9), 1_000 + 1_000_000, true).unwrap();
+        assert_eq!((later.total_borrow_assets, later.total_supply_assets), (500_500, 1_000_500));
+        assert_eq!(later.total_supply_shares, m.total_supply_shares);
+        // A 10 % fee: 50 of the 500 become supply shares at the price without them:
+        // 50 * (1e12 + 1e6) / (1,000,500 - 50 + 1) = 49,977,510.
+        let with_fee =
+            expected_market_balances(MarketTotals { fee: WAD / 10, ..m }, 10u128.pow(9), 1_000 + 1_000_000, true)
+                .unwrap();
+        assert_eq!(with_fee.total_supply_shares, 10u128.pow(12) + 49_977_510);
+        // 100 % APR for a year: 1 + 1/2 + 1/6 of the debt, as MathLib approximates e - 1.
+        let per_second = WAD / u128::from(YEAR);
+        let year = expected_market_balances(m, per_second, 1_000 + YEAR, true).unwrap();
+        assert_eq!(year.total_borrow_assets / 1_000, (500_000 + 500_000 * 5 / 3) / 1_000);
+        // A rate no IRM gives: past Morpho's bounds, not a wrapped number.
+        assert_eq!(expected_market_balances(m, u128::MAX, 2_000, true), None);
+    }
+
+    // ----- pre-liquidation: the Adapter's arithmetic, on the contracts' fork-test vectors
+
+    /// The app's preset: from 55 %, 10 % to 50 % of the debt for a 2 % to 5 % incentive.
+    fn preset() -> PreTerms {
+        PreTerms {
+            pre_lltv: 550_000_000_000_000_000,
+            pre_lcf1: 100_000_000_000_000_000,
+            pre_lcf2: 500_000_000_000_000_000,
+            pre_lif1: 1_020_000_000_000_000_000,
+            pre_lif2: 1_050_000_000_000_000_000,
+            expiry: 10_000,
+        }
+    }
+
+    /// 1.1 USDC borrowed on 0.05 ZEC, alone in a fresh market (1.1e12 shares), at `price`.
+    fn fresh_loan(price: u128) -> (MarketState, Position) {
+        let m = MarketState {
+            total_borrow_assets: 1_100_000,
+            total_borrow_shares: 1_100_000 * VIRTUAL_SHARES,
+            price,
+            lltv: LLTV,
+            block: 1,
+            timestamp: 5_000,
+        };
+        (m, Position::new(1_100_000 * VIRTUAL_SHARES, 5_000_000, &m))
+    }
+
+    /// `test_preLiquidate_ltvEqualToLltvPasses`: at $35.20 the LTV is the LLTV exactly, the factors
+    /// are at their far end, and repaying half the shares (550,000 units) takes 1,640,625 zat; a wei
+    /// of price lower the position is Morpho's to liquidate.
+    #[test]
+    fn pre_liquidation_at_the_lltv_matches_the_adapter() {
+        let (m, pos) = fresh_loan(cents(3_520));
+        let quote = pre_liquidation_quote(&pos, &preset(), LLTV).unwrap();
+        assert_eq!(
+            quote,
+            PreQuote {
+                repayable: 550_000 * VIRTUAL_SHARES,
+                pre_lif: 1_050_000_000_000_000_000,
+                ltv: LLTV
+            }
+        );
+        let plan = plan_pre_liquidation(&pos, &m, &preset(), 5_000_000, 100_000).unwrap();
+        assert_eq!(
+            plan,
+            PreLiquidation {
+                repaid_shares: 550_000 * VIRTUAL_SHARES,
+                repaid_assets: 550_000,
+                seized: 1_640_625,
+                pre_lif: 1_050_000_000_000_000_000,
+                ltv: LLTV,
+            }
+        );
+        let (m, pos) = fresh_loan(cents(3_520) - 1);
+        assert!(!pos.healthy());
+        assert_eq!(plan_pre_liquidation(&pos, &m, &preset(), 5_000_000, 100_000), None);
+    }
+
+    /// `test_preLiquidate_ltvEqualToPreLltvReverts`: at $40 the LTV is 55 % exactly, not above it;
+    /// a wei of price lower it is in the band, at the factors' near end.
+    #[test]
+    fn pre_liquidation_needs_an_ltv_above_pre_lltv() {
+        let (m, pos) = fresh_loan(cents(4_000));
+        assert_eq!(pre_liquidation_quote(&pos, &preset(), LLTV), None);
+        assert_eq!(plan_pre_liquidation(&pos, &m, &preset(), 5_000_000, 100_000), None);
+        let (m, pos) = fresh_loan(cents(4_000) - 1);
+        let plan = plan_pre_liquidation(&pos, &m, &preset(), 5_000_000, 100_000).unwrap();
+        assert!(plan.ltv > preset().pre_lltv && plan.ltv < preset().pre_lltv + 1_000_000_000_000);
+        // About a tenth of the shares (preLcf1), for about 2 % (preLif1).
+        assert!(plan.repaid_shares.abs_diff(110_000 * VIRTUAL_SHARES) < 2 * VIRTUAL_SHARES);
+        assert!(plan.pre_lif.abs_diff(preset().pre_lif1) < 1_000_000_000_000);
+        assert_eq!(plan.seized, u64::try_from(pre_liquidation_seized(plan.repaid_shares, plan.pre_lif, &m)).unwrap());
+    }
+
+    /// Terms the Adapter does not apply: expired at the state's time, or never set (zero).
+    #[test]
+    fn pre_liquidation_needs_terms_in_force() {
+        let (m, pos) = fresh_loan(cents(3_600));
+        assert!(plan_pre_liquidation(&pos, &m, &preset(), 5_000_000, 100_000).is_some());
+        let expired = PreTerms {
+            expiry: m.timestamp,
+            ..preset()
+        };
+        assert_eq!(plan_pre_liquidation(&pos, &m, &expired, 5_000_000, 100_000), None);
+        assert_eq!(plan_pre_liquidation(&pos, &m, &PreTerms::default(), 5_000_000, 100_000), None);
+    }
+
+    /// The D11 floors: a plan takes at least the floor and leaves at least the floor, taking the most
+    /// shares within the cap that do (the seizure grows with the shares).
+    #[test]
+    fn pre_liquidation_keeps_the_floors() {
+        // A 300,000 zat vault with 50,000 units of debt at 62 % LTV, terms that let all of it be
+        // repaid at a liquidation's incentive: repaying everything would take about 209,600 zat.
+        let all = PreTerms {
+            pre_lcf1: WAD,
+            pre_lcf2: WAD,
+            pre_lif1: liquidation_incentive_factor(LLTV),
+            pre_lif2: liquidation_incentive_factor(LLTV),
+            ..preset()
+        };
+        let m = MarketState {
+            total_borrow_assets: 50_000,
+            total_borrow_shares: 50_000 * VIRTUAL_SHARES,
+            price: mul_div_down(50_000, ORACLE_PRICE_SCALE * 100, 62 * 300_000),
+            lltv: LLTV,
+            block: 1,
+            timestamp: 5_000,
+        };
+        let pos = Position::new(50_000 * VIRTUAL_SHARES, 300_000, &m);
+        let quote = pre_liquidation_quote(&pos, &all, LLTV).unwrap();
+        assert_eq!(quote.repayable, pos.borrow_shares);
+        assert!(pre_liquidation_seized(quote.repayable, quote.pre_lif, &m) > 200_000);
+        let plan = plan_pre_liquidation(&pos, &m, &all, 300_000, 100_000).unwrap();
+        assert!(plan.repaid_shares < quote.repayable);
+        assert!((100_000..=200_000).contains(&plan.seized), "{plan:?}");
+        assert!(pre_liquidation_seized(plan.repaid_shares + 1, plan.pre_lif, &m) > 200_000, "the most shares");
+        // A vault too small for both floors, and a floor the cap cannot reach.
+        assert_eq!(plan_pre_liquidation(&pos, &m, &all, 199_999, 100_000), None);
+        let (m, pos) = fresh_loan(cents(3_999));
+        assert_eq!(plan_pre_liquidation(&pos, &m, &preset(), 5_000_000, 4_000_000), None);
+    }
+
+    /// Over random positions and terms in the band: the plan is within the cap and the floors, and
+    /// lowers the position's LTV once executed (Morpho's repayment and withdrawal applied to it).
+    #[test]
+    fn planned_pre_liquidations_lower_the_ltv() {
+        let mut rng = Lcg(0x5eed_2026_1017);
+        let mut planned = 0;
+        for _ in 0..5_000 {
+            // Positions of 0.002 to 100 ZEC with at least 0.1 % of a market of 1 to 100,000 USDC.
+            let total_assets = 1_000_000 + rng.below(100_000_000_000);
+            let total_shares = (total_assets * VIRTUAL_SHARES * (1_000 - rng.below(300)) / 1_000).max(1);
+            let borrow_shares = total_shares / 1_000 + rng.below(total_shares - total_shares / 1_000);
+            let collateral = 200_000 + rng.below(10_000_000_000);
+            let terms = PreTerms {
+                pre_lltv: 450_000_000_000_000_000 + rng.below(150_000_000_000_000_000),
+                pre_lcf1: 10_000_000_000_000_000 + rng.below(490_000_000_000_000_000),
+                pre_lcf2: 0,
+                pre_lif1: WAD + rng.below(50_000_000_000_000_000),
+                pre_lif2: 0,
+                expiry: u64::MAX,
+            };
+            let terms = PreTerms {
+                pre_lcf2: terms.pre_lcf1 + rng.below(WAD - terms.pre_lcf1 + 1),
+                pre_lif2: terms.pre_lif1 + rng.below(liquidation_incentive_factor(LLTV) - terms.pre_lif1 + 1),
+                ..terms
+            };
+            let debt = mul_div_up(borrow_shares, total_assets + VIRTUAL_ASSETS, total_shares + VIRTUAL_SHARES);
+            let ltv_permille = 440 + rng.below(190);
+            let price = mul_div_down(debt * 1_000, ORACLE_PRICE_SCALE, ltv_permille * collateral);
+            // $1 to $10,000 per ZEC.
+            if !(cents(100)..=cents(1_000_000)).contains(&price) {
+                continue;
+            }
+            let m = MarketState {
+                total_borrow_assets: total_assets,
+                total_borrow_shares: total_shares,
+                price,
+                lltv: LLTV,
+                block: 1,
+                timestamp: 1,
+            };
+            let pos = Position::new(borrow_shares, collateral, &m);
+            let outstanding = u64::try_from(collateral).unwrap();
+            let Some(plan) = plan_pre_liquidation(&pos, &m, &terms, outstanding, 100_000) else {
+                continue;
+            };
+            planned += 1;
+            let quote = pre_liquidation_quote(&pos, &terms, LLTV).unwrap();
+            assert!(plan.repaid_shares <= quote.repayable);
+            assert!(u128::from(plan.seized) >= 100_000 && u128::from(plan.seized) + 100_000 <= collateral);
+            // Morpho's state after the repayment (by shares, rounded up) and the withdrawal.
+            let after = MarketState {
+                total_borrow_assets: total_assets.saturating_sub(plan.repaid_assets),
+                total_borrow_shares: total_shares - plan.repaid_shares,
+                ..m
+            };
+            let next = Position::new(borrow_shares - plan.repaid_shares, collateral - u128::from(plan.seized), &after);
+            let value = mul_div_down(next.collateral, price, ORACLE_PRICE_SCALE);
+            assert!(next.healthy(), "Morpho's health check after the withdrawal: {plan:?}");
+            assert!(value > 0 && mul_div_up(next.debt, WAD, value) < plan.ltv, "the LTV falls: {plan:?}");
+        }
+        assert!(planned > 500, "{planned} planned");
+    }
+
+    /// The economics the round logs: the incentive at the oracle price, the gas at the configured ETH
+    /// price, the price risk of waiting for the ZEC.
+    #[test]
+    fn pre_liquidation_economics_are_logged_in_usdc_units() {
+        let (m, pos) = fresh_loan(cents(3_520));
+        let plan = plan_pre_liquidation(&pos, &m, &preset(), 5_000_000, 100_000).unwrap();
+        // 1,640,625 zat at $35.20 is 577,500 units for 550,000 repaid; 300,000 gas at 0.01 gwei and
+        // $3,000 per ETH is $0.009, 9,000 units; an hour at 20 bps an hour is 1,155 units.
+        let e = pre_liquidation_economics(&plan, m.price, 300_000 * 10_000_000, 3_000, 1, 20);
+        assert_eq!(
+            e,
+            PreEconomics {
+                incentive: 27_500,
+                gas: 9_000,
+                wait_risk: 1_155,
+                net: 17_345
+            }
+        );
+        assert!(pre_liquidation_economics(&plan, m.price, 10u128.pow(18), 3_000, 1, 20).net < 0);
+    }
+
+    // ----- one key's concurrent transactions
+
+    /// A MOCK node: it accepts a transaction only at the key's next nonce (its pending count) and
+    /// refuses a reused or skipped one, as a node does.
+    struct MockNode {
+        start: u64,
+        accepted: std::sync::Mutex<Vec<(&'static str, u64)>>,
+    }
+
+    impl MockNode {
+        fn pending(&self) -> u64 {
+            self.start + self.accepted.lock().unwrap().len() as u64
+        }
+
+        fn accept(&self, what: &'static str, nonce: u64) -> Result<u64> {
+            let mut accepted = self.accepted.lock().unwrap();
+            ensure!(nonce == self.start + accepted.len() as u64, "nonce {nonce} refused");
+            accepted.push((what, nonce));
+            Ok(nonce)
+        }
+    }
+
+    /// The market maker's close and its arming loop's `armLiveness`, sent at once through one
+    /// `NonceLock`: distinct, consecutive nonces, both accepted. Without the lock both read the same
+    /// pending count and the node refuses one (the failure the lock prevents). A refused send leaves
+    /// no gap: the next send reads the node again.
+    #[tokio::test]
+    async fn concurrent_sends_get_distinct_nonces() {
+        let node = MockNode {
+            start: 7,
+            accepted: Default::default(),
+        };
+        let lock = NonceLock::new(Address::repeat_byte(0x0b));
+        let count = || async { Ok(node.pending()) };
+        // Both broadcasts take a while, so the two sends overlap.
+        let broadcast = |what: &'static str| {
+            let node = &node;
+            move |nonce: u64| async move {
+                tokio::time::sleep(std::time::Duration::from_millis(20)).await;
+                node.accept(what, nonce)
+            }
+        };
+        let (close, arming) =
+            tokio::join!(lock.send(count(), broadcast("close")), lock.send(count(), broadcast("armLiveness")));
+        let (close, arming) = (close.unwrap(), arming.unwrap());
+        assert_ne!(close, arming);
+        assert_eq!(close.min(arming), 7);
+        assert_eq!(close.max(arming), 8);
+
+        // Unlocked: both read the pending count (9) before either is accepted.
+        let unlocked = |what: &'static str| {
+            let node = &node;
+            async move {
+                let nonce = node.pending();
+                tokio::time::sleep(std::time::Duration::from_millis(20)).await;
+                node.accept(what, nonce)
+            }
+        };
+        let (a, b) = tokio::join!(unlocked("close"), unlocked("armLiveness"));
+        assert!(a.is_ok() != b.is_ok(), "one of two unlocked sends is refused");
+
+        // The lock's counter (9) is now behind the node (10): its send is refused, the counter is
+        // forgotten, and the next send reads the node again.
+        let refused = lock.send(count(), broadcast("close")).await;
+        assert!(refused.is_err());
+        assert_eq!(lock.send(count(), broadcast("armLiveness")).await.unwrap(), 10);
+        assert_eq!(lock.send(count(), broadcast("close")).await.unwrap(), 11);
+        let failing = lock.send(count(), |_| async { Result::<u64>::Err(anyhow!("the RPC failed")) }).await;
+        assert!(failing.is_err());
+        assert_eq!(lock.send(count(), broadcast("close")).await.unwrap(), 12, "no gap after a failed send");
     }
 }

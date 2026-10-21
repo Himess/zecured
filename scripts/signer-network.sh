@@ -119,8 +119,12 @@ cmd_init() {
     local dir="$DATA/node-$i"
     local key_var="${KEY_PREFIX}SIGNER_${i}_PRIVATE_KEY"
     if [[ ! -f "$dir/identity.json" ]]; then
-      NODE_ETH_PRIVATE_KEY="${!key_var:-}" "$BIN/zecured-node" init --index "$i" --data "$dir" \
-        --url "http://127.0.0.1:$PORT_PREFIX$i" > "$dir.public.json"
+      # Without a key in .env the node draws a fresh one: the variable must then be unset, as the
+      # node reads an empty value as a key and refuses it.
+      (
+        if [[ -n "${!key_var:-}" ]]; then export NODE_ETH_PRIVATE_KEY="${!key_var}"; else unset NODE_ETH_PRIVATE_KEY; fi
+        "$BIN/zecured-node" init --index "$i" --data "$dir" --url "http://127.0.0.1:$PORT_PREFIX$i"
+      ) > "$dir.public.json"
     fi
     infos+=("$dir.public.json")
   done
@@ -174,6 +178,11 @@ cfg = {
         "max_pending": int(os.environ.get("OPEN_VAULT_MAX_PENDING", "512")),
     },
 }
+# R-10 on a local fork: its livenessPeriod (600 s, for quick liveness tests) is shorter than a payout's real
+# lifetime (about an hour), so a claim armed at once would never be committed and the bonds would always pay it.
+# The fork's payouts are mined within minutes: it shortens the lifetime instead (never on a public network).
+if local:
+    cfg["payout_lifetime_secs"] = int(os.environ.get("PAYOUT_LIFETIME_SECS", "240"))
 json.dump(cfg, open(out, "w"), indent=2)
 print(f"wrote {out} (registry {registry})")
 PY

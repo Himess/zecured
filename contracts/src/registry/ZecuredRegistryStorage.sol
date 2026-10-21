@@ -68,6 +68,29 @@ abstract contract ZecuredRegistryStorage is EIP712, IZecuredSignerErrors {
     uint256 internal _pendingClaimZat;
     /// @dev T-05 (a), D57: claims reopened after a dispute; a late inclusion proof still upholds them.
     mapping(bytes32 claimId => bool) internal _reopened;
+    /// @dev R-12: a refunded deposit whose proof waits for the relay (K3): its tag is used and its note a lineage note,
+    ///      but its Refund claim is opened only by `openReservedRefund`, for this account; until then no payout may
+    ///      spend the note (`commitSpend`), and `releaseRefund` frees both if the proof is dropped.
+    mapping(bytes32 depositTag => address account) internal _reservedRefund;
+    /// @dev R-11: Refund claims marked dormant (`markRefundDormant`), out of `_pendingClaimZat` until their account
+    ///      gives a destination or they close. Keyed by the claim's storage slot (`_slotOf`), so that `_closeClaim`,
+    ///      which is handed the claim itself, can tell.
+    mapping(uint256 claimSlot => bool) internal _dormant;
+
+    // v4 payouts and compensation (appended after the refund lifecycle's items; never reorder the items above).
+    /// @dev R-1: payouts whose confirmation by signatures was recorded (each payout reference at most once).
+    mapping(bytes32 payoutRef => bool) internal _payoutConfirmed;
+    /// @dev R-3: per vault, its claims confirmed by signatures (Paid, `paidAt != 0`) that no proof, dispute, expiry or
+    ///      compensation has resolved yet. The compensator tallies a compromised vault only once it is zero.
+    mapping(bytes32 vaultId => uint256) internal _unproven;
+    /// @dev R-20: compromised vaults the compensator settled while they stayed active (no longer counted as open).
+    mapping(bytes32 vaultId => bool) internal _compensatedVault;
+    /// @dev R-20: the outstanding of those vaults, which `lockedZatoshi` leaves out.
+    uint256 internal _compensatedZat;
+    /// @dev R-12 with the compensation: per vault, its refunds reserved (`_reservedRefund`) and neither opened nor
+    ///      released yet. The compensator tallies a compromised vault only once it is zero, so a refund reserved before
+    ///      the compromise opens first and is tallied with the vault's other claims.
+    mapping(bytes32 vaultId => uint256) internal _reservedRefundCount;
 
     constructor(address[5] memory signers_) EIP712(ZecuredEIP712.REGISTRY_DOMAIN_NAME, ZecuredEIP712.DOMAIN_VERSION) {
         address previous = address(0);
@@ -115,13 +138,46 @@ abstract contract ZecuredRegistryStorage is EIP712, IZecuredSignerErrors {
     }
 
     /// @dev A pending claim leaves the books (paid, written off or compensated); its vault settles once closed or
-    ///      cancelled with no pending claim left.
+    ///      cancelled with no pending claim left. A dormant refund (R-11) is already out of `_pendingClaimZat`.
     function _closeClaim(Claim storage c, ClaimStatus status) internal {
         c.status = status;
-        _pendingClaimZat -= c.amount;
+        uint256 slot = _slotOf(c);
+        if (_dormant[slot]) delete _dormant[slot];
+        else _pendingClaimZat -= c.amount;
         Vault storage v = _vaults[c.vaultId];
         v.unpaidClaims -= 1;
         if (_settled(v)) _settle();
+    }
+
+    /// @dev The storage slot of a claim: the key of `_dormant`.
+    function _slotOf(Claim storage c) internal pure returns (uint256 slot) {
+        assembly ("memory-safe") {
+            slot := c.slot
+        }
+    }
+
+    /// @dev A new pending claim. A closed or cancelled vault with no pending claim is settled: a new claim reopens it.
+    function _newClaim(bytes32 vaultId, Vault storage v, ClaimKind kind, uint64 amount, bytes32 commitment)
+        internal
+        returns (bytes32 claimId)
+    {
+        if (_settled(v)) _openVaults += 1;
+        uint64 sequence = v.claimCount;
+        claimId = keccak256(abi.encode(vaultId, sequence)); // `IZecuredRegistry.claimIdOf`
+        v.claimCount = sequence + 1;
+        v.unpaidClaims += 1;
+        _pendingClaimZat += amount;
+        _claims[claimId] = Claim({
+            vaultId: vaultId,
+            commitment: commitment,
+            amount: amount,
+            kind: kind,
+            status: ClaimStatus.Pending,
+            createdAt: uint40(block.timestamp),
+            bondPaid: false,
+            paidAt: 0,
+            disputeDueAt: 0
+        });
     }
 
     /// @dev Closed or cancelled with no pending claim: no longer counted in `openVaultCount`.

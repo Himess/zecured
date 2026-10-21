@@ -303,3 +303,55 @@ describe("runtimeConfigLoader", () => {
     expect(target.remoteError).toBe("no answer within 6 s");
   });
 });
+
+describe("v4: the deployment a build serves, the swap pin, the demo path and the market's labels", () => {
+  const SWAP: `0x${string}` = "0x7777777777777777777777777777777777777777";
+
+  it("the judge deployment by default; the mainnet beta talks to Base (8453) only", () => {
+    expect(buildConfig(DRY_RUN_ENV)).toMatchObject({ deployment: "testnet", chainId: 84532 });
+    const beta = buildConfig({ ...DRY_RUN_ENV, NEXT_PUBLIC_ZECURED_DEPLOYMENT: "mainnet-beta" }, remote({ chainId: 84532 }));
+    expect(beta).toMatchObject({ deployment: "mainnet-beta", chainId: 8453, contractsDeployed: false });
+    expect(beta.problems).toEqual(["The backend is configured for chain 84532, this app for Base (8453)."]);
+    expect(beta.denominations).toEqual([1_000_000n, 5_000_000n]); // the backend's list wins once loaded
+    expect(buildConfig({ NEXT_PUBLIC_ZECURED_DEPLOYMENT: "mainnet-beta" }).denominations).toEqual([5_000_000n, 10_000_000n]);
+    const typo = buildConfig({ ...DRY_RUN_ENV, NEXT_PUBLIC_ZECURED_DEPLOYMENT: "mainnet" });
+    expect(typo.problems).toEqual(["NEXT_PUBLIC_ZECURED_DEPLOYMENT is set but is neither testnet nor mainnet-beta."]);
+    expect(typo.contractsDeployed).toBe(false);
+  });
+
+  it("the swap is an optional pin, checked against the deployment file's when it names one", () => {
+    expect(buildConfig(DRY_RUN_ENV).swap).toBeNull();
+    const pinned = buildConfig({ ...DRY_RUN_ENV, NEXT_PUBLIC_SWAP: SWAP.toLowerCase() }, REMOTE);
+    expect(pinned.swap).toBe(SWAP);
+    expect(pinned.problems).toEqual([]);
+    const agreed = buildConfig({ ...DRY_RUN_ENV, NEXT_PUBLIC_SWAP: SWAP }, remote({ contracts: { ...REMOTE.contracts!, ZecuredSwap: SWAP } }));
+    expect(agreed.problems).toEqual([]);
+    const other = buildConfig({ ...DRY_RUN_ENV, NEXT_PUBLIC_SWAP: SWAP }, remote({ contracts: { ...REMOTE.contracts!, ZecuredSwap: ATTACKER } }));
+    expect(other.problems).toEqual([
+      "This build pins NEXT_PUBLIC_SWAP to 0x7777…7777, but the backend's deployed ZecuredSwap is 0x5555…5555.",
+    ]);
+    expect(buildConfig({ ...DRY_RUN_ENV, NEXT_PUBLIC_SWAP: "0x12" }).problems).toEqual(["NEXT_PUBLIC_SWAP is set but is not a valid address."]);
+  });
+
+  it("the demo path needs its flag, and never exists on the mainnet beta", () => {
+    expect(buildConfig(DRY_RUN_ENV).demoPath).toBe(false);
+    expect(buildConfig({ ...DRY_RUN_ENV, NEXT_PUBLIC_DEMO_PATH: "1" }).demoPath).toBe(true);
+    expect(buildConfig({ ...DRY_RUN_ENV, NEXT_PUBLIC_DEMO_PATH: "true" }).demoPath).toBe(false);
+    expect(buildConfig({ ...DRY_RUN_ENV, NEXT_PUBLIC_DEMO_PATH: "1", NEXT_PUBLIC_ZECURED_DEPLOYMENT: "mainnet-beta" }).demoPath).toBe(false);
+  });
+
+  it("names the loan token and the price from the deployment file (Circle's test USDC here, a MockUSDC on a fork)", () => {
+    expect(buildConfig(DRY_RUN_ENV).marketLabels).toBeNull();
+    const labels = buildConfig(DRY_RUN_ENV, REMOTE).marketLabels!;
+    expect(labels).toMatchObject({ loanToken: "USDC", loanTokenIsMock: false, oracleIsDemo: true });
+    expect(labels.loanTokenNote).toBe("Circle's test USDC on Base Sepolia (testnet funds, no value)");
+    expect(labels.oracleNote).toMatch(/DemoShockOracle \(DEMO.*MockZecOracle \(MOCK/);
+    const fork = parseRemoteConfig({
+      ...DRY_RUN_CONFIG,
+      contracts: { ...DRY_RUN_CONFIG.contracts, LoanToken: undefined, MockUSDC: DRY_RUN_CONFIG.contracts.LoanToken },
+    });
+    const forkLabels = buildConfig(DRY_RUN_ENV, fork).marketLabels!;
+    expect(forkLabels).toMatchObject({ loanToken: "MockUSDC", loanTokenIsMock: true });
+    expect(forkLabels.loanTokenNote).toMatch(/MOCK/);
+  });
+});

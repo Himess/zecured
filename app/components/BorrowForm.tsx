@@ -3,11 +3,14 @@
 import { useId, useState } from "react";
 import { getAddress, isAddress } from "viem";
 import { loanAccount, type SentUserOp } from "@/lib/account";
-import { borrowCalls } from "@/lib/calls";
+import { borrowCalls, describeRevert, setPreLiquidationCalls } from "@/lib/calls";
 import type { PositionSnapshot } from "@/lib/chain";
 import { config } from "@/lib/config";
-import { useAction } from "@/lib/hooks";
+import { useAction, usePreLiquidation } from "@/lib/hooks";
 import type { StoredLoan } from "@/lib/keys";
+import { loanTokenName, priceSourceName } from "@/lib/labels";
+import { PRE_LIQUIDATION_PRESETS, termsActive, termsOf, type PreLiquidationPreset } from "@/lib/preliq";
+import { ProtectionPresets } from "./position/Protection";
 import {
   formatBps,
   formatUsdc,
@@ -23,7 +26,11 @@ import {
 import { Button, Notice } from "./ui";
 import { TxResult } from "./TxResult";
 
-/** Borrow MockUSDC against the position, up to 40 % LTV, in one sponsored UserOp. */
+/**
+ * Borrow the market's loan token against the position, up to 40 % LTV, in one sponsored UserOp;
+ * with "Protect my loan" (section 4 of the v4 design), the same UserOp sets the account's
+ * pre-liquidation terms.
+ */
 export function BorrowForm({
   loan,
   snapshot,
@@ -35,20 +42,33 @@ export function BorrowForm({
 }) {
   const amountId = useId();
   const receiverId = useId();
+  const protectId = useId();
   const [amount, setAmount] = useState("");
   const [toOther, setToOther] = useState(false);
   const [receiver, setReceiver] = useState("");
-  const borrow = useAction(async (assets: bigint, to: `0x${string}`) => {
+  // v4 pre-liquidation: offered while the account has no terms in force (null data: the Adapter has none).
+  const terms = usePreLiquidation(loan.account);
+  const [protect, setProtect] = useState(false);
+  const [preset, setPreset] = useState<PreLiquidationPreset>(PRE_LIQUIDATION_PRESETS[1]!);
+  const borrow = useAction(async (assets: bigint, to: `0x${string}`, withProtection: boolean) => {
     if (!snapshot) throw new Error("Position not loaded");
-    const r = await loanAccount(loan.ownerKey).send(
-      borrowCalls({
-        account: loan.account,
-        assets,
-        receiver: to,
-        registryAuthorized: snapshot.registryAuthorized,
-        adapterAuthorized: snapshot.adapterAuthorized,
-      }),
-    );
+    const calls = borrowCalls({
+      account: loan.account,
+      assets,
+      receiver: to,
+      registryAuthorized: snapshot.registryAuthorized,
+      adapterAuthorized: snapshot.adapterAuthorized,
+    });
+    if (withProtection) calls.push(...setPreLiquidationCalls({ terms: termsOf(preset, BigInt(snapshot.blockTimestamp)) }));
+    let r: SentUserOp;
+    try {
+      r = await loanAccount(loan.ownerKey).send(calls);
+    } catch (e) {
+      const why = describeRevert(e);
+      if (why) throw new Error(why);
+      throw e;
+    }
+    void terms.refresh();
     onBorrowed?.(r);
     return r;
   });
@@ -88,13 +108,18 @@ export function BorrowForm({
     toOther && receiver.trim() && !isAddress(receiver.trim(), { strict: false }) ? "Not a Base (EVM) address." : null;
   const to = toOther ? (receiver.trim() && !receiverError ? getAddress(receiver.trim()) : null) : loan.account;
   const after = assets && !amountError ? snapshot.debt + assets : null;
+  const nowSeconds = BigInt(snapshot.blockTimestamp);
+  const canProtect = terms.data !== null && terms.data !== undefined && !termsActive(terms.data, nowSeconds);
+  const withProtection = protect && canProtect;
 
   return (
     <div className="space-y-4">
       <p className="text-sm text-muted">
-        Price {formatUsdPrice(snapshot.price)} per ZEC (MockZecOracle). You can borrow up to{" "}
-        <strong className="text-text">{formatUsdc(available)} USDC</strong> more ({formatBps(TARGET_LTV_BPS)} LTV; the market
-        liquidates above 62.5 %).
+        Price {formatUsdPrice(snapshot.price)} per ZEC ({priceSourceName()}). You can borrow up to{" "}
+        <strong className="text-text">
+          {formatUsdc(available)} {loanTokenName()}
+        </strong>{" "}
+        more ({formatBps(TARGET_LTV_BPS)} LTV; the market liquidates above 62.5 %).
       </p>
       <div className="space-y-2">
         <label htmlFor={amountId} className="block text-sm font-medium">
@@ -154,18 +179,33 @@ export function BorrowForm({
 
       {after !== null ? (
         <p className="text-sm text-muted">
-          After this borrow: debt {formatUsdc(after)} USDC, LTV {formatBps(ltvBps(collateral, snapshot.price, after) ?? 0n)},
+          After this borrow: debt {formatUsdc(after)} {loanTokenName()}, LTV {formatBps(ltvBps(collateral, snapshot.price, after) ?? 0n)},
           health factor {formatWad(healthFactor(collateral, snapshot.price, after, config.lltv) ?? 0n)}, liquidation below{" "}
           {formatUsdPrice(liquidationPrice(collateral, after, config.lltv) ?? 0n)} per ZEC.
         </p>
       ) : null}
 
+      {canProtect ? (
+        <div className="space-y-3 rounded-lg border border-border p-3">
+          <label htmlFor={protectId} className="flex items-start gap-3 text-sm">
+            <input id={protectId} type="checkbox" checked={protect} onChange={(e) => setProtect(e.target.checked)} className="mt-1" />
+            <span>
+              <span className="font-medium">Protect my loan</span>{" "}
+              <span className="text-muted">
+                (optional): agree to be partly repaid early for a small incentive instead of waiting for a full liquidation.
+              </span>
+            </span>
+          </label>
+          {protect ? <ProtectionPresets preset={preset} onPreset={setPreset} debt={after ?? snapshot.debt} /> : null}
+        </div>
+      ) : null}
+
       <Button
-        onClick={() => assets && to && borrow.run(assets, to)}
+        onClick={() => assets && to && borrow.run(assets, to, withProtection)}
         busy={borrow.busy}
         disabled={!assets || Boolean(amountError) || !to}
       >
-        {snapshot.accountDeployed ? "Borrow" : "Create account and borrow"}
+        {snapshot.accountDeployed ? (withProtection ? "Borrow and protect" : "Borrow") : "Create account and borrow"}
       </Button>
       {!snapshot.accountDeployed ? (
         <p className="text-xs text-muted">

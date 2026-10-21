@@ -7,8 +7,10 @@ import { CopyButton, MissingVaultId, useMounted } from "@/components/client";
 import { PayoutNotice } from "@/components/PayoutNotice";
 import { Badge, buttonClass, Card, KeyValue, Mono, Notice, Stat } from "@/components/ui";
 import type { Claim } from "@/lib/api";
+import { formatUtc } from "@/lib/calls";
 import { config } from "@/lib/config";
 import { useLoanByVault, usePosition, useUrlFragment, useVault, useVaultLedger } from "@/lib/hooks";
+import { priceSourceName } from "@/lib/labels";
 import {
   collateralValue,
   formatBps,
@@ -26,8 +28,10 @@ import { CLAIM_KIND_LABEL, feeClaim, refundsToClaim } from "@/lib/v3";
 import { formatTaz } from "@/lib/zcash";
 import { STATUS_LABEL } from "../status";
 import { Exits, PendingClose, SendUsdcForm } from "./Exits";
-import { ClaimsCard, PendingActivationCard, RefundsCard, TheftNotice } from "./Ledger";
+import { Deleverage } from "./Deleverage";
+import { ClaimsCard, PendingActivationCard, PendingRefundsCard, RefundsCard, TheftNotice } from "./Ledger";
 import { PartialRelease } from "./PartialRelease";
+import { ProtectionCard } from "./Protection";
 
 const ZERO_ACCOUNT = "0x0000000000000000000000000000000000000000";
 
@@ -38,6 +42,14 @@ const COORDINATOR_STATUS: Record<Claim["status"], { tone: "ok" | "warn" | "neutr
   compensated: { tone: "info", text: "Compensated" },
   disputed: { tone: "warn", text: "Disputed" },
 };
+
+/** The coordinator's word on a claim, shown while Base cannot be read: v4's delivery badges first. */
+function coordinatorBadge(c: Claim): { tone: "ok" | "warn" | "neutral" | "info"; text: string } {
+  // OFF's `proven`: final (its payout proven, or its confirmation undisputed through the window).
+  if (c.proven) return { tone: "ok", text: "Final on Base ✓" };
+  if (c.disputableUntil) return { tone: "info", text: `Signers confirmed — disputable until ${formatUtc(c.disputableUntil)}` };
+  return COORDINATOR_STATUS[c.status];
+}
 
 /** What Base says about the vault, as a badge, when it adds to the signers' status. */
 const BASE_STATUS: Partial<Record<string, { tone: "info" | "neutral" | "warn"; text: string }>> = {
@@ -149,7 +161,7 @@ export function PositionView() {
             hint={hf !== null && hf < WAD ? "liquidatable" : "liquidation below 1.00"}
           />
           <Stat label="Liquidation price" value={lp ? formatUsdPrice(lp) : "—"} hint="ZEC/USD" />
-          <Stat label="ZEC price" value={p ? formatUsdPrice(p.price) : "—"} hint="the market's oracle (MOCK / DEMO on testnet)" />
+          <Stat label="ZEC price" value={p ? formatUsdPrice(p.price) : "—"} hint={priceSourceName()} />
           <Stat label="Loan-to-value" value={ltv !== null && ltv !== undefined ? formatBps(ltv) : "—"} hint="max 62.5 %" />
         </dl>
         {fee ? (
@@ -169,10 +181,11 @@ export function PositionView() {
         </Notice>
       ) : null}
       {liquidations.length > 0 ? (
-        <Notice tone="warn" title="Part of the collateral was liquidated">
+        <Notice tone="warn" title="Part of the collateral went to repay debt">
           <p>
-            A liquidator repaid debt and received {formatTaz(liquidations.reduce((s, c) => s + c.amount, 0n))} in shielded
-            ZEC. The rest is still yours: release it once no debt remains, or close or repay.
+            {formatTaz(liquidations.reduce((s, c) => s + c.amount, 0n))} in shielded ZEC is paid to whoever repaid part of
+            the debt: the market maker of a deleverage you signed, a pre-liquidation within the terms you set, or a
+            liquidator. The rest is still yours: release it once no debt remains, or close or repay.
           </p>
         </Notice>
       ) : null}
@@ -207,6 +220,7 @@ export function PositionView() {
         </Card>
       ) : null}
 
+      {l ? <PendingRefundsCard ledger={l} /> : null}
       {l ? <RefundsCard ledger={l} loan={loan} onChanged={refresh} /> : null}
 
       {l ? (
@@ -219,7 +233,7 @@ export function PositionView() {
                 <span>{CLAIM_KIND_LABEL[c.kind]}</span>
                 <span className="flex items-center gap-3">
                   <span className="tabular-nums">{formatTaz(c.amount)}</span>
-                  <Badge tone={COORDINATOR_STATUS[c.status].tone}>{COORDINATOR_STATUS[c.status].text}</Badge>
+                  <Badge tone={coordinatorBadge(c).tone}>{coordinatorBadge(c).text}</Badge>
                 </span>
               </li>
             ))}
@@ -247,6 +261,16 @@ export function PositionView() {
           {!loan.pendingClose && !frozen ? (
             <Card title="Withdraw part of your ZEC">
               <PartialRelease loan={loan} vault={v} snapshot={p} onChanged={refresh} />
+            </Card>
+          ) : null}
+          {p.debt > 0n && !loan.pendingClose && !frozen ? (
+            <Card title="Reduce debt with collateral">
+              <Deleverage loan={loan} vault={v} snapshot={p} onChanged={refresh} />
+            </Card>
+          ) : null}
+          {!frozen ? (
+            <Card title="Protect my loan">
+              <ProtectionCard loan={loan} snapshot={p} onChanged={refresh} />
             </Card>
           ) : null}
           {borrowRoom && !loan.pendingClose && !frozen ? (

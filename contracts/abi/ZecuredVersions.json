@@ -328,6 +328,25 @@
   },
   {
     "type": "function",
+    "name": "isWorking",
+    "inputs": [
+      {
+        "name": "versionId",
+        "type": "bytes32",
+        "internalType": "bytes32"
+      }
+    ],
+    "outputs": [
+      {
+        "name": "",
+        "type": "bool",
+        "internalType": "bool"
+      }
+    ],
+    "stateMutability": "view"
+  },
+  {
+    "type": "function",
     "name": "nonce",
     "inputs": [],
     "outputs": [
@@ -663,6 +682,11 @@
   },
   {
     "type": "error",
+    "name": "InsufficientGasForRouter",
+    "inputs": []
+  },
+  {
+    "type": "error",
     "name": "InsufficientSignatures",
     "inputs": [
       {
@@ -686,6 +710,17 @@
     "type": "error",
     "name": "InvalidVersion",
     "inputs": []
+  },
+  {
+    "type": "error",
+    "name": "LastDepositVersion",
+    "inputs": [
+      {
+        "name": "versionId",
+        "type": "bytes32",
+        "internalType": "bytes32"
+      }
+    ]
   },
   {
     "type": "error",

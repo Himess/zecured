@@ -21,7 +21,7 @@ use reddsa::frost::redpallas::{
     round1::{SigningCommitments, SigningNonces},
 };
 use serde::{Deserialize, Serialize};
-use zcash_protocol::consensus::{BlockHeight, BranchId, Network};
+use zcash_protocol::consensus::{BlockHeight, BranchId};
 use zecured_base::SpendCommit;
 use zecured_policy::{
     derive::{deposit_tag, payout_ref},
@@ -34,6 +34,7 @@ use zecured_zcash_ops::{scan::ReceivedNote, spend::PAYOUT_EXPIRY_DELTA};
 use crate::{
     Inflight,
     chain::{VaultNotes, owns_receiver, vault_fvk},
+    config::ZcashNetwork,
     store::{Store, VaultRecord},
 };
 
@@ -259,10 +260,11 @@ pub fn check_release(current: Option<&Inflight>, prior: Option<[u8; 32]>, txid: 
     Ok(())
 }
 
-/// H-1, confirmation: the claims and the transaction must be exactly the payout this node
-/// signed (`txid` in internal byte order).
+/// H-1, confirmation: the transaction must be exactly the payout this node signed (`txid` in
+/// internal byte order), and the claims some or all of its claims, in its order (R-1: the
+/// coordinator confirms only those still pending on Base; the others are proven).
 pub fn check_confirmation(inflight: &Inflight, claim_ids: &[[u8; 32]], txid: &[u8; 32]) -> Result<()> {
-    ensure!(claim_ids == inflight.claim_ids, "claims differ from the payout we signed");
+    ensure!(crate::confirmable_subset(claim_ids, &inflight.claim_ids), "claims differ from the payout we signed");
     if let Some(signed) = inflight.txid {
         ensure!(signed == *txid, "not the transaction this node signed");
     }
@@ -290,11 +292,13 @@ pub fn main_lineage<'a>(
 }
 
 /// The plan and inputs this node expects for `kind`, from its own view: the vault's next payout,
-/// from its main lineage or from the note of a refunded deposit (I30). `bound`: the unpaid claims
-/// a commitment on Base already binds to the main lineage note (RT-3).
+/// from its main lineage or from the note of a refunded deposit (I30). `claims`: the vault's claims
+/// as the planner counts them (O-4, `Node::planning`); `bound`: the unpaid claims a commitment on
+/// Base already binds to the main lineage note (RT-3).
 pub fn expected_plan(
     store: &Store,
     vault: &VaultRecord,
+    claims: &[Claim],
     notes: &VaultNotes,
     kind: &SignKind,
     now: u64,
@@ -323,8 +327,8 @@ pub fn expected_plan(
     // H-2: a recipient that is one of the vault's own addresses is no recipient: the claim is set
     // aside rather than paid back into the vault outside its books.
     let recipient = |c: &Commitment| store.recipient(c).filter(|r| !owns_receiver(&fvk, &r.receiver));
-    let (main, i10) = main_lineage(vault.activated, vault.outstanding, &vault.claims, &notes.lineage, bound);
-    let next = ledger::next_vault_payout(&vault.claims, recipient, main, &notes.refund_values(), now)?;
+    let (main, i10) = main_lineage(vault.activated, vault.outstanding, claims, &notes.lineage, bound);
+    let next = ledger::next_vault_payout(claims, recipient, main, &notes.refund_values(), now)?;
     let wanted: Vec<[u8; 32]> = claim_ids.iter().map(|c| c.0).collect();
     let plan = match next {
         NextPayout::Pay(plan) if plan.claims == wanted => plan,
@@ -344,19 +348,21 @@ pub fn expected_plan(
     Ok((plan, inputs))
 }
 
-/// Transaction-level expectations for a payout built on top of `tip` (I-4: the tip comes from
-/// the light wallet server, so no arithmetic on it may overflow).
-pub fn expectations(tip: u32) -> Result<TxExpectations> {
+/// Transaction-level expectations for a payout built on top of `tip` on `network` (I-4: the tip
+/// comes from the light wallet server, so no arithmetic on it may overflow).
+pub fn expectations(network: ZcashNetwork, tip: u32) -> Result<TxExpectations> {
     let target = tip.checked_add(1).context("tip height overflow")?;
     Ok(TxExpectations {
-        consensus_branch_id: u32::from(BranchId::for_height(&Network::TestNetwork, BlockHeight::from_u32(target))),
+        consensus_branch_id: u32::from(BranchId::for_height(&network.params(), BlockHeight::from_u32(target))),
         min_expiry: target,
         max_expiry: target.saturating_add(PAYOUT_EXPIRY_DELTA).saturating_add(TIP_SKEW),
     })
 }
 
 /// Round 1: verify and commit.
+#[allow(clippy::too_many_arguments)]
 pub fn commit(
+    network: ZcashNetwork,
     vault: &VaultRecord,
     plan: &PayoutPlan,
     inputs: &[ReceivedNote],
@@ -365,7 +371,7 @@ pub fn commit(
     inflight: Option<&Inflight>,
     unspent: &[[u8; 32]],
 ) -> Result<(Session, Vec<SigningCommitments>)> {
-    let expectations = expectations(tip)?;
+    let expectations = expectations(network, tip)?;
     let pczt = Pczt::parse(&req.pczt).map_err(|e| anyhow!("parse PCZT: {e:?}"))?;
     let fvk = vault_fvk(vault)?;
     let expected: Vec<ExpectedInput> = inputs
@@ -569,13 +575,38 @@ mod tests {
         check_confirmation(&s2, &[A], &TX2).unwrap();
     }
 
+    /// R-1: a confirmation names some or all of the payout's claims, in the payout's order (those
+    /// still pending on Base), never another claim, a claim twice, or none.
+    #[test]
+    fn a_confirmation_names_part_of_the_payout_in_its_order() {
+        const C: [u8; 32] = [3; 32];
+        let s = signed(&[A, B, C], TX1);
+        check_confirmation(&s, &[A, B, C], &TX1).unwrap();
+        check_confirmation(&s, &[A, C], &TX1).unwrap();
+        check_confirmation(&s, &[B], &TX1).unwrap();
+        assert!(check_confirmation(&s, &[C, A], &TX1).is_err(), "another order");
+        assert!(check_confirmation(&s, &[A, A], &TX1).is_err(), "a claim twice");
+        assert!(check_confirmation(&s, &[], &TX1).is_err(), "nothing");
+        assert!(check_confirmation(&s, &[A, [4; 32]], &TX1).is_err(), "another claim");
+    }
+
     #[test]
     fn server_supplied_tips_cannot_overflow() {
-        assert!(expectations(u32::MAX).is_err());
-        let e = expectations(u32::MAX - 1).unwrap();
+        let testnet = ZcashNetwork::Testnet;
+        assert!(expectations(testnet, u32::MAX).is_err());
+        let e = expectations(testnet, u32::MAX - 1).unwrap();
         assert_eq!(e.min_expiry, u32::MAX);
         assert_eq!(e.max_expiry, u32::MAX);
-        let e = expectations(4_486_000).unwrap();
+        let e = expectations(testnet, 4_486_000).unwrap();
         assert_eq!(e.max_expiry, 4_486_001 + PAYOUT_EXPIRY_DELTA + TIP_SKEW);
+    }
+
+    /// A payout's consensus branch id is its network's at the target height: Testnet's NU7 (from
+    /// 4,465,026), Mainnet's NU6.3 (from 3,428,143; its NU7 has no height yet).
+    #[test]
+    fn the_branch_id_is_the_networks() {
+        let at = |network: ZcashNetwork, tip: u32| expectations(network, tip).unwrap().consensus_branch_id;
+        assert_eq!(at(ZcashNetwork::Testnet, 4_486_000), 0x7719_0ad9, "Testnet NU7");
+        assert_eq!(at(ZcashNetwork::Mainnet, 3_500_000), 0x37a5_165b, "Mainnet NU6.3");
     }
 }

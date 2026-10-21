@@ -34,7 +34,6 @@ use reddsa::frost::redpallas::{
     },
 };
 use serde::{Deserialize, Serialize};
-use zcash_protocol::consensus::Network;
 use zecured_base::{OpenVault, recover_typed, registry_domain, sign_typed, vault_opened};
 use zecured_policy::derive::{sk_commitment, vault_sk};
 use zecured_threshold::{MAX_SIGNERS, MIN_SIGNERS, ak_bytes, signer_id};
@@ -314,7 +313,8 @@ pub fn round3(
     let ordered: Vec<[u8; 32]> = contributions.values().copied().collect();
     let sk = vault_sk(&vault_id.0, &ordered);
     let fvk = VaultSecret::from_bytes(sk).full_viewing_key(&ak)?;
-    let network = Network::TestNetwork;
+    // The deployment's Zcash network: Testnet's `utest1…`/`uviewtest1…` or Mainnet's `u1…`/`uview1…`.
+    let network = cfg.zcash().params();
     let ufvk = encode_ufvk(&network, &fvk)?;
     let address = encode_ironwood_ua(&network, vault_address(&fvk))?;
     let open = pending.open;
@@ -355,6 +355,7 @@ pub fn round3(
         confirmed: vec![],
         last_event: None,
         activated_tag: None,
+        reopened: vec![],
     })?;
     Ok(out)
 }
@@ -385,6 +386,8 @@ mod tests {
             commit_depth_secs: 120,
             local_fork: true,
             open_vault: Default::default(),
+            payout_lifetime_secs: None,
+            zcash_network: None,
         }
     }
 

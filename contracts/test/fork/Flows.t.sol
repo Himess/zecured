@@ -46,8 +46,8 @@ contract FlowsTest is ZecuredFixture {
     }
 
     function _confirm(bytes32 vaultId, bytes32[] memory ids) internal {
-        _commitNext(vaultId, ids); // Tier 3: the signers commit the payout before they sign it
-        registry.confirmPayout(vaultId, ids, _threeSigs(registry.hashPayoutConfirmation(vaultId, ids)));
+        // Tier 3: the signers commit the payout before they sign it; then they confirm that payout (v4, R-1).
+        _confirmPayout(vaultId, _commitNext(vaultId, ids).payoutRef, ids);
         for (uint256 i; i < ids.length; ++i) {
             (,,,, ClaimStatus status) = registry.claim(ids[i]);
             assertEq(uint8(status), uint8(ClaimStatus.Paid));

@@ -9,7 +9,6 @@
 
 use alloy::primitives::B256;
 use anyhow::{Context, Result, anyhow, ensure};
-use tonic::Code;
 use zcash_client_backend::proto::service::TxFilter;
 use zcash_primitives::transaction::Transaction;
 use zcash_protocol::{
@@ -105,22 +104,7 @@ pub fn mined_height(raw_height: u64) -> Option<u32> {
     (raw_height > 0).then(|| u32::try_from(raw_height).ok()).flatten()
 }
 
-/// True if a `GetTransaction` error status definitely means "no such transaction":
-/// lightwalletd answers `NotFound`; Zebra-backed servers may relay the node's RPC error
-/// ("No such mempool or main chain transaction") with another code.
-pub fn is_not_found(code: Code, message: &str) -> bool {
-    match code {
-        Code::NotFound => true,
-        // Transport and load problems never mean "not found".
-        Code::Unavailable
-        | Code::DeadlineExceeded
-        | Code::Cancelled
-        | Code::ResourceExhausted
-        | Code::Unauthenticated
-        | Code::PermissionDenied => false,
-        _ => message.contains("No such mempool or main chain transaction"),
-    }
-}
+pub use zecured_zcash_ops::lwd::is_not_found;
 
 /// Asks the light wallet server about `txid`.
 pub async fn lookup(client: &mut LwdClient, network: &Network, txid: &TxId) -> Result<TxLookup> {
@@ -155,34 +139,28 @@ pub fn nullifiers_of(raw_hex: &str, network: &Network, height: u32) -> Result<Ve
         .unwrap_or_default())
 }
 
-/// What claims on Base say about a payout's claims.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub enum Settled {
-    /// Every claim is `Paid` on Base: `confirmPayout` already went through.
-    All,
-    /// None is paid yet.
-    None,
-    /// Some are paid, some not: never produced by one `confirmPayout`; investigate.
-    Partial,
-}
-
-/// `ClaimStatus.Paid` in the Registry (`enum ClaimStatus { None, Pending, Paid }`).
+/// `ClaimStatus.Pending` and `ClaimStatus.Paid` in the Registry.
+pub const CLAIM_PENDING: u8 = 1;
 pub const CLAIM_PAID: u8 = 2;
 
-/// Classifies the Registry's `(vaultId, status)` of each claim of a payout of `vault_id`.
-pub fn settled(vault_id: &B256, claims: &[(B256, u8)]) -> Settled {
-    let paid = claims.iter().filter(|(v, s)| v == vault_id && *s == CLAIM_PAID).count();
-    if claims.is_empty() || paid == 0 {
-        Settled::None
-    } else if paid == claims.len() {
-        Settled::All
-    } else {
-        Settled::Partial
-    }
+/// R-1: the claims of a mined payout of `vault_id` (`claims`, in the payout's order) that three
+/// signers confirm: those the Registry still has pending (`states`: its `(vaultId, status)` of each
+/// claim), never a reopened one, which only a proof settles again. The others were confirmed
+/// already (a confirmation whose receipt was lost, H-5), or a payout planned again after a false
+/// confirmation (O-4) names them: the payout's proof makes every claim final (section 3).
+pub fn confirmable(vault_id: &B256, claims: &[B256], states: &[(B256, u8)], reopened: &[[u8; 32]]) -> Vec<B256> {
+    claims
+        .iter()
+        .zip(states)
+        .filter(|(c, (v, s))| v == vault_id && *s == CLAIM_PENDING && !reopened.contains(&c.0))
+        .map(|(c, _)| *c)
+        .collect()
 }
 
 #[cfg(test)]
 mod tests {
+    use tonic::Code;
+
     use super::*;
 
     const EXPIRY: u32 = 1_000;
@@ -244,16 +222,22 @@ mod tests {
         assert_eq!(mined_height(4_486_956), Some(4_486_956));
     }
 
-    /// H-5: a payout whose confirmPayout already went through is recognized, not resent.
+    /// H-5 and R-1: a payout whose confirmation already went through is not confirmed again; a
+    /// payout planned again after a false confirmation confirms only its pending claims; a reopened
+    /// claim, another vault's or an unknown one is never confirmed.
     #[test]
-    fn claim_states_on_base() {
+    fn only_pending_claims_are_confirmed() {
         let v = B256::repeat_byte(1);
-        let other = B256::repeat_byte(2);
-        assert_eq!(settled(&v, &[(v, CLAIM_PAID), (v, CLAIM_PAID)]), Settled::All);
-        assert_eq!(settled(&v, &[(v, 1), (v, 1)]), Settled::None);
-        assert_eq!(settled(&v, &[(v, CLAIM_PAID), (v, 1)]), Settled::Partial);
-        assert_eq!(settled(&v, &[(other, CLAIM_PAID)]), Settled::None, "another vault's claim");
-        assert_eq!(settled(&v, &[(B256::ZERO, 0)]), Settled::None, "unknown claim");
-        assert_eq!(settled(&v, &[]), Settled::None);
+        let (a, b, c) = (B256::repeat_byte(0xa), B256::repeat_byte(0xb), B256::repeat_byte(0xc));
+        let claims = [a, b, c];
+        let all_paid = [(v, CLAIM_PAID); 3];
+        assert!(confirmable(&v, &claims, &all_paid, &[]).is_empty(), "confirmed already");
+        let pending = [(v, CLAIM_PENDING); 3];
+        assert_eq!(confirmable(&v, &claims, &pending, &[]), vec![a, b, c]);
+        let mixed = [(v, CLAIM_PAID), (v, CLAIM_PENDING), (v, CLAIM_PENDING)];
+        assert_eq!(confirmable(&v, &claims, &mixed, &[]), vec![b, c], "in the payout's order");
+        assert_eq!(confirmable(&v, &claims, &pending, &[b.0]), vec![a, c], "never a reopened claim");
+        let strangers = [(B256::repeat_byte(2), CLAIM_PENDING), (B256::ZERO, 0), (v, 5)];
+        assert!(confirmable(&v, &claims, &strangers, &[]).is_empty());
     }
 }

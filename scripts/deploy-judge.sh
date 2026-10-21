@@ -5,7 +5,9 @@
 # network's five signers (SIGNER_ADDRESSES), and the guests' reproducible image ids (README,
 # "Reproducing the guest image ids"). Writes contracts/deployments/base-sepolia.json; then bond
 # the signers (scripts/bond-signers.sh) and register the treasury's receiver and salt behind
-# FEE_COMMITMENT with them (POST /recipients), or the opening-fee claims are never paid. After a
+# FEE_COMMITMENT with them (POST /recipients), or the opening-fee claims are never paid. Draw them
+# before deploying with `cargo run -q -p zecured-recipient -- --address <treasury UA> --out <file>`,
+# which prints the commitment and keeps the salt in that file (0600) for the registration. After a
 # real deployment, add its Registry to JUDGE_REGISTRIES (signer/crates/base-client/src/theft_demo_guard.rs).
 #
 #   scripts/deploy-judge.sh                 # simulation only

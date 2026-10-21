@@ -44,7 +44,8 @@ import {IZcashHeaderRelay, ZCASH_TESTNET} from "../src/relay/IZcashHeaderRelay.s
 ///            immutables and the constructors check the wiring: ZZEC, ZecuredSpendLogic, ZecuredRegistry (which
 ///            creates the zZEC / loan token / oracle / AdaptiveCurveIRM / LLTV market on Morpho Blue),
 ///            SettlementAdapter, ZecuredIntake, SignerBondV2, ZecuredSlasher, ZecuredCompensator, and
-///            ZecuredVersions with the deposit and violation guests as its initial versions (T-07a);
+///            ZecuredVersions with the deposit and violation guests as its initial versions (T-07a), and the swap's
+///            payment guest too when PAYMENT_IMAGE_ID is set;
 ///         4. optionally a demo lender supply;
 ///         5. writes deployments/<name>.json (broadcast) or deployments/<name>.dry-run.json (simulation): every address
 ///            and every parameter.
@@ -57,6 +58,8 @@ import {IZcashHeaderRelay, ZCASH_TESTNET} from "../src/relay/IZcashHeaderRelay.s
 ///        ZECURED_CONFIG           optional: the config file (default config/zecured-<DEPLOYMENT_NAME>.json)
 ///        DEPOSIT_IMAGE_ID         image id of the deposit guest (tier2/)
 ///        VIOLATION_IMAGE_ID       image id of the violation guest (tier2/)
+///        PAYMENT_IMAGE_ID         optional: image id of the swap's payment guest (tier2/), an initial Swap version
+///                                 with the config's branch ids (otherwise one is scheduled later, after its delay)
 ///        ZCASH_RELAY              the ZcashHeaderRelay (script/DeployRelay.s.sol)
 ///        RISC0_VERIFIER           optional: the RISC Zero verifier (default: the config's router)
 ///        RISC0_VERIFIER_MOCK      true: a MockRiscZeroVerifier (MOCK, accepts unproven journals); local fork only
@@ -77,6 +80,18 @@ contract DeployZecured is Script {
     bytes4 internal constant GROTH16_SELECTOR = 0x73c457ba;
     uint256 internal constant BASE_MAINNET = 8453;
     uint64 internal constant JUDGE_CHALLENGE_WINDOW = 1 days;
+    /// R-10: the Zcash blocks during which a committed payout may still be mined, counted from its commitment on Base:
+    /// its target height (the signers' tip plus one), its expiry 120 blocks later (`PAYOUT_EXPIRY_DELTA` in
+    /// signer/crates/zcash-ops/src/spend.rs), the 5 blocks of tip skew a node accepts in that expiry (`TIP_SKEW`,
+    /// signer/crates/node/src/signing.rs) and the 10 blocks past it during which the nodes still count it minable
+    /// (`EXPIRY_REORG_MARGIN`, the same file).
+    uint256 internal constant PAYOUT_LIFETIME_BLOCKS = 1 + 120 + 5 + 10;
+    /// Zcash's target block spacing: 25 s from NU7 (Testnet is past it), 75 s on Mainnet until NU7 activates there.
+    uint256 internal constant TESTNET_BLOCK_SECONDS = 25;
+    uint256 internal constant MAINNET_BLOCK_SECONDS = 75;
+    /// Blocks are a random process, and come slower than the target for a while after a hash-rate drop (the difficulty
+    /// follows only over its averaging window): a payout's lifetime is twice the target time of its blocks.
+    uint256 internal constant PAYOUT_LIFETIME_MARGIN = 2;
 
     /// One network's parameters: contracts/config/zecured-<name>.json.
     struct NetworkConfig {
@@ -131,9 +146,10 @@ contract DeployZecured is Script {
         uint64 versionDepositDelay;
         uint64 versionViolationDelay;
         uint64 versionEstopDelay;
-        // ZecuredSpendLogic: disputes (T-05 (a))
+        // ZecuredSpendLogic: disputes (T-05 (a)), dormant refunds (R-11)
         uint64 disputeWindow;
         uint64 inclusionWindow;
+        uint64 refundDormancy;
         // ZecuredCompensator
         uint64 incidentWindow;
         address leftoverSink;
@@ -156,6 +172,8 @@ contract DeployZecured is Script {
         bytes4 sealSelector;
         bytes32 depositImageId;
         bytes32 violationImageId;
+        /// Optional: the swap's payment guest, an initial Swap version.
+        bytes32 paymentImageId;
         address relay;
         bytes32 feeCommitment;
         ZZEC zzec;
@@ -200,6 +218,7 @@ contract DeployZecured is Script {
         d.depositImageId = vm.envBytes32("DEPOSIT_IMAGE_ID");
         d.violationImageId = vm.envBytes32("VIOLATION_IMAGE_ID");
         require(d.depositImageId != bytes32(0) && d.violationImageId != bytes32(0), "DeployZecured: zero image id");
+        d.paymentImageId = vm.envOr("PAYMENT_IMAGE_ID", bytes32(0));
         d.relay = vm.envAddress("ZCASH_RELAY");
         _checkRelay(d.relay, cfg);
         d.feeCommitment = cfg.feeBps == 0 ? bytes32(0) : vm.envBytes32("FEE_COMMITMENT");
@@ -261,6 +280,7 @@ contract DeployZecured is Script {
         c.slashConfirmationWork = vm.parseJsonUint(json, ".slashConfirmationWork");
         c.slashWorkFloor = vm.parseJsonUint(json, ".slashWorkFloor");
         c.disputeWindow = uint64(vm.parseJsonUint(json, ".disputeWindow"));
+        c.refundDormancy = uint64(vm.parseJsonUint(json, ".refundDormancy"));
         c.versionDepositDelay = uint64(vm.parseJsonUint(json, ".versionDepositDelay"));
         c.versionViolationDelay = uint64(vm.parseJsonUint(json, ".versionViolationDelay"));
         c.versionEstopDelay = uint64(vm.parseJsonUint(json, ".versionEstopDelay"));
@@ -296,12 +316,33 @@ contract DeployZecured is Script {
         }
     }
 
-    /// The rules the contracts cannot know: what a judge or mainnet deployment must never get wrong.
+    /// The rules the contracts cannot know (or check only once deployed): what a judge or mainnet deployment must never
+    /// get wrong.
     function _checkConfig(NetworkConfig memory c) internal pure {
         require(c.coverageBps != 0, "DeployZecured: the coverage cap is on in every deployment (T-01)");
         for (uint256 i; i < c.workTiers.length; ++i) {
             require(c.workTiers[i].minWork >= c.minWorkFloor, "DeployZecured: a work tier below the floor");
+            // R-18 (the Intake's constructor checks it too): never less work for a larger amount.
+            require(
+                i == 0
+                    || (c.workTiers[i].maxAmountZat > c.workTiers[i - 1].maxAmountZat
+                        && c.workTiers[i].minWork >= c.workTiers[i - 1].minWork),
+                "DeployZecured: work tiers ascend in amount and never descend in work (R-18)"
+            );
         }
+        // R-18: a pending proof waits for time as well as for the relay (K3), a pending activation's account for its
+        // delay (R-13).
+        require(c.finalizeDelay != 0, "DeployZecured: finalizeDelay is not zero (R-18)");
+        require(c.pendingRefundDelay != 0, "DeployZecured: pendingRefundDelay is not zero (R-18)");
+        // R-11: a refund without a destination leaves the cap before anyone may abandon it.
+        require(
+            c.refundDormancy != 0 && c.refundDormancy <= c.refundAbandonPeriod,
+            "DeployZecured: 0 < refundDormancy <= refundAbandonPeriod (R-11)"
+        );
+        // R-10: the bonds never pay a claim whose committed payout may still be mined.
+        require(
+            c.commitGrace >= _payoutLifetime(c), "DeployZecured: commitGrace is shorter than a payout's lifetime (R-10)"
+        );
         require(c.slashConfirmationWork >= c.slashWorkFloor, "DeployZecured: slash confirmation work below the floor");
         if (!c.localFork) {
             require(c.minWorkFloor >= 1_000_000, "DeployZecured: the work floor is at least 1,000,000 off a local fork");
@@ -312,16 +353,28 @@ contract DeployZecured is Script {
             );
         }
         require(!c.journalV2 || c.branchIds[0] != 0, "DeployZecured: journal v2 needs its branch ids");
-        // A bond that starts to leave once the last vault settled is still slashable when a claim reopened by a dispute
-        // falls due (IZecuredDisputes).
+        // R-18 (SignerBondV2's constructor checks it too): a bond that starts to leave, in part (just after a claim's
+        // confirmation) or in full (once the last vault settled), is still slashable when a claim reopened by a dispute
+        // falls due (IZecuredDisputes). The partial exit's bound implies the full exit's.
         require(
-            uint256(c.disputeWindow) + c.inclusionWindow <= uint256(c.challengeWindow) + c.unbondingPeriod,
-            "DeployZecured: the dispute and inclusion windows outlast the challenge window plus the unbonding"
+            uint256(c.disputeWindow) + c.inclusionWindow <= c.unbondingPeriod,
+            "DeployZecured: the dispute and inclusion windows outlast the unbonding (R-18)"
         );
         require(
             c.versionDepositDelay != 0 && c.versionEstopDelay != 0 && c.versionEstopDelay <= c.versionViolationDelay,
             "DeployZecured: version delays (T-07a)"
         );
+    }
+
+    /// R-10: how long a committed payout may still be mined, in seconds (see PAYOUT_LIFETIME_BLOCKS): 6,800 s on Zcash
+    /// Testnet, 20,400 s on Zcash Mainnet (its 75 s blocks until NU7).
+    function _payoutLifetime(NetworkConfig memory c) internal pure returns (uint256) {
+        bytes32 network = keccak256(bytes(c.zcashNetwork));
+        uint256 spacing;
+        if (network == keccak256("zcash-testnet")) spacing = TESTNET_BLOCK_SECONDS;
+        else if (network == keccak256("zcash-mainnet")) spacing = MAINNET_BLOCK_SECONDS;
+        else revert("DeployZecured: zcashNetwork is zcash-testnet or zcash-mainnet");
+        return PAYOUT_LIFETIME_BLOCKS * spacing * PAYOUT_LIFETIME_MARGIN;
     }
 
     // ------------------------------------------------------------------ steps
@@ -414,7 +467,8 @@ contract DeployZecured is Script {
     function _core(NetworkConfig memory c, Deployment memory d, address[5] memory signerSet) internal {
         Predicted memory p = _predict(d.deployer);
         d.zzec = new ZZEC(p.registry, p.adapter, address(c.morpho));
-        d.spendLogic = new ZecuredSpendLogic(p.registry, signerSet, c.disputeWindow, c.inclusionWindow);
+        d.spendLogic =
+            new ZecuredSpendLogic(p.registry, signerSet, c.disputeWindow, c.inclusionWindow, c.refundDormancy);
         d.registry = new ZecuredRegistry(_registryConfig(c, d, p, signerSet));
         d.adapter = new SettlementAdapter(d.registry, c.minSeize, c.minSeizeBps, c.maxMarginBps);
         d.intake = new ZecuredIntake(_intakeConfig(c, d, p));
@@ -451,6 +505,11 @@ contract DeployZecured is Script {
         require(address(d.versions) == p.versions, "DeployZecured: versions address mismatch");
         d.marketId = d.registry.marketId();
         require(c.morpho.market(d.marketId).lastUpdate != 0, "DeployZecured: market not created");
+        // R-9: on mainnet the bonds read the ZecuredPriceFeed's state, and pay no liveness while it is stale.
+        require(
+            c.chainId != BASE_MAINNET || d.bond.priceStateChecked(),
+            "DeployZecured: the bond does not see the price feed's state (R-9)"
+        );
     }
 
     function _predict(address deployer) internal view returns (Predicted memory p) {
@@ -466,15 +525,25 @@ contract DeployZecured is Script {
         p.versions = vm.computeCreateAddress(deployer, n + 8);
     }
 
-    /// T-07a: the deposit guest (with the config's branch ids) and the violation guest, both through the pinned seal
-    /// selector, active at once.
+    /// T-07a: the deposit guest (with the config's branch ids) and the violation guest, and with PAYMENT_IMAGE_ID the
+    /// swap's payment guest (the same branch ids), all through the pinned seal selector, active at once.
     function _initialVersions(NetworkConfig memory c, Deployment memory d)
         internal
         pure
         returns (Version[] memory initial)
     {
         uint32[4] memory none;
-        initial = new Version[](2);
+        initial = new Version[](d.paymentImageId == bytes32(0) ? 2 : 3);
+        if (d.paymentImageId != bytes32(0)) {
+            initial[2] = Version({
+                kind: VersionKind.Swap,
+                selector: d.sealSelector,
+                imageId: d.paymentImageId,
+                branches: c.branchIds,
+                activeAt: 0,
+                removed: false
+            });
+        }
         initial[0] = Version({
             kind: VersionKind.Deposit,
             selector: d.sealSelector,
@@ -745,6 +814,8 @@ contract DeployZecured is Script {
         vm.serializeString(eip712, "adapterDomain", "ZecuredSettlementAdapter");
         vm.serializeString(eip712, "intakeDomain", "ZecuredIntake");
         vm.serializeString(eip712, "versionsDomain", "ZecuredVersions");
+        vm.serializeString(eip712, "bondDomain", "ZecuredSignerBond");
+        vm.serializeBytes32(eip712, "bondDomainSeparator", d.bond.domainSeparator());
         vm.serializeBytes32(eip712, "versionsDomainSeparator", d.versions.domainSeparator());
         vm.serializeString(eip712, "version", "1");
         vm.serializeBytes32(eip712, "registryDomainSeparator", d.registry.domainSeparator());
@@ -787,6 +858,7 @@ contract DeployZecured is Script {
         tier3 = "tier3";
         vm.serializeBool(tier3, "enabled", true);
         vm.serializeBytes32(tier3, "violationImageId", d.violationImageId);
+        vm.serializeBytes32(tier3, "paymentImageId", d.paymentImageId);
         vm.serializeUint(tier3, "challengeWindow", c.challengeWindow);
         vm.serializeString(tier3, "slashConfirmationWork", vm.toString(c.slashConfirmationWork));
         tier3 = vm.serializeBool(tier3, "theftDemo", c.theftDemo);
@@ -817,6 +889,8 @@ contract DeployZecured is Script {
         vm.serializeUint(v3, "incidentWindow", c.incidentWindow);
         vm.serializeUint(v3, "disputeWindow", c.disputeWindow);
         vm.serializeUint(v3, "inclusionWindow", c.inclusionWindow);
+        vm.serializeUint(v3, "refundDormancy", c.refundDormancy);
+        vm.serializeBool(v3, "bondChecksPriceState", d.bond.priceStateChecked());
         vm.serializeUint(v3, "versionDepositDelay", c.versionDepositDelay);
         vm.serializeUint(v3, "versionViolationDelay", c.versionViolationDelay);
         vm.serializeUint(v3, "versionEstopDelay", c.versionEstopDelay);

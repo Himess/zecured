@@ -20,17 +20,21 @@ use zcash_note_encryption::try_note_decryption;
 use zcash_primitives::transaction::Transaction;
 use zcash_protocol::{
     TxId,
-    consensus::{BlockHeight, BranchId, Network},
+    consensus::{BlockHeight, BranchId},
 };
 pub use zecured_deposit_statement::Mode;
-use zecured_deposit_statement::{Journal, MmrStep, Witness, tag_key, vault_receiver, verify};
-use zecured_zcash_ops::lwd::{self, LwdClient};
+use zecured_deposit_statement::{Journal, MmrStep, Witness, tag_key, vault_receiver_on, verify_on};
+use zecured_zcash_ops::{
+    lwd::{self, LwdClient},
+    network::ZcashNetwork,
+};
 
 use crate::{
     chain,
-    history::{self, BlockSummary},
+    history::{self, BlockSummary, Epoch},
     mmr::Mmr,
     p2p::HeaderLine,
+    statement_network,
 };
 
 /// A vault as its five signers described it in `VaultOpened`.
@@ -76,34 +80,38 @@ fn raw_headers(path: &Path, heights: &[u32]) -> Result<BTreeMap<u32, Vec<u8>>> {
     Ok(out)
 }
 
-/// The per-block summaries of the NU7 epoch up to `last`, from the cache at `cache` (extended
-/// and rewritten as needed: the first build takes a few minutes, later ones seconds).
+/// The per-block summaries of `epoch` up to `last`, from the cache at `cache` (extended and
+/// rewritten as needed: the first build takes a few minutes, later ones seconds; a cache of another
+/// epoch is rebuilt).
 async fn summaries(
     client: &mut LwdClient,
     headers: &BTreeMap<u32, history::Header>,
     cache: &Path,
+    epoch: Epoch,
     last: u32,
 ) -> Result<Vec<BlockSummary>> {
     let cached: Option<Vec<BlockSummary>> =
         fs::read(cache).ok().and_then(|b| serde_json::from_slice::<Vec<BlockSummary>>(&b).ok());
     let mut out = match cached {
-        Some(s) if s.first().map(|b| b.height) == Some(history::NU7_ACTIVATION_HEIGHT) => s,
+        Some(s) if s.first().map(|b| b.height) == Some(epoch.activation) => s,
         _ => vec![],
     };
     out.retain(|s| s.height <= last);
-    let have = out.last().map_or(history::NU7_ACTIVATION_HEIGHT - 1, |s| s.height);
+    let have = out.last().map_or(epoch.activation - 1, |s| s.height);
     if have < last {
         // The commitment trees restart from the server's tree state at `have`.
         out.extend(chain::block_summaries(client, headers, have + 1, last).await?);
         fs::write(cache, serde_json::to_vec(&out)?)?;
     }
-    ensure!(out.len() == (last - history::NU7_ACTIVATION_HEIGHT + 1) as usize, "summary gap");
+    ensure!(out.len() == (last - epoch.activation + 1) as usize, "summary gap");
     Ok(out)
 }
 
-/// A mined transaction and where it is: its block B and B's place in the NU7-epoch history that
+/// A mined transaction and where it is: its block B and B's place in the epoch's history that
 /// header `tip` commits to (the inclusion part of every Tier 2 and Tier 3 witness).
 pub struct Located {
+    /// The Zcash network the transaction was read from.
+    pub network: ZcashNetwork,
     pub raw_tx: Vec<u8>,
     pub height: u32,
     pub tx_index: usize,
@@ -123,15 +131,16 @@ pub struct Located {
 impl Located {
     /// The transaction, parsed.
     pub fn transaction(&self) -> Result<Transaction> {
-        let branch = BranchId::for_height(&Network::TestNetwork, BlockHeight::from_u32(self.height));
+        let branch = BranchId::for_height(&self.network.params(), BlockHeight::from_u32(self.height));
         Ok(Transaction::read(&self.raw_tx[..], branch)?)
     }
 }
 
-/// Locates transaction `txid` under header `tip` (after its block; the relay must accept that
-/// header and enough work on top of it).
+/// Locates transaction `txid` of Zcash `network` under header `tip` (after its block, in the same
+/// epoch; the relay must accept that header and enough work on top of it).
 pub async fn locate(
     client: &mut LwdClient,
+    network: ZcashNetwork,
     headers_path: &Path,
     summaries_path: &Path,
     txid: TxId,
@@ -140,12 +149,13 @@ pub async fn locate(
     let headers = chain::load_headers(headers_path)?;
     let (raw_tx, height) = lwd::raw_transaction(client, &txid).await?;
     let height = u32::try_from(height)?;
-    ensure!(height >= history::NU7_ACTIVATION_HEIGHT && height < tip, "transaction at {height}, anchor {tip}");
+    let epoch = history::epoch(network, tip)?;
+    ensure!(height >= epoch.activation && height < tip, "transaction at {height}, anchor {tip}");
 
-    let summaries = summaries(client, &headers, summaries_path, tip - 1).await?;
-    let leaves: Vec<_> = summaries.iter().map(|s| history::leaf(history::NU7_BRANCH_ID, s)).collect();
+    let summaries = summaries(client, &headers, summaries_path, epoch, tip - 1).await?;
+    let leaves: Vec<_> = summaries.iter().map(|s| history::leaf(epoch.branch_id, s)).collect();
     let mmr = Mmr::new(leaves.clone())?;
-    let leaf_index = (height - history::NU7_ACTIVATION_HEIGHT) as usize;
+    let leaf_index = (height - epoch.activation) as usize;
     let (path, peak_index) = mmr.path(leaf_index)?;
 
     // The transaction's position in its block, and the anchor block's auth data root.
@@ -154,7 +164,7 @@ pub async fn locate(
     let tx_index = txids.iter().position(|t| t == txid.as_ref()).context("transaction not in its block")?;
     let txid_path = history::txid_merkle_path(&txids, tx_index)?;
     let tip_block = chain::compact_blocks(client, tip, tip).await?.remove(0);
-    let branch = BranchId::for_height(&Network::TestNetwork, BlockHeight::from_u32(tip));
+    let branch = BranchId::for_height(&network.params(), BlockHeight::from_u32(tip));
     let mut auth = vec![];
     for ctx in &tip_block.vtx {
         let (raw, _) = lwd::raw_transaction(client, &ctx.txid()).await?;
@@ -164,6 +174,7 @@ pub async fn locate(
 
     let mut raw = raw_headers(headers_path, &[height, tip])?;
     Ok(Located {
+        network,
         raw_tx,
         height,
         tx_index,
@@ -187,18 +198,18 @@ pub async fn locate(
     })
 }
 
-/// The Orchard-protocol full viewing key of a Testnet UFVK.
-pub fn ufvk_fvk(ufvk: &str) -> Result<orchard::keys::FullViewingKey> {
-    UnifiedFullViewingKey::decode(&Network::TestNetwork, ufvk)
+/// The Orchard-protocol full viewing key of a UFVK of Zcash `network`.
+pub fn ufvk_fvk(network: ZcashNetwork, ufvk: &str) -> Result<orchard::keys::FullViewingKey> {
+    UnifiedFullViewingKey::decode(&network.params(), ufvk)
         .map_err(|e| anyhow!("UFVK: {e}"))?
         .orchard()
         .cloned()
         .context("UFVK without an Orchard-protocol key")
 }
 
-/// Builds the witness of a note of transaction `txid` to `vault`, anchored at header `tip`
-/// (after the transaction's block; the relay must accept that header and enough work on top of
-/// it), and checks it with the statement.
+/// Builds the witness of a note of transaction `txid` of Zcash `network` to `vault`, anchored at
+/// header `tip` (after the transaction's block; the relay must accept that header and enough work
+/// on top of it), and checks it with the statement on that network.
 ///
 /// The note is an output of the transaction to the vault's published receiver: the one created
 /// by action `action` if given; otherwise, in Activate mode, the first of the vault's amount and,
@@ -206,6 +217,7 @@ pub fn ufvk_fvk(ufvk: &str) -> Result<orchard::keys::FullViewingKey> {
 #[allow(clippy::too_many_arguments)]
 pub async fn build(
     client: &mut LwdClient,
+    network: ZcashNetwork,
     headers_path: &Path,
     summaries_path: &Path,
     txid: TxId,
@@ -214,12 +226,13 @@ pub async fn build(
     action: Option<u32>,
     tip: u32,
 ) -> Result<Built> {
-    let at = locate(client, headers_path, summaries_path, txid, tip).await?;
+    let at = locate(client, network, headers_path, summaries_path, txid, tip).await?;
+    let statement = statement_network(network);
 
     // The note, found with the vault's incoming viewing key, to the vault's published receiver.
-    let fvk = ufvk_fvk(&vault.ufvk)?;
+    let fvk = ufvk_fvk(network, &vault.ufvk)?;
     let ivk = PreparedIncomingViewingKey::new(&fvk.to_ivk(Scope::External));
-    let published = vault_receiver(&vault.address).map_err(|e| anyhow!("the vault's address: {e:?}"))?;
+    let published = vault_receiver_on(statement, &vault.address).map_err(|e| anyhow!("the vault's address: {e:?}"))?;
     let tx = at.transaction()?;
     let bundle = tx.ironwood_bundle().context("no Ironwood bundle")?;
     let (action_index, note, recipient) = bundle
@@ -265,7 +278,7 @@ pub async fn build(
         vault_amount: vault.amount,
         expiry_height: vault.expiry_height,
     };
-    let journal = verify(&witness).map_err(|e| anyhow!("the statement refuses the witness: {e:?}"))?;
+    let journal = verify_on(statement, &witness).map_err(|e| anyhow!("the statement refuses the witness: {e:?}"))?;
     Ok(Built {
         witness,
         journal,

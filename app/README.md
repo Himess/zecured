@@ -47,6 +47,9 @@ values that carry no authority.
 | `NEXT_PUBLIC_SIGNERS` | none (pin) | The five signer addresses, comma-separated (to verify signer signatures in the app). |
 | `NEXT_PUBLIC_MORPHO` | `0xBBBBBbbBBb9cC5e90e3b3Af64bdAF62C37EEFFCb` | Morpho Blue on Base Sepolia (the default is a pin too). |
 | `NEXT_PUBLIC_IRM` | `0x46415998764C29aB2a25CbeA6254146D50D22687` | AdaptiveCurveIRM (the default is a pin too). |
+| `NEXT_PUBLIC_ZECURED_DEPLOYMENT` | `testnet` | v4: `testnet` (the judge deployment: Base Sepolia, Zcash testnet, TAZ) or `mainnet-beta` (Base 8453, Zcash mainnet, ZEC): the band "Mainnet beta — unaudited — invite only — small caps" on every page, an invite code sent with `POST /vaults`, the demo path off, the evidence page's mainnet section first. Any other value keeps Base disabled. |
+| `NEXT_PUBLIC_SWAP` | none | v4: ZecuredSwap, pinned like the other contracts (the user's own wallet sends `open` and `refund` to it); empty: the Buy page says the build has no swap. |
+| `NEXT_PUBLIC_DEMO_PATH` | off | v4, P-1 (DEMO, judge deployment only): `1` shows "Try with demo TAZ" while the backend's demo wallet is on (`GET /demo/status`). Ignored on the mainnet beta. |
 
 All values are public (inlined into the bundle at build time). Rebuild after changing them.
 
@@ -102,8 +105,12 @@ addresses are what the app trusts.
 | `/loans` | Loan keys held in this browser: export, import (validated against the derived account), forget. |
 | `/position#<vaultId>` | Collateral, debt (with accrued interest), health factor, liquidation price; a pending activation (readiness height and time, what holds it, turning it into a refund after a long pause or a halt); refunds; every claim in plain words, with "My payout did not arrive" (a dispute) within the dispute window and a reopening once the signers' time to prove the payout passed, and for an overdue claim of the account what the signers' bonds would pay for it now, with "Claim from the bonds"; a frozen or compromised vault, and what the compensator owes it (read-only); exits: close from collateral, repay + release, release after liquidation; withdraw part of the ZEC (D14); send USDC; borrow more. |
 | `/verify#<vaultId>` | Owner-signed `ViewKeyRequest` → the vault's UFVK (never stored), what it shows and hides, and the `zecured-wallet watch` command from the vault's birthday height. |
-| `/refund#<vaultId>` | The vault's Refund claims on Base (why each landed, its destination step, reviving an abandoned one) and its pending activation. There is no refund outside Base. |
+| `/refund#<vaultId>` | The vault's Refund claims on Base (why each landed, its destination step, reviving an abandoned one), its pending refunds (R-12: proven, their claims not open yet) and its pending activation. There is no refund outside Base. |
 | `/world` | Everyone / signer network / you, with live Registry events, market totals and the signers' view of your vaults. |
+| `/buy` | v4, Zecured Swap (Buy side; Sell stays on the command line): a quote from the maker through the backend, the user's own wallet approves and opens the order, the destination (an Ironwood address and salt behind the order's commitment) goes to the maker through the backend, the order is followed from Base events until its payment is proven, and refunded after its deadline otherwise. |
+| `/market` | v4, P-4: supplied, borrowed, utilization, rates, the locked collateral, the signers' bonds against it and the compensation order; optional lending from the user's own wallet (EIP-1193). |
+| `/status` | v4, P-2: the signers' modes, the Zcash tip against the header relay, the deposit-proof queue, the minting gates, the coverage cap's fill, ΣB and B_eff, the anonymity set of each vault size, the proof versions and the running commit. |
+| `/evidence` | v4, P-3: the backend's evidence file (`zecured-evidence/1`, lib/evidence.ts): the manifest, every flow's transactions linked to the explorers, the leak scan, the measured durations. |
 | `/demo` | Admin-token panel: node modes, the sweep (threshold) demo, the MOCK oracle price (presets $40 and $20); bot status is a placeholder. |
 
 The vault id travels in the URL **fragment**, never in the path or the query (security review
@@ -121,9 +128,13 @@ sponsored UserOp and follows the new Release claim until it is paid.
 
 v3 (contracts/src/interfaces/v3, docs/DECISIONS.md D40 to D54):
 
-- **Refunds (T-02).** A deposit that cannot back a loan (a second payment, a deposit while
-  minting is halted or the coverage cap is full, a Refund-mode proof) lands on Base as a Refund
-  claim. Its destination is pre-validated exactly like an exit's, then set with one sponsored
+- **Refunds (T-02, v4 R-11 and R-12).** A deposit that cannot back a loan (a second payment, a
+  deposit while minting is halted, a Refund-mode proof) lands on Base as a pending refund
+  (`RefundPending`), which waits like an activation until `finalizeRefund` opens its Refund claim;
+  the vault pages list it as pending until then. A new vault's deposit that the coverage cap has
+  no room for is no longer refunded: its proof waits and is sent again once there is room, or its
+  owner asks for a Refund-mode proof instead ("Refund my deposit instead",
+  `POST /vaults/:id/prove-refund`). A refund's destination is pre-validated exactly like an exit's, then set with one sponsored
   UserOp, `Registry.setRefundDestination(claimId, commitment)`; the same revives a refund written
   off after `refundAbandonPeriod` without a destination. The reason it landed is read from the
   Intake's `DepositRefunded` event of the claim's creation second.

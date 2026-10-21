@@ -19,7 +19,7 @@ use std::{fs, path::PathBuf};
 use anyhow::{Context, Result, anyhow};
 use clap::{Parser, Subcommand};
 use zcash_protocol::TxId;
-use zecured_deposit_witness::{p2p, violation};
+use zecured_deposit_witness::{ZcashNetwork, p2p, violation};
 use zecured_zcash_ops::lwd;
 
 #[derive(Parser)]
@@ -32,12 +32,16 @@ struct Args {
     /// Receives the bounty (an EOA; never a vault's smart account). Not used by `included`.
     #[arg(long, global = true)]
     beneficiary: Option<String>,
-    /// JSON Lines headers from NU7 activation on.
+    /// JSON Lines headers from the epoch's activation on (NU7 on Testnet).
     #[arg(long, global = true, default_value = "data/tier2/headers_nu7.json")]
     headers: PathBuf,
-    /// First extend the header file to the Testnet tip over the P2P network.
+    /// First extend the header file to the network's tip over the P2P network.
     #[arg(long, global = true)]
     update_headers: bool,
+    /// The Zcash network of the transaction (`testnet` or `mainnet`): its peers, encodings and
+    /// epochs, and the statement the witness is checked with (prove it with that network's guest).
+    #[arg(long, global = true, default_value = "testnet", value_parser = ["testnet", "mainnet"])]
+    network: String,
     /// Cache of per-block summaries (built on first use; a few minutes).
     #[arg(long, global = true, default_value = "data/tier2/summaries.json")]
     summaries: PathBuf,
@@ -91,7 +95,7 @@ enum KindArgs {
         claim_file: PathBuf,
     },
     /// Not a violation (T-05): a payout of the vault is in a block under the anchor. The journal
-    /// names it by its payoutRef; the v2 slasher refuses this kind.
+    /// names it by its payoutRef; `ZecuredSlasher.proveInclusion` makes its claims final (D76).
     Included {
         #[arg(long)]
         ufvk_file: PathBuf,
@@ -107,6 +111,7 @@ fn hex32(s: &str) -> Result<[u8; 32]> {
 #[tokio::main]
 async fn main() -> Result<()> {
     let args = Args::parse();
+    let network = ZcashNetwork::from_name(&args.network)?;
     let tip = args.tip.context("--tip")?;
     let beneficiary: [u8; 20] = match (&args.kind, args.beneficiary.as_deref()) {
         (KindArgs::Included { .. }, _) => [0; 20],
@@ -116,10 +121,12 @@ async fn main() -> Result<()> {
     };
     if args.update_headers {
         let path = args.headers.clone();
-        let height = tokio::task::spawn_blocking(move || p2p::extend_file(&path, &p2p::seed_peers())).await??;
+        let height =
+            tokio::task::spawn_blocking(move || p2p::extend_file(network, &path, &p2p::seed_peers(network))).await??;
         println!("headers up to {height}");
     }
     let mut client = lwd::connect(&args.lwd).await?;
+    lwd::check_network(&mut client, network).await?;
     let read_ufvk = |p: &PathBuf| -> Result<String> { Ok(fs::read_to_string(p)?.trim().to_owned()) };
     let (witness, journal) = match &args.kind {
         KindArgs::Uncommitted {
@@ -129,6 +136,7 @@ async fn main() -> Result<()> {
         } => {
             violation::uncommitted(
                 &mut client,
+                network,
                 &args.headers,
                 &args.summaries,
                 &read_ufvk(ufvk_file)?,
@@ -147,6 +155,7 @@ async fn main() -> Result<()> {
         } => {
             violation::withheld_change(
                 &mut client,
+                network,
                 &args.headers,
                 &args.summaries,
                 &read_ufvk(ufvk_file)?,
@@ -168,6 +177,7 @@ async fn main() -> Result<()> {
             )?;
             violation::wrong_claim_ref(
                 &mut client,
+                network,
                 &args.headers,
                 &args.summaries,
                 &read_ufvk(ufvk_file)?,
@@ -185,6 +195,7 @@ async fn main() -> Result<()> {
             )?;
             violation::misdirected(
                 &mut client,
+                network,
                 &args.headers,
                 &args.summaries,
                 TxId::from_hex(&e.txid).context("txid")?,
@@ -200,6 +211,7 @@ async fn main() -> Result<()> {
         KindArgs::Included { ufvk_file, txid } => {
             violation::included(
                 &mut client,
+                network,
                 &args.headers,
                 &args.summaries,
                 zecured_deposit_statement::tag_key(&read_ufvk(ufvk_file)?),

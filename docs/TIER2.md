@@ -119,8 +119,13 @@ features of their own (§ 8.1).
 
 The witness names the epoch of B and T (`branch_id`): the build must allow it, the transaction must carry it, and it
 personalizes the history tree's hashes, so B and T are of it. A deployment registers only its network's guests; the
-Intake also checks `branchId` against the ids it was deployed with. (NU6.3 is a Testnet epoch too, from 4,134,000 to
+Intake also checks `branchId` against the ids the proof's verifier version allows (`ZecuredVersions`, D54). (NU6.3 is a Testnet epoch too, from 4,134,000 to
 NU7; the Testnet build proves the current NU7 epoch only.)
+
+The witness builders are not built per network: they take it from the deployment (D81) and check a witness with that
+network's statement parameters, which must be those of the guest that proves it. The anchor's epoch, its first block
+and branch id, comes from zcash_protocol's activation heights: Testnet's NU7 epoch from 4,465,026; on Mainnet NU6.3's
+from 3,428,143 until a zcash_protocol release carries NU7's Mainnet height.
 
 ### 2.3 Why the tag key is bound to the vault (design review)
 
@@ -156,7 +161,9 @@ depends on the tag key, which only the owner, the signers and whoever proves the
 
 then the deposit **lands**, once: if it can activate the vault, the Registry **reserves** the vault id, the tag and the
 account and the Intake records a pending activation (D26, review K3): nothing is minted yet. Otherwise (Refund mode, a
-vault that is not new, an account bound elsewhere, a halt, a full coverage cap) it lands as a Refund claim (§ 5).
+vault that is not new, an account bound elsewhere, a halt) it lands as a pending refund, whose Refund claim opens after
+the same wait (§ 5). A new vault's proof that finds the coverage cap full reverts and is sent again once there is room
+(R-11).
 `finalizeActivation(vaultId)` (anyone) mints and supplies once the relay's best chain has gained `finalizeDepth` (6)
 headers since the proof and `finalizeDelay` (150 s) has passed, with the anchor still on the best chain under the
 same work, no violation case open on the vault, and minting neither halted, paused nor short of bonds.
@@ -204,11 +211,16 @@ keccak256(K)`, § 2.3).
 ## 5. Deposits that do not activate: refunds by proof (D41, T-02)
 
 A proof needs no signer, so a deposit that cannot activate its vault is brought onto Base like any other: it lands as
-a Refund claim of the vault's account (`DepositRefunded`, with the reason), and its note is a lineage note from then
-on. The account gives the refund's destination (`setRefundDestination`, a salted commitment, by UserOp); the signers
-then pay it with a committed payout like any claim, and its theft is F1. A refund nobody claims is written off after
-`refundAbandonPeriod` and can be revived by its account. A pending activation becomes a refund after a halt, or after a
-pause by signatures has lasted `pendingRefundDelay` (`refundPending`). With journal v2, a note of any other amount, or
+a pending refund of the vault's account (`RefundPending`, with the reason), and its note is a lineage note from then
+on. Like an activation, the refund waits (v4, R-12): `finalizeRefund` opens its Refund claim (`DepositRefunded`) once
+the relay has moved on by `finalizeDepth` headers and `finalizeDelay` seconds with the anchor still on the best chain,
+and `dropPendingRefund` frees the note if the anchor leaves it, so a short fake branch cannot leave a refund claim for
+good; no payout may spend a pending refund's note, and no refund opens while its vault is pending. The account gives
+the refund's destination (`setRefundDestination`, a salted commitment, by UserOp); the signers then pay it with a
+committed payout like any claim, and its theft is F1. A refund without a destination for `refundDormancy` can be
+marked dormant and stops counting against the cap; one nobody claims is written off after `refundAbandonPeriod` and
+can be revived by its account. A pending activation becomes a refund after a halt, or at its account's request once
+`pendingRefundDelay` has passed since it was ready, whatever gate holds it (`refundPending`, R-13). With journal v2, a note of any other amount, or
 paid after the vault's expiry, is proven in Refund mode and lands the same way. There is no `cancelVault` any more:
 it could not authenticate the vault's owner on Base without publishing `VaultOpened`'s hashes, and an off-chain refund
 of a note a later proof could make a lineage note would look exactly like an F1 theft (I30, D42). Notes no deployed
@@ -278,7 +290,10 @@ keep an off-chain refund from ever spending a note that backs zZEC, or could:
    the real deposit, 48 s for an F1 violation (TESTING.md § 2b). `risc0-groth16` 3.0.5 wraps in Groth16 either with
    Docker on x86 or natively with its `cuda` feature. The CUDA prover fails on our receipts (an out-of-bounds read
    in its own kernel, TESTING.md § 2b), so the wrap uses Docker on x86: about a minute per seal. Its input is the
-   succinct receipt, which holds no viewing key. Both seals pass RISC Zero's router (done). A deposit witness holds
+   succinct receipt, which holds no viewing key. Both seals pass RISC Zero's router (done), and so do statement v2's
+   (`RealSealsV2.t.sol`, 2026-10-21): deposit-test, violation-test (F1 and `Included`) and payment-test. On an RTX
+   4090 their STARKs take 4 to 37 s; on a 4-vCPU server without a GPU the deposit's took 7 h 58 min (TESTING.md
+   § 2b): a deployment that proves its users' deposits needs a GPU. A deposit witness holds
    the vault's tag key K, not its viewing key (statement v2): the GPU server learns which notes and payouts are the
    vault's, not their amounts or recipients. The private alternative keeps the STARK on the depositor's machine.
 2. **Base Sepolia**: deploy a relay from a recent checkpoint (`script/DeployRelay.s.sol`, Testnet parameters by
@@ -314,7 +329,7 @@ both guests are frozen once the deployed ids are taken from that build. Two runs
 same source) gave the same ids. Statement v1's, after the red-team fixes, were deposit
 `0x62feed13b2948aa427275fb6003e717ccc88945d033b99b196936ca99a80cdf5` and violation
 `0x7d8c9dd23e813e0e44ffea2b18ec9ec451b52a8a7b634ae998583d49b73cc526`; the real seals of `RealGroth16Seal.t.sol` are of
-those guests. Statement v2 changes both and adds the Mainnet pair: the workflow builds both networks, prints the four
+those guests, and those of `RealSealsV2.t.sol` of statement v2's. Statement v2 changes both and adds the Mainnet pair: the workflow builds both networks, prints the four
 ids and runs both parity suites on each pair. Its runs of 2026-10-16 on statement v2 (two, the same ids, every parity
 suite passing) give the ids to deploy, a network's pair as `DEPOSIT_IMAGE_ID` and `VIOLATION_IMAGE_ID`, and the ELFs
 provers run:
@@ -325,6 +340,13 @@ provers run:
 | violation-test | `0x65705f75c5482b2b0cf6fee12760b2364d48213bb2933f3882dc2d92f824866e` | `45205f4e390e5d017213ffd399c9231d0300a227d46db7e2f711f0abdc33dd38` |
 | deposit-main | `0x53f8f8e3664ce908c4ea072f239e18b6fa8b01d68c01fc162b4ae2e31b2cd5c5` | `b85d9d21f4bad6d7998506cb09431d5057a334a06732ebdfa3a4472fe811c461` |
 | violation-main | `0x24edd49e52447665146009687b6b85e3f0b6184883cbf635a762048cd1a5ce33` | `dfc746ce0e6c6c2c1f6f5323ebe3c7ef371ab6bd4c3c8f6d08c656adbef3c789` |
+| payment-test (Zecured Swap) | `0x199bf772d0780413a07081b4889f0473c8ae558c6d8c4dca96eef49b5e486134` | `26439f49d26a18560d03a8ba2849888c25f8cf059f1d55d6609f9a697cb29386` |
+| payment-main (Zecured Swap) | `0x1c2def3eb121bd3240700ca554ab455e03420981856fda3f580b930f731038b2` | `3d9d4488acec0c5a93438e714e9b54d100fac0df26897f7a0fbce9c29fb52531` |
+
+The payment guests (the swap's statement, `tier2/payment-statement`) were built the same way on 2026-10-17, twice with
+the same ids, their parity suite passing on both networks. These ids and ELF hashes are pinned in
+`tier2/pinned-image-ids.txt`: the workflow fails when a build gives a pinned
+guest another id or ELF, so shared code cannot move them unnoticed.
 
 The judge deployment and the theft demo take journal v2 with the Testnet pair and the NU7 epoch (branch id
 `0x77190AD9`, D56); the local fork takes journal v2 too, with its own build's ids and the MOCK verifier.

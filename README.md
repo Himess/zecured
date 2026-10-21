@@ -1,31 +1,53 @@
 # Zecured
 
-> **Borrow against shielded ZEC. Sell nothing. Reveal nothing.**
+> **Use shielded ZEC on Base: borrow against it, or swap into it. It never leaves the shielded pool.**
 
-Every way to use ZEC in DeFi today starts with unshielding it. Zecured doesn't.
-Holding ZEC shielded no longer means giving up liquidity: you can borrow dollars on Base without
-selling or unshielding it, and USDC lenders on Base gain a new market backed by Zcash collateral.
+Using ZEC in DeFi today usually means taking it out of the shielded pool. Zecured doesn't.
 
-Zecured lets ZEC holders borrow USDC on Base without selling their ZEC and without it ever
-leaving the shielded pool. Collateral sits in a fresh **3-of-5 FROST threshold vault** in
-Zcash's **Ironwood** pool; a **non-transferable receipt (zZEC)** is minted straight into a
-**Morpho Blue** position of a fresh, gasless smart account. Close the loan by repaying in USDC
-— or **close it from collateral**: a market maker repays the debt and takes ZEC for it, and
-the rest returns to a new shielded address, so no outside funds ever touch your account. If
-the price drops, a liquidator repays and receives the seized ZEC, shielded.
+Two products, one Zcash light client on Base:
 
-**Who you have to trust.** Every deposit of a vault's amount is brought onto Base by a
-zero-knowledge proof that the note is in a Zcash block whose header Base verified, as collateral or
-as a committed refund ([Tier 2](docs/TIER2.md)). Minting needs no signer, except that all five
-together can schedule a new verifier version, which takes effect only after a public delay. Signers
-must commit every payout on Base before they can sign it. Taking ZEC that backs loans — without a
-commitment or under a false one — or paying any claim to anyone but its owner is provable on Base
-with a zero-knowledge proof that reveals no Zcash transaction, note or address, and it slashes the
-signers' bonds ([Tier 3](docs/TIER3.md)); the bonds compensate the victims: liquidators and lenders
-before the borrower's own equity. New collateral is accepted only while the bonds cover its value.
-If the signers stop paying a claim for 24 hours (72 on mainnet), its claimant is paid from the
-bonds, and a payout they confirm but never send can be disputed. Three of five signers can pause new
-minting for up to 30 days at a time; withdrawals, repayments, liquidations and payouts never stop.
+- **Borrow.** Borrow USDC on Base against ZEC that stays in Zcash's shielded Ironwood pool. The ZEC
+  sits in a fresh **3-of-5 FROST threshold vault**; on a zero-knowledge proof of the deposit, a
+  **non-transferable collateral receipt (zZEC)** is minted straight into a **Morpho Blue** position of
+  a fresh, gasless smart account. Close by repaying in USDC, or **close from collateral**: a market
+  maker repays the debt and takes ZEC for it, and the rest returns to a new shielded address, so no
+  outside funds ever touch your account. A liquidation, or a pre-liquidation the borrower opted into,
+  pays in shielded ZEC too.
+- **Swap.** Swap USDC into shielded ZEC with no custodian, no signer and no wrapped ZEC. The USDC
+  waits in escrow on Base and is released by a zero-knowledge proof, made by whoever paid, that a
+  shielded payment for that very order is in the Zcash chain. Any Ironwood address can receive.
+  Selling ZEC for USDC works the same way, from the CLI ([docs/SWAP.md](docs/SWAP.md)).
+
+The shared core is a Zcash light client on Base: `ZcashHeaderRelay` verifies Zcash headers
+(Equihash) on-chain, ZIP 221 history commitments keep a proven block hidden among its epoch's, RISC
+Zero guests prove deposits, payments, payouts and violations, and `ZecuredVersions` lists the
+verifiers each proof is checked with.
+
+**Who you have to trust.** Base never takes the signers' word: deposits are proven, payouts are
+proven, misbehaviour is proven — and the same Zcash light client lets anyone swap USDC into shielded
+ZEC with no custodian.
+
+- **Deposits.** Every deposit of a vault's amount is brought onto Base by a zero-knowledge proof that
+  the note is in a Zcash block whose header Base verified, as collateral or as a refund
+  ([Tier 2](docs/TIER2.md)). Minting needs no signer, except that all five together can schedule a
+  new verifier version, which takes effect only after a public delay. New collateral is accepted
+  only while the bonds cover its value.
+- **Payouts.** Signers must commit every payout on Base before they can sign it, and a payout is
+  final on Base only once its inclusion in a Zcash block is proven in zero knowledge; the coordinator
+  proves every payout, and anyone can. A signed confirmation is a fast first step that its claimant
+  can dispute.
+- **Misbehaviour.** Taking ZEC that backs loans (without a commitment, or under a false one), or
+  paying any claim to anyone but its owner, is provable on Base with a zero-knowledge proof that
+  reveals no Zcash transaction, note or address, and it slashes the signers' bonds
+  ([Tier 3](docs/TIER3.md)); the bonds compensate the victims: liquidators and lenders before the
+  borrower's own equity.
+- **Liveness.** Once a signer has acknowledged a claim's destination, a claim left unpaid for 24
+  hours (72 on mainnet) is paid to its claimant from the bonds. Three of five signers can pause new
+  minting for up to 30 days at a time; withdrawals, repayments, liquidations and payouts never stop.
+- **Swap.** No signer and no bond take part in a trade: its USDC moves only on a payment proof,
+  checked against the relay with the same work and readiness rules as a deposit. A market maker that
+  never pays costs its taker only time.
+
 What the bonds cover and what they do not: [docs/ECONOMICS.md](docs/ECONOMICS.md).
 
 On Zcash testnet a single Equihash ASIC out-mines the whole network about 40 times over, so every
@@ -55,10 +77,16 @@ Verified end to end on **Zcash testnet (NU7)** with five independent signer proc
 | Tier 2 deposit proof | The deposit statement on a real deposit: the zkVM's journal equals the native one (20.2 M cycles), the relay verified the anchor header's Equihash on-chain |
 | Tier 3 commit before sign | A real payout's `SpendCommit` signed by the three chosen signers in FROST round 1, recorded on Base, and checked by every signer three blocks deep before it released its share; then mined and confirmed |
 | Tier 3 violation statements | F1 holds on a real Testnet vault spend and the slasher's tests slash with exactly that journal; F1 and F3 run in the zkVM with the native journal |
+| Real seals of the pinned guests | Real Groth16 seals of deposit-test, violation-test (F1 and `Included`) and payment-test pass RISC Zero's router on Base Sepolia and Base mainnet forks; the STARKs take 4 to 37 s on an RTX 4090 |
+| Proven delivery | A disputed confirmation made final by the payout's inclusion proof 2 min 51 s after the dispute; routine proofs inside the dispute window |
+| Zecured Swap | Buy and Sell orders settled on payment proofs (payment memo `"ZSWP" ‖ orderId`, ovk none); an unpaid order refunded after its pay window |
+| Theft demonstration | Three compromised signers sweep a vault; the borrower's viewing key detects F1 a block later; all five bonds slashed; the victim's debt repaid and the rest of its ZEC's value paid in USDC |
+| The app in a browser | Gasless: open, deposit, borrow with pre-liquidation terms, deleverage and close from collateral (Safe signatures), repay and release, a claim paid from the bonds |
 
-The Base side of P2 / P3 / P6 / D14 has been run against a local fork of Base Sepolia (real
-Morpho Blue deployment); the public Base Sepolia deployment follows. Evidence (block heights,
-txids) and how to reproduce every run: [docs/TESTING.md](docs/TESTING.md).
+The Base side has been run on local forks of Base Sepolia (the real Morpho Blue deployment and
+RISC Zero router). No deployment is kept running through judging ([D82](docs/DECISIONS.md)):
+the whole system runs on a local fork (below). Evidence (block heights, short txids, timings) and
+how to reproduce every run: [docs/TESTING.md](docs/TESTING.md).
 
 ## What is real and what is a mock
 
@@ -69,16 +97,18 @@ txids) and how to reproduce every run: [docs/TESTING.md](docs/TESTING.md).
 | Per-payout policy checks by every signer (P0–P6) | Signer independence (all 5 nodes run by us); the Tier 3 bonds show the mechanism, not economic security |
 | Morpho Blue market on Base Sepolia (the real Morpho deployment); the whole contract suite also runs on a Base mainnet fork, against mainnet's Morpho Blue and RISC Zero router | Morpho in the symbolic checks and the compensator's unit tests only (`MockMorphoForHalmos`, `MockMorphoForCompensator`, test only: Halmos has no fork mode; the fork tests use the real Morpho deployment). Unit tests use MOCK peers, test only: `MockCompensatorRegistry`, `MockCompensatorSlasher`, `MockCompensatorBond`, `BondV2Mocks`, `MockSignerBond` (the bond and slasher views set by hand), `MockCapPrice`, `MockHeaderRelay`, `MockAggregator` (a Chainlink-style source for the price feed's tests); `IntakeHarness` (TEST ONLY) activates a vault without a proof |
 | ZZEC, ZecuredRegistry and ZecuredSpendLogic, ZecuredIntake, SettlementAdapter, SignerBondV2 (USDC bonds), ZecuredSlasher, ZecuredCompensator, ZecuredVersions; ZecuredPriceFeed for mainnet (tested against the live Chainlink and API3 feeds on a Base mainnet fork) | |
-| Liquidation, close from collateral, refunds of non-conforming deposits | |
+| Liquidation, close from collateral, refunds of non-conforming deposits | DEMO: on a testnet deployment only, the operators' demo wallet pays a vault real TAZ for a visitor without testnet ZEC ("Try with demo TAZ") |
+| Zecured Swap: `ZecuredSwap`, the payment statement in the RISC Zero zkVM, the market maker (the app's Buy page uses the user's own wallet; Sell is on the command line) | The payment fixture is synthetic until a rehearsal payment gives a real one (D68) |
+| An onion service configuration for the app and its API (`infra/onion`), deployed with the servers | |
 | Own RPC / bundler / paymaster proxy with a sponsorship allowlist | |
-| Tier 2 deposit statement on real Testnet data, run in the RISC Zero zkVM; Zcash header relay with on-chain Equihash | RISC Zero verifier on the local fork (`MockRiscZeroVerifier`, accepts unproven journals; it also plays the router and its emergency stop for the version registry) for the demo's own proofs, and `mock-host` (MOCK, TEST ONLY), which seals journals of the native statement for it where RISC Zero does not run (Windows); real Groth16 seals of a real deposit and a real F1 spend pass RISC Zero's verifier router on Base Sepolia and on a Base mainnet fork (`RealGroth16Seal.t.sol`) |
+| Tier 2 deposit statement on real Testnet data, run in the RISC Zero zkVM; Zcash header relay with on-chain Equihash | RISC Zero verifier on the local fork (`MockRiscZeroVerifier`, accepts unproven journals; it also plays the router and its emergency stop for the version registry) for the demo's own proofs, and `mock-host` (MOCK, TEST ONLY), which seals journals of the native deposit, violation and payment statements for it where RISC Zero does not run (Windows); real Groth16 seals of a real deposit and a real F1 spend pass RISC Zero's verifier router on Base Sepolia and on a Base mainnet fork (`RealGroth16Seal.t.sol`), and so do the pinned guests' (statement v2: deposit, F1, `Included`, payment; `RealSealsV2.t.sol`) |
 | Tier 3 ([docs/TIER3.md](docs/TIER3.md)): every payout committed on Base before it is signed; bonds, slashing, compensation, the liveness penalty and disputes of a confirmation; the violation statement proven on a real Testnet vault spend and run in the zkVM; the `watch --tier3` watchtower | The theft demonstration runs on its own deployment with a 2-minute challenge window (labelled DEMO), never on the judge deployment |
 
 ## Repository layout
 
 | Path | What |
 |---|---|
-| `contracts/` | Solidity + Foundry: `ZZEC`, `ZecuredRegistry` (vaults, claims, exits, Tier 3 lineage) with `ZecuredSpendLogic` (spend commitments, disputes), `ZecuredIntake` (deposit proofs and the gates of minting), `SettlementAdapter`, `SignerBondV2`, `ZecuredSlasher`, `ZecuredCompensator`, `ZecuredVersions`, `ZecuredPriceFeed` (mainnet), mocks, and the Zcash header relay (`src/relay/`); 590 tests (5 of them need a Base mainnet RPC), an invariant campaign of 16 invariants and 16 symbolic checks (Halmos) ([docs/INVARIANTS.md](docs/INVARIANTS.md)) |
+| `contracts/` | Solidity + Foundry: `ZZEC`, `ZecuredRegistry` (vaults, claims, exits, Tier 3 lineage) with `ZecuredSpendLogic` (spend commitments, disputes), `ZecuredIntake` (deposit proofs and the gates of minting), `SettlementAdapter`, `SignerBondV2`, `ZecuredSlasher`, `ZecuredCompensator`, `ZecuredVersions`, `ZecuredSwap`, `ZecuredPriceFeed` (mainnet), mocks, and the Zcash header relay (`src/relay/`); 772 tests (6 skipped without a Base mainnet RPC), four invariant campaigns (35 invariants) and 22 symbolic checks (Halmos) ([docs/INVARIANTS.md](docs/INVARIANTS.md)) |
 | `signer/crates/zcash-ops` | Ironwood scanning, PCZT build/prove/sign/extract, ZIP 2005 vault keys |
 | `signer/crates/threshold` | FROST DKG and re-randomized signing |
 | `signer/crates/policy` | P1 classification, payout ledger (I10), PCZT verification against the plan |
@@ -86,12 +116,16 @@ txids) and how to reproduce every run: [docs/TESTING.md](docs/TESTING.md).
 | `signer/crates/coordinator` | Keyless orchestrator: DKG relay, attestations, payouts, confirmations |
 | `signer/crates/base-client` | EIP-712 (cross-checked with Solidity), Registry events |
 | `signer/crates/deposit-witness` | Tier 2: the ZIP 221 history tree (V3, Ironwood) from public chain data, and the witness of a deposit proof |
-| `tier2/` | Tier 2 and 3: the deposit and violation statements (`statement/`), the two RISC Zero guests and the host (separate Cargo workspace) |
+| `tier2/` | Tier 2 and 3 and the swap: the deposit and violation statements (`statement/`), the payment statement (`payment-statement/`), their RISC Zero guests and the host (separate Cargo workspace) |
+| `ops/` | `zecured-ops`: prepares, signs, collects and submits the signers' operator messages ([docs/OPERATIONS.md](docs/OPERATIONS.md) § 8) |
+| `swap/` | Zecured Swap: the shared swap crate and the market maker bot (`zecured-swap-maker`) ([docs/SWAP.md](docs/SWAP.md)) |
+| `tools/leak-scan` | Searches a deployment's events, calldata and storage for the Zcash identifiers of our own runs ([docs/TESTING.md](docs/TESTING.md) § 4) |
+| `tools/recipient` | Draws the salt of a destination that must be fixed before any backend runs (the treasury's `FEE_COMMITMENT`) and prints its commitment |
 | `backend/` | Public API + privacy proxy (RPC, bundler, paymaster allowlist) |
 | `bots/` | Liquidator and market maker |
 | `cli/` | `zecured-wallet`: Ironwood CLI wallet and borrower actions |
 | `app/` | Next.js app (in progress) |
-| `docs/` | [Architecture](docs/ARCHITECTURE.md), [Interfaces](docs/INTERFACES.md), [Threat model](docs/THREAT_MODEL.md), [Decisions](docs/DECISIONS.md), [Invariants](docs/INVARIANTS.md), [Economics](docs/ECONOMICS.md), [Mainnet](docs/MAINNET.md), [Testing and evidence](docs/TESTING.md), [Security review](docs/SECURITY_REVIEW.md), [Tier 2 design](docs/TIER2.md), [Tier 3 design](docs/TIER3.md), [Operators](docs/OPERATORS.md), [Jury FAQ](docs/JURY_FAQ.md), spikes |
+| `docs/` | [Architecture](docs/ARCHITECTURE.md), [Interfaces](docs/INTERFACES.md), [Threat model](docs/THREAT_MODEL.md), [Decisions](docs/DECISIONS.md), [Invariants](docs/INVARIANTS.md), [Economics](docs/ECONOMICS.md), [Mainnet](docs/MAINNET.md), [Swap](docs/SWAP.md), [Testing and evidence](docs/TESTING.md), [Security review](docs/SECURITY_REVIEW.md), [Tier 2 design](docs/TIER2.md), [Tier 3 design](docs/TIER3.md), [Operators](docs/OPERATORS.md), [Jury FAQ](docs/JURY_FAQ.md), spikes |
 
 ## Running it
 
@@ -124,28 +158,31 @@ scripts/signer-network.sh start    # 5 signer nodes + backend (logs in signer/da
 Everything Base-related can run against a local fork of Base Sepolia, including the app's
 sponsored UserOps (a local alto bundler and mock paymaster replace the hosted ones, no API key):
 
+Minting needs a deposit proof (Tier 2) and all five signer bonds, so the fork always runs both:
+
 ```bash
-scripts/local-fork.sh start   # anvil fork, fresh deployment (contracts/deployments/anvil.json), bundler :4337, paymaster :4338
+(cd tier2 && cargo build --release)           # RISC Zero guest and host (rzup toolchain)
+./target/debug/update-headers data/tier2/headers_nu7.json   # NU7-epoch headers over P2P (first run: see docs/TIER2.md)
+scripts/local-fork.sh start   # anvil fork, fresh deployment (contracts/deployments/anvil.json), the header relay fed
+                              # from the Testnet, the guests' image ids, bundler :4337, paymaster :4338
 export ZECURED_DEPLOYMENTS=$PWD/contracts/deployments/anvil.json BASE_SEPOLIA_RPC_URL=http://127.0.0.1:8545 \
        BUNDLER_URL=http://127.0.0.1:4337 PAYMASTER_URL=http://127.0.0.1:4338
-scripts/signer-network.sh init && scripts/signer-network.sh start
+scripts/signer-network.sh init && scripts/bond-signers.sh   # nothing is minted before all five bonds are in
+DEPOSIT_PROOF_HOST=$PWD/tier2/target/release/zecured-tier2-host DEPOSIT_PROOF_MOCK=true \
+  scripts/signer-network.sh start             # the coordinator proves each deposit; no signer attests one
 ./target/debug/zecured-bots market-maker &    # and: zecured-bots liquidator &
 ```
 
 ### Tier 2: minting on a deposit proof
 
-```bash
-(cd tier2 && cargo build --release)           # RISC Zero guest and host (rzup toolchain)
-./target/debug/update-headers data/tier2/headers_nu7.json   # NU7-epoch headers over P2P (first run: see docs/TIER2.md)
-TIER2=1 scripts/local-fork.sh start           # + header relay fed from the Testnet, image id, MOCK verifier
-DEPOSIT_PROOF_HOST=$PWD/tier2/target/release/zecured-tier2-host DEPOSIT_PROOF_MOCK=true \
-  scripts/signer-network.sh start             # the coordinator proves deposits instead of attesting them
-```
-
-On the local fork the proof is checked by `MockRiscZeroVerifier` (MOCK). The real seal is a
+On the local fork the proof is checked by `MockRiscZeroVerifier` (MOCK). Where RISC Zero does not run (Windows),
+`target/debug/mock-host` (MOCK) stands in for the zkVM host: it checks the witness with the native statement and seals
+its journal for the MOCK verifier, with the deployment's image ids in `ZECURED_MOCK_DEPOSIT_IMAGE_ID`,
+`ZECURED_MOCK_VIOLATION_IMAGE_ID` and `ZECURED_MOCK_PAYMENT_IMAGE_ID`. The real seal is a
 succinct receipt (`zecured-tier2-host prove`, 36 s on a rented RTX 4090: `scripts/gpu-prove.sh`)
 wrapped in Groth16 (`groth16`, about a minute with Docker on x86), checked by RISC Zero's verifier
-router on Base Sepolia; `RealGroth16Seal.t.sol` runs a real deposit's seal through it.
+router on Base Sepolia; `RealGroth16Seal.t.sol` runs a real deposit's seal through it, and `RealSealsV2.t.sol` the
+seals of the pinned guests (statement v2: deposit, F1, `Included` and the swap's payment).
 
 ### Reproducing the guest image ids
 
@@ -177,6 +214,8 @@ passing ([docs/TIER2.md](docs/TIER2.md) § 8.1 lists the ELFs' hashes):
 | violation-test | `0x65705f75c5482b2b0cf6fee12760b2364d48213bb2933f3882dc2d92f824866e` |
 | deposit-main | `0x53f8f8e3664ce908c4ea072f239e18b6fa8b01d68c01fc162b4ae2e31b2cd5c5` |
 | violation-main | `0x24edd49e52447665146009687b6b85e3f0b6184883cbf635a762048cd1a5ce33` |
+| payment-test (swap, 2026-10-17) | `0x199bf772d0780413a07081b4889f0473c8ae558c6d8c4dca96eef49b5e486134` |
+| payment-main (swap, 2026-10-17) | `0x1c2def3eb121bd3240700ca554ab455e03420981856fda3f580b930f731038b2` |
 
 The ids of a deployment's network must equal the deployed ones (`deployments/base-sepolia.json` for
 Testnet). A build without

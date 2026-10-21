@@ -19,7 +19,9 @@ contract ZecuredEIP712Test is Test {
 
     string internal constant DEPOSIT_ATTESTATION =
         "DepositAttestation(bytes32 vaultId,address account,uint64 amount,bytes32 depositTag)";
-    string internal constant PAYOUT_CONFIRMATION = "PayoutConfirmation(bytes32 vaultId,bytes32 claimIdsHash)";
+    /// v4 (R-1): the confirmation names the committed payout it confirms.
+    string internal constant PAYOUT_CONFIRMATION =
+        "PayoutConfirmation(bytes32 vaultId,bytes32 payoutRef,bytes32 claimIdsHash)";
     string internal constant CLOSE_REQUEST =
         "CloseRequest(bytes32 vaultId,address account,address executor,uint16 marginBps,uint64 minUserAmount,bytes32 userCommitment,uint256 nonce,uint64 deadline)";
     string internal constant OPEN_VAULT =
@@ -192,8 +194,8 @@ contract ZecuredEIP712Test is Test {
         bytes32[] memory ids = _claimIds();
         assertEq(ZecuredEIP712.claimIdsHash(ids), keccak256(abi.encodePacked(ids[0], ids[1])));
         assertEq(
-            ZecuredEIP712.hashPayoutConfirmation(VAULT_ID, ids),
-            vm.eip712HashStruct(PAYOUT_CONFIRMATION, abi.encode(VAULT_ID, ZecuredEIP712.claimIdsHash(ids)))
+            ZecuredEIP712.hashPayoutConfirmation(VAULT_ID, PAYOUT_REF, ids),
+            vm.eip712HashStruct(PAYOUT_CONFIRMATION, abi.encode(VAULT_ID, PAYOUT_REF, ZecuredEIP712.claimIdsHash(ids)))
         );
 
         CloseRequest memory req = _closeRequest();
@@ -261,18 +263,20 @@ contract ZecuredEIP712Test is Test {
         string memory json = string.concat(
             '{"types":{',
             DOMAIN_TYPES_JSON,
-            ',"PayoutConfirmation":[{"name":"vaultId","type":"bytes32"},{"name":"claimIdsHash","type":"bytes32"}]},',
+            ',"PayoutConfirmation":[{"name":"vaultId","type":"bytes32"},{"name":"payoutRef","type":"bytes32"},{"name":"claimIdsHash","type":"bytes32"}]},',
             '"primaryType":"PayoutConfirmation",',
             _domainJson("ZecuredRegistry", REGISTRY),
             ',"message":{"vaultId":"',
             vm.toString(VAULT_ID),
+            '","payoutRef":"',
+            vm.toString(PAYOUT_REF),
             '","claimIdsHash":"',
             vm.toString(keccak256(abi.encodePacked(ids))),
             '"}}'
         );
         bytes32 ours = _digest(
             _domainSeparator(ZecuredEIP712.REGISTRY_DOMAIN_NAME, REGISTRY),
-            ZecuredEIP712.hashPayoutConfirmation(VAULT_ID, ids)
+            ZecuredEIP712.hashPayoutConfirmation(VAULT_ID, PAYOUT_REF, ids)
         );
         assertEq(ours, vm.eip712HashTypedData(json));
         assertEq(ours, GOLDEN_PAYOUT_CONFIRMATION_DIGEST, "golden vector");
@@ -577,7 +581,9 @@ contract ZecuredEIP712Test is Test {
         console.logBytes32(_domainSeparator(ZecuredEIP712.ADAPTER_DOMAIN_NAME, ADAPTER));
         console.log("DepositAttestation digest");
         console.logBytes32(GOLDEN_DEPOSIT_ATTESTATION_DIGEST);
-        console.log("PayoutConfirmation digest (claimIds = [claimIdOf(vaultId, 0), claimIdOf(vaultId, 1)])");
+        console.log(
+            "PayoutConfirmation digest (payoutRef 0xaaaa..aa, claimIds = [claimIdOf(vaultId, 0), claimIdOf(vaultId, 1)])"
+        );
         console.logBytes32(GOLDEN_PAYOUT_CONFIRMATION_DIGEST);
         console.log("CloseRequest digest");
         console.logBytes32(GOLDEN_CLOSE_REQUEST_DIGEST);
@@ -602,8 +608,9 @@ contract ZecuredEIP712Test is Test {
 
     bytes32 internal constant GOLDEN_DEPOSIT_ATTESTATION_DIGEST =
         0xbe0251d9c909749194da8ebf137e42a33a60d6fba8672a022c4923558fecb90f;
+    // PayoutConfirmation v4 (R-1): payoutRef 0xaaaa..aa (as SpendCommit's below), claimIds as above.
     bytes32 internal constant GOLDEN_PAYOUT_CONFIRMATION_DIGEST =
-        0xf166a0191609bbccd2b7aa9e7527b1553a418f7626902cc10099034b838e4973;
+        0xfc56db8989d0aac788a7784e03833e8cd73e42d08ce8f92d468bf0f3015420b3;
     bytes32 internal constant GOLDEN_CLOSE_REQUEST_DIGEST =
         0x2207e7a8cd1b3966d87015d4b554f9271a760f2854c1c9d37ae0391b885ae8f7;
     // DeleverageRequest: marginBps 100, repayAssets 500,000, maxCollateral 1,262,500, nonce 42, deadline as above.

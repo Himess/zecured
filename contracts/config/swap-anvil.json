@@ -1,0 +1,27 @@
+{
+  "_comment": "ZecuredSwap on a local anvil fork of Base Sepolia (scripts/local-fork.sh): the lending deployment's MockUSDC (SWAP_USDC) and MOCK verifier (the version registry's router), the anvil Intake's work tier, short pay windows for warped tests.",
+  "network": "anvil",
+  "chainId": 84532,
+  "zcashNetwork": "zcash-testnet",
+  "localFork": true,
+  "usdc": "0x0000000000000000000000000000000000000000",
+  "riscZeroRouter": "0x0b144E07A0826182B6b59788c34b32Bfa86Fb711",
+  "branchIds": [
+    1998129881
+  ],
+  "tierMaxAmountZat": [
+    "18446744073709551615"
+  ],
+  "tierMinWork": [
+    "1000000"
+  ],
+  "minWorkFloor": "0",
+  "finalizeDepth": 6,
+  "finalizeDelay": 150,
+  "maxOrderUsdc": "200000000",
+  "maxOrderZat": "1000000000",
+  "minPayWindow": 600,
+  "maxPayWindow": 21600,
+  "feeBps": 0,
+  "feeRecipient": "0x0000000000000000000000000000000000000000"
+}

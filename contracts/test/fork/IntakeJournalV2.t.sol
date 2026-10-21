@@ -11,7 +11,7 @@ import {ZecuredFixture} from "../utils/ZecuredFixture.sol";
 
 /// @notice Journal v2 (T-09): `abi.encode(mode, branchId, tipHash, vaultId, account, amount, depositTag,
 ///         vaultOpenedHash)`, 256 bytes. Activate mode (0) is the D5 deposit rule; Refund mode (1) lands as a refund
-///         whatever the vault; the epoch's consensus branch id must be one the Intake allows. MOCK relay and verifier:
+///         whatever the vault; the epoch's consensus branch id must be one its deposit version lists (D54). MOCK relay and verifier:
 ///         what the guest proves is tier2/'s subject.
 contract IntakeJournalV2Test is ZecuredFixture {
     uint32 internal constant NU7 = 0x77190AD9;
@@ -97,8 +97,18 @@ contract IntakeJournalV2Test is ZecuredFixture {
         bytes32 claimId = registry.claimIdOf(j.vaultId, 0);
         (bytes memory journal, bytes memory seal, bytes[] memory sigs) = _proofOf(j);
         vm.expectEmit(address(intake));
-        emit IZecuredIntake.DepositRefunded(j.vaultId, claimId, RefundReason.ModeRefund);
+        emit IZecuredIntake.RefundPending(
+            j.vaultId, j.depositTag, uint8(RefundReason.ModeRefund), 4_500_000 + FINALIZE_DEPTH, block.timestamp + 150
+        );
         intake.attestDepositWithProof(journal, seal, proofs.imageId, sigs);
+        // R-12: it waits for the relay like an activation; the vault is untouched until the claim opens.
+        assertEq(uint8(_status(j.vaultId)), uint8(VaultStatus.None));
+        assertEq(intake.pendingRefundTotal(), 123_456);
+        _readyRefund(j.depositTag);
+        vm.expectEmit(address(intake));
+        emit IZecuredIntake.DepositRefunded(j.vaultId, claimId, RefundReason.ModeRefund);
+        assertEq(intake.finalizeRefund(j.depositTag), claimId);
+        assertEq(intake.pendingRefundTotal(), 0);
         assertEq(uint8(_status(j.vaultId)), uint8(VaultStatus.Cancelled));
         _assertClaim(claimId, j.vaultId, ClaimKind.Refund, 123_456, bytes32(0), ClaimStatus.Pending);
         assertEq(registry.vaultOf(j.account), bytes32(0));
@@ -129,7 +139,7 @@ contract IntakeJournalV2Test is ZecuredFixture {
     }
 
     function test_revert_branchNotAllowed() public {
-        uint32[3] memory bad = [uint32(0), 0x12345678, type(uint32).max]; // zero, and ids the Intake was not given
+        uint32[3] memory bad = [uint32(0), 0x12345678, type(uint32).max]; // zero, and ids the version does not list
         for (uint256 i; i < bad.length; ++i) {
             DepositJournal memory j = _journalOf("v2.a", ACTIVATE, bad[i], VAULT_001);
             (bytes memory journal, bytes memory seal, bytes[] memory sigs) = _proofOf(j);
