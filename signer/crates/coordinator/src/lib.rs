@@ -125,6 +125,8 @@ pub(crate) const RECEIPT_TIMEOUT: Duration = Duration::from_secs(120);
 const COMMIT_WAIT_MARGIN_SECS: u64 = 30;
 /// T-05: how often the coordinator warns at most about one vault's payable claims getting old.
 const LIVENESS_WARNING_INTERVAL: Duration = Duration::from_secs(30 * 60);
+/// N-3, N-12: how often a warning about one claim or proof that waits on others is repeated.
+const HOURLY_WARNING_INTERVAL: Duration = Duration::from_secs(60 * 60);
 /// O-2: seconds the coordinator waits for the signers to apply a vault's newest Base event before
 /// it asks them to sign anyway (and retries on the next pass if they refuse, as before).
 pub const NODE_CATCH_UP_SECS: u64 = 60;
@@ -317,6 +319,8 @@ pub struct Coordinator {
     ironwood_path: std::path::PathBuf,
     /// W-11: how far the history was searched for each unresolved payout reference.
     searched: std::sync::Mutex<HashMap<B256, u32>>,
+    /// N-3, N-12: when each hourly warning was last given, by kind and subject.
+    warned: std::sync::Mutex<HashMap<(&'static str, B256), Instant>>,
     /// TEST ONLY: see [`TEST_WITHHOLD_FLAG`].
     #[cfg(feature = "test-hooks")]
     withhold_flag: std::path::PathBuf,
@@ -486,6 +490,8 @@ fn finish_open(
         f1_cases: vec![],
         overridden_tags: vec![],
         anchors: vec![],
+        compensated_claims: vec![],
+        f4_done: vec![],
     };
     let response = OpenVaultResponse {
         vault_id: vault.vault_id,
@@ -515,15 +521,27 @@ fn apply_event(v: &mut CoordVault, ev: &VaultEvent) {
             claims,
             claim_refs,
         } => {
+            // N-5: each claim's recipient commitment now, which Base checked the commitment against.
+            let commitments: Vec<[u8; 32]> = claims
+                .iter()
+                .map(|id| v.claims.iter().find(|c| c.id == id.0).map_or([0; 32], |c| c.commitment))
+                .collect();
             match v.commitments.iter_mut().find(|c| c.payout_ref == *payout_ref) {
                 // W-1: the coordinator's own record of a commitment it made learns its references from Base.
-                Some(c) if c.claim_refs.is_empty() => c.claim_refs = claim_refs.clone(),
-                Some(_) => {}
+                Some(c) => {
+                    if c.claim_refs.is_empty() {
+                        c.claim_refs = claim_refs.clone();
+                    }
+                    if c.claim_commitments.is_empty() {
+                        c.claim_commitments = commitments;
+                    }
+                }
                 None => v.commitments.push(CommittedPayout {
                     payout_ref: *payout_ref,
                     input_tag: *input_tag,
                     claims: claims.iter().map(|c| c.0).collect(),
                     claim_refs: claim_refs.clone(),
+                    claim_commitments: commitments,
                 }),
             }
         }
@@ -549,8 +567,7 @@ fn apply_event(v: &mut CoordVault, ev: &VaultEvent) {
             commitment,
             payable_at,
         } => {
-            v.armed.retain(|a| a.claim_id != claim_id.0);
-            v.armed.push(Armed {
+            v.arm(Armed {
                 claim_id: claim_id.0,
                 commitment: commitment.0,
                 payable_at: *payable_at,
@@ -695,6 +712,11 @@ fn apply_event(v: &mut CoordVault, ev: &VaultEvent) {
                         if claim.state != ClaimState::Paid {
                             claim.state = ClaimState::Compensated;
                         }
+                        // N-5: a claim held paid stays so in the books (as on every node); no proof
+                        // or keeper acts on it any more.
+                        if !v.compensated_claims.contains(&claim.id) {
+                            v.compensated_claims.push(claim.id);
+                        }
                     }
                     // T-05 (a): Base's state; a claim this coordinator saw paid stays paid in its
                     // books ([`CoordVault::books`]), and it proves that payout's inclusion.
@@ -791,6 +813,7 @@ impl Coordinator {
             ironwood: Mutex::new(None),
             ironwood_path: data_dir.join(format!("ironwood-txids.{}.bin", cfg.zcash())),
             searched: std::sync::Mutex::default(),
+            warned: std::sync::Mutex::default(),
             #[cfg(feature = "test-hooks")]
             withhold_flag: data_dir.join(TEST_WITHHOLD_FLAG),
             cfg,
@@ -1236,19 +1259,27 @@ impl Coordinator {
             claims: v
                 .claims
                 .iter()
-                .map(|c| ClaimView {
-                    claim_id: B256::from(c.id),
-                    kind: c.kind,
-                    amount: c.amount,
-                    paid: c.state == ClaimState::Paid,
-                    state: c.state,
-                    destination_set: c.commitment != [0; 32],
-                    proven: c.proven,
-                    disputable_until: (c.state == ClaimState::Paid && !c.proven && c.confirmed_at != 0)
-                        .then_some(())
-                        .and(window)
-                        .map(|w| c.confirmed_at.saturating_add(w)),
-                    liveness_armed: v.armed(c),
+                .map(|c| {
+                    // N-5: Base's state of a claim the compensator settled, whatever the books hold.
+                    let state = if v.compensated_claims.contains(&c.id) {
+                        ClaimState::Compensated
+                    } else {
+                        c.state
+                    };
+                    ClaimView {
+                        claim_id: B256::from(c.id),
+                        kind: c.kind,
+                        amount: c.amount,
+                        paid: state == ClaimState::Paid,
+                        state,
+                        destination_set: c.commitment != [0; 32],
+                        proven: c.proven,
+                        disputable_until: (state == ClaimState::Paid && !c.proven && c.confirmed_at != 0)
+                            .then_some(())
+                            .and(window)
+                            .map(|w| c.confirmed_at.saturating_add(w)),
+                        liveness_armed: v.armed(c),
+                    }
                 })
                 .collect(),
             non_conforming: v.non_conforming.clone(),
@@ -2187,7 +2218,16 @@ impl Coordinator {
             debug!(vault = %short(id), error = %scrubbed(e), "payout status unknown");
         }
         match action {
-            Action::Confirm => self.settle(id, &inflight).await,
+            Action::Confirm => {
+                // N-1: the confirmation by signatures waits for the payout's anchor, not its block.
+                if let Ok(inflight::TxLookup::Mined(h)) = &lookup {
+                    let v = self.vault(id).await?;
+                    if !self.confirm_due(&v, &inflight, *h, tip).await? {
+                        return Ok(());
+                    }
+                }
+                self.settle(id, &inflight).await
+            }
             Action::Wait => Ok(()),
             Action::Rebroadcast if tip < inflight.broadcast_from => Ok(()), // L23: held back
             Action::Rebroadcast => {
@@ -2241,15 +2281,22 @@ impl Coordinator {
         if let Some(kept) = &inflight.spend_commit {
             // Section 3: the payout's commitment, whose delivery this coordinator proves (its event
             // records it too).
-            let record = CommittedPayout {
-                payout_ref: kept.record.payout_ref,
-                input_tag: kept.record.input_tag,
-                claims: kept.record.claim_ids.iter().map(|c| c.0).collect(),
-                claim_refs: kept.record.claim_refs.clone(),
-            };
             self.update_vault(id, |v| {
-                if !v.commitments.iter().any(|c| c.payout_ref == record.payout_ref) {
-                    v.commitments.push(record);
+                if !v.commitments.iter().any(|c| c.payout_ref == kept.record.payout_ref) {
+                    // N-5: the recipients the payout was planned for, whose salts made its references.
+                    let claim_commitments = kept
+                        .record
+                        .claim_ids
+                        .iter()
+                        .map(|id| v.claims.iter().find(|c| c.id == id.0).map_or([0; 32], |c| c.commitment))
+                        .collect();
+                    v.commitments.push(CommittedPayout {
+                        payout_ref: kept.record.payout_ref,
+                        input_tag: kept.record.input_tag,
+                        claims: kept.record.claim_ids.iter().map(|c| c.0).collect(),
+                        claim_refs: kept.record.claim_refs.clone(),
+                        claim_commitments,
+                    });
                 }
             })
             .await?;
@@ -2909,6 +2956,109 @@ mod tests {
         (crate::nodes::tests::serve(app).await, calls)
     }
 
+    /// N-7: the keepers run before a restart's first scan of a vault; an executed case of it waits
+    /// for that scan (nothing is decided without one) instead of being dropped, nothing is asked of
+    /// Base, and the keeper's clock is not used up.
+    #[tokio::test]
+    async fn n7_executed_cases_wait_for_the_vaults_scan() {
+        use alloy::sol_types::SolCall;
+        let (mut c, _dir) = offline("n7-cases");
+        let (rpc, calls) = recording_stub(vec![
+            (IZecuredRegistry::intakeCall::SELECTOR, word(Address::repeat_byte(0xa1))),
+            (IZecuredRegistry::slasherCall::SELECTOR, word(Address::repeat_byte(0xa2))),
+            (IZecuredRegistry::signerBondCall::SELECTOR, word(Address::repeat_byte(0xa3))),
+        ])
+        .await;
+        c.cfg.base_rpc_url = rpc;
+        let mut cased = vault(1);
+        cased.status = VaultStatus::Active;
+        cased.claims = vec![claim(1, 300_000)];
+        cased.inclusion_cases = vec![InclusionCase {
+            case_id: B256::repeat_byte(0xca),
+            payout_ref: B256::repeat_byte(0xaa),
+        }];
+        c.store.lock().await.save(cased.clone()).unwrap();
+        c.prove_by_cases(&cased).await.unwrap();
+        assert_eq!(c.vault(&cased.vault_id).await.unwrap().inclusion_cases, cased.inclusion_cases, "kept");
+        assert!(calls.lock().unwrap().is_empty(), "nothing asked of Base");
+        assert!(c.keeper_due(&cased.vault_id, crate::keepers::Keeper::Cases), "looked at again on the next pass");
+    }
+
+    /// N-6: a claim Base holds armed already for its destination, as early as the earliest receipt
+    /// or earlier, is not armed again (`armLiveness` would go through and change nothing): nothing
+    /// is simulated nor sent, and the arming is recorded here. A receipt earlier than Base's arming
+    /// still arms it.
+    #[tokio::test]
+    async fn n6_a_claim_armed_on_base_is_not_armed_again() {
+        use alloy::sol_types::SolCall;
+        use axum::{Json, Router, routing::post};
+        let selector = |s: [u8; 4]| format!("call:{}", hex::encode(s));
+        let bond = Address::repeat_byte(0xcc);
+        let (claim_id, commitment) = (B256::repeat_byte(1), B256::from([1u8; 32]));
+        let key = PrivateKeySigner::random();
+        let answer = ReceiptOut {
+            claim_id,
+            commitment,
+            received_at: 1_500,
+            signature: sign_typed(&key, &bond_domain(84_532, bond), &destination_received(claim_id, commitment, 1_500))
+                .unwrap(),
+        };
+        let node =
+            crate::nodes::tests::serve(Router::new().route("/v1/receipts", post(move || async move { Json(answer) })))
+                .await;
+        let mut urls = vec![node];
+        urls.extend((0..4).map(|_| "http://127.0.0.1:9".to_owned()));
+        let mut cfg = config(&urls);
+        cfg.nodes[0].eth = key.address();
+        let dir = TempDir::new("n6-arming");
+        let mut c = Coordinator::new(cfg, &dir.0, &hex::encode(PrivateKeySigner::random().to_bytes())).unwrap();
+        let mut v = vault(1);
+        v.status = VaultStatus::Active;
+        v.claims = vec![claim(1, 300_000)];
+        c.store.lock().await.save(v.clone()).unwrap();
+        let on_base = |payable_at: u64| {
+            ISignerBond::livenessArmingCall::abi_encode_returns(&ISignerBond::livenessArmingReturn {
+                commitment,
+                payableAt: payable_at,
+            })
+        };
+        let stub = |payable_at: u64| {
+            recording_stub(vec![
+                (IZecuredRegistry::intakeCall::SELECTOR, word(Address::repeat_byte(0xa1))),
+                (IZecuredRegistry::slasherCall::SELECTOR, word(Address::repeat_byte(0xa2))),
+                (IZecuredRegistry::signerBondCall::SELECTOR, word(bond)),
+                (ISignerBond::livenessArmingCall::SELECTOR, on_base(payable_at)),
+                // Base takes an equal or later receipt without a revert.
+                (ISignerBond::armLivenessCall::SELECTOR, vec![]),
+            ])
+        };
+        // Armed on Base at 1,200 for this destination; the earliest receipt says 1,500.
+        let (rpc, calls) = stub(1_200).await;
+        c.cfg.base_rpc_url = rpc;
+        c.arm_claims(&v).await.unwrap();
+        let seen = calls.lock().unwrap().clone();
+        assert!(seen.contains(&selector(ISignerBond::livenessArmingCall::SELECTOR)));
+        assert!(!seen.contains(&selector(ISignerBond::armLivenessCall::SELECTOR)), "not simulated");
+        assert!(!seen.iter().any(|m| m == "eth_sendRawTransaction"), "not sent");
+        let kept = c.vault(&v.vault_id).await.unwrap();
+        assert_eq!(
+            kept.armed,
+            [Armed {
+                claim_id: [1; 32],
+                commitment: [1; 32],
+                payable_at: 1_200
+            }],
+            "recorded here before its event"
+        );
+        assert!(crate::keepers::unarmed(&kept).is_empty(), "not looked at again");
+        // Armed on Base at 2,000 only: the receipt of 1,500 lowers it, so it is armed again.
+        let (rpc, calls) = stub(2_000).await;
+        c.cfg.base_rpc_url = rpc;
+        c.keeper_tries.lock().unwrap().clear();
+        let _ = c.arm_claims(&v).await; // the stub mines nothing
+        assert!(calls.lock().unwrap().contains(&selector(ISignerBond::armLivenessCall::SELECTOR)));
+    }
+
     /// The keepers simulate before they send: nothing is sent when Base says there is nothing to do
     /// or would refuse the call, and a vault is tried again only after the keeper's retry interval.
     #[tokio::test]
@@ -2987,12 +3137,10 @@ mod tests {
             payout_ref: B256::repeat_byte(0xaa),
         }];
         c.store.lock().await.save(cased.clone()).unwrap();
-        c.prove_by_cases(&cased).await.unwrap();
+        // Nothing left to prove by it (W-1: a payout without a record here proves no claim of the vault).
+        c.prove_cases(&cased, vec![(B256::repeat_byte(0xca), vec![])]).await.unwrap();
         assert!(c.vault(&cased.vault_id).await.unwrap().inclusion_cases.is_empty(), "nothing left to prove by it");
-        assert!(
-            !eth_calls(&calls).contains(&selector(IZecuredSlasher::proveInclusionByCaseCall::SELECTOR)),
-            "W-1: a payout without a record here proves no claim of the vault"
-        );
+        assert!(!eth_calls(&calls).contains(&selector(IZecuredSlasher::proveInclusionByCaseCall::SELECTOR)));
         assert!(!calls.lock().unwrap().iter().any(|m| m == "eth_sendRawTransaction"));
         // A case with claims whose simulation upholds none: used up, nothing sent.
         c.store.lock().await.save(cased.clone()).unwrap();

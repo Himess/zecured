@@ -100,6 +100,22 @@ pub struct CommittedPayout {
     /// v4.1: then nothing of the payout is proven, see `delivery::landed_payouts`).
     #[serde(default)]
     pub claim_refs: Vec<B256>,
+    /// N-5: the recipient commitment each claim had when the payout was committed, in `claims`' order:
+    /// the one its reference was computed for, which a claim keeps no longer once the bonds paid it.
+    /// Empty in a record made before: the claims' commitments now stand in.
+    #[serde(default)]
+    pub claim_commitments: Vec<[u8; 32]>,
+}
+
+impl CommittedPayout {
+    /// N-5: the recipient commitment claim `i` of the payout was committed to (see
+    /// `claim_commitments`; a record without them: the claim's commitment now).
+    pub fn commitment_of(&self, i: usize, v: &CoordVault) -> Option<[u8; 32]> {
+        self.claim_commitments.get(i).copied().filter(|c| *c != [0; 32]).or_else(|| {
+            let id = self.claims.get(i)?;
+            v.claims.iter().find(|c| c.id == *id).map(|c| c.commitment)
+        })
+    }
 }
 
 /// R-12: a refund proof waiting on the Intake until the relay has moved on.
@@ -242,6 +258,15 @@ pub struct CoordVault {
     /// W-10: the anchor of each payout's proofs, fixed once per payout and kept across restarts.
     #[serde(default)]
     pub anchors: Vec<PlannedAnchor>,
+    /// N-5: claims the compensator settled on Base (`ClaimCompensated`). One this coordinator holds
+    /// paid keeps that state in its books, as every node does (the payouts they plan must agree), so
+    /// they are kept here: no proof or keeper acts on them.
+    #[serde(default)]
+    pub compensated_claims: Vec<[u8; 32]>,
+    /// N-5: the F4 proofs of hidden claims that are done (`keccak256(payoutRef || claimId)`): proven
+    /// already, by this coordinator or another, or no longer due on Base.
+    #[serde(default)]
+    pub f4_done: Vec<B256>,
 }
 
 /// W-10: where the proofs of a payout anchor. `planned` is `c + payout_delay_max_blocks + 1 + r`,
@@ -316,6 +341,7 @@ impl CoordVault {
             .filter(|c| {
                 !c.proven
                     && matches!(c.state, ClaimState::Unpaid | ClaimState::Paid | ClaimState::Disputed)
+                    && !self.compensated_claims.contains(&c.id)
                     && self.commitments.iter().any(|p| p.claims.contains(&c.id))
             })
             .map(|c| c.id)
@@ -326,6 +352,13 @@ impl CoordVault {
     pub fn armed(&self, claim: &Claim) -> bool {
         claim.commitment != [0; 32]
             && self.armed.iter().any(|a| a.claim_id == claim.id && a.commitment == claim.commitment)
+    }
+
+    /// R-5: records the claim's arming on Base (its event, or N-6 the keeper's own arming before
+    /// the event reaches the safe head), in place of any earlier one.
+    pub fn arm(&mut self, a: Armed) {
+        self.armed.retain(|x| x.claim_id != a.claim_id);
+        self.armed.push(a);
     }
 
     /// The claims as this coordinator's books count them, and plans from: a claim it saw paid on
@@ -510,6 +543,8 @@ pub(crate) mod tests {
             f1_cases: vec![],
             overridden_tags: vec![],
             anchors: vec![],
+            compensated_claims: vec![],
+            f4_done: vec![],
         }
     }
 
@@ -578,6 +613,7 @@ pub(crate) mod tests {
             input_tag: B256::repeat_byte(8),
             claims: vec![[1; 32], [2; 32], [3; 32]],
             claim_refs: vec![],
+            claim_commitments: vec![],
         }];
         assert_eq!(v.to_uphold(), vec![[1; 32]]);
         assert_eq!(v.to_prove(), vec![[1; 32], [2; 32], [3; 32]]);
