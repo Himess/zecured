@@ -23,19 +23,18 @@ pub struct Market {
     pub price: U256,
     /// Seconds since the price was last fresh, when the feed says.
     pub price_age: Option<u64>,
-    /// Base's clock (the latest block's timestamp).
-    pub now: u64,
     /// W-7: whether a proof could land: the Swap version is working, and the Zcash blocks the
     /// relay lags the light wallet server's tip.
     pub proofs: ProofPath,
-    /// Zatoshi the maker can pay now, less what its unpaid Buy orders with a destination already
-    /// promise (W-19: an order without one reserves nothing).
+    /// Zatoshi the maker can pay now, less what its Buy orders and quotes hold (W-19: an order
+    /// without a destination holds nothing after its reservation, N-10).
     pub zcash_free: u64,
-    /// USDC the maker can lock now (balance and allowance).
+    /// USDC the maker can lock now (balance and allowance), less what its Sell quotes would lock.
     pub usdc_free: U256,
-    /// The maker's orders not done, Sell orders included.
+    /// N-10: the maker's places taken: its open orders holding one (Sell orders included) and the
+    /// quotes it gave whose orders it has not read yet.
     pub open_orders: usize,
-    /// W-19: those of the quote's taker, when it names one.
+    /// W-19, N-10: the places of the quote's taker, when it names one.
     pub taker_open_orders: usize,
 }
 
@@ -204,7 +203,6 @@ mod tests {
             // $40 per ZEC.
             price: U256::from(40_000_000u64) * price_scale() / U256::from(100_000_000u64),
             price_age: Some(60),
-            now: 1_760_000_000,
             proofs: ProofPath {
                 version_working: true,
                 relay_lag: 1,

@@ -1,6 +1,6 @@
-//! Tests only: a Base JSON-RPC stub of what the maker reads (its latest block, ZecuredSwap's orders,
-//! relay and version registry, the oracle, USDC), answering from a state the test changes as it
-//! goes, and a maker on it.
+//! Tests only: a Base JSON-RPC stub of what the maker reads (its latest block, ZecuredSwap's orders
+//! and `OrderOpened` logs, relay and version registry, the oracle, USDC), answering from a state the
+//! test changes as it goes, and a maker on it.
 
 use std::{
     collections::HashMap,
@@ -11,7 +11,7 @@ use alloy::{
     primitives::{Address, B256, Bytes, U256},
     providers::{Provider, ProviderBuilder},
     signers::local::PrivateKeySigner,
-    sol_types::SolCall,
+    sol_types::{SolCall, SolEvent},
 };
 use axum::{Json, Router, extract::State, routing::post};
 use orchard::keys::{FullViewingKey, SpendingKey};
@@ -40,6 +40,8 @@ pub struct Chain {
     pub usdc_allowance: U256,
     /// ZecuredSwap's orders; another id is an empty one (`OrderStatus.None`).
     pub orders: HashMap<B256, IZecuredSwap::Order>,
+    /// What `eth_getLogs` answers, whatever the filter.
+    pub logs: Vec<Value>,
     /// How many calls the stub answered.
     pub calls: usize,
 }
@@ -55,6 +57,7 @@ impl Default for Chain {
             usdc_balance: U256::from(500_000_000u64),
             usdc_allowance: U256::MAX,
             orders: HashMap::new(),
+            logs: vec![],
             calls: 0,
         }
     }
@@ -100,6 +103,7 @@ async fn rpc(State(chain): State<Shared>, Json(req): Json<Value>) -> Json<Value>
         Some("eth_chainId") => json!("0x14a34"),
         Some("eth_blockNumber") => json!("0x10"),
         Some("eth_getBlockByNumber") => block(c.now),
+        Some("eth_getLogs") => json!(c.logs),
         Some("eth_call") => {
             let call = &req["params"][0];
             let data = hex::decode(
@@ -162,8 +166,12 @@ async fn rpc(State(chain): State<Shared>, Json(req): Json<Value>) -> Json<Value>
     Json(json!({ "jsonrpc": "2.0", "id": req["id"], "result": result }))
 }
 
-/// A maker of `cfg` and `book` on the Base RPC `rpc`, with a test wallet (never scanned).
-pub fn maker(rpc: &str, cfg: MakerConfig, book: Book) -> Arc<Maker> {
+/// A maker of `cfg` and `book` on the Base RPC `rpc`, with a test wallet (never scanned) and its
+/// order book in a directory of its own under the system's temporary one ([`forget`] removes it).
+pub fn maker(rpc: &str, mut cfg: MakerConfig, book: Book) -> Arc<Maker> {
+    cfg.state = std::env::temp_dir()
+        .join(format!("zecured-maker-test-{}", hex::encode(zecured_swap::random_bytes32())))
+        .join("orders.json");
     let provider = ProviderBuilder::new().connect_http(rpc.parse().unwrap()).erased();
     let sk = (1u8..).find_map(|b| Option::<SpendingKey>::from(SpendingKey::from_bytes([b; 32]))).unwrap();
     let wallet = Wallet {
@@ -192,6 +200,13 @@ pub fn maker(rpc: &str, cfg: MakerConfig, book: Book) -> Arc<Maker> {
     ))
 }
 
+/// Removes the directory of `m`'s order book.
+pub fn forget(m: &Maker) {
+    if let Some(dir) = m.cfg.state.parent() {
+        let _ = std::fs::remove_dir_all(dir);
+    }
+}
+
 /// An open order of `maker` on Base, as `order(id)` answers it.
 pub fn open_order(maker: Address, side: u8, taker: Address, zatoshi: u64, pay_deadline: u64) -> IZecuredSwap::Order {
     IZecuredSwap::Order {
@@ -204,4 +219,25 @@ pub fn open_order(maker: Address, side: u8, taker: Address, zatoshi: u64, pay_de
         usdc: U256::from(20_000_000u64),
         receiverCommitment: B256::repeat_byte(3),
     }
+}
+
+/// The `OrderOpened` log of `order`, id `id`, as `eth_getLogs` gives it.
+pub fn order_opened(id: B256, order: &IZecuredSwap::Order) -> Value {
+    let log = IZecuredSwap::OrderOpened {
+        orderId: id,
+        maker: order.maker,
+        taker: order.taker,
+        side: order.side,
+        zatoshi: order.zatoshi,
+        usdc: order.usdc,
+        receiverCommitment: order.receiverCommitment,
+        payDeadline: order.payDeadline,
+    }
+    .encode_log_data();
+    let h = B256::repeat_byte(0x42);
+    json!({
+        "address": Address::repeat_byte(0x11), "topics": log.topics(), "data": log.data,
+        "blockNumber": "0x5", "blockHash": h, "transactionHash": h, "transactionIndex": "0x0",
+        "logIndex": "0x0", "removed": false,
+    })
 }

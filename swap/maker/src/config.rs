@@ -64,13 +64,21 @@ pub struct MakerConfig {
     pub max_order_zat: u64,
     /// USDC units (6 decimals).
     pub max_order_usdc: u64,
-    /// Most orders the maker has open at once, Sell orders included: it bounds the USDC the maker
-    /// locks (its approval is sized by it) and the free options its Sell quotes hand out (W-19).
+    /// The maker's places: most orders it has open at once, Sell orders included, and quotes given
+    /// and not opened yet (N-10); a Buy order without a destination takes one only during its
+    /// reservation (`reservation_secs`). It bounds the USDC the maker locks (its approval is sized by
+    /// it) and the free options its Sell quotes hand out (W-19).
     pub max_open_orders: usize,
-    /// W-19: most open orders of one taker (a quote names its taker on Sell, and on Buy when asked;
-    /// a Buy destination counts the taker's orders in payment), 1 to `max_open_orders`.
+    /// W-19, N-10: most places of one taker: its orders on Base (opened from a quote naming it or
+    /// from an open Buy quote) and the quotes naming it, 1 to `max_open_orders`. A taker's order
+    /// beyond it holds no place and takes no destination.
     #[serde(default = "default_max_open_orders_per_taker")]
     pub max_open_orders_per_taker: usize,
+    /// N-10: seconds a new Buy order holds one of the maker's places, and reserves its ZEC, while it
+    /// waits for its destination (from when the maker reads it from Base); left without one, it
+    /// holds nothing afterwards. 10 minutes by default.
+    #[serde(default = "default_reservation_secs")]
+    pub reservation_secs: u64,
     /// H-05 (L23), W-10: a random 1 to `pay_delay_max_blocks` Zcash blocks between receiving a
     /// destination and broadcasting the payment, so the payment does not sit in the block right
     /// after the order opened on Base; and the proof's anchor, fixed before the payment, at
@@ -123,6 +131,10 @@ fn default_max_open_orders_per_taker() -> usize {
     3
 }
 
+fn default_reservation_secs() -> u64 {
+    600
+}
+
 /// The most a spread may be (20 %).
 pub const MAX_SPREAD_BPS: u16 = 2_000;
 
@@ -163,6 +175,12 @@ impl MakerConfig {
         }
     }
 
+    /// Seconds after which the engine's last pass is too old for the API to decide on (W-7), and a
+    /// quote's place outlasts its deadline, while its order may be on Base and not read yet (N-10).
+    pub fn pass_stale_secs(&self) -> u64 {
+        3 * self.poll_secs + 60
+    }
+
     /// W-20: blocks from the tip a payment is scheduled at to its anchor having the order's tier of
     /// work on top, at most: the anchor window and the work (`confirm_estimate_secs` in blocks).
     pub fn anchor_pipeline_blocks(&self) -> u32 {
@@ -180,6 +198,10 @@ impl MakerConfig {
         ensure!(
             (1..=self.max_open_orders).contains(&self.max_open_orders_per_taker),
             "max_open_orders_per_taker is 1 to max_open_orders (W-19)"
+        );
+        ensure!(
+            self.reservation_secs > 0 && self.reservation_secs < u64::from(self.pay_window_secs),
+            "reservation_secs is more than 0 and less than pay_window_secs (N-10)"
         );
         ensure!(self.quote_ttl_secs >= 10, "quote_ttl_secs is at least 10");
         ensure!(self.block_secs > 0 && self.poll_secs > 0, "block_secs and poll_secs");
@@ -248,6 +270,7 @@ pub mod tests {
             max_order_usdc: 200_000_000,
             max_open_orders: 10,
             max_open_orders_per_taker: 3,
+            reservation_secs: 600,
             pay_delay_max_blocks: 8,
             block_secs: 75,
             confirm_estimate_secs: 1_200,
@@ -318,8 +341,15 @@ pub mod tests {
         assert!(c.check().is_err(), "W-19: above the maker's own cap");
         let mut raw = serde_json::to_value(judge_like()).unwrap();
         raw.as_object_mut().unwrap().remove("max_open_orders_per_taker");
+        raw.as_object_mut().unwrap().remove("reservation_secs");
         let c: MakerConfig = serde_json::from_value(raw).unwrap();
         assert_eq!(c.max_open_orders_per_taker, 3, "the default of a config written before W-19");
+        assert_eq!(c.reservation_secs, 600, "N-10: ten minutes by default");
+        let mut c = judge_like();
+        c.reservation_secs = 0;
+        assert!(c.check().is_err(), "N-10: no reservation at all");
+        c.reservation_secs = u64::from(c.pay_window_secs);
+        assert!(c.check().is_err(), "N-10: a reservation as long as the window");
     }
 
     /// W-10: a config written before the planned anchor, still naming `prove_delay_max_blocks`, is

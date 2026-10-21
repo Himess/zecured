@@ -310,11 +310,15 @@ pub struct DestinationFacts {
     pub now: u64,
     /// W-7: whether a proof could land now.
     pub proofs: ProofPath,
-    /// W-19: the zatoshi the maker can still pay: its scanned balance less what orders with a
-    /// destination reserved (this order has none yet).
+    /// W-19: the zatoshi the maker can still pay this order: its scanned balance less what other
+    /// orders and quotes hold (N-10: this order's own reservation back in).
     pub zcash_free: u64,
-    /// W-19: the taker's other open orders already given a destination (in payment).
-    pub taker_paying: usize,
+    /// N-10: whether this order holds one of the maker's places (its reservation lasts), and the
+    /// places taken by the others.
+    pub holds_place: bool,
+    pub places_taken: usize,
+    /// W-19, N-10: the places of the order's taker on Base, this order's aside.
+    pub taker_places: usize,
 }
 
 /// `POST /swap/orders/:id/destination`: whether the maker takes the taker's destination for `rec`
@@ -350,12 +354,17 @@ pub fn accept_destination(
         if d.proofs.relay_lag > cfg.max_relay_lag_blocks {
             return Err(ApiError::RELAY_BEHIND);
         }
-        // W-19: from here on the order reserves its ZEC: the maker must have it, and one taker's
-        // orders in payment stay within its cap.
+        // W-19: from here on the order holds its ZEC: the maker must have it (N-10: its reservation,
+        // while it lasts, kept it for it), and one taker's places stay within its cap. N-10: an
+        // order that no longer holds a place (its reservation lapsed, or none was given) takes one
+        // again only if there is one.
         if d.zcash_free < rec.zatoshi.saturating_add(PAYMENT_FEE_HEADROOM) {
             return Err(ApiError::NO_INVENTORY);
         }
-        if d.taker_paying >= cfg.max_open_orders_per_taker {
+        if !d.holds_place && d.places_taken >= cfg.max_open_orders {
+            return Err(ApiError::BUSY);
+        }
+        if d.taker_places >= cfg.max_open_orders_per_taker {
             return Err(ApiError::TAKER_BUSY);
         }
     }
@@ -423,10 +432,12 @@ pub struct Maker {
     pub wallet: Mutex<Wallet>,
     /// The wallet's spendable balance after the last scan (zatoshi).
     pub balance: AtomicU64,
-    /// The last pass's Zcash tip, relay tip and when it read them (Unix seconds).
+    /// The last pass's Zcash tip, relay tip and when it read them (Unix seconds), and Base's clock
+    /// then.
     zcash_tip: AtomicU64,
     relay_tip: AtomicU64,
     pass_at: AtomicU64,
+    pass_base_now: AtomicU64,
     pub prover: Prover,
     /// W-7: the Swap version of the prover's guest and selector: the maker quotes, takes
     /// destinations, pays and proves only while it is working.
@@ -477,6 +488,7 @@ pub fn new_record(
             Side::Buy => MakerStatus::AwaitingDestination,
             Side::Sell => MakerStatus::TakerPays,
         },
+        reserved_until: None,
         receiver: None,
         salt: None,
         pay_after_height: None,
@@ -521,6 +533,7 @@ impl Maker {
             zcash_tip: AtomicU64::new(0),
             relay_tip: AtomicU64::new(0),
             pass_at: AtomicU64::new(0),
+            pass_base_now: AtomicU64::new(0),
             prover,
             version_id,
             proving_key: tokio::sync::OnceCell::new(),
@@ -538,12 +551,17 @@ impl Maker {
         )
     }
 
+    /// Base's clock at the last pass.
+    pub fn last_pass_base_now(&self) -> u64 {
+        self.pass_base_now.load(Ordering::Relaxed)
+    }
+
     /// W-7: whether a payment made now could be proven, as the API decides a quote or a
     /// destination: the version is read now, the relay's lag is the last pass's, which must be
     /// recent (the maker follows both chains).
     pub async fn proof_path(&self) -> Result<ProofPath, ApiError> {
         let (zcash_tip, relay_height, pass_at) = self.last_pass();
-        if unix_now().saturating_sub(pass_at) > 3 * self.cfg.poll_secs + 60 {
+        if unix_now().saturating_sub(pass_at) > self.cfg.pass_stale_secs() {
             return Err(ApiError::UNAVAILABLE);
         }
         Ok(ProofPath {
@@ -616,6 +634,9 @@ impl Maker {
         self.zcash_tip.store(u64::from(zcash_tip), Ordering::Relaxed);
         self.relay_tip.store(m.relay_height, Ordering::Relaxed);
         self.pass_at.store(unix_now(), Ordering::Relaxed);
+        self.pass_base_now.store(m.now, Ordering::Relaxed);
+        // N-10: the quotes that hold no place any more are forgotten.
+        self.book.lock().await.prune_quotes(m.now);
         let ids: Vec<B256> = self.book.lock().await.open_orders().map(|o| o.order_id).collect();
         for id in ids {
             if let Err(e) = self.advance(&mut client, id, &m).await {
@@ -694,6 +715,9 @@ impl Maker {
         })
         .await?;
         let me = self.signer.address();
+        // N-10: a new Buy order's reservation runs on Base's clock, read once there is one.
+        let now = if logs.is_empty() { 0 } else { self.now().await? };
+        let balance = self.balance.load(Ordering::Relaxed);
         let mut book = self.book.lock().await;
         for log in logs.iter().filter(|l| !l.removed) {
             let ev = IZecuredSwap::OrderOpened::decode_log(&log.inner).context("OrderOpened")?;
@@ -702,10 +726,9 @@ impl Maker {
             }
             let side = Side::from_u8(ev.side)?;
             info!(order = %ev.orderId, ?side, zatoshi = ev.zatoshi, "order opened");
-            book.orders.insert(
-                ev.orderId,
-                new_record(ev.orderId, side, ev.taker, ev.zatoshi, ev.usdc, ev.payDeadline, ev.receiverCommitment),
-            );
+            let rec =
+                new_record(ev.orderId, side, ev.taker, ev.zatoshi, ev.usdc, ev.payDeadline, ev.receiverCommitment);
+            book.record_opened(rec, now, balance, &self.cfg);
         }
         book.synced_to = head;
         book.save(&self.cfg.state)
@@ -1069,6 +1092,7 @@ mod tests {
             pay_deadline: 1_000_000 + 21_600,
             receiver_commitment: B256::repeat_byte(3),
             status,
+            reserved_until: None,
             receiver: None,
             salt: None,
             pay_after_height: None,
@@ -1105,6 +1129,7 @@ mod tests {
         }
     }
 
+    /// An order holding its place (its reservation lasts), the maker otherwise idle.
     fn dest(now: u64) -> DestinationFacts {
         DestinationFacts {
             now,
@@ -1113,7 +1138,9 @@ mod tests {
                 relay_lag: 1,
             },
             zcash_free: 2_000_000_000,
-            taker_paying: 0,
+            holds_place: true,
+            places_taken: 0,
+            taker_places: 0,
         }
     }
 
@@ -1490,6 +1517,144 @@ mod tests {
         assert!(matches!(maker.decide_now(&b, 4_500_003).await.unwrap(), Step::Abandon(_)));
     }
 
+    /// N-10's makers: on the Base stub, the engine just passed (its view of the chains is recent),
+    /// with 20 ZEC to pay from.
+    async fn passed_maker(chain: crate::testkit::Shared, cfg: MakerConfig, book: Book) -> Arc<Maker> {
+        let m = crate::testkit::maker(&crate::testkit::base_stub(chain).await, cfg, book);
+        m.pass_at.store(unix_now(), Ordering::Relaxed);
+        m.balance.store(2_000_000_000, Ordering::Relaxed);
+        m
+    }
+
+    /// One request to the maker's API: its status and JSON body.
+    async fn call(
+        m: &Arc<Maker>,
+        req: axum::http::Request<axum::body::Body>,
+    ) -> (axum::http::StatusCode, serde_json::Value) {
+        use tower::ServiceExt;
+        let r = crate::api::router(m.clone()).oneshot(req).await.unwrap();
+        let status = r.status();
+        let body = axum::body::to_bytes(r.into_body(), 1 << 16).await.unwrap();
+        (status, serde_json::from_slice(&body).unwrap_or_default())
+    }
+
+    fn get(uri: &str) -> axum::http::Request<axum::body::Body> {
+        axum::http::Request::get(uri).body(axum::body::Body::empty()).unwrap()
+    }
+
+    /// The taker's destination `(ua, salt)` of an order, and the commitment it opens.
+    fn destination(index: u32) -> (String, [u8; 32], B256) {
+        use orchard::keys::Scope;
+        let sk = (1u8..).find_map(|b| Option::<SpendingKey>::from(SpendingKey::from_bytes([b; 32]))).unwrap();
+        let address = FullViewingKey::from(&sk).address_at(index, Scope::External);
+        let salt = [index as u8; 32];
+        let ua = zecured_zcash_ops::keys::encode_ironwood_ua(&Network::TestNetwork, address).unwrap();
+        (ua, salt, zecured_swap::receiver_commitment(&salt, &address.to_raw_address_bytes()))
+    }
+
+    /// N-10 (a): a Buy order left without a destination holds one of the maker's places only for
+    /// a short time after it opened: orders opened and left (queue stuffing) leave the maker free
+    /// to quote again.
+    #[tokio::test]
+    async fn n10_an_order_left_without_a_destination_stops_holding_a_place() {
+        let cfg = judge_like();
+        let mut book = Book::default();
+        for i in 0..cfg.max_open_orders as u8 {
+            let r = new_record(
+                B256::repeat_byte(0x40 + i),
+                Side::Buy,
+                Address::repeat_byte(0x30 + i),
+                50_000_000,
+                U256::from(20_000_000u64),
+                1_000_000 + 21_600,
+                B256::repeat_byte(3),
+            );
+            book.orders.insert(r.order_id, r);
+        }
+        let chain = std::sync::Arc::new(std::sync::Mutex::new(crate::testkit::Chain::default()));
+        let m = passed_maker(chain, cfg, book).await;
+        let (status, body) = call(&m, get("/swap/quote?side=buy&zatoshi=50000000")).await;
+        assert_eq!(status, axum::http::StatusCode::OK, "{body}");
+        crate::testkit::forget(&m);
+    }
+
+    /// N-10 (b): the per-taker cap applies to an order's taker on Base, orders opened from open Buy
+    /// quotes included: beyond its cap, a taker's order holds no place of the maker's and takes no
+    /// destination.
+    #[tokio::test]
+    async fn n10_the_per_taker_cap_applies_to_the_orders_taker_on_base() {
+        use crate::testkit::{Chain, open_order, order_opened};
+        let mut cfg = judge_like();
+        cfg.max_open_orders = 4;
+        let chain = std::sync::Arc::new(std::sync::Mutex::new(Chain::default()));
+        let m = passed_maker(chain.clone(), cfg, Book::default()).await;
+        // Four orders of one taker, opened from open Buy quotes, read from Base by the engine.
+        let taker = Address::repeat_byte(0x33);
+        let (ua, salt, commitment) = destination(4);
+        let ids: Vec<B256> = (1..=4u8).map(B256::repeat_byte).collect();
+        {
+            let mut c = chain.lock().unwrap();
+            for id in &ids {
+                let mut o = open_order(m.signer.address(), 0, taker, 50_000_000, 1_000_000 + 21_600);
+                o.receiverCommitment = commitment;
+                c.logs.push(order_opened(*id, &o));
+                c.orders.insert(*id, o);
+            }
+        }
+        m.sync_orders().await.unwrap();
+        assert_eq!(m.book.lock().await.orders.len(), 4);
+        // Another taker is still quoted: the fourth order holds no place.
+        let (status, body) = call(&m, get("/swap/quote?side=buy&zatoshi=50000000")).await;
+        assert_eq!(status, axum::http::StatusCode::OK, "{body}");
+        // And the fourth order takes no destination.
+        let post = |id: B256| {
+            let body = serde_json::json!({ "receiver": ua, "salt": hex::encode(salt) }).to_string();
+            axum::http::Request::post(format!("/swap/orders/{id}/destination"))
+                .header("content-type", "application/json")
+                .body(axum::body::Body::from(body))
+                .unwrap()
+        };
+        let (status, body) = call(&m, post(ids[3])).await;
+        assert_eq!((status, body["code"].as_str()), (axum::http::StatusCode::SERVICE_UNAVAILABLE, Some("busy")));
+        // Its first three take theirs: their reservations kept their places and their ZEC.
+        for id in &ids[..3] {
+            assert_eq!(m.book.lock().await.orders[id].reserved_until, Some(1_000_000 + 600));
+            let (status, body) = call(&m, post(*id)).await;
+            assert_eq!(status, axum::http::StatusCode::ACCEPTED, "{body}");
+        }
+        crate::testkit::forget(&m);
+    }
+
+    /// N-10 (c): quotes given and not opened yet hold the maker's places, and those naming a taker
+    /// count toward its cap: a burst of quotes cannot outrun the engine reading their orders.
+    #[tokio::test]
+    async fn n10_quotes_given_count_toward_the_makers_places() {
+        let mut cfg = judge_like();
+        cfg.max_open_orders = 4;
+        let chain = std::sync::Arc::new(std::sync::Mutex::new(crate::testkit::Chain::default()));
+        let m = passed_maker(chain, cfg, Book::default()).await;
+        let sell = format!("/swap/quote?side=sell&zatoshi=50000000&taker={}", Address::repeat_byte(0x33));
+        for _ in 0..3 {
+            let (status, body) = call(&m, get(&sell)).await;
+            assert_eq!(status, axum::http::StatusCode::OK, "{body}");
+        }
+        let (status, body) = call(&m, get(&sell)).await;
+        assert_eq!(
+            (status, body["code"].as_str()),
+            (axum::http::StatusCode::SERVICE_UNAVAILABLE, Some("busy")),
+            "the taker's cap"
+        );
+        let buy = "/swap/quote?side=buy&zatoshi=50000000";
+        assert_eq!(call(&m, get(buy)).await.0, axum::http::StatusCode::OK, "the maker's last place");
+        let (status, body) = call(&m, get(buy)).await;
+        assert_eq!(
+            (status, body["code"].as_str()),
+            (axum::http::StatusCode::SERVICE_UNAVAILABLE, Some("busy")),
+            "no place left"
+        );
+        crate::testkit::forget(&m);
+    }
+
     /// W-8: what the wallet's scan shows of an expired payment's inputs.
     #[test]
     fn w8_the_inputs_of_an_expired_payment() {
@@ -1676,11 +1841,24 @@ mod tests {
         );
         d.zcash_free = r.zatoshi + PAYMENT_FEE_HEADROOM;
         assert!(accept_destination(&cfg, &Network::TestNetwork, &r, &d, &ua, &hex::encode(salt)).is_ok());
-        d.taker_paying = 3;
+        d.taker_places = 3;
         assert_eq!(
             accept_destination(&cfg, &Network::TestNetwork, &r, &d, &ua, &hex::encode(salt)).err(),
             Some(ApiError::TAKER_BUSY)
         );
+        // N-10: an order whose reservation lapsed takes a place again only if one is free.
+        d.taker_places = 2;
+        d.holds_place = false;
+        d.places_taken = cfg.max_open_orders;
+        assert_eq!(
+            accept_destination(&cfg, &Network::TestNetwork, &r, &d, &ua, &hex::encode(salt)).err(),
+            Some(ApiError::BUSY)
+        );
+        d.places_taken -= 1;
+        assert!(accept_destination(&cfg, &Network::TestNetwork, &r, &d, &ua, &hex::encode(salt)).is_ok());
+        d.holds_place = true;
+        d.places_taken = cfg.max_open_orders;
+        assert!(accept_destination(&cfg, &Network::TestNetwork, &r, &d, &ua, &hex::encode(salt)).is_ok(), "its own");
     }
 
     /// W-7: the maker never pays while no proof could land (its Swap version removed or its
