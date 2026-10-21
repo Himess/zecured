@@ -290,7 +290,9 @@ keep an off-chain refund from ever spending a note that backs zZEC, or could:
    the real deposit, 48 s for an F1 violation (TESTING.md § 2b). `risc0-groth16` 3.0.5 wraps in Groth16 either with
    Docker on x86 or natively with its `cuda` feature. The CUDA prover fails on our receipts (an out-of-bounds read
    in its own kernel, TESTING.md § 2b), so the wrap uses Docker on x86: about a minute per seal. Its input is the
-   succinct receipt, which holds no viewing key. Both seals pass RISC Zero's router (done). A deposit witness holds
+   succinct receipt, which holds no viewing key. Both seals pass RISC Zero's router (done), and so does statement
+   v2's deposit-test seal (`RealSealsV2.t.sol`, 2026-10-21). On a 4-vCPU server without a GPU that STARK took 7 h
+   58 min (TESTING.md § 2b): a deployment that proves its users' deposits needs a GPU. A deposit witness holds
    the vault's tag key K, not its viewing key (statement v2): the GPU server learns which notes and payouts are the
    vault's, not their amounts or recipients. The private alternative keeps the STARK on the depositor's machine.
 2. **Base Sepolia**: deploy a relay from a recent checkpoint (`script/DeployRelay.s.sol`, Testnet parameters by
@@ -326,7 +328,7 @@ both guests are frozen once the deployed ids are taken from that build. Two runs
 same source) gave the same ids. Statement v1's, after the red-team fixes, were deposit
 `0x62feed13b2948aa427275fb6003e717ccc88945d033b99b196936ca99a80cdf5` and violation
 `0x7d8c9dd23e813e0e44ffea2b18ec9ec451b52a8a7b634ae998583d49b73cc526`; the real seals of `RealGroth16Seal.t.sol` are of
-those guests. Statement v2 changes both and adds the Mainnet pair: the workflow builds both networks, prints the four
+those guests, and those of `RealSealsV2.t.sol` of statement v2's. Statement v2 changes both and adds the Mainnet pair: the workflow builds both networks, prints the four
 ids and runs both parity suites on each pair. Its runs of 2026-10-16 on statement v2 (two, the same ids, every parity
 suite passing) give the ids to deploy, a network's pair as `DEPOSIT_IMAGE_ID` and `VIOLATION_IMAGE_ID`, and the ELFs
 provers run:
