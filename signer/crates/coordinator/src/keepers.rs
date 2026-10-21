@@ -57,6 +57,9 @@ pub(crate) const EXPIRY_MARGIN_SECS: u64 = 120;
 /// How long a keeper waits before it tries one vault again after Base refused its call (or the call
 /// would have changed nothing).
 pub(crate) const KEEPER_RETRY: Duration = Duration::from_secs(600);
+/// W-4, W-6: how soon a keeper waiting on the nodes (a claim's receipt, enough signers to take a
+/// recipient) looks again: a claim is armed as soon as a node gives its receipt.
+pub(crate) const NODE_RETRY: Duration = Duration::from_secs(30);
 
 /// The keepers, for their retry clocks.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
@@ -210,9 +213,14 @@ impl Coordinator {
     /// Whether `keeper` may act for `vault` now, and if so marks it as acting: once per
     /// [`KEEPER_RETRY`] at most.
     pub(crate) fn keeper_due(&self, vault: &B256, keeper: Keeper) -> bool {
+        self.keeper_due_after(vault, keeper, KEEPER_RETRY)
+    }
+
+    /// [`Self::keeper_due`] with its own period.
+    pub(crate) fn keeper_due_after(&self, vault: &B256, keeper: Keeper, retry: Duration) -> bool {
         let mut tries = self.keeper_tries.lock().unwrap_or_else(|p| p.into_inner());
         let now = Instant::now();
-        if tries.get(&(*vault, keeper)).is_some_and(|at| now.duration_since(*at) < KEEPER_RETRY) {
+        if tries.get(&(*vault, keeper)).is_some_and(|at| now.duration_since(*at) < retry) {
             return false;
         }
         tries.insert((*vault, keeper), now);
@@ -393,7 +401,7 @@ impl Coordinator {
     /// destination of yet waits for the next pass.
     pub(crate) async fn arm_claims(&self, v: &CoordVault) -> Result<()> {
         let claims = unarmed(v);
-        if claims.is_empty() || !self.keeper_due(&v.vault_id, Keeper::Arm) {
+        if claims.is_empty() || !self.keeper_due_after(&v.vault_id, Keeper::Arm, NODE_RETRY) {
             return Ok(());
         }
         let bond = self.v3().await?.bond;
@@ -440,7 +448,7 @@ impl Coordinator {
             let store = self.store.lock().await;
             unregistered_reimbursements(v, |c| store.recipient(c).is_some())
         };
-        if todo.is_empty() || !self.keeper_due(&v.vault_id, Keeper::Treasury) {
+        if todo.is_empty() || !self.keeper_due_after(&v.vault_id, Keeper::Treasury, NODE_RETRY) {
             return Ok(());
         }
         for (id, commitment) in todo {
@@ -520,6 +528,25 @@ mod tests {
 
     use super::*;
     use crate::store::{CommittedPayout, tests::vault};
+
+    /// W-4, W-6: a keeper waiting on the nodes (a receipt, enough signers) looks again after
+    /// `NODE_RETRY`; the others after `KEEPER_RETRY`.
+    #[test]
+    fn w4_a_keeper_waiting_on_the_nodes_looks_again_soon() {
+        let dir = crate::store::tests::TempDir::new("w4-retry");
+        let urls: Vec<String> = (1..=5).map(|_| "http://127.0.0.1:9".to_owned()).collect();
+        let gas = hex::encode(alloy::signers::local::PrivateKeySigner::random().to_bytes());
+        let c = Coordinator::new(crate::nodes::tests::config(&urls), &dir.0, &gas).unwrap();
+        let v = B256::repeat_byte(1);
+        assert!(c.keeper_due_after(&v, Keeper::Arm, NODE_RETRY));
+        assert!(!c.keeper_due_after(&v, Keeper::Arm, NODE_RETRY), "not twice at once");
+        let earlier = Instant::now().checked_sub(NODE_RETRY + Duration::from_secs(1)).unwrap();
+        c.keeper_tries.lock().unwrap().insert((v, Keeper::Arm), earlier);
+        assert!(c.keeper_due_after(&v, Keeper::Arm, NODE_RETRY), "half a minute later: again");
+        c.keeper_tries.lock().unwrap().insert((v, Keeper::Burn), earlier);
+        assert!(!c.keeper_due(&v, Keeper::Burn), "a Base keeper waits KEEPER_RETRY");
+        assert!(NODE_RETRY < KEEPER_RETRY);
+    }
 
     /// W-6: a bond-paid claim's treasury recipient is registered with every signer when its Base
     /// destination is the derived one, and only once; a destination that is not derived never is, and
