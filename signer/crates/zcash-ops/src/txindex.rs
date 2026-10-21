@@ -8,7 +8,8 @@
 //! search the whole Ironwood history, by claim reference (a claimant) or by payout reference (a
 //! borrower, the coordinator). Only transactions with Ironwood actions can pay a claim, so only
 //! theirs are kept. The last [`REORG_MARGIN`] blocks are read again on every update and never
-//! written to the file.
+//! written to the file (N-12: nor kept from a file that went further than the server's tip allows),
+//! and a server's answer with a block outside the range asked is refused.
 //!
 //! The file holds public chain data only: `ZWIX`, a version byte, the network byte, the first
 //! height, the last height kept and the count (u32, little-endian), then each transaction's height
@@ -89,13 +90,14 @@ impl IronwoodIndex {
     /// [`REORG_MARGIN`] below it, saved after each range read (a first read of the whole history
     /// that is cut short resumes where it stopped).
     pub async fn update(&mut self, client: &mut lwd::LwdClient, tip: u32) -> Result<()> {
+        self.cap(tip);
         let keep_to = tip.saturating_sub(REORG_MARGIN);
         self.tail.clear();
         let mut from = self.kept_to + 1;
         while from <= tip {
             let to = from.saturating_add(CHUNK - 1).min(tip);
-            let (keep, tail): (Vec<_>, Vec<_>) =
-                lwd::ironwood_txids(client, from, to).await?.into_iter().partition(|(h, _)| *h <= keep_to);
+            let txs = in_range(lwd::ironwood_txids(client, from, to).await?, from, to)?;
+            let (keep, tail): (Vec<_>, Vec<_>) = txs.into_iter().partition(|(h, _)| *h <= keep_to);
             self.tail.extend(tail);
             if keep_to >= from {
                 self.kept.extend(keep);
@@ -104,8 +106,21 @@ impl IronwoodIndex {
             }
             from = to + 1;
         }
-        self.read_to = self.read_to.max(tip);
+        self.read_to = tip;
         Ok(())
+    }
+
+    /// N-12: what is kept stops [`REORG_MARGIN`] below the server's `tip`. A file that went further
+    /// (kept against another server, or before a reorganisation) gives up its last blocks, which are
+    /// read again.
+    fn cap(&mut self, tip: u32) {
+        let keep_to = tip.saturating_sub(REORG_MARGIN).max(self.start - 1);
+        if self.kept_to > keep_to {
+            self.kept.retain(|(h, _)| *h <= keep_to);
+            self.kept_to = keep_to;
+            self.tail.clear();
+            self.read_to = keep_to;
+        }
     }
 
     /// Every transaction read, oldest first: its height and txid.
@@ -140,6 +155,16 @@ impl IronwoodIndex {
         fs::write(&tmp, out).with_context(|| format!("write {}", tmp.display()))?;
         fs::rename(&tmp, path).with_context(|| format!("replace {}", path.display()))
     }
+}
+
+/// N-12: the light wallet server's answer for the blocks `from..=to`, refused if it holds a
+/// transaction of any other block.
+fn in_range(txs: Vec<(u32, [u8; 32])>, from: u32, to: u32) -> Result<Vec<(u32, [u8; 32])>> {
+    anyhow::ensure!(
+        txs.iter().all(|(h, _)| (from..=to).contains(h)),
+        "the light wallet server answered with a block outside the range asked"
+    );
+    Ok(txs)
 }
 
 fn network_byte(network: ZcashNetwork) -> u8 {
@@ -195,5 +220,25 @@ mod tests {
         fs::write(&path, b"ZWIX garbage").unwrap();
         assert_eq!(IronwoodIndex::open(&path, ZcashNetwork::Testnet).unwrap().txs().count(), 0);
         let _ = fs::remove_file(&path);
+    }
+
+    /// N-12: a file kept further than the server's tip allows is cut back to [`REORG_MARGIN`] below
+    /// it (its last blocks are read again); one behind the tip is kept as it is. An answer with a block
+    /// outside the range asked is refused.
+    #[test]
+    fn n12_the_index_never_keeps_within_the_margin_of_the_tip() {
+        let txs = vec![(4_134_005, [1; 32]), (4_199_950, [2; 32]), (4_199_990, [3; 32])];
+        let mut index = IronwoodIndex::in_memory(ZcashNetwork::Testnet, 4_200_000, txs.clone()).unwrap();
+        index.cap(4_200_050);
+        assert_eq!(index.kept_to, 4_199_950);
+        assert_eq!(index.txs().copied().collect::<Vec<_>>(), txs[..2], "the block 40 below the tip is read again");
+        assert_eq!(index.range().1, 4_199_950);
+        let mut behind = IronwoodIndex::in_memory(ZcashNetwork::Testnet, 4_200_000, txs.clone()).unwrap();
+        behind.cap(4_300_000);
+        assert_eq!((behind.kept_to, behind.txs().count()), (4_200_000, 3), "behind the tip: kept");
+        let tx = |h: u32| (h, [9; 32]);
+        assert!(in_range(vec![tx(10), tx(20)], 10, 20).is_ok());
+        assert!(in_range(vec![tx(9)], 10, 20).is_err());
+        assert!(in_range(vec![tx(21)], 10, 20).is_err());
     }
 }
