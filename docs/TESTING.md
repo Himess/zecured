@@ -234,6 +234,27 @@ Found and fixed: after the deleverage, the position page said "Part of the colla
 pre-liquidation pay through a Liquidation claim like a liquidation, which the page cannot tell apart, so it now says
 that part of the collateral went to whoever repaid part of the debt.
 
+### v4.1 on a local fork (2026-10-21)
+
+A fresh v4.1 deployment on an anvil fork of Base Sepolia (block 48,411,390), a relay fed from P2P, the MOCK verifier with
+the pinned Testnet image ids, five nodes and the coordinator with the treasury keys (W-6), real Zcash Testnet:
+
+| Flow | Result | Evidence |
+|---|---|---|
+| Two deposits (0.01 TAZ) | Broadcast 14:15:17, seen by the signers 14:19, proof on Base 14:21:24, active 14:24:17 | deposits `4cc54e5e`, `3b42fdc8` |
+| Borrow and partial release | 2 USDC; 0.004 ZEC committed 14:28:24, broadcast 14:28:26, confirmed by signatures | payout `cfb10c40` (block 4,525,841) |
+| A late payout's anchor (W-10) | Planned at 4,525,837 (this fork's network config had no payout delay, so `r` = 0); the payout waited in the mempool and was mined at 4,525,841, late, so its routine delivery proof anchored at `h + 1 + r` = 4,525,842, queued 14:34:51 and final on Base 14:36:15 | proof `0x8d259151` |
+| Earliest-receipt armings (W-4) | The coordinator armed both claims with their earliest receipts | coordinator log |
+| Reimbursement end to end (W-6) | Nodes 3 to 5 stopped; the release went overdue and its claimant took it from the bonds (`slashLiveness`, 157,919 gas). `zecured-ops` refused to sign without the treasury keys, and refused a destination prepared with other keys ("not the claim's treasury destination: not signed (W-6)"); three operators signed the derived one, sent 3 of 3. With the nodes back, the coordinator registered the derived recipient (14:46:17); the payout was committed 14:47:29, held one block (L23), confirmed 14:50:27, and the treasury's wallet found the note: 990,000 zatoshi at block 4,525,883 | `0x00a16af0`, `0xaa12d8fc` |
+| A planned anchor (W-10) | With `payout_delay_max_blocks` 8: planned at 4,525,892 (`r` = 2), the payout mined at 4,525,883. Its proof anchored at exactly 4,525,892, the plan, nine blocks above the payout's block and not at `h + 1`; queued 15:00:37, ready 15:02:16, by which time the confirmation had expired undisputed (R-3), so the proof was not sent and its anchor was read from the seal file's journal | seal file |
+| The Ironwood index (W-11) | Testnet's whole Ironwood history from 4,134,000 (about 392,000 blocks, 231,000 Ironwood transactions, an 8.3 MB index) read in 27 s on the first run; a later run in 1 s | — |
+
+Found and fixed: on Windows a debug build of the CLI overflowed the main thread's 1 MiB stack while proving a payment
+(Halo 2 ran inside `main`'s future, since v4); the wallet and the Sell payer now prove on a blocking thread, as the
+coordinator always did. And a claim was armed eleven minutes after a node could give its receipt: the arming keeper had
+counted its first, empty look (no receipt yet) as a try and waited the ten-minute keeper period; the keepers that wait
+on the nodes (armings, treasury recipients) now look again every 30 seconds.
+
 ## 2b. Tier 2 deposit proofs (docs/TIER2.md)
 
 | What | How | Result |
