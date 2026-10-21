@@ -74,6 +74,12 @@ pub struct Facts {
     /// Another payment of the maker is broadcast and not mined yet (one at a time: its inputs are
     /// not marked spent before it is mined).
     pub other_payment_unmined: bool,
+    /// W-20: the last block of the tip's epoch (`None` while no later activation is known), and
+    /// whether the payment statement proves on that epoch.
+    pub tip_epoch_last: Option<u32>,
+    pub tip_epoch_provable: bool,
+    /// W-20: mined, the last block of the payment's epoch.
+    pub payment_epoch_last: Option<u32>,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -159,6 +165,12 @@ pub fn decide(cfg: &MakerConfig, rec: &OrderRecord, f: &Facts, pay_delay: u32, d
             if f.now.saturating_add(cfg.required_secs()) > rec.pay_deadline {
                 return Step::Abandon("too late to pay and prove before the deadline");
             }
+            // W-20: the payment, its anchor and the order's tier of work in one epoch the statement
+            // proves on, or no payment yet (past the activation, the next epoch may take it).
+            if !anchor::fits_in_epoch(f.zcash_tip, cfg.anchor_pipeline_blocks(), f.tip_epoch_provable, f.tip_epoch_last)
+            {
+                return Step::Wait;
+            }
             let tip = f.zcash_tip;
             match (rec.pay_after_height, rec.planned_anchor_height) {
                 // Scheduled, and a payment broadcast now still lands below its planned anchor.
@@ -190,8 +202,9 @@ pub fn decide(cfg: &MakerConfig, rec: &OrderRecord, f: &Facts, pay_delay: u32, d
                 Some(Seen::Mined(mined)) => match rec.anchor_height {
                     // The block seen when the anchor was scheduled (a reorganization may move it).
                     Some(a) if rec.mined_height == Some(mined) && a > mined => Step::Prove,
-                    // W-10: the planned anchor whatever the payment's block, unless it came late.
-                    _ => match anchor::anchor_height(rec.planned_anchor_height, draw, mined, None) {
+                    // W-10: the planned anchor whatever the payment's block, unless it came late;
+                    // W-20: never past the last block of the payment's epoch.
+                    _ => match anchor::anchor_height(rec.planned_anchor_height, draw, mined, f.payment_epoch_last) {
                         Some(anchor) => Step::ScheduleAnchor { mined, anchor },
                         None => Step::Abandon("paid, but its proof cannot land: the order will be refunded"),
                     },
@@ -582,6 +595,12 @@ impl Maker {
             payment,
             inputs_unspent,
             other_payment_unmined,
+            tip_epoch_last: anchor::epoch_last_height(self.zcash, zcash_tip),
+            tip_epoch_provable: anchor::provable_epoch(self.zcash, zcash_tip),
+            payment_epoch_last: match payment {
+                Some(Seen::Mined(h)) => anchor::epoch_last_height(self.zcash, h),
+                _ => None,
+            },
         })
     }
 
@@ -840,6 +859,9 @@ mod tests {
             payment: None,
             inputs_unspent: false,
             other_payment_unmined: false,
+            tip_epoch_last: None,
+            tip_epoch_provable: true,
+            payment_epoch_last: None,
         }
     }
 
@@ -1004,6 +1026,55 @@ mod tests {
         );
         let fresh = rec(Side::Buy, MakerStatus::DestinationReceived);
         assert!(matches!(decide(&cfg, &fresh, &f, 4, 7), Step::SchedulePayment { draw: 7, .. }));
+    }
+
+    /// W-20: the anchor never passes the last block of the payment's epoch (the statement needs the
+    /// payment and its anchor in one epoch); a payment mined in that very block cannot be proven.
+    #[test]
+    fn w20_the_anchor_never_leaves_the_payments_epoch() {
+        let cfg = judge_like();
+        let mut r = rec(Side::Buy, MakerStatus::Paid);
+        r.planned_anchor_height = Some(4_500_015);
+        r.anchor_draw = Some(5);
+        let mut f = facts(1_000_200);
+        f.zcash_tip = 4_500_030;
+        f.payment = Some(Seen::Mined(4_500_008));
+        f.payment_epoch_last = Some(4_500_010);
+        assert_eq!(
+            decide(&cfg, &r, &f, 3, 0),
+            Step::ScheduleAnchor {
+                mined: 4_500_008,
+                anchor: 4_500_010
+            },
+            "cut at the epoch's last block"
+        );
+        f.payment = Some(Seen::Mined(4_500_010));
+        assert!(matches!(decide(&cfg, &r, &f, 3, 0), Step::Abandon(_)), "the epoch's last block: no anchor");
+    }
+
+    /// W-20: no payment while its anchor window and the order's tier of work would not fit before
+    /// a known activation, nor in an epoch the payment statement does not prove on.
+    #[test]
+    fn w20_no_payment_near_a_known_activation() {
+        let cfg = judge_like();
+        // From the tip: 18 blocks of anchor window, 16 of work (1,200 s in 75-s blocks).
+        assert_eq!(cfg.anchor_pipeline_blocks(), 18 + 16);
+        let mut r = rec(Side::Buy, MakerStatus::DestinationReceived);
+        let mut f = facts(1_000_000);
+        f.tip_epoch_last = Some(4_500_000 + 34 - 1);
+        assert_eq!(decide(&cfg, &r, &f, 3, 2), Step::Wait, "the activation is too close");
+        f.tip_epoch_last = Some(4_500_000 + 34);
+        assert!(matches!(decide(&cfg, &r, &f, 3, 2), Step::SchedulePayment { .. }));
+        r.pay_after_height = Some(4_500_003);
+        r.planned_anchor_height = Some(4_500_012);
+        r.anchor_draw = Some(2);
+        f.zcash_tip = 4_500_003;
+        assert_eq!(decide(&cfg, &r, &f, 3, 2), Step::Wait, "scheduled, but the activation came closer");
+        f.tip_epoch_last = None;
+        f.tip_epoch_provable = false;
+        assert_eq!(decide(&cfg, &r, &f, 3, 2), Step::Wait, "an epoch the statement does not prove on");
+        f.tip_epoch_provable = true;
+        assert_eq!(decide(&cfg, &r, &f, 3, 2), Step::Pay);
     }
 
     /// The hash the relay stub gives the header at `height`.

@@ -135,6 +135,13 @@ impl MakerConfig {
             + self.submit_margin_secs
     }
 
+    /// W-20: blocks from the tip a payment is scheduled at to its anchor having the order's tier of
+    /// work on top, at most: the anchor window and the work (`confirm_estimate_secs` in blocks).
+    pub fn anchor_pipeline_blocks(&self) -> u32 {
+        let work = u32::try_from(self.confirm_estimate_secs.div_ceil(self.block_secs)).unwrap_or(u32::MAX);
+        anchor::anchor_window(self.pay_delay_max_blocks).saturating_add(work)
+    }
+
     /// What every config must respect; the chain's own bounds are checked at start.
     pub fn check(&self) -> Result<()> {
         ensure!(self.swap != Address::ZERO && self.oracle != Address::ZERO, "swap and oracle addresses");
