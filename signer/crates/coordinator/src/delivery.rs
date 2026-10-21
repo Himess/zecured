@@ -28,6 +28,20 @@
 //! hid under another reference never goes into a delivery proof: its claimant could never find X, so
 //! the coordinator proves the violation instead (F4, at a dispute's priority), and the compensator
 //! pays the claim.
+//!
+//! W-10: a proof's anchor is public on Base (the slasher's events and the journal), the payout's
+//! block is not. An anchor taken as the first header with the slasher's work above the payout sits
+//! right above its block and gives it away. So the anchor of a payout's proofs is fixed when its
+//! commitment lands, while Zcash block `c` is being mined: `a = c + payout_delay_max_blocks + 1 + r`,
+//! `r` drawn once per payout in `0..=payout_delay_max_blocks` and kept ([`plan_anchor`]). The payout
+//! is broadcast after its L23 delay of 1 to `payout_delay_max_blocks` blocks, so it lands in one of
+//! the blocks `c + 1` to `c + payout_delay_max_blocks`, below `a` whichever it is. A payout mined at
+//! or after `a` (late), or one this coordinator did not plan, anchors at `h + 1 + r`. The anchor
+//! never passes the last block of the payout's epoch (W-20). The coordinator waits for the
+//! slasher's work on top of exactly that header. Two exceptions, both for a claim that would be
+//! paid twice otherwise: when the delayed proof could not land `DEADLINE_MARGIN_SECS` before the
+//! dispute's end (`payoutDispute`), or before the liveness deadline of a claim still pending
+//! (`livenessDeadline`), the payout is proven under the first header with the work instead.
 
 use std::{collections::BTreeMap, fs, path::PathBuf, time::Instant};
 
@@ -40,25 +54,87 @@ use anyhow::{Context, Result, bail, ensure};
 use tracing::{debug, error, info, warn};
 use zcash_protocol::TxId;
 use zecured_base::{
-    events::{IZcashHeaderRelay, IZecuredRegistry, IZecuredSlasher, VERSION_VIOLATION, VIOLATION_WRONG_CLAIM_REF},
-    relay::slash_anchor,
+    events::{
+        ISignerBond, IZcashHeaderRelay, IZecuredRegistry, IZecuredSlasher, VERSION_VIOLATION, VIOLATION_WRONG_CLAIM_REF,
+    },
+    relay::{anchor_above, anchor_at},
 };
 use zecured_deposit_witness::{p2p, violation};
 use zecured_policy::{
     derive::{deposit_tag, payout_ref, tag_key},
-    ledger::{Recipient, claim_ref},
+    ledger::{ClaimState, Recipient, claim_ref},
 };
 use zecured_zcash_ops::{lwd, network::ZcashNetwork, scan::ReceivedNote};
 
 use crate::{
     Coordinator, LIVENESS_WARNING_INTERVAL, RECEIPT_TIMEOUT,
     error::scrubbed,
-    log_failure,
+    log_failure, now,
     proofs::{DepositProofs, Prover, SealFile, guest_active, prove_into, seal_selector, version_active},
     queue::{Enqueued, Priority},
     short,
-    store::CoordVault,
+    store::{CoordVault, PlannedAnchor},
 };
+
+/// W-10: the Zcash block target spacing, to estimate when an anchor gets the slasher's work.
+const BLOCK_SECS: u64 = 75;
+/// W-10: what a delivery proof takes at most from its job to Base: the queue, the STARK and its
+/// Groth16 wrap (minutes on the deployment's prover, docs/TESTING.md), and the submission.
+const PROOF_SECS: u64 = 20 * 60;
+/// W-10: how long before a claim's deadline its payout's proof must be on Base.
+const DEADLINE_MARGIN_SECS: u64 = 10 * 60;
+
+/// A uniform draw in `0..=max` from the operating system's CSPRNG, without modulo bias.
+fn draw_r(max: u32) -> u32 {
+    let n = u64::from(max) + 1;
+    let zone = (1u64 << 32) - (1u64 << 32) % n;
+    loop {
+        let v = u64::from(rand_core_06::RngCore::next_u32(&mut rand_core_06::OsRng));
+        if v < zone {
+            return u32::try_from(v % n).unwrap_or(0);
+        }
+    }
+}
+
+/// W-10: the anchor of a payout committed while the Zcash tip was `tip` (block `c = tip + 1` being
+/// mined): `c + max + 1 + r` for `payout_delay_max_blocks = max`, with a fresh draw `r`.
+pub(crate) fn plan_anchor(payout_ref: B256, tip: u32, max: u32) -> PlannedAnchor {
+    let r = draw_r(max);
+    PlannedAnchor {
+        payout_ref,
+        planned: Some(tip.saturating_add(1).saturating_add(max).saturating_add(1).saturating_add(r)),
+        r,
+    }
+}
+
+/// W-10, W-20: the anchor of a payout mined at `h`: the `planned` one when the payout came below it,
+/// whatever `h` is; otherwise (late, or never planned here) `h + 1 + r`. Never past `epoch_last`,
+/// the last block of the payout's epoch; `None` when no anchor can prove it (it is in that block).
+pub(crate) fn anchor_height(planned: Option<u32>, r: u32, h: u32, epoch_last: Option<u32>) -> Option<u32> {
+    let a = match planned {
+        Some(p) if p > h => p,
+        _ => h.saturating_add(1).saturating_add(r),
+    };
+    let a = epoch_last.map_or(a, |last| a.min(last));
+    (a > h).then_some(a)
+}
+
+/// W-20: the last block of the epoch of block `height`: the next network upgrade's activation less
+/// one, or `None` while zcash_protocol knows no later activation.
+pub(crate) fn epoch_last_height(network: ZcashNetwork, height: u32) -> Option<u32> {
+    use zcash_protocol::consensus::{BlockHeight, BranchId};
+    let params = network.params();
+    let (_, end) = BranchId::for_height(&params, BlockHeight::from_u32(height)).height_bounds(&params)?;
+    end.map(|e| u32::from(e).saturating_sub(1))
+}
+
+/// W-10: whether a payout's proof drops its delay: its delayed anchor `a` is not under the work yet,
+/// `q` (below it) is, and the delayed proof, `a - q` blocks and a proof away, would not land
+/// `DEADLINE_MARGIN_SECS` before `deadline`.
+pub(crate) fn drop_delay(now: u64, a: u32, q: u32, deadline: u64) -> bool {
+    let eta = now.saturating_add(u64::from(a.saturating_sub(q)) * BLOCK_SECS).saturating_add(PROOF_SECS);
+    eta.saturating_add(DEADLINE_MARGIN_SECS) > deadline
+}
 
 /// Kind 5 of the violation guest's journal: a payout's inclusion, not a violation.
 const INCLUDED: u8 = 5;
@@ -433,8 +509,9 @@ impl Coordinator {
             );
             return Ok(());
         }
-        let Some(anchor) = slash_anchor(&provider, slasher, payout.height).await? else {
-            // The relay has not got the payout's block deep enough under the slasher's work yet.
+        let deadline = self.proof_deadline(&provider, v, &payout.claims).await?;
+        let Some(anchor) = self.proof_anchor(&provider, v, slasher, reference, payout.height, deadline).await? else {
+            // W-10: the relay has not got the payout's anchor under the slasher's work yet.
             return Ok(());
         };
         let job = InclusionJob {
@@ -532,6 +609,101 @@ impl Coordinator {
 }
 
 impl Coordinator {
+    /// W-10: the payout's anchor plan, as kept; a payout this coordinator did not plan gets its `r`
+    /// now, kept at once so that every proof of the payout takes the same anchor.
+    pub(crate) async fn anchor_plan(&self, vault_id: &B256, reference: B256) -> Result<(Option<u32>, u32)> {
+        let fresh = draw_r(self.cfg.payout_delay_max_blocks);
+        self.update_vault(vault_id, |cur| match cur.anchors.iter().find(|a| a.payout_ref == reference) {
+            Some(a) => (a.planned, a.r),
+            None => {
+                cur.anchors.push(PlannedAnchor {
+                    payout_ref: reference,
+                    planned: None,
+                    r: fresh,
+                });
+                (None, fresh)
+            }
+        })
+        .await
+    }
+
+    /// W-10: the anchor of a proof of payout `reference`, mined at `h`: its planned anchor once the
+    /// relay has the slasher's work on top of it; `None` until then. With a `deadline` the delayed
+    /// proof would miss, the first header with the work instead.
+    async fn proof_anchor<P: alloy::providers::Provider>(
+        &self,
+        provider: &P,
+        v: &CoordVault,
+        slasher: Address,
+        reference: B256,
+        h: u32,
+        deadline: Option<u64>,
+    ) -> Result<Option<u32>> {
+        let (planned, r) = self.anchor_plan(&v.vault_id, reference).await?;
+        let epoch_last = epoch_last_height(self.cfg.zcash(), h);
+        let Some(a) = anchor_height(planned, r, h, epoch_last) else {
+            if self.dispute_warning_due(&v.vault_id) {
+                error!(vault = %short(&v.vault_id), "a payout was mined in its epoch's last block: no anchor can prove it (W-20)");
+            }
+            return Ok(None);
+        };
+        let s = IZecuredSlasher::new(slasher, provider);
+        let relay = s.relay().call().await.context("slasher.relay")?;
+        let min = s.slashConfirmationWork().call().await.context("slasher.slashConfirmationWork")?;
+        if anchor_at(provider, relay, a, min).await?.is_some() {
+            return Ok(Some(a));
+        }
+        let Some(deadline) = deadline else {
+            return Ok(None);
+        };
+        let Some(q) = anchor_above(provider, relay, h, min).await? else {
+            return Ok(None); // no header above the payout has the work yet
+        };
+        let q = epoch_last.map_or(q, |last| q.min(last));
+        if !drop_delay(now(), a, q, deadline) {
+            return Ok(None);
+        }
+        warn!(vault = %short(&v.vault_id), "a claim's deadline is near: its payout is proven without the anchor's delay (W-10)");
+        Ok(Some(q))
+    }
+
+    /// W-10: the earliest deadline among the payout's claims that a proof of it must beat: a disputed
+    /// claim's end of dispute (`payoutDispute`), a pending one's liveness deadline. `None` when every
+    /// claim is confirmed (a dispute would give the proof its whole window).
+    async fn proof_deadline<P: alloy::providers::Provider>(
+        &self,
+        provider: &P,
+        v: &CoordVault,
+        claims: &[B256],
+    ) -> Result<Option<u64>> {
+        let state = |id: &B256| v.claims.iter().find(|c| B256::from(c.id) == *id).map(|c| c.state);
+        let registry = IZecuredRegistry::new(self.cfg.registry, provider);
+        let mut bond = None;
+        let mut earliest: Option<u64> = None;
+        for id in claims {
+            let due = match state(id) {
+                Some(ClaimState::Disputed) => {
+                    registry.payoutDispute(*id).call().await.context("Registry.payoutDispute")?.dueAt
+                }
+                Some(ClaimState::Unpaid) => {
+                    let b = match bond {
+                        Some(b) => b,
+                        None => *bond.insert(self.v3().await?.bond),
+                    };
+                    if b == Address::ZERO {
+                        continue;
+                    }
+                    ISignerBond::new(b, provider).livenessDeadline(*id).call().await.context("bond.livenessDeadline")?
+                }
+                _ => continue,
+            };
+            if due != 0 {
+                earliest = Some(earliest.map_or(due, |e| e.min(due)));
+            }
+        }
+        Ok(earliest)
+    }
+
     /// W-1: a claim the landed payout's commitment hid: its F4 proof is submitted once made, or queued
     /// at a dispute's priority once the relay has the slasher's work on top of the payout's block.
     /// Nothing about the claim's recipient is logged.
@@ -566,8 +738,8 @@ impl Coordinator {
             warn!("the configured violation guest is not an active verifier version on Base: no F4 proof (T-07a)");
             return Ok(());
         }
-        let Some(anchor) = slash_anchor(&provider, slasher, h.height).await? else {
-            return Ok(()); // the payout's block is not under the slasher's work yet
+        let Some(anchor) = self.proof_anchor(&provider, v, slasher, h.payout_ref, h.height, None).await? else {
+            return Ok(()); // W-10: the payout's anchor is not under the slasher's work yet
         };
         let job = HiddenJob {
             ufvk: v.ufvk.clone(),
@@ -649,6 +821,99 @@ mod tests {
 
     use super::*;
     use crate::store::{CommittedPayout, tests::vault};
+
+    /// W-10: within the window, the anchor is the planned height whatever the payout's block is; it is
+    /// `h + 1` only when the payout came in the window's last block. Every L23 delay, draw and mempool
+    /// wait of a coordinator with `payout_delay_max_blocks` = 8.
+    #[test]
+    fn w10_the_anchor_does_not_depend_on_the_payout_height() {
+        let max = 8;
+        let tip = 4_500_000;
+        for delay in 1..=max {
+            for r in 0..=max {
+                let planned = tip + 1 + max + 1 + r;
+                // Broadcast once the tip reaches `tip + delay` (`broadcast_from`): mined in the next
+                // block at the earliest, one of `c + 1 .. c + max` for `c = tip + 1`.
+                let earliest = tip + delay + 1;
+                for wait in 0..=2 * max + 2 {
+                    let h = earliest + wait;
+                    let a = anchor_height(Some(planned), r, h, None).unwrap();
+                    assert!(a > h);
+                    if h < planned {
+                        assert_eq!(a, planned, "delay {delay}, r {r}, wait {wait}: the planned anchor");
+                        assert_eq!(a == h + 1, h == planned - 1, "h + 1 only at the window's end");
+                    } else {
+                        assert_eq!(a, h + 1 + r, "a late payout");
+                    }
+                }
+            }
+        }
+        let p = plan_anchor(B256::repeat_byte(1), tip, max);
+        assert!(p.r <= max);
+        assert_eq!(p.planned, Some(tip + 1 + max + 1 + p.r));
+        assert_eq!(plan_anchor(B256::ZERO, tip, 0).planned, Some(tip + 2), "a local fork without delays");
+        for _ in 0..200 {
+            assert!(draw_r(8) <= 8);
+        }
+        assert_eq!(draw_r(0), 0);
+    }
+
+    /// W-10: a payout this coordinator did not plan (a disputed one traced on Base, or one from
+    /// before v4.1) anchors as a late one.
+    #[test]
+    fn w10_an_unplanned_payout_anchors_as_a_late_one() {
+        assert_eq!(anchor_height(None, 3, 100, None), Some(104));
+        assert_eq!(anchor_height(Some(100), 3, 100, None), Some(104), "mined at the planned height: late");
+    }
+
+    /// W-20: the anchor never leaves the payout's epoch; a payout in its epoch's last block has no
+    /// anchor at all. The epochs are zcash_protocol's: Testnet's NU7 has no known end.
+    #[test]
+    fn w20_the_anchor_never_leaves_the_payouts_epoch() {
+        assert_eq!(anchor_height(Some(120), 4, 100, Some(110)), Some(110), "cut at the epoch's last block");
+        assert_eq!(anchor_height(Some(120), 4, 100, Some(130)), Some(120));
+        assert_eq!(anchor_height(Some(120), 4, 125, Some(127)), Some(127), "late and cut");
+        assert_eq!(anchor_height(Some(120), 4, 110, Some(110)), None, "the epoch's last block: unprovable");
+        assert_eq!(epoch_last_height(ZcashNetwork::Testnet, 4_500_000), None);
+        assert_eq!(epoch_last_height(ZcashNetwork::Testnet, 4_200_000), Some(4_465_025), "until NU7 activated");
+    }
+
+    /// W-10: the delay is dropped only when the delayed proof would miss a claim's deadline by the
+    /// margin: never for a dispute's window of hours, always when the deadline is minutes away.
+    #[test]
+    fn w10_the_delay_is_dropped_only_before_a_near_deadline() {
+        let now = 1_000_000;
+        // 18 blocks to the delayed anchor's work: 22.5 minutes, plus the proof's 20.
+        assert!(!drop_delay(now, 120, 102, now + 6 * 3_600), "a dispute's six hours: keep the delay");
+        assert!(drop_delay(now, 120, 102, now + 40 * 60), "a liveness deadline 40 minutes away: drop it");
+        let edge = now + 18 * BLOCK_SECS + PROOF_SECS + DEADLINE_MARGIN_SECS;
+        assert!(!drop_delay(now, 120, 102, edge));
+        assert!(drop_delay(now, 120, 102, edge - 1));
+    }
+
+    /// W-10: the anchor of a payout is drawn once and kept: the store reopened after a restart gives
+    /// the same `r`, and a second proof of the payout takes the same anchor.
+    #[tokio::test]
+    async fn w10_the_anchor_plan_is_kept_across_restarts() {
+        let dir = crate::store::tests::TempDir::new("w10-anchor");
+        let urls: Vec<String> = (1..=5).map(|_| "http://127.0.0.1:9".to_owned()).collect();
+        let gas = hex::encode(alloy::signers::local::PrivateKeySigner::random().to_bytes());
+        let mut cfg = crate::nodes::tests::config(&urls);
+        cfg.payout_delay_max_blocks = 1_000_000; // a collision of two draws is then unlikely
+        let v = crate::store::tests::vault(1);
+        let reference = B256::repeat_byte(0x9f);
+        let first = {
+            let c = Coordinator::new(cfg.clone(), &dir.0, &gas).unwrap();
+            c.store.lock().await.save(v.clone()).unwrap();
+            let first = c.anchor_plan(&v.vault_id, reference).await.unwrap();
+            assert_eq!(c.anchor_plan(&v.vault_id, reference).await.unwrap(), first, "drawn once");
+            first
+        };
+        assert_eq!(first.0, None, "not planned here: a late payout's anchor");
+        let c = Coordinator::new(cfg, &dir.0, &gas).unwrap();
+        assert_eq!(c.anchor_plan(&v.vault_id, reference).await.unwrap(), first, "kept across a restart");
+        assert_eq!(c.vault(&v.vault_id).await.unwrap().anchors.len(), 1);
+    }
 
     fn journal(words: [[u8; 32]; 8]) -> Vec<u8> {
         words.concat()

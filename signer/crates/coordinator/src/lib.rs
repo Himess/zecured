@@ -479,6 +479,7 @@ fn finish_open(
         compensated: false,
         f1_cases: vec![],
         overridden_tags: vec![],
+        anchors: vec![],
     };
     let response = OpenVaultResponse {
         vault_id: vault.vault_id,
@@ -2069,6 +2070,12 @@ impl Coordinator {
         } else {
             self.fetch_zcash_tip().await.unwrap_or(tip).max(tip)
         };
+        // W-10: the payout's proofs anchor at a height fixed now, from the block being mined while its
+        // commitment landed, never from the block the payout lands in.
+        let anchor = signed
+            .spend_commit
+            .as_ref()
+            .map(|(record, _)| delivery::plan_anchor(record.payout_ref, signed_tip, self.cfg.payout_delay_max_blocks));
         let record = Inflight {
             claim_ids,
             refund_note,
@@ -2083,7 +2090,14 @@ impl Coordinator {
             },
             spend_commit: signed.spend_commit.clone().map(|(record, sigs)| KeptCommitment { record, sigs }),
         };
-        self.update_vault(id, |cur| cur.inflight = Some(record)).await?;
+        self.update_vault(id, |cur| {
+            cur.inflight = Some(record);
+            if let Some(a) = anchor {
+                cur.anchors.retain(|x| x.payout_ref != a.payout_ref);
+                cur.anchors.push(a);
+            }
+        })
+        .await?;
         if withhold {
             warn!(vault = %short(id), "TEST: payout withheld; it will expire unmined");
             return Ok(());

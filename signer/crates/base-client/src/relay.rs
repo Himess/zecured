@@ -1,5 +1,6 @@
 //! Choosing the anchor of a proof: a header on the Zcash header relay's best chain, above the
-//! proven transaction's block, with enough work on top of it. A deposit proof needs the Intake's
+//! proven transaction's block, with enough work on top of it ([`anchor_above`]), or one fixed in
+//! advance ([`anchor_at`], W-10). A deposit proof needs the Intake's
 //! work tier for its amount (`minConfirmationWorkFor`); a violation or inclusion proof the
 //! slasher's `slashConfirmationWork`.
 
@@ -34,6 +35,20 @@ pub async fn anchor_above<P: Provider>(
         h -= 1;
     }
     Ok(None)
+}
+
+/// W-10: `height` itself once it is on the best chain of the relay at `relay` with at least
+/// `min_work` on top of it, `None` until then. Unlike [`anchor_above`], the anchor is fixed in
+/// advance, so it says nothing of the proven block but that it is below.
+pub async fn anchor_at<P: Provider>(provider: &P, relay: Address, height: u32, min_work: U256) -> Result<Option<u32>> {
+    let relay = IZcashHeaderRelay::new(relay, provider);
+    let tip = relay.bestChainTip().call().await.context("relay tip")?;
+    if u64::try_from(tip.height)? <= u64::from(height) {
+        return Ok(None);
+    }
+    let hash = relay.bestBlockHashAt(U256::from(height)).call().await.context("relay.bestBlockHashAt")?;
+    let work = relay.confirmationWork(hash).call().await.context("relay.confirmationWork")?;
+    Ok((work >= min_work).then_some(height))
 }
 
 /// The anchor of a deposit proof of `amount` zatoshi mined at `deposit_height`: the Intake's relay

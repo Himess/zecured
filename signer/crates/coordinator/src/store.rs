@@ -239,6 +239,20 @@ pub struct CoordVault {
     /// cases the keeper moves to the deposit's vault (`followNote`).
     #[serde(default)]
     pub overridden_tags: Vec<B256>,
+    /// W-10: the anchor of each payout's proofs, fixed once per payout and kept across restarts.
+    #[serde(default)]
+    pub anchors: Vec<PlannedAnchor>,
+}
+
+/// W-10: where the proofs of a payout anchor. `planned` is `c + payout_delay_max_blocks + 1 + r`,
+/// `c` the Zcash block being mined when the payout's commitment landed on Base (`None`: a payout
+/// this coordinator did not commit, or committed before v4.1); `r` is drawn once, uniformly in
+/// `0..=payout_delay_max_blocks`.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct PlannedAnchor {
+    pub payout_ref: B256,
+    pub planned: Option<u32>,
+    pub r: u32,
 }
 
 /// R-2: an executed case whose journal proved a committed payout of the vault in a block: an F2
@@ -495,6 +509,7 @@ pub(crate) mod tests {
             compensated: false,
             f1_cases: vec![],
             overridden_tags: vec![],
+            anchors: vec![],
         }
     }
 
