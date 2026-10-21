@@ -7,7 +7,8 @@
 //! - `POST /swap/orders/{orderId}/destination` `{ receiver, salt }`: the taker's Ironwood receiver
 //!   (a unified address, or the raw 43 bytes as 0x-hex) and the salt of the order's commitment.
 //!   The commitment is on Base: a destination that does not open it is refused, so no
-//!   authentication is needed. Never logged; erased once the order is done.
+//!   authentication is needed. Never logged; erased once the order is done. 202 when taken; given
+//!   again once taken, 200 from the book before anything is read from the chains (N-8).
 //! - `GET /swap/orders/{orderId}`: the maker's view of one of its orders (no receiver, salt or
 //!   txid).
 //! - `GET /swap/status`: what the maker quotes now.
@@ -34,15 +35,16 @@ use tracing::{debug, info};
 use zecured_swap::{
     Side,
     abi::{IERC20, IZecPrice},
+    chain::ProofPath,
     quote::sign_quote,
 };
 use zecured_zcash_ops::keys::encode_ironwood_ua;
 
 use crate::{
-    engine::{DestinationFacts, Maker, accept_destination},
+    engine::{DestinationFacts, Maker, accept_destination, destination_again},
     gate::{INVITE_HEADER, admitted},
     quoting::{Market, QuoteJson, QuoteRequest, quote, terms},
-    state::MakerStatus,
+    state::{Book, GivenQuote, MakerStatus},
 };
 
 /// An error of the maker API: a fixed message and a short code.
@@ -132,8 +134,32 @@ pub fn router(maker: Arc<Maker>) -> Router {
         .with_state(maker)
 }
 
-/// The market as the quote needs it: price, whether a proof could land (W-7), inventory.
-async fn market(m: &Maker, side: Side, taker: Option<Address>) -> Result<Market, ApiError> {
+/// What a quote needs from the chains: the price, Base's clock, whether a proof could land (W-7),
+/// and the USDC the maker could lock.
+struct ChainMarket {
+    price: U256,
+    price_age: Option<u64>,
+    now: u64,
+    proofs: ProofPath,
+    usdc_free: U256,
+}
+
+/// The market as the quote needs it: the chains' part, and (N-10) the maker's places and inventory
+/// less what its open orders and the quotes it gave hold.
+fn market(m: &Maker, c: &ChainMarket, book: &Book, taker: Option<Address>) -> Market {
+    let taker = taker.filter(|t| *t != Address::ZERO);
+    Market {
+        price: c.price,
+        price_age: c.price_age,
+        proofs: c.proofs,
+        zcash_free: m.balance.load(Ordering::Relaxed).saturating_sub(book.reserved_zatoshi(c.now)),
+        usdc_free: c.usdc_free.saturating_sub(book.quoted_usdc(c.now)),
+        open_orders: book.places_taken(c.now),
+        taker_open_orders: taker.map_or(0, |t| book.taker_places(t, c.now, None)),
+    }
+}
+
+async fn chain_market(m: &Maker, side: Side) -> Result<ChainMarket, ApiError> {
     let oracle = IZecPrice::new(m.cfg.oracle, &m.provider);
     let now = m.now().await?;
     let low = oracle.price().call().await.map_err(|_| ApiError::PRICE_STALE)?;
@@ -150,28 +176,16 @@ async fn market(m: &Maker, side: Side, taker: Option<Address>) -> Result<Market,
     // W-7: the Swap version, read now; the relay's lag from the engine's last pass, which must be
     // recent (the maker follows both chains).
     let proofs = m.proof_path().await?;
-    let (reserved, open_orders, taker_open_orders) = {
-        let book = m.book.lock().await;
-        let taker = taker.filter(|t| *t != Address::ZERO);
-        (
-            book.reserved_zatoshi(),
-            book.open_orders().count(),
-            taker.map_or(0, |t| book.open_orders().filter(|o| o.taker == t).count()),
-        )
-    };
     let me = m.signer.address();
     let usdc = IERC20::new(m.swap().usdc().call().await.map_err(anyhow::Error::from)?, &m.provider);
     let balance = usdc.balanceOf(me).call().await.map_err(anyhow::Error::from)?;
     let allowance = usdc.allowance(me, m.cfg.swap).call().await.map_err(anyhow::Error::from)?;
-    Ok(Market {
+    Ok(ChainMarket {
         price,
         price_age,
         now,
         proofs,
-        zcash_free: m.balance.load(Ordering::Relaxed).saturating_sub(reserved),
         usdc_free: balance.min(allowance),
-        open_orders,
-        taker_open_orders,
     })
 }
 
@@ -188,10 +202,29 @@ async fn get_quote(
         return Err(ApiError::BAD_REQUEST);
     };
     let side = Side::parse(&req.side).map_err(|_| ApiError::BAD_REQUEST)?;
-    let market = market(&m, side, req.taker).await?;
-    let t = terms(&m.cfg, &m.limits, &market, &req)?;
+    let chain = chain_market(&m, side).await?;
     // A random nonce: unguessable order ids, and none reused across restarts.
     let nonce = U256::from_be_bytes(zecured_swap::random_bytes32());
+    let order_id = zecured_swap::order_id(m.cfg.chain_id, m.cfg.swap, m.signer.address(), nonce);
+    // N-10: decided and kept under one lock of the book: from here on the quote holds one of the
+    // maker's places, and its ZEC or USDC, until its order is read from Base or it can no longer
+    // be opened and read.
+    let t = {
+        let mut book = m.book.lock().await;
+        book.prune_quotes(chain.now);
+        let t = terms(&m.cfg, &m.limits, &market(&m, &chain, &book, req.taker), &req)?;
+        let holds_until = chain.now.saturating_add(m.cfg.quote_ttl_secs).saturating_add(m.cfg.pass_stale_secs());
+        let given = GivenQuote {
+            side: t.side,
+            taker: t.taker,
+            zatoshi: t.zatoshi,
+            usdc: t.usdc,
+            holds_until,
+        };
+        book.quotes.insert(order_id, given);
+        book.save(&m.cfg.state)?;
+        t
+    };
     // Sell: a fresh diversified receiver of the maker's wallet for each quote, unlinkable to the
     // maker's other receipts; the wallet's incoming viewing key finds the payment.
     let maker_receiver = if t.side == Side::Sell {
@@ -207,9 +240,8 @@ async fn get_quote(
     } else {
         None
     };
-    let q = quote(&m.cfg, &t, m.signer.address(), market.now, nonce, maker_receiver.as_ref().map(|r| r.2));
+    let q = quote(&m.cfg, &t, m.signer.address(), chain.now, nonce, maker_receiver.as_ref().map(|r| r.2));
     let signature = sign_quote(&m.signer, &m.domain, &q)?;
-    let order_id = zecured_swap::order_id(m.cfg.chain_id, m.cfg.swap, q.maker, q.nonce);
     let mut body = json!({
         "quote": QuoteJson::from(&q),
         "signature": signature,
@@ -241,6 +273,18 @@ async fn post_destination(
     let Ok(Json(body)) = body else {
         return Err(ApiError::BAD_REQUEST);
     };
+    let taken = json!({ "orderId": order_id, "status": "destination_received" });
+    // N-8: a destination given again once taken is acknowledged from the book (200), before
+    // anything is read from the chains: neither a stale view of them nor a busy engine refuses it.
+    let again = {
+        let book = m.book.lock().await;
+        let rec = book.orders.get(&order_id);
+        rec.and_then(|rec| destination_again(&m.network, rec, &body.receiver, &body.salt))
+    };
+    if let Some(again) = again {
+        again?;
+        return Ok((StatusCode::OK, Json(taken)));
+    }
     let now = m.now().await?;
     // W-7: whether a proof could land, read before the book is locked.
     let proofs = m.proof_path().await?;
@@ -252,34 +296,37 @@ async fn post_destination(
         m.record_from_chain(order_id).await?
     };
     let mut book = m.book.lock().await;
-    if let Some(rec) = fresh {
-        book.orders.entry(order_id).or_insert(rec);
+    let balance = m.balance.load(Ordering::Relaxed);
+    if let Some(rec) = fresh
+        && !book.orders.contains_key(&order_id)
+    {
+        // N-10: recorded as the engine would have: in its quote's place, with its reservation.
+        book.record_opened(rec, now, balance, &m.cfg);
     }
     let rec = book.orders.get(&order_id).ok_or(ApiError::UNKNOWN_ORDER)?.clone();
-    // W-19: what the maker could still pay, and how many of this taker's orders are in payment.
+    // W-19, N-10: what the maker could still pay this order (its own reservation back in), and the
+    // places taken, by the others and by this order's taker.
+    let holds_place = rec.holds_place(now);
     let facts = DestinationFacts {
         now,
         proofs,
-        zcash_free: m.balance.load(Ordering::Relaxed).saturating_sub(book.reserved_zatoshi()),
-        taker_paying: book
-            .open_orders()
-            .filter(|o| {
-                o.order_id != order_id
-                    && o.taker == rec.taker
-                    && matches!(o.status, MakerStatus::DestinationReceived | MakerStatus::Paid | MakerStatus::Proven)
-            })
-            .count(),
+        zcash_free: balance.saturating_sub(book.reserved_zatoshi(now).saturating_sub(rec.reserved_zatoshi(now))),
+        holds_place,
+        places_taken: book.places_taken(now).saturating_sub(usize::from(holds_place)),
+        taker_places: book.taker_places(rec.taker, now, Some(order_id)),
     };
     let d = accept_destination(&m.cfg, &m.network, &rec, &facts, &body.receiver, &body.salt)?;
     let entry = book.orders.get_mut(&order_id).expect("read above");
-    if entry.status == MakerStatus::AwaitingDestination {
-        entry.receiver = Some(hex::encode(d.receiver));
-        entry.salt = Some(hex::encode(d.salt));
-        entry.status = MakerStatus::DestinationReceived;
-        book.save(&m.cfg.state)?;
-        info!(order = %order_id, "destination received");
+    if entry.status != MakerStatus::AwaitingDestination {
+        // Taken by an earlier request meanwhile: this same destination (it opens the commitment).
+        return Ok((StatusCode::OK, Json(taken)));
     }
-    Ok((StatusCode::ACCEPTED, Json(json!({ "orderId": order_id, "status": "destination_received" }))))
+    entry.receiver = Some(hex::encode(d.receiver));
+    entry.salt = Some(hex::encode(d.salt));
+    entry.status = MakerStatus::DestinationReceived;
+    book.save(&m.cfg.state)?;
+    info!(order = %order_id, "destination received");
+    Ok((StatusCode::ACCEPTED, Json(taken)))
 }
 
 async fn get_order(
@@ -300,16 +347,21 @@ async fn get_order(
 }
 
 /// O-7: what the maker can still fill: ZEC (the last scan's spendable balance less what its open
-/// Buy orders with a destination reserved) and USDC (its balance within its allowance to
-/// ZecuredSwap, which Sell orders lock), in zatoshi and USDC units.
+/// Buy orders and Buy quotes hold, N-10) and USDC (its balance within its allowance to
+/// ZecuredSwap, which Sell orders lock, less what its Sell quotes would lock), in zatoshi and USDC
+/// units.
 pub async fn inventory(m: &Maker) -> anyhow::Result<(u64, U256)> {
-    let reserved = m.book.lock().await.reserved_zatoshi();
+    let now = m.now().await?;
+    let (reserved, quoted) = {
+        let book = m.book.lock().await;
+        (book.reserved_zatoshi(now), book.quoted_usdc(now))
+    };
     let zec_free = m.balance.load(Ordering::Relaxed).saturating_sub(reserved);
     let me = m.signer.address();
     let usdc = IERC20::new(m.swap().usdc().call().await?, &m.provider);
     let balance = usdc.balanceOf(me).call().await?;
     let allowance = usdc.allowance(me, m.cfg.swap).call().await?;
-    Ok((zec_free, balance.min(allowance)))
+    Ok((zec_free, balance.min(allowance).saturating_sub(quoted)))
 }
 
 /// O-7: the operators' local endpoint, served on `status_bind` (a loopback address) only:
@@ -325,7 +377,8 @@ async fn get_inventory(State(m): State<Arc<Maker>>) -> Result<Json<serde_json::V
 }
 
 async fn get_status(State(m): State<Arc<Maker>>) -> Json<serde_json::Value> {
-    let open = m.book.lock().await.open_orders().count();
+    // N-10: the places taken (orders holding one, quotes given), on Base's clock of the last pass.
+    let open = m.book.lock().await.places_taken(m.last_pass_base_now());
     Json(json!({
         "maker": m.signer.address(),
         "swap": m.cfg.swap,
@@ -345,70 +398,85 @@ async fn get_status(State(m): State<Arc<Maker>>) -> Json<serde_json::Value> {
 
 #[cfg(test)]
 mod tests {
-    use alloy::{
-        primitives::Address,
-        providers::{Provider, ProviderBuilder},
-        signers::local::PrivateKeySigner,
-        sol_types::SolCall,
-    };
+    use alloy::primitives::Address;
     use axum::body::Body;
     use orchard::keys::{FullViewingKey, SpendingKey};
     use tower::ServiceExt;
-    use zecured_swap::abi::IZecuredSwap;
 
     use super::*;
-    use crate::{
-        config::tests::judge_like,
-        engine::{Wallet, new_record},
-        quoting::ChainLimits,
-        state::Book,
-    };
+    use crate::{config::tests::judge_like, engine::new_record, state::Book};
 
-    /// A Base RPC stub answering the three reads `inventory` makes, by function selector.
-    async fn base_stub(usdc: Address) -> String {
-        let app = Router::new().route(
-            "/",
-            post(move |Json(req): Json<serde_json::Value>| async move {
-                let call = &req["params"][0];
-                let data = call["input"].as_str().or(call["data"].as_str()).unwrap_or_default();
-                let selector = hex::decode(data.trim_start_matches("0x").get(..8).unwrap_or_default()).unwrap();
-                let word = |v: U256| format!("0x{}", hex::encode(v.to_be_bytes::<32>()));
-                let result = if selector == IZecuredSwap::usdcCall::SELECTOR {
-                    word(U256::from_be_slice(usdc.as_slice()))
-                } else if selector == IERC20::balanceOfCall::SELECTOR {
-                    word(U256::from(250_000_000u64))
-                } else if selector == IERC20::allowanceCall::SELECTOR {
-                    word(U256::from(200_000_000u64))
-                } else {
-                    "0x14a34".to_owned()
-                };
-                Json(json!({ "jsonrpc": "2.0", "id": req["id"], "result": result }))
-            }),
-        );
-        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
-        let addr = listener.local_addr().unwrap();
-        tokio::spawn(async move { axum::serve(listener, app).await.unwrap() });
-        format!("http://{addr}")
-    }
+    /// N-8: a destination given again once the maker took it is acknowledged from the book (200)
+    /// before anything is read from the chains: a stale view of them (a long pass, a proof) never
+    /// turns it into a refusal. One that does not open the order's commitment is still refused.
+    #[tokio::test]
+    async fn n8_a_destination_given_again_is_acknowledged_from_the_book() {
+        use std::sync::Mutex;
 
-    fn wallet() -> Wallet {
+        use crate::testkit::{Chain, base_stub, maker};
         let sk = (1u8..).find_map(|b| Option::<SpendingKey>::from(SpendingKey::from_bytes([b; 32]))).unwrap();
-        Wallet {
-            fvk: FullViewingKey::from(&sk),
-            sk,
-            birthday: 1,
-            scan: None,
-        }
+        let address = FullViewingKey::from(&sk).address_at(9u32, Scope::External);
+        let ua = encode_ironwood_ua(&zcash_protocol::consensus::Network::TestNetwork, address).unwrap();
+        let salt = [0x5a; 32];
+        let id = B256::repeat_byte(7);
+        let mut rec = new_record(
+            id,
+            Side::Buy,
+            Address::repeat_byte(2),
+            50_000_000,
+            U256::from(20_000_000u64),
+            1_000_000 + 21_600,
+            zecured_swap::receiver_commitment(&salt, &address.to_raw_address_bytes()),
+        );
+        rec.status = MakerStatus::DestinationReceived;
+        rec.receiver = Some(hex::encode(address.to_raw_address_bytes()));
+        rec.salt = Some(hex::encode(salt));
+        let mut book = Book::default();
+        book.orders.insert(id, rec);
+        let chain = Arc::new(Mutex::new(Chain::default()));
+        // No pass yet: the maker's view of the chains is stale.
+        let m = maker(&base_stub(chain.clone()).await, judge_like(), book);
+        let post = |salt: [u8; 32]| {
+            let body = json!({ "receiver": ua, "salt": hex::encode(salt) }).to_string();
+            let app = router(m.clone());
+            async move {
+                let req = axum::http::Request::post(format!("/swap/orders/{id}/destination"))
+                    .header("content-type", "application/json")
+                    .body(Body::from(body))
+                    .unwrap();
+                let r = app.oneshot(req).await.unwrap();
+                let status = r.status();
+                let body = axum::body::to_bytes(r.into_body(), 1 << 16).await.unwrap();
+                (status, serde_json::from_slice::<serde_json::Value>(&body).unwrap_or_default())
+            }
+        };
+        let (status, body) = post(salt).await;
+        assert_eq!(status, StatusCode::OK, "{body}");
+        assert_eq!(body, json!({ "orderId": id, "status": "destination_received" }));
+        let (status, body) = post([0x5b; 32]).await;
+        assert_eq!((status, body["code"].as_str()), (StatusCode::UNPROCESSABLE_ENTITY, Some("bad_destination")));
+        assert_eq!(chain.lock().unwrap().calls, 0, "nothing read from the chains");
+        // Paid since: still acknowledged.
+        m.book.lock().await.orders.get_mut(&id).unwrap().status = MakerStatus::Paid;
+        assert_eq!(post(salt).await.0, StatusCode::OK);
     }
 
     /// O-7: the operators' endpoint answers the free ZEC (the scanned balance less what open Buy
-    /// orders with a destination reserved) and the lockable USDC (balance within the allowance); the
-    /// public API never serves it.
+    /// orders and quotes hold) and the lockable USDC (balance within the allowance, less what Sell
+    /// quotes would lock); the public API never serves it.
     #[tokio::test]
     async fn the_inventory_is_served_on_the_status_router_only() {
-        let rpc = base_stub(Address::repeat_byte(0x55)).await;
-        let provider = ProviderBuilder::new().connect_http(rpc.parse().unwrap()).erased();
-        let cfg = judge_like();
+        use std::sync::Mutex;
+
+        use crate::{
+            state::GivenQuote,
+            testkit::{Chain, base_stub, forget, maker},
+        };
+        let chain = Arc::new(Mutex::new(Chain {
+            usdc_balance: U256::from(250_000_000u64),
+            usdc_allowance: U256::from(200_000_000u64),
+            ..Chain::default()
+        }));
         let mut book = Book::default();
         let buy = |id: u8| {
             new_record(
@@ -426,35 +494,33 @@ mod tests {
         given.status = MakerStatus::DestinationReceived;
         book.orders.insert(given.order_id, given);
         book.orders.insert(B256::repeat_byte(4), buy(4));
-        let limits = ChainLimits {
-            max_order_usdc: U256::from(1u64),
-            max_order_zat: 1,
-            min_pay_window: 1,
-            max_pay_window: 2,
-        };
-        let domain = zecured_swap::quote::swap_domain(cfg.chain_id, cfg.swap);
-        let maker = Arc::new(Maker::new(
-            cfg,
-            zecured_zcash_ops::network::ZcashNetwork::Testnet,
-            PrivateKeySigner::random(),
-            provider,
-            domain,
-            limits,
-            book,
-            wallet(),
-            B256::ZERO,
-        ));
-        maker.balance.store(100_000_000, Ordering::Relaxed);
+        let m = maker(&base_stub(chain).await, judge_like(), book);
+        m.balance.store(100_000_000, Ordering::Relaxed);
         let get = |app: Router| async move {
             let r = app.oneshot(axum::http::Request::get("/inventory").body(Body::empty()).unwrap()).await.unwrap();
             let status = r.status();
             let body = axum::body::to_bytes(r.into_body(), 1 << 16).await.unwrap();
             (status, serde_json::from_slice::<serde_json::Value>(&body).unwrap_or_default())
         };
-        let (status, body) = get(status_router(maker.clone())).await;
+        let (status, body) = get(status_router(m.clone())).await;
         assert_eq!(status, StatusCode::OK);
         assert_eq!(body, json!({ "zecFreeZat": "70000000", "usdcFree": "200000000" }));
-        let (status, _) = get(router(maker)).await;
+        // N-10: quotes given hold their ZEC or USDC.
+        let quote = |side, zatoshi, usdc| GivenQuote {
+            side,
+            taker: Address::ZERO,
+            zatoshi,
+            usdc: U256::from(usdc),
+            holds_until: 1_000_225,
+        };
+        let mut book = m.book.lock().await;
+        book.quotes.insert(B256::repeat_byte(5), quote(Side::Buy, 20_000_000, 8_000_000u64));
+        book.quotes.insert(B256::repeat_byte(6), quote(Side::Sell, 10_000_000, 3_900_000u64));
+        drop(book);
+        let (_, body) = get(status_router(m.clone())).await;
+        assert_eq!(body, json!({ "zecFreeZat": "50000000", "usdcFree": "196100000" }));
+        let (status, _) = get(router(m.clone())).await;
         assert_eq!(status, StatusCode::NOT_FOUND, "never on the public API");
+        forget(&m);
     }
 }

@@ -64,19 +64,27 @@ pub struct MakerConfig {
     pub max_order_zat: u64,
     /// USDC units (6 decimals).
     pub max_order_usdc: u64,
-    /// Most orders the maker has open at once, Sell orders included: it bounds the USDC the maker
-    /// locks (its approval is sized by it) and the free options its Sell quotes hand out (W-19).
+    /// The maker's places: most orders it has open at once, Sell orders included, and quotes given
+    /// and not opened yet (N-10); a Buy order without a destination takes one only during its
+    /// reservation (`reservation_secs`). It bounds the USDC the maker locks (its approval is sized by
+    /// it) and the free options its Sell quotes hand out (W-19).
     pub max_open_orders: usize,
-    /// W-19: most open orders of one taker (a quote names its taker on Sell, and on Buy when asked;
-    /// a Buy destination counts the taker's orders in payment), 1 to `max_open_orders`.
+    /// W-19, N-10: most places of one taker: its orders on Base (opened from a quote naming it or
+    /// from an open Buy quote) and the quotes naming it, 1 to `max_open_orders`. A taker's order
+    /// beyond it holds no place and takes no destination.
     #[serde(default = "default_max_open_orders_per_taker")]
     pub max_open_orders_per_taker: usize,
+    /// N-10: seconds a new Buy order holds one of the maker's places, and reserves its ZEC, while it
+    /// waits for its destination (from when the maker reads it from Base); left without one, it
+    /// holds nothing afterwards. 10 minutes by default.
+    #[serde(default = "default_reservation_secs")]
+    pub reservation_secs: u64,
     /// H-05 (L23), W-10: a random 1 to `pay_delay_max_blocks` Zcash blocks between receiving a
     /// destination and broadcasting the payment, so the payment does not sit in the block right
     /// after the order opened on Base; and the proof's anchor, fixed before the payment, at
-    /// `c + pay_delay_max_blocks + 1 + r` with `r` drawn in `0..=pay_delay_max_blocks`
-    /// (`zecured_swap::anchor`), so the public anchor says nothing of the payment's block. (There
-    /// is no separate proving delay any more: `r` does that work.)
+    /// `c + pay_delay_max_blocks + 1 + 2 + r` (two blocks of headroom, N-4) with `r` drawn in
+    /// `0..=pay_delay_max_blocks` (`zecured_swap::anchor`), so the public anchor says nothing of the
+    /// payment's block. (There is no separate proving delay any more: `r` does that work.)
     pub pay_delay_max_blocks: u32,
     /// Seconds per Zcash block (75 on Testnet and Mainnet).
     #[serde(default = "default_block_secs")]
@@ -123,21 +131,34 @@ fn default_max_open_orders_per_taker() -> usize {
     3
 }
 
+fn default_reservation_secs() -> u64 {
+    600
+}
+
 /// The most a spread may be (20 %).
 pub const MAX_SPREAD_BPS: u16 = 2_000;
 
 impl MakerConfig {
     pub fn load(path: &std::path::Path) -> Result<Self> {
         let raw = std::fs::read_to_string(path).with_context(|| format!("read {}", path.display()))?;
-        let cfg: Self = serde_json::from_str(&raw).context("parse the maker config")?;
+        let raw: serde_json::Value = serde_json::from_str(&raw).context("parse the maker config")?;
+        // W-10: the proving delay is gone, and a config still setting it is refused by name (not as
+        // serde's "unknown field"), with what took its place.
+        ensure!(
+            raw.get("prove_delay_max_blocks").is_none(),
+            "prove_delay_max_blocks is no longer read: the proof's anchor is now planned before the payment, \
+             and pay_delay_max_blocks sets both the payment's delay and that planned anchor (docs/SWAP.md \
+             \"Privacy\"); remove prove_delay_max_blocks from the config"
+        );
+        let cfg: Self = serde_json::from_value(raw).context("parse the maker config")?;
         cfg.check()?;
         Ok(cfg)
     }
 
     /// Seconds an order needs from its destination to its proof on Base, at most: the anchor window
-    /// (W-10: the latest planned anchor is `2 × pay_delay_max_blocks + 2` blocks above the tip the
-    /// payment is scheduled at, the payment's own delay included), the tier's work on top of the
-    /// anchor, proving, and the margin.
+    /// (W-10: the latest planned anchor is `2 × pay_delay_max_blocks + 4` blocks above the tip the
+    /// payment is scheduled at, the payment's own delay and the two blocks of headroom (N-4)
+    /// included), the tier's work on top of the anchor, proving, and the margin.
     pub fn required_secs(&self) -> u64 {
         u64::from(anchor::anchor_window(self.pay_delay_max_blocks)) * self.block_secs
             + self.confirm_estimate_secs
@@ -152,6 +173,12 @@ impl MakerConfig {
             mock: self.mock_seal,
             work: self.state.with_file_name("proofs"),
         }
+    }
+
+    /// Seconds after which the engine's last pass is too old for the API to decide on (W-7), and a
+    /// quote's place outlasts its deadline, while its order may be on Base and not read yet (N-10).
+    pub fn pass_stale_secs(&self) -> u64 {
+        3 * self.poll_secs + 60
     }
 
     /// W-20: blocks from the tip a payment is scheduled at to its anchor having the order's tier of
@@ -171,6 +198,10 @@ impl MakerConfig {
         ensure!(
             (1..=self.max_open_orders).contains(&self.max_open_orders_per_taker),
             "max_open_orders_per_taker is 1 to max_open_orders (W-19)"
+        );
+        ensure!(
+            self.reservation_secs > 0 && self.reservation_secs < u64::from(self.pay_window_secs),
+            "reservation_secs is more than 0 and less than pay_window_secs (N-10)"
         );
         ensure!(self.quote_ttl_secs >= 10, "quote_ttl_secs is at least 10");
         ensure!(self.block_secs > 0 && self.poll_secs > 0, "block_secs and poll_secs");
@@ -239,6 +270,7 @@ pub mod tests {
             max_order_usdc: 200_000_000,
             max_open_orders: 10,
             max_open_orders_per_taker: 3,
+            reservation_secs: 600,
             pay_delay_max_blocks: 8,
             block_secs: 75,
             confirm_estimate_secs: 1_200,
@@ -270,9 +302,9 @@ pub mod tests {
     fn the_judge_config_passes() {
         let c = judge_like();
         c.check().unwrap();
-        // W-10: an anchor window of 2 × 8 + 2 blocks of 75 s, 1,200 s of work on top of the anchor,
-        // 3,000 s of proving, 900 s of margin.
-        assert_eq!(c.required_secs(), 18 * 75 + 1_200 + 3_000 + 900);
+        // W-10: an anchor window of 2 × 8 + 4 blocks of 75 s (two of them the headroom, N-4), 1,200 s
+        // of work on top of the anchor, 3,000 s of proving, 900 s of margin.
+        assert_eq!(c.required_secs(), 20 * 75 + 1_200 + 3_000 + 900);
     }
 
     #[test]
@@ -309,8 +341,35 @@ pub mod tests {
         assert!(c.check().is_err(), "W-19: above the maker's own cap");
         let mut raw = serde_json::to_value(judge_like()).unwrap();
         raw.as_object_mut().unwrap().remove("max_open_orders_per_taker");
+        raw.as_object_mut().unwrap().remove("reservation_secs");
         let c: MakerConfig = serde_json::from_value(raw).unwrap();
         assert_eq!(c.max_open_orders_per_taker, 3, "the default of a config written before W-19");
+        assert_eq!(c.reservation_secs, 600, "N-10: ten minutes by default");
+        let mut c = judge_like();
+        c.reservation_secs = 0;
+        assert!(c.check().is_err(), "N-10: no reservation at all");
+        c.reservation_secs = u64::from(c.pay_window_secs);
+        assert!(c.check().is_err(), "N-10: a reservation as long as the window");
+    }
+
+    /// W-10: a config written before the planned anchor, still naming `prove_delay_max_blocks`, is
+    /// refused with a message naming what replaced it, not serde's generic "unknown field".
+    #[test]
+    fn prove_delay_max_blocks_is_refused_by_name() {
+        let dir =
+            std::env::temp_dir().join(format!("zecured-maker-cfg-{}", hex::encode(zecured_swap::random_bytes32())));
+        std::fs::create_dir_all(&dir).unwrap();
+        let path = dir.join("maker.json");
+        let mut raw = serde_json::to_value(judge_like()).unwrap();
+        raw["prove_delay_max_blocks"] = serde_json::json!(4);
+        std::fs::write(&path, serde_json::to_vec(&raw).unwrap()).unwrap();
+        let e = format!("{:#}", MakerConfig::load(&path).unwrap_err());
+        assert!(e.contains("prove_delay_max_blocks"), "{e}");
+        assert!(e.contains("pay_delay_max_blocks") && e.contains("planned anchor"), "{e}");
+        raw.as_object_mut().unwrap().remove("prove_delay_max_blocks");
+        std::fs::write(&path, serde_json::to_vec(&raw).unwrap()).unwrap();
+        MakerConfig::load(&path).unwrap();
+        let _ = std::fs::remove_dir_all(&dir);
     }
 
     /// The payments' Zcash network goes with the Base chain unless named, and another pairing is

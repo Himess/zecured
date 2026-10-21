@@ -4,7 +4,9 @@
 //! tier of work on top of the header at exactly that height, build the payment witness, prove it,
 //! submit the proof, finalize once ready. Sell: the taker pays and proves; the maker finalizes a
 //! ready settlement and refunds itself after the deadline. Every decision is the pure function
-//! [`decide`] of an order and the facts read for it.
+//! [`decide`] of an order and the facts read for it. N-4: a payment, once built, is decided again
+//! on facts read right before its broadcast, and is sent only if that is still a payment; a proof
+//! runs in a task of its own, so a pass never waits for one.
 
 use std::{
     sync::{
@@ -80,7 +82,7 @@ pub struct Facts {
     pub tip_epoch_provable: bool,
     /// W-20: mined, the last block of the payment's epoch.
     pub payment_epoch_last: Option<u32>,
-    /// W-7: whether a proof could land (read once per pass).
+    /// W-7: whether a proof could land (read once per pass, and again right before a broadcast).
     pub proofs: ProofPath,
 }
 
@@ -88,6 +90,19 @@ pub struct Facts {
 pub struct Pending {
     pub stale: bool,
     pub ready: bool,
+}
+
+/// What both chains say at one moment, as a decision needs it: read once per pass, and again
+/// right before a payment's broadcast (N-4).
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct Moment {
+    /// Base's clock (the latest block's timestamp).
+    pub now: u64,
+    /// The light wallet server's Zcash tip, and the relay's.
+    pub zcash_tip: u32,
+    pub relay_height: u64,
+    /// W-7: whether a proof could land.
+    pub proofs: ProofPath,
 }
 
 /// What the engine does next for an order.
@@ -109,10 +124,11 @@ pub enum Step {
     /// time (W-8).
     PaymentExpired,
     /// Record the payment's block and the anchor height of its proof (W-10: the planned one, or a
-    /// late payment's).
+    /// late payment's), and a late payment's own `r` (N-12), kept once drawn.
     ScheduleAnchor {
         mined: u32,
         anchor: u32,
+        late_draw: Option<u32>,
     },
     Prove,
     Drop,
@@ -126,8 +142,9 @@ pub enum Step {
 }
 
 /// The next step for `rec` given `f`. `pay_delay` (1 to `pay_delay_max_blocks`) and `draw` (0 to
-/// `pay_delay_max_blocks`, the anchor's `r`) are the random draws (`zecured_swap::anchor::draw`),
-/// made by the caller; an order keeps the first `draw` it is scheduled with.
+/// `pay_delay_max_blocks`, an anchor's `r`) are the random draws (`zecured_swap::anchor::draw`),
+/// made by the caller; an order keeps the first `draw` it is scheduled with, and a late payment
+/// the first `draw` its late anchor takes (N-12).
 pub fn decide(cfg: &MakerConfig, rec: &OrderRecord, f: &Facts, pay_delay: u32, draw: u32) -> Step {
     match f.status {
         OrderStatus::Settled => return Step::Finish(MakerStatus::Settled),
@@ -146,7 +163,7 @@ pub fn decide(cfg: &MakerConfig, rec: &OrderRecord, f: &Facts, pay_delay: u32, d
         };
     }
     let past_deadline = f.now > rec.pay_deadline;
-    let draw = rec.anchor_draw.unwrap_or(draw);
+    let order_draw = rec.anchor_draw.unwrap_or(draw);
     match (rec.side, rec.status) {
         (_, MakerStatus::Settled | MakerStatus::Refunded) => Step::Wait,
         (Side::Sell, _) => {
@@ -195,8 +212,8 @@ pub fn decide(cfg: &MakerConfig, rec: &OrderRecord, f: &Facts, pay_delay: u32, d
                     let c = anchor::current_height(tip);
                     Step::SchedulePayment {
                         pay_after: anchor::pay_after(c, pay_delay),
-                        planned_anchor: anchor::planned_anchor(c, cfg.pay_delay_max_blocks, draw),
-                        draw,
+                        planned_anchor: anchor::planned_anchor(c, cfg.pay_delay_max_blocks, order_draw),
+                        draw: order_draw,
                     }
                 }
             }
@@ -216,26 +233,40 @@ pub fn decide(cfg: &MakerConfig, rec: &OrderRecord, f: &Facts, pay_delay: u32, d
                             Step::Wait
                         }
                     }
-                    // W-10: the planned anchor whatever the payment's block, unless it came late;
-                    // W-20: never past the last block of the payment's epoch.
-                    _ => match anchor::anchor_height(rec.planned_anchor_height, draw, mined, f.payment_epoch_last) {
-                        Some(anchor) => Step::ScheduleAnchor { mined, anchor },
-                        None => Step::Abandon("paid, but its proof cannot land: the order will be refunded"),
-                    },
+                    // W-10: the planned anchor whatever the payment's block, unless it came late (or
+                    // was paid before anchors were planned): then `h + 1 + r` with an `r` of its own
+                    // (N-12), never the order's, which would tie the late anchor to the plan. W-20:
+                    // never past the last block of the payment's epoch.
+                    _ => {
+                        let late = !rec.planned_anchor_height.is_some_and(|p| p > mined);
+                        let late_draw = late.then(|| rec.late_anchor_draw.unwrap_or(draw));
+                        // On time, the planned anchor: `r` is not used.
+                        let r = late_draw.unwrap_or_default();
+                        match anchor::anchor_height(rec.planned_anchor_height, r, mined, f.payment_epoch_last) {
+                            Some(anchor) => Step::ScheduleAnchor {
+                                mined,
+                                anchor,
+                                late_draw,
+                            },
+                            None => Step::Abandon("paid, but its proof cannot land: the order will be refunded"),
+                        }
+                    }
                 },
                 // W-8: not mined as far as the server says, which proves nothing (a reorganization, a
                 // server behind or another one): before its expiry height the payment is sent again;
-                // after it, it never happened only if the wallet shows its inputs unspent. Otherwise
-                // the maker waits, and never pays the order twice.
-                _ => {
-                    if !rec.expiry_height.is_some_and(|e| f.zcash_tip > e) {
-                        Step::Rebroadcast
-                    } else if f.inputs_unspent {
-                        Step::PaymentExpired
-                    } else {
-                        Step::Wait
+                // after it, it never happened only if the wallet shows its inputs unspent, and (N-12)
+                // only once the tip is EXPIRY_MARGIN_BLOCKS past it. Otherwise the maker waits, and
+                // never pays the order twice.
+                _ => match rec.expiry_height {
+                    Some(e) if f.zcash_tip > e => {
+                        if f.inputs_unspent && f.zcash_tip > e.saturating_add(EXPIRY_MARGIN_BLOCKS) {
+                            Step::PaymentExpired
+                        } else {
+                            Step::Wait
+                        }
                     }
-                }
+                    _ => Step::Rebroadcast,
+                },
             }
         }
         (Side::Buy, MakerStatus::Proven) => {
@@ -249,18 +280,23 @@ pub fn decide(cfg: &MakerConfig, rec: &OrderRecord, f: &Facts, pay_delay: u32, d
     }
 }
 
+/// N-12 (W-8): blocks past its expiry height before an unmined payment counts as expired: a short
+/// reorganization, or a light wallet server a block or two behind, could still show it mined at or
+/// below that height.
+pub const EXPIRY_MARGIN_BLOCKS: u32 = 3;
+
 /// W-8: whether a wallet scan that covers blocks up to `scanned_to` shows every input of a payment
 /// with expiry height `expiry` unspent: `inputs` are the payment's input nullifiers (hex) and
 /// `notes` the wallet's notes (nullifier, spent). Then the payment was never mined, and never will
-/// be: no block above its expiry height may hold it. A payment without recorded inputs shows
-/// nothing.
+/// be: no block above its expiry height may hold it. The scan must reach `EXPIRY_MARGIN_BLOCKS`
+/// past that height (N-12). A payment without recorded inputs shows nothing.
 pub fn inputs_unspent(
     scanned_to: u32,
     expiry: u32,
     inputs: &[String],
     notes: impl IntoIterator<Item = ([u8; 32], bool)>,
 ) -> bool {
-    if scanned_to <= expiry || inputs.is_empty() {
+    if scanned_to <= expiry.saturating_add(EXPIRY_MARGIN_BLOCKS) || inputs.is_empty() {
         return false;
     }
     let notes: Vec<(String, bool)> = notes.into_iter().map(|(nf, spent)| (hex::encode(nf), spent)).collect();
@@ -274,11 +310,15 @@ pub struct DestinationFacts {
     pub now: u64,
     /// W-7: whether a proof could land now.
     pub proofs: ProofPath,
-    /// W-19: the zatoshi the maker can still pay: its scanned balance less what orders with a
-    /// destination reserved (this order has none yet).
+    /// W-19: the zatoshi the maker can still pay this order: its scanned balance less what other
+    /// orders and quotes hold (N-10: this order's own reservation back in).
     pub zcash_free: u64,
-    /// W-19: the taker's other open orders already given a destination (in payment).
-    pub taker_paying: usize,
+    /// N-10: whether this order holds one of the maker's places (its reservation lasts), and the
+    /// places taken by the others.
+    pub holds_place: bool,
+    pub places_taken: usize,
+    /// W-19, N-10: the places of the order's taker on Base, this order's aside.
+    pub taker_places: usize,
 }
 
 /// `POST /swap/orders/:id/destination`: whether the maker takes the taker's destination for `rec`
@@ -314,16 +354,38 @@ pub fn accept_destination(
         if d.proofs.relay_lag > cfg.max_relay_lag_blocks {
             return Err(ApiError::RELAY_BEHIND);
         }
-        // W-19: from here on the order reserves its ZEC: the maker must have it, and one taker's
-        // orders in payment stay within its cap.
+        // W-19: from here on the order holds its ZEC: the maker must have it (N-10: its reservation,
+        // while it lasts, kept it for it), and one taker's places stay within its cap. N-10: an
+        // order that no longer holds a place (its reservation lapsed, or none was given) takes one
+        // again only if there is one.
         if d.zcash_free < rec.zatoshi.saturating_add(PAYMENT_FEE_HEADROOM) {
             return Err(ApiError::NO_INVENTORY);
         }
-        if d.taker_paying >= cfg.max_open_orders_per_taker {
+        if !d.holds_place && d.places_taken >= cfg.max_open_orders {
+            return Err(ApiError::BUSY);
+        }
+        if d.taker_places >= cfg.max_open_orders_per_taker {
             return Err(ApiError::TAKER_BUSY);
         }
     }
     Ok(destination)
+}
+
+/// N-8: a destination given again for `rec` once the maker took one (the order waits for its
+/// payment, or is paid or proven): answered from the book alone, `Ok` when it opens the order's
+/// commitment (only the destination taken does). `None` while `rec` has taken none, or is done.
+pub fn destination_again(
+    network: &Network,
+    rec: &OrderRecord,
+    receiver: &str,
+    salt: &str,
+) -> Option<Result<(), ApiError>> {
+    let taken = matches!(rec.status, MakerStatus::DestinationReceived | MakerStatus::Paid | MakerStatus::Proven);
+    (rec.side == Side::Buy && taken).then(|| {
+        check_destination(network, receiver, salt, rec.receiver_commitment)
+            .map(|_| ())
+            .map_err(|_| ApiError::BAD_DESTINATION)
+    })
 }
 
 /// The maker's Ironwood wallet: the file `zecured-wallet init` writes.
@@ -370,15 +432,33 @@ pub struct Maker {
     pub wallet: Mutex<Wallet>,
     /// The wallet's spendable balance after the last scan (zatoshi).
     pub balance: AtomicU64,
-    /// The last pass's Zcash tip, relay tip and when it read them (Unix seconds).
+    /// The last pass's Zcash tip, relay tip and when it read them (Unix seconds), and Base's clock
+    /// then.
     zcash_tip: AtomicU64,
     relay_tip: AtomicU64,
     pass_at: AtomicU64,
+    pass_base_now: AtomicU64,
     pub prover: Prover,
     /// W-7: the Swap version of the prover's guest and selector: the maker quotes, takes
     /// destinations, pays and proves only while it is working.
     pub version_id: B256,
     proving_key: tokio::sync::OnceCell<Arc<ProvingKey>>,
+    /// N-4: the order whose payment is being proven, off the pass (one proof at a time).
+    proving: std::sync::Mutex<Option<B256>>,
+    /// Held while one of the maker's Base transactions is sent and mined: the pass and the proving
+    /// task send from one key.
+    base_tx: Mutex<()>,
+}
+
+/// N-4: frees the proving slot when the proving task ends, however it ends.
+struct ProvingSlot<'a>(&'a std::sync::Mutex<Option<B256>>);
+
+impl Drop for ProvingSlot<'_> {
+    fn drop(&mut self) {
+        if let Ok(mut proving) = self.0.lock() {
+            *proving = None;
+        }
+    }
 }
 
 /// The system clock, Unix seconds.
@@ -408,11 +488,13 @@ pub fn new_record(
             Side::Buy => MakerStatus::AwaitingDestination,
             Side::Sell => MakerStatus::TakerPays,
         },
+        reserved_until: None,
         receiver: None,
         salt: None,
         pay_after_height: None,
         planned_anchor_height: None,
         anchor_draw: None,
+        late_anchor_draw: None,
         txid: None,
         opening: None,
         raw_tx: None,
@@ -451,9 +533,12 @@ impl Maker {
             zcash_tip: AtomicU64::new(0),
             relay_tip: AtomicU64::new(0),
             pass_at: AtomicU64::new(0),
+            pass_base_now: AtomicU64::new(0),
             prover,
             version_id,
             proving_key: tokio::sync::OnceCell::new(),
+            proving: std::sync::Mutex::new(None),
+            base_tx: Mutex::new(()),
         }
     }
 
@@ -466,12 +551,17 @@ impl Maker {
         )
     }
 
+    /// Base's clock at the last pass.
+    pub fn last_pass_base_now(&self) -> u64 {
+        self.pass_base_now.load(Ordering::Relaxed)
+    }
+
     /// W-7: whether a payment made now could be proven, as the API decides a quote or a
     /// destination: the version is read now, the relay's lag is the last pass's, which must be
     /// recent (the maker follows both chains).
     pub async fn proof_path(&self) -> Result<ProofPath, ApiError> {
         let (zcash_tip, relay_height, pass_at) = self.last_pass();
-        if unix_now().saturating_sub(pass_at) > 3 * self.cfg.poll_secs + 60 {
+        if unix_now().saturating_sub(pass_at) > self.cfg.pass_stale_secs() {
             return Err(ApiError::UNAVAILABLE);
         }
         Ok(ProofPath {
@@ -530,30 +620,61 @@ impl Maker {
         }
     }
 
-    /// One pass over every open order.
-    pub async fn tick(&self) -> Result<()> {
+    /// One pass over every open order. It never waits for a proof (N-4: proofs run in a task of
+    /// their own), so its view of the chains, which the API decides on, stays recent.
+    pub async fn tick(self: &Arc<Self>) -> Result<()> {
         let mut client = lwd::connect(&self.cfg.lwd).await?;
         lwd::check_network(&mut client, self.zcash).await?;
-        let zcash_tip = u32::try_from(lwd::latest_block(&mut client).await?.height)?;
+        let zcash_tip = lwd_tip(&mut client).await?;
         self.scan_wallet(&mut client, zcash_tip).await?;
         self.sync_orders().await?;
-        let now = self.now().await?;
-        let relay_height = relay_tip(&self.provider, self.cfg.swap).await?;
-        // W-7: whether a proof could land, read once per pass, before any payment of the pass.
-        let proofs = ProofPath {
-            version_working: swap_version_working(&self.provider, self.cfg.swap, self.version_id).await?,
-            relay_lag: u64::from(zcash_tip).saturating_sub(relay_height),
-        };
+        // W-7: whether a proof could land, read once per pass before any payment of the pass, and
+        // again right before each broadcast (N-4).
+        let m = self.moment(zcash_tip).await?;
         self.zcash_tip.store(u64::from(zcash_tip), Ordering::Relaxed);
-        self.relay_tip.store(relay_height, Ordering::Relaxed);
+        self.relay_tip.store(m.relay_height, Ordering::Relaxed);
         self.pass_at.store(unix_now(), Ordering::Relaxed);
+        self.pass_base_now.store(m.now, Ordering::Relaxed);
+        // N-10: the quotes that hold no place any more are forgotten.
+        self.book.lock().await.prune_quotes(m.now);
         let ids: Vec<B256> = self.book.lock().await.open_orders().map(|o| o.order_id).collect();
         for id in ids {
-            if let Err(e) = self.advance(&mut client, id, now, zcash_tip, relay_height, proofs).await {
+            if let Err(e) = self.advance(&mut client, id, &m).await {
                 warn!(order = %id, "order step failed: {e:#}");
             }
         }
         Ok(())
+    }
+
+    /// What Base says now, the Zcash tip being `zcash_tip`: its clock, the relay's tip, and whether
+    /// a proof of the maker's Swap version could land.
+    async fn moment(&self, zcash_tip: u32) -> Result<Moment> {
+        let now = self.now().await?;
+        let relay_height = relay_tip(&self.provider, self.cfg.swap).await?;
+        let proofs = ProofPath {
+            version_working: swap_version_working(&self.provider, self.cfg.swap, self.version_id).await?,
+            relay_lag: u64::from(zcash_tip).saturating_sub(relay_height),
+        };
+        Ok(Moment {
+            now,
+            zcash_tip,
+            relay_height,
+            proofs,
+        })
+    }
+
+    /// N-4: the step [`decide`] takes for `rec` on facts read now, the Zcash tip being `zcash_tip`:
+    /// a built payment is broadcast only while this is still [`Step::Pay`].
+    pub async fn decide_now(&self, rec: &OrderRecord, zcash_tip: u32) -> Result<Step> {
+        let m = self.moment(zcash_tip).await?;
+        let f = self.facts(rec, &m, None).await?;
+        // The draws only shape a step that is not a payment, which is not taken from here.
+        Ok(decide(&self.cfg, rec, &f, 1, 0))
+    }
+
+    /// N-4: whether the payment of order `id` is being proven now.
+    pub fn proving_now(&self, id: B256) -> bool {
+        self.proving.lock().is_ok_and(|p| *p == Some(id))
     }
 
     async fn scan_wallet(&self, client: &mut lwd::LwdClient, tip: u32) -> Result<()> {
@@ -594,6 +715,9 @@ impl Maker {
         })
         .await?;
         let me = self.signer.address();
+        // N-10: a new Buy order's reservation runs on Base's clock, read once there is one.
+        let now = if logs.is_empty() { 0 } else { self.now().await? };
+        let balance = self.balance.load(Ordering::Relaxed);
         let mut book = self.book.lock().await;
         for log in logs.iter().filter(|l| !l.removed) {
             let ev = IZecuredSwap::OrderOpened::decode_log(&log.inner).context("OrderOpened")?;
@@ -602,25 +726,17 @@ impl Maker {
             }
             let side = Side::from_u8(ev.side)?;
             info!(order = %ev.orderId, ?side, zatoshi = ev.zatoshi, "order opened");
-            book.orders.insert(
-                ev.orderId,
-                new_record(ev.orderId, side, ev.taker, ev.zatoshi, ev.usdc, ev.payDeadline, ev.receiverCommitment),
-            );
+            let rec =
+                new_record(ev.orderId, side, ev.taker, ev.zatoshi, ev.usdc, ev.payDeadline, ev.receiverCommitment);
+            book.record_opened(rec, now, balance, &self.cfg);
         }
         book.synced_to = head;
         book.save(&self.cfg.state)
     }
 
-    /// The facts about `rec` (chain reads only).
-    async fn facts(
-        &self,
-        client: &mut lwd::LwdClient,
-        rec: &OrderRecord,
-        now: u64,
-        zcash_tip: u32,
-        relay_height: u64,
-        proofs: ProofPath,
-    ) -> Result<Facts> {
+    /// The facts about `rec` at the moment `m` (Base reads; `payment`, what the light wallet server
+    /// says of its payment, is the caller's to read).
+    async fn facts(&self, rec: &OrderRecord, m: &Moment, payment: Option<Seen>) -> Result<Facts> {
         let swap = self.swap();
         let order = swap.order(rec.order_id).call().await?;
         let status = OrderStatus::from_u8(order.status)?;
@@ -631,16 +747,8 @@ impl Maker {
             let stale = swap.settlementStale(rec.order_id).call().await?;
             Some(Pending {
                 stale,
-                ready: zecured_swap::chain::settlement_ready(&p, relay_height, now),
+                ready: zecured_swap::chain::settlement_ready(&p, m.relay_height, m.now),
             })
-        };
-        // W-8: a transport error is no answer: `?` skips the order for this pass, so a payment is
-        // never taken for unmined because the server could not be reached.
-        let payment = match (rec.status, rec.txid.as_deref()) {
-            (MakerStatus::Paid, Some(txid)) => {
-                Some(payment_seen(client, &TxId::from_hex(txid).context("stored txid")?).await?)
-            }
-            _ => None,
         };
         let inputs_unspent = match (rec.status, rec.expiry_height) {
             (MakerStatus::Paid, Some(expiry)) => {
@@ -658,36 +766,41 @@ impl Maker {
                 .any(|o| o.order_id != rec.order_id && o.status == MakerStatus::Paid && o.mined_height.is_none())
         };
         Ok(Facts {
-            now,
-            zcash_tip,
+            now: m.now,
+            zcash_tip: m.zcash_tip,
             status,
             pending,
             payment,
             inputs_unspent,
             other_payment_unmined,
-            tip_epoch_last: anchor::epoch_last_height(self.zcash, zcash_tip),
-            tip_epoch_provable: anchor::provable_epoch(self.zcash, zcash_tip),
+            tip_epoch_last: anchor::epoch_last_height(self.zcash, m.zcash_tip),
+            tip_epoch_provable: anchor::provable_epoch(self.zcash, m.zcash_tip),
             payment_epoch_last: match payment {
                 Some(Seen::Mined(h)) => anchor::epoch_last_height(self.zcash, h),
                 _ => None,
             },
-            proofs,
+            proofs: m.proofs,
         })
     }
 
-    async fn advance(
-        &self,
-        client: &mut lwd::LwdClient,
-        id: B256,
-        now: u64,
-        zcash_tip: u32,
-        relay_height: u64,
-        proofs: ProofPath,
-    ) -> Result<()> {
+    async fn advance(self: &Arc<Self>, client: &mut lwd::LwdClient, id: B256, m: &Moment) -> Result<()> {
+        // N-4: an order whose payment is being proven is the proving task's until it ends (it
+        // writes the order before it ends, so the record read below is never older than its own).
+        if self.proving_now(id) {
+            return Ok(());
+        }
         let Some(rec) = self.book.lock().await.orders.get(&id).cloned() else {
             return Ok(());
         };
-        let f = self.facts(client, &rec, now, zcash_tip, relay_height, proofs).await?;
+        // W-8: a transport error is no answer: `?` skips the order for this pass, so a payment is
+        // never taken for unmined because the server could not be reached.
+        let payment = match (rec.status, rec.txid.as_deref()) {
+            (MakerStatus::Paid, Some(txid)) => {
+                Some(payment_seen(client, &TxId::from_hex(txid).context("stored txid")?).await?)
+            }
+            _ => None,
+        };
+        let f = self.facts(&rec, m, payment).await?;
         let (pay_delay, draw) = anchor::draw(self.cfg.pay_delay_max_blocks);
         let step = decide(&self.cfg, &rec, &f, pay_delay, draw);
         let mut rec = rec;
@@ -723,22 +836,31 @@ impl Maker {
                 rec.input_nullifiers.clear();
                 rec.mined_height = None;
                 rec.anchor_height = None;
+                rec.late_anchor_draw = None;
             }
-            Step::ScheduleAnchor { mined, anchor } => {
+            Step::ScheduleAnchor {
+                mined,
+                anchor,
+                late_draw,
+            } => {
                 rec.mined_height = Some(mined);
                 rec.anchor_height = Some(anchor);
-                // A payment from before anchors were planned keeps the draw its anchor used.
-                rec.anchor_draw.get_or_insert(draw);
+                // N-12: a late payment keeps the draw its anchor took (a reorganization may move the
+                // payment again).
+                if let Some(r) = late_draw {
+                    rec.late_anchor_draw.get_or_insert(r);
+                }
             }
             Step::Prove => {
-                if !self.prove(client, &mut rec).await? {
-                    return Ok(());
-                }
+                // N-4: off the pass; the order is marked proven once its proof is on Base.
+                self.start_proving(rec);
+                return Ok(());
             }
             Step::Reprove => {
                 rec.status = MakerStatus::Paid;
             }
             Step::Drop => {
+                let _tx = self.base_tx.lock().await;
                 let swap = self.swap();
                 let call = swap.dropSettlement(id);
                 let gas = gas_with_headroom(call.estimate_gas().await.context("estimate dropSettlement")?);
@@ -750,11 +872,13 @@ impl Maker {
                 }
             }
             Step::Finalize => {
+                let _tx = self.base_tx.lock().await;
                 finalize_settlement(&self.provider, self.cfg.swap, id).await?;
                 info!(order = %id, "settled");
                 rec.finish(MakerStatus::Settled, None);
             }
             Step::Refund => {
+                let _tx = self.base_tx.lock().await;
                 let swap = self.swap();
                 let call = swap.refund(id);
                 let gas = gas_with_headroom(call.estimate_gas().await.context("estimate refund")?);
@@ -785,8 +909,9 @@ impl Maker {
     }
 
     /// Pays a Buy order: one note of its zatoshi to the taker's receiver, the swap memo,
-    /// `ovk = None`; checked against the payment statement before it is broadcast, and recorded
-    /// (opening, txid, the raw transaction) before the broadcast.
+    /// `ovk = None`; checked against the payment statement before it is broadcast, decided again on
+    /// facts read right before the broadcast (N-4), and recorded (opening, txid, the raw
+    /// transaction) before the broadcast.
     async fn pay(&self, client: &mut lwd::LwdClient, rec: &mut OrderRecord) -> Result<()> {
         let receiver: [u8; 43] = hex::decode(rec.receiver.as_deref().context("no destination")?)?
             .try_into()
@@ -821,6 +946,16 @@ impl Maker {
             (tx, opening, target, nullifiers)
         };
         check_payment_note(&tx, &opening, rec.order_id)?;
+        // N-4: the decision to pay was taken on the pass's facts, and building the payment took
+        // time: the tip, Base's clock, the relay and the Swap version are read again, and the
+        // payment goes out only while `decide` still pays (it still lands below its planned anchor,
+        // a proof could still land, there is still time). Otherwise it is dropped unsent, and the
+        // next pass decides afresh (it waits, plans the anchor again or abandons the order).
+        let tip = lwd_tip(client).await?;
+        if self.decide_now(rec, tip).await? != Step::Pay {
+            info!(order = %rec.order_id, "the payment was not sent: the chains moved on while it was built");
+            return Ok(());
+        }
         let raw = spend::serialize(&tx)?;
         rec.txid = Some(tx.txid().to_string());
         rec.opening = Some(opening);
@@ -844,9 +979,50 @@ impl Maker {
         Ok(())
     }
 
+    /// N-4: proves `rec`'s payment in a task of its own, so the pass goes on with the other orders
+    /// (a payment one of them makes meanwhile is decided on what the chains say then) and the
+    /// maker's view of the chains, which the API decides on, stays recent. One proof at a time:
+    /// another order's waits for a later pass.
+    fn start_proving(self: &Arc<Self>, rec: OrderRecord) {
+        {
+            let Ok(mut proving) = self.proving.lock() else {
+                return;
+            };
+            if proving.is_some() {
+                return;
+            }
+            *proving = Some(rec.order_id);
+        }
+        let maker = self.clone();
+        tokio::spawn(async move {
+            let _slot = ProvingSlot(&maker.proving);
+            let id = rec.order_id;
+            if let Err(e) = maker.prove_and_record(rec).await {
+                warn!(order = %id, "proof failed: {e:#}");
+            }
+        });
+    }
+
+    /// The proving task: proves the payment and, once the proof is on Base, marks the order proven
+    /// (still paid with the same payment: the pass leaves an order being proven alone).
+    async fn prove_and_record(&self, mut rec: OrderRecord) -> Result<()> {
+        if !self.prove(&mut rec).await? {
+            return Ok(());
+        }
+        let mut book = self.book.lock().await;
+        if let Some(current) = book.orders.get_mut(&rec.order_id)
+            && current.status == MakerStatus::Paid
+            && current.txid == rec.txid
+        {
+            current.status = MakerStatus::Proven;
+            book.save(&self.cfg.state)?;
+        }
+        Ok(())
+    }
+
     /// Proves a mined payment under the header at exactly its anchor height (W-10) and submits the
     /// proof; false while that header has not the order's tier of work on top of it on the relay.
-    async fn prove(&self, client: &mut lwd::LwdClient, rec: &mut OrderRecord) -> Result<bool> {
+    async fn prove(&self, rec: &mut OrderRecord) -> Result<bool> {
         let anchor = rec.anchor_height.context("no anchor height")?;
         let Some(anchor_hash) = anchor_at(&self.provider, self.cfg.swap, anchor, rec.zatoshi).await? else {
             return Ok(false);
@@ -857,8 +1033,10 @@ impl Maker {
         anyhow::ensure!(have >= anchor, "the P2P peers are behind the relay");
         let txid = TxId::from_hex(rec.txid.as_deref().context("no txid")?).context("stored txid")?;
         let opening = rec.opening.clone().context("no opening")?;
+        let mut client = lwd::connect(&self.cfg.lwd).await?;
+        lwd::check_network(&mut client, self.zcash).await?;
         let built = payment::build(
-            client,
+            &mut client,
             self.zcash,
             &self.cfg.headers,
             &self.cfg.summaries,
@@ -882,11 +1060,19 @@ impl Maker {
         let prover = self.prover.clone();
         let witness = built.witness;
         let seal = tokio::task::spawn_blocking(move || prover.seal(&witness)).await??;
-        prove_settlement(&self.provider, self.cfg.swap, rec.order_id, &seal).await?;
+        {
+            let _tx = self.base_tx.lock().await;
+            prove_settlement(&self.provider, self.cfg.swap, rec.order_id, &seal).await?;
+        }
         info!(order = %rec.order_id, anchor, "payment proven on Base");
         rec.status = MakerStatus::Proven;
         Ok(true)
     }
+}
+
+/// The light wallet server's Zcash tip.
+async fn lwd_tip(client: &mut lwd::LwdClient) -> Result<u32> {
+    Ok(u32::try_from(lwd::latest_block(client).await?.height)?)
 }
 
 #[cfg(test)]
@@ -906,11 +1092,13 @@ mod tests {
             pay_deadline: 1_000_000 + 21_600,
             receiver_commitment: B256::repeat_byte(3),
             status,
+            reserved_until: None,
             receiver: None,
             salt: None,
             pay_after_height: None,
             planned_anchor_height: None,
             anchor_draw: None,
+            late_anchor_draw: None,
             txid: None,
             opening: None,
             raw_tx: None,
@@ -941,6 +1129,7 @@ mod tests {
         }
     }
 
+    /// An order holding its place (its reservation lasts), the maker otherwise idle.
     fn dest(now: u64) -> DestinationFacts {
         DestinationFacts {
             now,
@@ -949,7 +1138,9 @@ mod tests {
                 relay_lag: 1,
             },
             zcash_free: 2_000_000_000,
-            taker_paying: 0,
+            holds_place: true,
+            places_taken: 0,
+            taker_places: 0,
         }
     }
 
@@ -959,18 +1150,19 @@ mod tests {
         let mut r = rec(Side::Buy, MakerStatus::AwaitingDestination);
         assert_eq!(decide(&cfg, &r, &facts(1_000_000), 3, 2), Step::Wait, "no destination yet");
         r.status = MakerStatus::DestinationReceived;
-        // The tip is 4,500,000: block c = 4,500,001 is being mined. The anchor first (c + 8 + 1 + r),
-        // then the payment's delay of 3 blocks: broadcast at 4,500,003, mined from 4,500,004 on.
+        // The tip is 4,500,000: block c = 4,500,001 is being mined. The anchor first (c + 8 + 1 + 2 +
+        // r: two blocks of headroom, N-4), then the payment's delay of 3 blocks: broadcast at
+        // 4,500,003, mined from 4,500,004 on.
         assert_eq!(
             decide(&cfg, &r, &facts(1_000_000), 3, 2),
             Step::SchedulePayment {
                 pay_after: 4_500_003,
-                planned_anchor: 4_500_012,
+                planned_anchor: 4_500_014,
                 draw: 2
             }
         );
         r.pay_after_height = Some(4_500_003);
-        r.planned_anchor_height = Some(4_500_012);
+        r.planned_anchor_height = Some(4_500_014);
         r.anchor_draw = Some(2);
         assert_eq!(decide(&cfg, &r, &facts(1_000_000), 3, 2), Step::Wait, "the privacy delay");
         let mut f = facts(1_000_100);
@@ -984,7 +1176,7 @@ mod tests {
         let mut f = facts(1_000_200);
         f.payment = Some(Seen::NotMined);
         assert_eq!(decide(&cfg, &r, &f, 3, 2), Step::Rebroadcast);
-        f.zcash_tip = 4_500_124;
+        f.zcash_tip = 4_500_127;
         assert_eq!(decide(&cfg, &r, &f, 3, 2), Step::Wait, "expired, its inputs not shown unspent");
         f.inputs_unspent = true;
         assert_eq!(decide(&cfg, &r, &f, 3, 2), Step::PaymentExpired);
@@ -995,11 +1187,12 @@ mod tests {
             decide(&cfg, &r, &f, 3, 2),
             Step::ScheduleAnchor {
                 mined: 4_500_005,
-                anchor: 4_500_012
+                anchor: 4_500_014,
+                late_draw: None
             }
         );
         r.mined_height = Some(4_500_005);
-        r.anchor_height = Some(4_500_012);
+        r.anchor_height = Some(4_500_014);
         assert_eq!(decide(&cfg, &r, &f, 3, 2), Step::Prove);
         r.status = MakerStatus::Proven;
         f.pending = Some(Pending {
@@ -1039,7 +1232,7 @@ mod tests {
         r.anchor_height = Some(4_500_014);
         r.input_nullifiers = vec!["ab".repeat(32)];
         let mut f = facts(1_000_200);
-        f.zcash_tip = 4_500_124;
+        f.zcash_tip = 4_500_127;
         f.payment = Some(Seen::NotMined);
         assert_ne!(decide(&cfg, &r, &f, 3, 2), Step::PaymentExpired, "a payment seen mined never expires");
         assert_eq!(decide(&cfg, &r, &f, 3, 2), Step::Wait);
@@ -1056,7 +1249,8 @@ mod tests {
             decide(&cfg, &r, &f, 3, 2),
             Step::ScheduleAnchor {
                 mined: 4_500_006,
-                anchor: 4_500_014
+                anchor: 4_500_014,
+                late_draw: None
             }
         );
     }
@@ -1064,14 +1258,14 @@ mod tests {
     /// W-10: the proof's anchor height does not depend on the payment's block: every block the
     /// payment may land in below the planned anchor gives the order that same anchor; it is the
     /// payment's next block only when the payment came in the window's last block, and a late
-    /// payment anchors `r` blocks above its next one.
+    /// payment anchors its own `r` (N-12) blocks above its next one.
     #[test]
     fn w10_the_anchor_height_does_not_depend_on_the_payment_height() {
         let cfg = judge_like();
         let mut r = rec(Side::Buy, MakerStatus::Paid);
         r.expiry_height = Some(4_500_123);
-        // Scheduled at tip 4,500,000 (c = 4,500,001) with r = 5: the anchor is c + 8 + 1 + 5.
-        r.planned_anchor_height = Some(4_500_015);
+        // Scheduled at tip 4,500,000 (c = 4,500,001) with r = 5: the anchor is c + 8 + 1 + 2 + 5.
+        r.planned_anchor_height = Some(4_500_017);
         r.anchor_draw = Some(5);
         let anchor_for = |mined: u32| {
             let mut f = facts(1_000_200);
@@ -1082,11 +1276,50 @@ mod tests {
                 s => panic!("{s:?}"),
             }
         };
-        let anchors: Vec<u32> = (4_500_002..4_500_015).map(anchor_for).collect();
-        assert!(anchors.iter().all(|a| *a == 4_500_015), "the anchor follows the payment: {anchors:?}");
-        assert_eq!(anchor_for(4_500_014), 4_500_015, "h + 1 only for the window's last block");
-        assert_eq!(anchor_for(4_500_015), 4_500_021, "late: h + 1 + r, with the order's r");
-        assert_eq!(anchor_for(4_500_020), 4_500_026);
+        let anchors: Vec<u32> = (4_500_002..4_500_017).map(anchor_for).collect();
+        assert!(anchors.iter().all(|a| *a == 4_500_017), "the anchor follows the payment: {anchors:?}");
+        assert_eq!(anchor_for(4_500_016), 4_500_017, "h + 1 only for the window's last block");
+        assert_eq!(anchor_for(4_500_017), 4_500_018, "late: h + 1 + its own r (the draw given, 0)");
+        assert_eq!(anchor_for(4_500_022), 4_500_023);
+    }
+
+    /// N-12: a late payment's anchor (`h + 1 + r`) takes an `r` of its own, the draw the engine gives
+    /// when the payment is first seen late, never the order's: that one would tie the late anchor to
+    /// the plan and narrow the blocks the payment hides among.
+    #[test]
+    fn n12_a_late_payment_anchors_with_an_r_of_its_own() {
+        let cfg = judge_like();
+        let mut r = rec(Side::Buy, MakerStatus::Paid);
+        r.expiry_height = Some(4_500_123);
+        r.planned_anchor_height = Some(4_500_017);
+        r.anchor_draw = Some(5);
+        let mut f = facts(1_000_200);
+        f.zcash_tip = 4_500_030;
+        f.payment = Some(Seen::Mined(4_500_017));
+        let step = decide(&cfg, &r, &f, 3, 0);
+        assert!(matches!(step, Step::ScheduleAnchor { anchor: 4_500_018, .. }), "h + 1 + 0, not + 5: {step:?}");
+        // The engine keeps that draw: moved by a reorganization, the payment keeps it.
+        assert_eq!(
+            step,
+            Step::ScheduleAnchor {
+                mined: 4_500_017,
+                anchor: 4_500_018,
+                late_draw: Some(0)
+            }
+        );
+        r.late_anchor_draw = Some(3);
+        f.payment = Some(Seen::Mined(4_500_019));
+        assert!(matches!(decide(&cfg, &r, &f, 3, 7), Step::ScheduleAnchor { anchor: 4_500_023, .. }), "kept");
+        // On time, no draw of its own: the planned anchor.
+        f.payment = Some(Seen::Mined(4_500_009));
+        assert!(matches!(
+            decide(&cfg, &r, &f, 3, 7),
+            Step::ScheduleAnchor {
+                anchor: 4_500_017,
+                late_draw: None,
+                ..
+            }
+        ));
     }
 
     /// W-10: a payment that could no longer land below its planned anchor (held by another unmined
@@ -1097,20 +1330,20 @@ mod tests {
         let cfg = judge_like();
         let mut r = rec(Side::Buy, MakerStatus::DestinationReceived);
         r.pay_after_height = Some(4_500_003);
-        r.planned_anchor_height = Some(4_500_012);
+        r.planned_anchor_height = Some(4_500_014);
         r.anchor_draw = Some(2);
         let mut f = facts(1_000_100);
-        f.zcash_tip = 4_500_010;
+        f.zcash_tip = 4_500_012;
         assert_eq!(decide(&cfg, &r, &f, 4, 7), Step::Pay, "still lands below the anchor");
-        f.zcash_tip = 4_500_011;
+        f.zcash_tip = 4_500_013;
         assert_eq!(
             decide(&cfg, &r, &f, 4, 7),
             Step::SchedulePayment {
-                pay_after: 4_500_015,
-                planned_anchor: 4_500_023,
+                pay_after: 4_500_017,
+                planned_anchor: 4_500_027,
                 draw: 2
             },
-            "planned again from c = 4,500,012, the order's r kept"
+            "planned again from c = 4,500,014, the order's r kept"
         );
         let fresh = rec(Side::Buy, MakerStatus::DestinationReceived);
         assert!(matches!(decide(&cfg, &fresh, &f, 4, 7), Step::SchedulePayment { draw: 7, .. }));
@@ -1132,7 +1365,8 @@ mod tests {
             decide(&cfg, &r, &f, 3, 0),
             Step::ScheduleAnchor {
                 mined: 4_500_008,
-                anchor: 4_500_010
+                anchor: 4_500_010,
+                late_draw: None
             },
             "cut at the epoch's last block"
         );
@@ -1145,16 +1379,17 @@ mod tests {
     #[test]
     fn w20_no_payment_near_a_known_activation() {
         let cfg = judge_like();
-        // From the tip: 18 blocks of anchor window, 16 of work (1,200 s in 75-s blocks).
-        assert_eq!(cfg.anchor_pipeline_blocks(), 18 + 16);
+        // From the tip: 20 blocks of anchor window (two of headroom), 16 of work (1,200 s in 75-s
+        // blocks).
+        assert_eq!(cfg.anchor_pipeline_blocks(), 20 + 16);
         let mut r = rec(Side::Buy, MakerStatus::DestinationReceived);
         let mut f = facts(1_000_000);
-        f.tip_epoch_last = Some(4_500_000 + 34 - 1);
+        f.tip_epoch_last = Some(4_500_000 + 36 - 1);
         assert_eq!(decide(&cfg, &r, &f, 3, 2), Step::Wait, "the activation is too close");
-        f.tip_epoch_last = Some(4_500_000 + 34);
+        f.tip_epoch_last = Some(4_500_000 + 36);
         assert!(matches!(decide(&cfg, &r, &f, 3, 2), Step::SchedulePayment { .. }));
         r.pay_after_height = Some(4_500_003);
-        r.planned_anchor_height = Some(4_500_012);
+        r.planned_anchor_height = Some(4_500_014);
         r.anchor_draw = Some(2);
         f.zcash_tip = 4_500_003;
         assert_eq!(decide(&cfg, &r, &f, 3, 2), Step::Wait, "scheduled, but the activation came closer");
@@ -1232,17 +1467,263 @@ mod tests {
         assert_eq!(anchor_at(&provider, swap, tip + 1, 50_000_000).await.unwrap(), None, "above the relay's tip");
     }
 
+    /// N-4: a payment is decided again on what the chains say right before its broadcast. Another
+    /// order's proof runs (off the pass) while the Swap version is removed: the payment the pass
+    /// decided on its earlier facts is not sent. Neither is one whose tip passed its plan while it
+    /// was built.
+    #[tokio::test]
+    async fn n4_no_payment_while_the_version_was_removed_during_another_proof() {
+        use crate::testkit::{Chain, base_stub, maker, open_order};
+        let chain = std::sync::Arc::new(std::sync::Mutex::new(Chain {
+            now: 1_000_100,
+            relay_height: 4_500_002,
+            ..Chain::default()
+        }));
+        let maker = maker(&base_stub(chain.clone()).await, judge_like(), Book::default());
+        let me = maker.signer.address();
+        // Order B: scheduled at tip 4,500,000 and due; order A: paid, mined, its anchor scheduled.
+        let mut b = rec(Side::Buy, MakerStatus::DestinationReceived);
+        b.pay_after_height = Some(4_500_003);
+        b.planned_anchor_height = Some(4_500_014);
+        b.anchor_draw = Some(2);
+        let mut a = rec(Side::Buy, MakerStatus::Paid);
+        a.order_id = B256::repeat_byte(9);
+        a.txid = Some("cd".repeat(32));
+        a.mined_height = Some(4_500_001);
+        a.anchor_height = Some(4_500_012);
+        {
+            let mut c = chain.lock().unwrap();
+            for o in [&a, &b] {
+                c.orders.insert(o.order_id, open_order(me, 0, o.taker, o.zatoshi, o.pay_deadline));
+            }
+        }
+        maker.book.lock().await.orders.extend([(a.order_id, a.clone()), (b.order_id, b.clone())]);
+        assert_eq!(maker.decide_now(&b, 4_500_003).await.unwrap(), Step::Pay, "the pass would pay B");
+        // A's proof starts, and the version is removed while it runs.
+        *maker.proving.lock().unwrap() = Some(a.order_id);
+        assert!(maker.proving_now(a.order_id) && !maker.proving_now(b.order_id));
+        chain.lock().unwrap().version_working = false;
+        assert_eq!(maker.decide_now(&b, 4_500_003).await.unwrap(), Step::Wait, "B's broadcast is refused");
+        // The tip passed B's plan while it was built: its anchor is planned again, nothing is sent.
+        {
+            let mut c = chain.lock().unwrap();
+            c.version_working = true;
+            c.relay_height = 4_500_012;
+        }
+        assert_eq!(maker.decide_now(&b, 4_500_012).await.unwrap(), Step::Pay, "the last tip below the plan");
+        assert!(matches!(maker.decide_now(&b, 4_500_013).await.unwrap(), Step::SchedulePayment { .. }));
+        // So is a payment once too little time is left.
+        chain.lock().unwrap().now = b.pay_deadline - maker.cfg.required_secs() + 1;
+        assert!(matches!(maker.decide_now(&b, 4_500_003).await.unwrap(), Step::Abandon(_)));
+    }
+
+    /// N-10's makers: on the Base stub, the engine just passed (its view of the chains is recent),
+    /// with 20 ZEC to pay from.
+    async fn passed_maker(chain: crate::testkit::Shared, cfg: MakerConfig, book: Book) -> Arc<Maker> {
+        let m = crate::testkit::maker(&crate::testkit::base_stub(chain).await, cfg, book);
+        m.pass_at.store(unix_now(), Ordering::Relaxed);
+        m.balance.store(2_000_000_000, Ordering::Relaxed);
+        m
+    }
+
+    /// One request to the maker's API: its status and JSON body.
+    async fn call(
+        m: &Arc<Maker>,
+        req: axum::http::Request<axum::body::Body>,
+    ) -> (axum::http::StatusCode, serde_json::Value) {
+        use tower::ServiceExt;
+        let r = crate::api::router(m.clone()).oneshot(req).await.unwrap();
+        let status = r.status();
+        let body = axum::body::to_bytes(r.into_body(), 1 << 16).await.unwrap();
+        (status, serde_json::from_slice(&body).unwrap_or_default())
+    }
+
+    fn get(uri: &str) -> axum::http::Request<axum::body::Body> {
+        axum::http::Request::get(uri).body(axum::body::Body::empty()).unwrap()
+    }
+
+    /// The taker's destination `(ua, salt)` of an order, and the commitment it opens.
+    fn destination(index: u32) -> (String, [u8; 32], B256) {
+        use orchard::keys::Scope;
+        let sk = (1u8..).find_map(|b| Option::<SpendingKey>::from(SpendingKey::from_bytes([b; 32]))).unwrap();
+        let address = FullViewingKey::from(&sk).address_at(index, Scope::External);
+        let salt = [index as u8; 32];
+        let ua = zecured_zcash_ops::keys::encode_ironwood_ua(&Network::TestNetwork, address).unwrap();
+        (ua, salt, zecured_swap::receiver_commitment(&salt, &address.to_raw_address_bytes()))
+    }
+
+    /// N-10 (a): a Buy order left without a destination holds one of the maker's places only for
+    /// a short time after it opened: orders opened and left (queue stuffing) leave the maker free
+    /// to quote again.
+    #[tokio::test]
+    async fn n10_an_order_left_without_a_destination_stops_holding_a_place() {
+        let cfg = judge_like();
+        let mut book = Book::default();
+        for i in 0..cfg.max_open_orders as u8 {
+            let r = new_record(
+                B256::repeat_byte(0x40 + i),
+                Side::Buy,
+                Address::repeat_byte(0x30 + i),
+                50_000_000,
+                U256::from(20_000_000u64),
+                1_000_000 + 21_600,
+                B256::repeat_byte(3),
+            );
+            book.orders.insert(r.order_id, r);
+        }
+        let chain = std::sync::Arc::new(std::sync::Mutex::new(crate::testkit::Chain::default()));
+        let m = passed_maker(chain, cfg, book).await;
+        let (status, body) = call(&m, get("/swap/quote?side=buy&zatoshi=50000000")).await;
+        assert_eq!(status, axum::http::StatusCode::OK, "{body}");
+        crate::testkit::forget(&m);
+    }
+
+    /// N-10 (b): the per-taker cap applies to an order's taker on Base, orders opened from open Buy
+    /// quotes included: beyond its cap, a taker's order holds no place of the maker's and takes no
+    /// destination.
+    #[tokio::test]
+    async fn n10_the_per_taker_cap_applies_to_the_orders_taker_on_base() {
+        use crate::testkit::{Chain, open_order, order_opened};
+        let mut cfg = judge_like();
+        cfg.max_open_orders = 4;
+        let chain = std::sync::Arc::new(std::sync::Mutex::new(Chain::default()));
+        let m = passed_maker(chain.clone(), cfg, Book::default()).await;
+        // Four orders of one taker, opened from open Buy quotes, read from Base by the engine.
+        let taker = Address::repeat_byte(0x33);
+        let (ua, salt, commitment) = destination(4);
+        let ids: Vec<B256> = (1..=4u8).map(B256::repeat_byte).collect();
+        {
+            let mut c = chain.lock().unwrap();
+            for id in &ids {
+                let mut o = open_order(m.signer.address(), 0, taker, 50_000_000, 1_000_000 + 21_600);
+                o.receiverCommitment = commitment;
+                c.logs.push(order_opened(*id, &o));
+                c.orders.insert(*id, o);
+            }
+        }
+        m.sync_orders().await.unwrap();
+        assert_eq!(m.book.lock().await.orders.len(), 4);
+        // Another taker is still quoted: the fourth order holds no place.
+        let (status, body) = call(&m, get("/swap/quote?side=buy&zatoshi=50000000")).await;
+        assert_eq!(status, axum::http::StatusCode::OK, "{body}");
+        // And the fourth order takes no destination.
+        let post = |id: B256| {
+            let body = serde_json::json!({ "receiver": ua, "salt": hex::encode(salt) }).to_string();
+            axum::http::Request::post(format!("/swap/orders/{id}/destination"))
+                .header("content-type", "application/json")
+                .body(axum::body::Body::from(body))
+                .unwrap()
+        };
+        let (status, body) = call(&m, post(ids[3])).await;
+        assert_eq!((status, body["code"].as_str()), (axum::http::StatusCode::SERVICE_UNAVAILABLE, Some("busy")));
+        // Its first three take theirs: their reservations kept their places and their ZEC.
+        for id in &ids[..3] {
+            assert_eq!(m.book.lock().await.orders[id].reserved_until, Some(1_000_000 + 600));
+            let (status, body) = call(&m, post(*id)).await;
+            assert_eq!(status, axum::http::StatusCode::ACCEPTED, "{body}");
+        }
+        crate::testkit::forget(&m);
+    }
+
+    /// N-10 (c): quotes given and not opened yet hold the maker's places, and those naming a taker
+    /// count toward its cap: a burst of quotes cannot outrun the engine reading their orders.
+    #[tokio::test]
+    async fn n10_quotes_given_count_toward_the_makers_places() {
+        let mut cfg = judge_like();
+        cfg.max_open_orders = 4;
+        let chain = std::sync::Arc::new(std::sync::Mutex::new(crate::testkit::Chain::default()));
+        let m = passed_maker(chain, cfg, Book::default()).await;
+        let sell = format!("/swap/quote?side=sell&zatoshi=50000000&taker={}", Address::repeat_byte(0x33));
+        for _ in 0..3 {
+            let (status, body) = call(&m, get(&sell)).await;
+            assert_eq!(status, axum::http::StatusCode::OK, "{body}");
+        }
+        let (status, body) = call(&m, get(&sell)).await;
+        assert_eq!(
+            (status, body["code"].as_str()),
+            (axum::http::StatusCode::SERVICE_UNAVAILABLE, Some("busy")),
+            "the taker's cap"
+        );
+        let buy = "/swap/quote?side=buy&zatoshi=50000000";
+        assert_eq!(call(&m, get(buy)).await.0, axum::http::StatusCode::OK, "the maker's last place");
+        let (status, body) = call(&m, get(buy)).await;
+        assert_eq!(
+            (status, body["code"].as_str()),
+            (axum::http::StatusCode::SERVICE_UNAVAILABLE, Some("busy")),
+            "no place left"
+        );
+        crate::testkit::forget(&m);
+    }
+
     /// W-8: what the wallet's scan shows of an expired payment's inputs.
     #[test]
     fn w8_the_inputs_of_an_expired_payment() {
         let (a, b) = ([0xab; 32], [0xcd; 32]);
         let inputs = vec![hex::encode(a), hex::encode(b)];
         let notes = |a_spent, b_spent| vec![(a, a_spent), (b, b_spent), ([0xee; 32], true)];
-        assert!(inputs_unspent(124, 123, &inputs, notes(false, false)));
-        assert!(!inputs_unspent(123, 123, &inputs, notes(false, false)), "the scan must pass the expiry height");
-        assert!(!inputs_unspent(124, 123, &inputs, notes(false, true)), "an input spent: by the payment or another");
-        assert!(!inputs_unspent(124, 123, &inputs, vec![(a, false)]), "an input the wallet does not know");
-        assert!(!inputs_unspent(124, 123, &[], notes(false, false)), "no recorded inputs: nothing shown");
+        assert!(inputs_unspent(127, 123, &inputs, notes(false, false)));
+        assert!(!inputs_unspent(126, 123, &inputs, notes(false, false)), "the scan must pass the expiry height");
+        assert!(!inputs_unspent(127, 123, &inputs, notes(false, true)), "an input spent: by the payment or another");
+        assert!(!inputs_unspent(127, 123, &inputs, vec![(a, false)]), "an input the wallet does not know");
+        assert!(!inputs_unspent(127, 123, &[], notes(false, false)), "no recorded inputs: nothing shown");
+    }
+
+    /// N-9: without delays (`pay_delay_max_blocks` 0, a local fork) the maker still pays: its
+    /// payment, due once the tip reaches the schedule, lands below the planned anchor.
+    #[test]
+    fn n9_a_payment_without_delays_is_paid() {
+        let mut cfg = judge_like();
+        cfg.local_fork = true;
+        cfg.mock_seal = true;
+        cfg.pay_delay_max_blocks = 0;
+        cfg.check().unwrap();
+        let mut r = rec(Side::Buy, MakerStatus::DestinationReceived);
+        let (pay_delay, draw) = anchor::draw(0);
+        let Step::SchedulePayment {
+            pay_after,
+            planned_anchor,
+            draw,
+        } = decide(&cfg, &r, &facts(1_000_000), pay_delay, draw)
+        else {
+            panic!("not scheduled")
+        };
+        r.pay_after_height = Some(pay_after);
+        r.planned_anchor_height = Some(planned_anchor);
+        r.anchor_draw = Some(draw);
+        let mut f = facts(1_000_100);
+        f.zcash_tip = pay_after;
+        assert_eq!(
+            decide(&cfg, &r, &f, pay_delay, draw),
+            Step::Pay,
+            "due at {pay_after}, anchored at {planned_anchor}"
+        );
+    }
+
+    /// N-12 (W-8): an unmined payment counts as expired only three blocks after its expiry height:
+    /// before that, a short reorganization or a light wallet server a block or two behind could
+    /// still show it mined at or below that height, and the order would be paid twice.
+    #[test]
+    fn n12_a_payment_expires_only_three_blocks_after_its_expiry_height() {
+        let (a, b) = ([0xab; 32], [0xcd; 32]);
+        let inputs = vec![hex::encode(a), hex::encode(b)];
+        let notes = vec![(a, false), (b, false)];
+        for scanned_to in 124..=126 {
+            assert!(!inputs_unspent(scanned_to, 123, &inputs, notes.clone()), "scanned to {scanned_to}");
+        }
+        assert!(inputs_unspent(127, 123, &inputs, notes));
+        let cfg = judge_like();
+        let mut r = rec(Side::Buy, MakerStatus::Paid);
+        r.expiry_height = Some(4_500_123);
+        r.input_nullifiers = inputs;
+        let mut f = facts(1_000_200);
+        f.payment = Some(Seen::NotMined);
+        f.inputs_unspent = true;
+        for tip in 4_500_124..=4_500_126 {
+            f.zcash_tip = tip;
+            assert_eq!(decide(&cfg, &r, &f, 3, 2), Step::Wait, "tip {tip}: not expired yet");
+        }
+        f.zcash_tip = 4_500_127;
+        assert_eq!(decide(&cfg, &r, &f, 3, 2), Step::PaymentExpired);
     }
 
     /// The maker never pays when the pipeline would not fit before the deadline (docs/SWAP.md "The market maker").
@@ -1360,11 +1841,24 @@ mod tests {
         );
         d.zcash_free = r.zatoshi + PAYMENT_FEE_HEADROOM;
         assert!(accept_destination(&cfg, &Network::TestNetwork, &r, &d, &ua, &hex::encode(salt)).is_ok());
-        d.taker_paying = 3;
+        d.taker_places = 3;
         assert_eq!(
             accept_destination(&cfg, &Network::TestNetwork, &r, &d, &ua, &hex::encode(salt)).err(),
             Some(ApiError::TAKER_BUSY)
         );
+        // N-10: an order whose reservation lapsed takes a place again only if one is free.
+        d.taker_places = 2;
+        d.holds_place = false;
+        d.places_taken = cfg.max_open_orders;
+        assert_eq!(
+            accept_destination(&cfg, &Network::TestNetwork, &r, &d, &ua, &hex::encode(salt)).err(),
+            Some(ApiError::BUSY)
+        );
+        d.places_taken -= 1;
+        assert!(accept_destination(&cfg, &Network::TestNetwork, &r, &d, &ua, &hex::encode(salt)).is_ok());
+        d.holds_place = true;
+        d.places_taken = cfg.max_open_orders;
+        assert!(accept_destination(&cfg, &Network::TestNetwork, &r, &d, &ua, &hex::encode(salt)).is_ok(), "its own");
     }
 
     /// W-7: the maker never pays while no proof could land (its Swap version removed or its
@@ -1375,7 +1869,7 @@ mod tests {
         let cfg = judge_like();
         let mut r = rec(Side::Buy, MakerStatus::DestinationReceived);
         r.pay_after_height = Some(4_500_003);
-        r.planned_anchor_height = Some(4_500_012);
+        r.planned_anchor_height = Some(4_500_014);
         r.anchor_draw = Some(2);
         let mut f = facts(1_000_100);
         f.zcash_tip = 4_500_003;
@@ -1390,7 +1884,7 @@ mod tests {
         r.status = MakerStatus::Paid;
         r.expiry_height = Some(4_500_123);
         r.mined_height = Some(4_500_005);
-        r.anchor_height = Some(4_500_012);
+        r.anchor_height = Some(4_500_014);
         let mut f = facts(1_000_200);
         f.payment = Some(Seen::Mined(4_500_005));
         assert_eq!(decide(&cfg, &r, &f, 3, 2), Step::Prove);
