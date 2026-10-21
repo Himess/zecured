@@ -64,6 +64,7 @@ fn node_at(rpc: &str) -> (Node, TempDir) {
         open_vault: Default::default(),
         payout_lifetime_secs: None,
         zcash_network: None,
+        proof_timing: Default::default(),
     };
     let id = Identity {
         index: 2,

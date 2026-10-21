@@ -89,6 +89,7 @@ fn setup() -> (NetworkConfig, Vec<TestNode>) {
         open_vault: Default::default(),
         payout_lifetime_secs: None,
         zcash_network: None,
+        proof_timing: Default::default(),
     };
     (cfg, nodes)
 }
