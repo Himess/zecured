@@ -237,7 +237,8 @@ that part of the collateral went to whoever repaid part of the debt.
 ### v4.1 on a local fork (2026-10-21)
 
 A fresh v4.1 deployment on an anvil fork of Base Sepolia (block 48,411,390), a relay fed from P2P, the MOCK verifier with
-the pinned Testnet image ids, five nodes and the coordinator with the treasury keys (W-6), real Zcash Testnet:
+the pinned Testnet image ids, five nodes and the coordinator with the treasury keys (W-6), the swap maker, real Zcash
+Testnet:
 
 | Flow | Result | Evidence |
 |---|---|---|
@@ -247,6 +248,9 @@ the pinned Testnet image ids, five nodes and the coordinator with the treasury k
 | Earliest-receipt armings (W-4) | The coordinator armed both claims with their earliest receipts | coordinator log |
 | Reimbursement end to end (W-6) | Nodes 3 to 5 stopped; the release went overdue and its claimant took it from the bonds (`slashLiveness`, 157,919 gas). `zecured-ops` refused to sign without the treasury keys, and refused a destination prepared with other keys ("not the claim's treasury destination: not signed (W-6)"); three operators signed the derived one, sent 3 of 3. With the nodes back, the coordinator registered the derived recipient (14:46:17); the payout was committed 14:47:29, held one block (L23), confirmed 14:50:27, and the treasury's wallet found the note: 990,000 zatoshi at block 4,525,883 | `0x00a16af0`, `0xaa12d8fc` |
 | A planned anchor (W-10) | With `payout_delay_max_blocks` 8: planned at 4,525,892 (`r` = 2), the payout mined at 4,525,883. Its proof anchored at exactly 4,525,892, the plan, nine blocks above the payout's block and not at `h + 1`; queued 15:00:37, ready 15:02:16, by which time the confirmation had expired undisputed (R-3), so the proof was not sent and its anchor was read from the seal file's journal | seal file |
+| Swap Buy, the maker (W-7, W-10, W-19) | The maker quoted only once its engine had passed once (W-7: the relay's lag comes from a pass); a cap of 3 open orders per taker. 0.005 ZEC for 6.388 USDC: scheduled at 4,525,923 (a two-block delay), anchor planned at 4,525,928 (`r` = 1); paid 15:07:54, mined at 4,525,926, proven on Base 15:16:32 under the header at 4,525,928, the plan, not `h + 1` | open `0x9b67ca47` |
+| Swap Sell, the CLI (W-9, W-10) | The CLI took ZecuredSwap from the pinned record (`anvil.swap.json`). 0.003 ZEC for 3.757 USDC: scheduled at 4,525,929 (four blocks), anchor planned at 4,525,933 (`r` = 2); the payment was mined at 4,525,933 itself, so late, and its proof anchored at `h + 1 + r` = 4,525,936 (MOCK seal). Both orders settled, at 15:20:39 and 15:20:41; the CLI's whole Sell took 12 min 13 s | open `0xa4196792`, proof `0x69874164` |
+| Leak scan (P-6) | The lending and swap deployments, three wallets (the main one, the maker's, the treasury's) and two vaults: 302 identifiers; 77 events, 55 transactions' calldata, 177 storage words | **0 matches** |
 | The Ironwood index (W-11) | Testnet's whole Ironwood history from 4,134,000 (about 392,000 blocks, 231,000 Ironwood transactions, an 8.3 MB index) read in 27 s on the first run; a later run in 1 s | — |
 
 Found and fixed: on Windows a debug build of the CLI overflowed the main thread's 1 MiB stack while proving a payment
