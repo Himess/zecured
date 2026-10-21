@@ -702,7 +702,9 @@ async fn pay(wallet: &Path, lwd_url: &str, f: &mut SwapFile, q: &SwapQuote, path
     )?;
     let opening = unsigned.opening.clone();
     let pk = tokio::task::spawn_blocking(spend::proving_key).await?;
-    let tx = authorize(unsigned, &w.sk, &pk)?;
+    // Off the main thread: Halo 2 proving in a debug build needs more stack than Windows gives it (1 MiB).
+    let sk = w.sk;
+    let tx = tokio::task::spawn_blocking(move || authorize(unsigned, &sk, &pk)).await??;
     check_payment_note(&tx, &opening, f.order_id)?;
     let raw = spend::serialize(&tx)?;
     f.opening = Some(opening);

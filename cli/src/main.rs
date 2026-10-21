@@ -743,7 +743,9 @@ async fn send(w: &Wallet, url: &str, to: &str, amount: u64) -> Result<String> {
         &payments,
     )?;
     let pk = tokio::task::spawn_blocking(spend::proving_key).await?;
-    let pczt = spend::finalize_and_prove(unsigned.pczt, &pk)?;
+    // Off the main thread: Halo 2 proving in a debug build needs more stack than Windows gives it (1 MiB).
+    let pczt = unsigned.pczt;
+    let pczt = tokio::task::spawn_blocking(move || spend::finalize_and_prove(pczt, &pk)).await??;
     let mut signer = Signer::new(pczt).map_err(|e| anyhow!("signer: {e:?}"))?;
     let ask = SpendAuthorizingKey::from(&w.sk);
     for i in &unsigned.spend_action_indices {
@@ -942,8 +944,10 @@ async fn main() -> Result<()> {
                 println!("tier 3: no commitment names a claim of these destinations yet");
             }
         }
-        Cmd::Loan(cmd) => loan(&cli.wallet, &cli.lwd, &cli.backend, cmd).await?,
-        Cmd::Swap(cmd) => swap::run(&cli.wallet, &cli.lwd, cmd).await?,
+        // Boxed: these futures are large in a debug build, and `main`'s lives on the main thread's
+        // stack (1 MiB on Windows).
+        Cmd::Loan(cmd) => Box::pin(loan(&cli.wallet, &cli.lwd, &cli.backend, cmd)).await?,
+        Cmd::Swap(cmd) => Box::pin(swap::run(&cli.wallet, &cli.lwd, cmd)).await?,
     }
     Ok(())
 }
