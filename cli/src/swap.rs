@@ -163,13 +163,16 @@ struct SwapFile {
     status: String,
     /// W-10: the payment's schedule, drawn once the order is on Base: it is broadcast once the
     /// Zcash tip reaches `pay_after_height`, and its proof anchors at `planned_anchor_height` (a
-    /// late payment: one block above its own plus `anchor_draw`).
+    /// late payment: one block above its own plus `late_anchor_draw`, an `r` of its own drawn the
+    /// first time it is seen late, N-12).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pay_after_height: Option<u32>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     planned_anchor_height: Option<u32>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     anchor_draw: Option<u32>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    late_anchor_draw: Option<u32>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     opening: Option<PaymentOpening>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -233,6 +236,21 @@ fn schedule(f: &mut SwapFile, tip: u32, max: u32) {
     let c = anchor::current_height(tip);
     f.pay_after_height = Some(anchor::pay_after(c, delay));
     f.planned_anchor_height = Some(anchor::planned_anchor(c, max, r));
+}
+
+/// W-10, N-12: the anchor height of the payment mined at `height`: the planned one, or for a late
+/// payment (or one paid before anchors were planned) `height + 1 + r` with an `r` of its own, drawn
+/// the first time and kept in the file, never the order's `anchor_draw` (true: drawn now); never
+/// past `epoch_last`, the last block of the payment's epoch.
+fn proof_anchor(f: &mut SwapFile, height: u32, epoch_last: Option<u32>, max: u32) -> (Option<u32>, bool) {
+    let late = !f.planned_anchor_height.is_some_and(|p| p > height);
+    let drawn = late && f.late_anchor_draw.is_none();
+    if drawn {
+        f.late_anchor_draw = Some(anchor::draw(max).1);
+    }
+    // On time, the planned anchor: `r` is not used.
+    let r = f.late_anchor_draw.unwrap_or_default();
+    (anchor::anchor_height(f.planned_anchor_height, r, height, epoch_last), drawn)
 }
 
 /// The rules every run's options respect.
@@ -545,6 +563,7 @@ async fn take_sell_quote(
         pay_after_height: None,
         planned_anchor_height: None,
         anchor_draw: None,
+        late_anchor_draw: None,
         opening: None,
         txid: None,
         raw_tx: None,
@@ -670,6 +689,7 @@ async fn advance(wallet: &Path, lwd_url: &str, mut f: SwapFile, opts: &SwapOpts)
                 f.pay_after_height = None;
                 f.planned_anchor_height = None;
                 f.anchor_draw = None;
+                f.late_anchor_draw = None;
                 write_json(&path, &f)?;
                 println!("order {} settled", f.order_id);
                 return Ok(());
@@ -750,20 +770,15 @@ async fn prove(
             return Ok(false);
         }
     };
-    // A payment from before anchors were planned draws its anchor's `r` now, once.
-    let r = match f.anchor_draw {
-        Some(r) => r,
-        None => {
-            let (_, r) = anchor::draw(opts.pay_delay_max_blocks);
-            f.anchor_draw = Some(r);
-            write_json(path, f)?;
-            r
-        }
-    };
     let network = zcash_network();
     let epoch_last = anchor::epoch_last_height(network, height);
-    let anchor_height = anchor::anchor_height(f.planned_anchor_height, r, height, epoch_last)
-        .context("the payment is in the last block of its epoch: no anchor can prove it")?;
+    let (anchor_height, drawn) = proof_anchor(f, height, epoch_last, opts.pay_delay_max_blocks);
+    if drawn {
+        // A late payment's own `r`, drawn once: kept before anything else happens.
+        write_json(path, f)?;
+    }
+    let anchor_height =
+        anchor_height.context("the payment is in the last block of its epoch: no anchor can prove it")?;
     let Some(anchor) = anchor_at(provider, pin.swap, anchor_height, q.zatoshi).await? else {
         eprintln!("the relay has not the order's tier of work on top of the proof's anchor yet; waiting");
         return Ok(false);
@@ -1081,6 +1096,7 @@ mod tests {
             pay_after_height: None,
             planned_anchor_height: None,
             anchor_draw: None,
+            late_anchor_draw: None,
             opening: None,
             txid: None,
             raw_tx: None,
@@ -1141,6 +1157,25 @@ mod tests {
             (f.pay_after_height, f.planned_anchor_height, f.anchor_draw),
             "a resume keeps the schedule"
         );
+    }
+
+    /// N-12: a late payment's anchor (`h + 1 + r`) takes an `r` of its own, drawn the first time and
+    /// kept in the order's file, never the order's `anchor_draw`; on time, the planned anchor.
+    #[test]
+    fn n12_a_late_payment_anchors_with_an_r_of_its_own() {
+        let mut f = scheduled();
+        assert_eq!(proof_anchor(&mut f, 4_500_010, None, 8), (Some(4_500_014), false), "on time");
+        assert_eq!(f.late_anchor_draw, None);
+        let (a, drawn) = proof_anchor(&mut f, 4_500_014, None, 8);
+        let r = f.late_anchor_draw.expect("drawn");
+        assert!(drawn && r <= 8);
+        assert_eq!(a, Some(4_500_015 + r), "late: h + 1 + its own r");
+        assert_eq!(proof_anchor(&mut f, 4_500_014, None, 8), (a, false), "drawn once");
+        let back: SwapFile = serde_json::from_value(serde_json::to_value(&f).unwrap()).unwrap();
+        assert_eq!(back.late_anchor_draw, Some(r), "kept in the file");
+        f.late_anchor_draw = Some(0);
+        assert_eq!(proof_anchor(&mut f, 4_500_014, None, 8), (Some(4_500_015), false), "not the order's r (2)");
+        assert_eq!(proof_anchor(&mut f, 4_500_014, Some(4_500_014), 8), (None, false), "the epoch's last block");
     }
 
     /// N-9: without delays (`--pay-delay-max-blocks 0` with `--mock`, a local fork) the CLI still

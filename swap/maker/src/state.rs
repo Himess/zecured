@@ -70,6 +70,10 @@ pub struct OrderRecord {
     /// W-10: `r`, the anchor's random draw, drawn once for the order and kept across restarts.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub anchor_draw: Option<u32>,
+    /// N-12: a late payment's own `r` (its anchor is `h + 1 + r`), drawn apart from `anchor_draw`
+    /// the first time the payment is seen mined at or after its planned anchor, and kept.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub late_anchor_draw: Option<u32>,
     /// The payment's txid and the note's opening. Private; erased when done.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub txid: Option<String>,
@@ -109,6 +113,7 @@ impl OrderRecord {
         self.pay_after_height = None;
         self.planned_anchor_height = None;
         self.anchor_draw = None;
+        self.late_anchor_draw = None;
         self.expiry_height = None;
         self.mined_height = None;
         self.anchor_height = None;
@@ -201,6 +206,7 @@ mod tests {
             pay_after_height: Some(10),
             planned_anchor_height: Some(25),
             anchor_draw: Some(5),
+            late_anchor_draw: Some(2),
             txid: Some("cd".repeat(32)),
             opening: Some(PaymentOpening {
                 action_index: 1,
@@ -265,11 +271,13 @@ mod tests {
         let back = Book::load(&path).unwrap();
         let r = &back.orders[&B256::repeat_byte(1)];
         assert_eq!((r.planned_anchor_height, r.anchor_draw, r.anchor_height), (Some(25), Some(5), Some(25)));
+        assert_eq!(r.late_anchor_draw, Some(2), "N-12: a late payment's own draw too");
         let mut old = serde_json::to_value(&book).unwrap();
         let o = old["orders"].as_object_mut().unwrap().values_mut().next().unwrap().as_object_mut().unwrap();
         for k in [
             "planned_anchor_height",
             "anchor_draw",
+            "late_anchor_draw",
             "anchor_height",
             "input_nullifiers",
         ] {
@@ -278,6 +286,7 @@ mod tests {
         o.insert("anchor_after_height".into(), serde_json::json!(13));
         let r: Book = serde_json::from_value(old).unwrap();
         assert_eq!(r.orders[&B256::repeat_byte(1)].anchor_draw, None);
+        assert_eq!(r.orders[&B256::repeat_byte(1)].late_anchor_draw, None);
         let _ = fs::remove_dir_all(&dir);
     }
 

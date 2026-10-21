@@ -109,10 +109,11 @@ pub enum Step {
     /// time (W-8).
     PaymentExpired,
     /// Record the payment's block and the anchor height of its proof (W-10: the planned one, or a
-    /// late payment's).
+    /// late payment's), and a late payment's own `r` (N-12), kept once drawn.
     ScheduleAnchor {
         mined: u32,
         anchor: u32,
+        late_draw: Option<u32>,
     },
     Prove,
     Drop,
@@ -126,8 +127,9 @@ pub enum Step {
 }
 
 /// The next step for `rec` given `f`. `pay_delay` (1 to `pay_delay_max_blocks`) and `draw` (0 to
-/// `pay_delay_max_blocks`, the anchor's `r`) are the random draws (`zecured_swap::anchor::draw`),
-/// made by the caller; an order keeps the first `draw` it is scheduled with.
+/// `pay_delay_max_blocks`, an anchor's `r`) are the random draws (`zecured_swap::anchor::draw`),
+/// made by the caller; an order keeps the first `draw` it is scheduled with, and a late payment
+/// the first `draw` its late anchor takes (N-12).
 pub fn decide(cfg: &MakerConfig, rec: &OrderRecord, f: &Facts, pay_delay: u32, draw: u32) -> Step {
     match f.status {
         OrderStatus::Settled => return Step::Finish(MakerStatus::Settled),
@@ -146,7 +148,7 @@ pub fn decide(cfg: &MakerConfig, rec: &OrderRecord, f: &Facts, pay_delay: u32, d
         };
     }
     let past_deadline = f.now > rec.pay_deadline;
-    let draw = rec.anchor_draw.unwrap_or(draw);
+    let order_draw = rec.anchor_draw.unwrap_or(draw);
     match (rec.side, rec.status) {
         (_, MakerStatus::Settled | MakerStatus::Refunded) => Step::Wait,
         (Side::Sell, _) => {
@@ -195,8 +197,8 @@ pub fn decide(cfg: &MakerConfig, rec: &OrderRecord, f: &Facts, pay_delay: u32, d
                     let c = anchor::current_height(tip);
                     Step::SchedulePayment {
                         pay_after: anchor::pay_after(c, pay_delay),
-                        planned_anchor: anchor::planned_anchor(c, cfg.pay_delay_max_blocks, draw),
-                        draw,
+                        planned_anchor: anchor::planned_anchor(c, cfg.pay_delay_max_blocks, order_draw),
+                        draw: order_draw,
                     }
                 }
             }
@@ -216,12 +218,24 @@ pub fn decide(cfg: &MakerConfig, rec: &OrderRecord, f: &Facts, pay_delay: u32, d
                             Step::Wait
                         }
                     }
-                    // W-10: the planned anchor whatever the payment's block, unless it came late;
-                    // W-20: never past the last block of the payment's epoch.
-                    _ => match anchor::anchor_height(rec.planned_anchor_height, draw, mined, f.payment_epoch_last) {
-                        Some(anchor) => Step::ScheduleAnchor { mined, anchor },
-                        None => Step::Abandon("paid, but its proof cannot land: the order will be refunded"),
-                    },
+                    // W-10: the planned anchor whatever the payment's block, unless it came late (or
+                    // was paid before anchors were planned): then `h + 1 + r` with an `r` of its own
+                    // (N-12), never the order's, which would tie the late anchor to the plan. W-20:
+                    // never past the last block of the payment's epoch.
+                    _ => {
+                        let late = !rec.planned_anchor_height.is_some_and(|p| p > mined);
+                        let late_draw = late.then(|| rec.late_anchor_draw.unwrap_or(draw));
+                        // On time, the planned anchor: `r` is not used.
+                        let r = late_draw.unwrap_or_default();
+                        match anchor::anchor_height(rec.planned_anchor_height, r, mined, f.payment_epoch_last) {
+                            Some(anchor) => Step::ScheduleAnchor {
+                                mined,
+                                anchor,
+                                late_draw,
+                            },
+                            None => Step::Abandon("paid, but its proof cannot land: the order will be refunded"),
+                        }
+                    }
                 },
                 // W-8: not mined as far as the server says, which proves nothing (a reorganization, a
                 // server behind or another one): before its expiry height the payment is sent again;
@@ -420,6 +434,7 @@ pub fn new_record(
         pay_after_height: None,
         planned_anchor_height: None,
         anchor_draw: None,
+        late_anchor_draw: None,
         txid: None,
         opening: None,
         raw_tx: None,
@@ -730,12 +745,20 @@ impl Maker {
                 rec.input_nullifiers.clear();
                 rec.mined_height = None;
                 rec.anchor_height = None;
+                rec.late_anchor_draw = None;
             }
-            Step::ScheduleAnchor { mined, anchor } => {
+            Step::ScheduleAnchor {
+                mined,
+                anchor,
+                late_draw,
+            } => {
                 rec.mined_height = Some(mined);
                 rec.anchor_height = Some(anchor);
-                // A payment from before anchors were planned keeps the draw its anchor used.
-                rec.anchor_draw.get_or_insert(draw);
+                // N-12: a late payment keeps the draw its anchor took (a reorganization may move the
+                // payment again).
+                if let Some(r) = late_draw {
+                    rec.late_anchor_draw.get_or_insert(r);
+                }
             }
             Step::Prove => {
                 if !self.prove(client, &mut rec).await? {
@@ -918,6 +941,7 @@ mod tests {
             pay_after_height: None,
             planned_anchor_height: None,
             anchor_draw: None,
+            late_anchor_draw: None,
             txid: None,
             opening: None,
             raw_tx: None,
@@ -1003,7 +1027,8 @@ mod tests {
             decide(&cfg, &r, &f, 3, 2),
             Step::ScheduleAnchor {
                 mined: 4_500_005,
-                anchor: 4_500_014
+                anchor: 4_500_014,
+                late_draw: None
             }
         );
         r.mined_height = Some(4_500_005);
@@ -1064,7 +1089,8 @@ mod tests {
             decide(&cfg, &r, &f, 3, 2),
             Step::ScheduleAnchor {
                 mined: 4_500_006,
-                anchor: 4_500_014
+                anchor: 4_500_014,
+                late_draw: None
             }
         );
     }
@@ -1072,7 +1098,7 @@ mod tests {
     /// W-10: the proof's anchor height does not depend on the payment's block: every block the
     /// payment may land in below the planned anchor gives the order that same anchor; it is the
     /// payment's next block only when the payment came in the window's last block, and a late
-    /// payment anchors `r` blocks above its next one.
+    /// payment anchors its own `r` (N-12) blocks above its next one.
     #[test]
     fn w10_the_anchor_height_does_not_depend_on_the_payment_height() {
         let cfg = judge_like();
@@ -1093,8 +1119,47 @@ mod tests {
         let anchors: Vec<u32> = (4_500_002..4_500_017).map(anchor_for).collect();
         assert!(anchors.iter().all(|a| *a == 4_500_017), "the anchor follows the payment: {anchors:?}");
         assert_eq!(anchor_for(4_500_016), 4_500_017, "h + 1 only for the window's last block");
-        assert_eq!(anchor_for(4_500_017), 4_500_023, "late: h + 1 + r, with the order's r");
-        assert_eq!(anchor_for(4_500_022), 4_500_028);
+        assert_eq!(anchor_for(4_500_017), 4_500_018, "late: h + 1 + its own r (the draw given, 0)");
+        assert_eq!(anchor_for(4_500_022), 4_500_023);
+    }
+
+    /// N-12: a late payment's anchor (`h + 1 + r`) takes an `r` of its own, the draw the engine gives
+    /// when the payment is first seen late, never the order's: that one would tie the late anchor to
+    /// the plan and narrow the blocks the payment hides among.
+    #[test]
+    fn n12_a_late_payment_anchors_with_an_r_of_its_own() {
+        let cfg = judge_like();
+        let mut r = rec(Side::Buy, MakerStatus::Paid);
+        r.expiry_height = Some(4_500_123);
+        r.planned_anchor_height = Some(4_500_017);
+        r.anchor_draw = Some(5);
+        let mut f = facts(1_000_200);
+        f.zcash_tip = 4_500_030;
+        f.payment = Some(Seen::Mined(4_500_017));
+        let step = decide(&cfg, &r, &f, 3, 0);
+        assert!(matches!(step, Step::ScheduleAnchor { anchor: 4_500_018, .. }), "h + 1 + 0, not + 5: {step:?}");
+        // The engine keeps that draw: moved by a reorganization, the payment keeps it.
+        assert_eq!(
+            step,
+            Step::ScheduleAnchor {
+                mined: 4_500_017,
+                anchor: 4_500_018,
+                late_draw: Some(0)
+            }
+        );
+        r.late_anchor_draw = Some(3);
+        f.payment = Some(Seen::Mined(4_500_019));
+        assert!(matches!(decide(&cfg, &r, &f, 3, 7), Step::ScheduleAnchor { anchor: 4_500_023, .. }), "kept");
+        // On time, no draw of its own: the planned anchor.
+        f.payment = Some(Seen::Mined(4_500_009));
+        assert!(matches!(
+            decide(&cfg, &r, &f, 3, 7),
+            Step::ScheduleAnchor {
+                anchor: 4_500_017,
+                late_draw: None,
+                ..
+            }
+        ));
     }
 
     /// W-10: a payment that could no longer land below its planned anchor (held by another unmined
@@ -1140,7 +1205,8 @@ mod tests {
             decide(&cfg, &r, &f, 3, 0),
             Step::ScheduleAnchor {
                 mined: 4_500_008,
-                anchor: 4_500_010
+                anchor: 4_500_010,
+                late_draw: None
             },
             "cut at the epoch's last block"
         );
