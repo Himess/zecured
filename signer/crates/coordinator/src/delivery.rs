@@ -765,6 +765,9 @@ impl Coordinator {
     /// W-10: the payout's anchor plan, as kept; a payout this coordinator did not plan gets its `r`
     /// now, kept at once so that every proof of the payout takes the same anchor.
     pub(crate) async fn anchor_plan(&self, vault_id: &B256, reference: B256) -> Result<(Option<u32>, u32)> {
+        if let Some(a) = self.vault(vault_id).await?.anchors.iter().find(|a| a.payout_ref == reference) {
+            return Ok((a.planned, a.r)); // kept: read without writing the vault's record again
+        }
         let fresh = draw_r(self.cfg.payout_delay_max_blocks);
         self.update_vault(vault_id, |cur| match cur.anchors.iter().find(|a| a.payout_ref == reference) {
             Some(a) => (a.planned, a.r),
