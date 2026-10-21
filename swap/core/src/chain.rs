@@ -1,6 +1,7 @@
-//! ZecuredSwap on Base, as a payer uses it: the anchor a payment proof needs (a header on the
-//! relay's best chain above the payment's block, with the order's tier of work on top), whether the
-//! seal's guest is an active Swap version, and the proof and finalization transactions.
+//! ZecuredSwap on Base, as a payer uses it: the anchor a payment proof needs (the relay's
+//! best-chain header at the height the payer planned, with the order's tier of work on top: W-10),
+//! whether a proof could land now (the guest's Swap version working, the relay keeping up: W-7),
+//! and the proof and finalization transactions.
 
 use alloy::{
     primitives::{Address, B256, U256},
@@ -10,24 +11,9 @@ use anyhow::{Context, Result, ensure};
 use zecured_base::{
     events::{IZcashHeaderRelay, IZecuredVersions, version_id},
     gas_with_headroom,
-    relay::anchor_above,
 };
 
 use crate::{VERSION_SWAP, abi::IZecuredSwap, seal::SealFile};
-
-/// The anchor of a payment of an order of `zatoshi` mined at `height`: the swap's relay and the
-/// work its tier for the order's amount requires; `None` until the relay has got that far.
-pub async fn payment_anchor<P: Provider>(
-    provider: &P,
-    swap: Address,
-    height: u32,
-    zatoshi: u64,
-) -> Result<Option<u32>> {
-    let s = IZecuredSwap::new(swap, provider);
-    let relay = s.relay().call().await.context("ZecuredSwap.relay")?;
-    let min: U256 = s.minConfirmationWorkFor(zatoshi).call().await.context("ZecuredSwap.minConfirmationWorkFor")?;
-    anchor_above(provider, relay, height, min).await
-}
 
 /// W-10: the hash of the relay's best-chain header at exactly `height`, once the work the order's
 /// tier asks (`minConfirmationWorkFor(zatoshi)`) is on top of it; `None` until then (the relay's
@@ -131,21 +117,6 @@ pub async fn relay_tip<P: Provider>(provider: &P, swap: Address) -> Result<u64> 
     let relay = IZecuredSwap::new(swap, provider).relay().call().await.context("ZecuredSwap.relay")?;
     let tip = IZcashHeaderRelay::new(relay, provider).bestChainTip().call().await.context("relay tip")?;
     Ok(u64::try_from(tip.height)?)
-}
-
-/// Whether ZecuredSwap takes a seal of `image_id` behind router selector `selector` (an active Swap
-/// version of its version registry).
-pub async fn swap_version_active<P: Provider>(
-    provider: &P,
-    swap: Address,
-    selector: [u8; 4],
-    image_id: B256,
-) -> Result<bool> {
-    let versions = IZecuredSwap::new(swap, provider).versions().call().await.context("ZecuredSwap.versions")?;
-    Ok(IZecuredVersions::new(versions, provider)
-        .isActive(version_id(VERSION_SWAP, selector, image_id))
-        .call()
-        .await?)
 }
 
 /// Submits a payment proof of `order_id`; returns the Base transaction hash.

@@ -8,12 +8,17 @@
 //!   zecured-wallet swap status --order <orderId>
 //!
 //! The wallet deals only with the ZecuredSwap of its pinned deployment record
-//! (`--swap-deployment`), whatever contract or chain a maker names (W-9).
+//! (`--swap-deployment`), whatever contract or chain a maker names (W-9). It opens an order, and
+//! pays it, only while a proof could land: its payment guest is a working Swap version and the
+//! relay keeps up (W-7), and the payment, its anchor and the order's tier of work fit before a
+//! known network upgrade (W-20). It pays after a random delay, under an anchor whose height it
+//! drew before paying (W-10, docs/SWAP.md "Privacy").
 //!
 //! TEST ONLY: the taker is an EOA (`SWAP_TAKER_PRIVATE_KEY`) that pays its own Base gas; the app
 //! takes Buy orders from the user's own wallet. Each order's file (0600, next to the wallet) keeps
-//! the quote, the maker's receiver and salt and, once paid, the payment note's opening and txid:
-//! what `resume` needs to prove the payment, and nothing that ever leaves this machine.
+//! the quote, the maker's receiver and salt, the payment's schedule and, once paid, the payment
+//! note's opening and txid: what `resume` needs to prove the payment, and nothing that ever leaves
+//! this machine.
 
 use std::{
     path::{Path, PathBuf},
@@ -36,14 +41,21 @@ use zecured_deposit_witness::{p2p, payment};
 use zecured_swap::{
     OrderStatus, SIDE_SELL,
     abi::{IZecuredSwap, SwapQuote},
-    chain::{finalize_settlement, payment_anchor, prove_settlement, relay_tip, settlement_ready, swap_version_active},
-    pay::{PaymentOpening, authorize, build_payment, check_payment_note, select_inputs},
+    anchor::{self, MIN_PAY_DELAY_MAX_BLOCKS},
+    chain::{
+        ProofPath, anchor_at, blocks_for_work, finalize_settlement, prove_settlement, relay_tip, settlement_ready,
+        swap_version_id, swap_version_working,
+    },
+    pay::{PaymentOpening, Seen, authorize, build_payment, check_payment_note, payment_seen, select_inputs},
     quote::{check_quote_signature, swap_domain},
     seal::Prover,
 };
 use zecured_zcash_ops::{keys::ironwood_receiver, lwd, spend};
 
 use crate::{load_wallet, lwd_connect, read_json, read_secret_json, scan, write_json, zcash_network, zcash_params};
+
+/// Relay headers whose average work estimates how many blocks the order's tier of work takes (W-20).
+const WORK_SAMPLE: u32 = 24;
 
 #[derive(Subcommand)]
 pub enum SwapCmd {
@@ -99,10 +111,25 @@ pub struct SwapOpts {
     headers: PathBuf,
     #[arg(long, default_value = "data/tier2/summaries.json")]
     summaries: PathBuf,
-    /// Refuse a quote whose pay window is shorter (seconds): this wallet must pay, wait for the
-    /// order's tier of work on the relay and prove before the deadline.
-    #[arg(long, default_value_t = 7_200)]
+    /// Refuse a quote whose pay window is shorter (seconds): this wallet waits its privacy delays
+    /// (up to 2 × `--pay-delay-max-blocks` + 2 blocks from the order to its proof's anchor), pays,
+    /// waits for the order's tier of work on the relay and proves before the deadline.
+    #[arg(long, default_value_t = 10_800)]
     min_window: u32,
+    /// The time this wallet needs from its payment to its proof on Base, seconds (the anchor, the
+    /// order's tier of work, proving, submitting): it never pays with less than that left before
+    /// the deadline; the order then goes back to the maker unpaid.
+    #[arg(long, default_value_t = 7_200)]
+    prove_secs: u64,
+    /// W-10: the payment waits a random 1 to this many Zcash blocks after the order lands on Base,
+    /// and its proof anchors at a height drawn before it (docs/SWAP.md "Privacy"). At least 2,
+    /// except with `--mock` (a local fork).
+    #[arg(long, default_value_t = 8)]
+    pay_delay_max_blocks: u32,
+    /// W-7: neither open nor pay while the Zcash header relay lags the light wallet server's tip
+    /// by more blocks than this.
+    #[arg(long, default_value_t = 5)]
+    max_relay_lag: u64,
     #[command(flatten)]
     pin: PinOpts,
 }
@@ -134,12 +161,145 @@ struct SwapFile {
     maker_receiver: String,
     maker_salt: String,
     status: String,
+    /// W-10: the payment's schedule, drawn once the order is on Base: it is broadcast once the
+    /// Zcash tip reaches `pay_after_height`, and its proof anchors at `planned_anchor_height` (a
+    /// late payment: one block above its own plus `anchor_draw`).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pay_after_height: Option<u32>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    planned_anchor_height: Option<u32>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    anchor_draw: Option<u32>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     opening: Option<PaymentOpening>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     txid: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     raw_tx: Option<String>,
+}
+
+/// What an opened order's payment does next (W-7, W-10, W-20).
+#[derive(Debug, PartialEq, Eq)]
+enum PayMove {
+    /// Draw the payment's delay and plan its anchor from the current height: nothing planned yet,
+    /// or the schedule went by unpaid (a payment now could no longer land below its anchor).
+    Schedule,
+    Wait(&'static str),
+    Pay,
+    GiveUp(&'static str),
+}
+
+/// What an opened order's payment depends on, read just before it is decided.
+struct PayFacts {
+    /// The light wallet server's Zcash tip.
+    tip: u32,
+    /// Base's clock, and the order's deadline.
+    now: u64,
+    deadline: u64,
+    /// W-7: whether a proof could land.
+    proofs: ProofPath,
+    /// W-20: the payment, its anchor and the order's tier of work fit in the tip's epoch, one the
+    /// statement proves on.
+    fits_epoch: bool,
+}
+
+fn pay_move(f: &SwapFile, x: &PayFacts, opts: &SwapOpts) -> PayMove {
+    if x.now.saturating_add(opts.prove_secs) > x.deadline {
+        return PayMove::GiveUp(
+            "too late to pay and prove before the deadline: nothing was paid, and the maker's USDC goes back to it",
+        );
+    }
+    match (f.pay_after_height, f.planned_anchor_height) {
+        (Some(after), Some(planned)) if x.tip.saturating_add(1) < planned => {
+            if let Some(why) = x.proofs.problem(opts.max_relay_lag) {
+                PayMove::Wait(why)
+            } else if !x.fits_epoch {
+                PayMove::Wait("the payment and its proof would not fit before a network upgrade activation")
+            } else if x.tip < after {
+                PayMove::Wait("the payment's random privacy delay")
+            } else {
+                PayMove::Pay
+            }
+        }
+        _ => PayMove::Schedule,
+    }
+}
+
+/// W-10: the payment's schedule from the tip `tip`: a fresh delay, and the anchor planned with the
+/// order's draw (drawn now, once, if it has none).
+fn schedule(f: &mut SwapFile, tip: u32, max: u32) {
+    let (delay, r) = anchor::draw(max);
+    let r = *f.anchor_draw.get_or_insert(r);
+    let c = anchor::current_height(tip);
+    f.pay_after_height = Some(anchor::pay_after(c, delay));
+    f.planned_anchor_height = Some(anchor::planned_anchor(c, max, r));
+}
+
+/// The rules every run's options respect.
+fn check_opts(opts: &SwapOpts) -> Result<()> {
+    ensure!(
+        opts.mock || opts.pay_delay_max_blocks >= MIN_PAY_DELAY_MAX_BLOCKS,
+        "--pay-delay-max-blocks is at least {MIN_PAY_DELAY_MAX_BLOCKS} outside a local fork (W-10)"
+    );
+    ensure!(
+        u64::from(opts.min_window) > opts.prove_secs,
+        "--min-window must leave room for the privacy delays on top of --prove-secs"
+    );
+    Ok(())
+}
+
+/// The Swap version this wallet's proofs need: its prover's guest and selector (`<host> payment
+/// image-id`, asked once).
+fn version_of(cache: &mut Option<B256>, prover: &Prover) -> Result<B256> {
+    if let Some(v) = cache {
+        return Ok(*v);
+    }
+    let v = swap_version_id(prover.selector(), prover.image_id()?);
+    *cache = Some(v);
+    Ok(v)
+}
+
+/// W-7: whether a proof of Swap version `version` could land now, the light wallet server's tip
+/// being `tip`.
+async fn proof_path(provider: &DynProvider, pin: &SwapPin, version: B256, tip: u32) -> Result<ProofPath> {
+    let version_working = swap_version_working(provider, pin.swap, version).await?;
+    let relay = relay_tip(provider, pin.swap).await?;
+    Ok(ProofPath {
+        version_working,
+        relay_lag: u64::from(tip).saturating_sub(relay),
+    })
+}
+
+/// W-20: whether a payment scheduled at the tip `tip`, its anchor and the order's tier of work fit
+/// in the tip's epoch (the tier's work in blocks is read from the relay only near a known
+/// activation).
+async fn fits_epoch(provider: &DynProvider, pin: &SwapPin, tip: u32, zatoshi: u64, max: u32) -> Result<bool> {
+    let network = zcash_network();
+    let last = anchor::epoch_last_height(network, tip);
+    let work = match last {
+        Some(_) => blocks_for_work(provider, pin.swap, zatoshi, WORK_SAMPLE).await?,
+        None => 0,
+    };
+    Ok(anchor::fits_in_epoch(
+        tip,
+        anchor::anchor_window(max).saturating_add(work),
+        anchor::provable_epoch(network, tip),
+        last,
+    ))
+}
+
+async fn lwd_tip(client: &mut lwd::LwdClient) -> Result<u32> {
+    Ok(u32::try_from(lwd::latest_block(client).await?.height)?)
+}
+
+/// Base's clock: the latest block's timestamp.
+async fn base_now(provider: &DynProvider) -> Result<u64> {
+    Ok(provider
+        .get_block_by_number(BlockNumberOrTag::Latest)
+        .await?
+        .context("no latest Base block")?
+        .header
+        .timestamp)
 }
 
 /// The quote as the maker's API returns it (integers as decimal strings).
@@ -271,6 +431,14 @@ fn usdc_units(usdc: f64) -> Result<U256> {
     Ok(U256::from((usdc * 1e6).round() as u64))
 }
 
+fn prover(wallet: &Path, order: &B256, opts: &SwapOpts) -> Prover {
+    Prover {
+        host: opts.host.clone(),
+        mock: opts.mock,
+        work: wallet.with_file_name(format!("proof-swap-{}", hex::encode(&order[..8]))),
+    }
+}
+
 pub async fn run(wallet: &Path, lwd_url: &str, cmd: SwapCmd) -> Result<()> {
     match cmd {
         SwapCmd::Sell {
@@ -279,11 +447,13 @@ pub async fn run(wallet: &Path, lwd_url: &str, cmd: SwapCmd) -> Result<()> {
             min_usdc,
             opts,
         } => {
+            check_opts(&opts)?;
             let zatoshi = crate::zats(zec)?;
             let f = take_sell_quote(wallet, &maker, zatoshi, min_usdc.map(usdc_units).transpose()?, &opts).await?;
             advance(wallet, lwd_url, f, &opts).await
         }
         SwapCmd::Resume { order, opts } => {
+            check_opts(&opts)?;
             let f: SwapFile = read_secret_json(&swap_path(wallet, &order))?;
             advance(wallet, lwd_url, f, &opts).await
         }
@@ -370,6 +540,9 @@ async fn take_sell_quote(
         maker_receiver: hex::encode(receiver),
         maker_salt: hex::encode(maker_salt),
         status: "quoted".into(),
+        pay_after_height: None,
+        planned_anchor_height: None,
+        anchor_draw: None,
         opening: None,
         txid: None,
         raw_tx: None,
@@ -389,24 +562,71 @@ async fn advance(wallet: &Path, lwd_url: &str, mut f: SwapFile, opts: &SwapOpts)
     let swap = IZecuredSwap::new(pin.swap, &provider);
     let q = f.quote.to_quote()?;
     let path = swap_path(wallet, &f.order_id);
+    let prover = prover(wallet, &f.order_id, opts);
+    let mut version = None;
     loop {
         match f.status.as_str() {
             "quoted" => {
                 ensure!(q.taker == me, "this order's quote is for another taker key");
+                // W-7, W-20: no order whose payment could not be proven.
+                let mut client = lwd_connect(lwd_url).await?;
+                let tip = lwd_tip(&mut client).await?;
+                let path_now = proof_path(&provider, &pin, version_of(&mut version, &prover)?, tip).await?;
+                if let Some(why) = path_now.problem(opts.max_relay_lag) {
+                    bail!("{why}: the order is not opened");
+                }
+                ensure!(
+                    fits_epoch(&provider, &pin, tip, q.zatoshi, opts.pay_delay_max_blocks).await?,
+                    "the payment and its proof would not fit before a network upgrade activation: the order is not opened"
+                );
                 let call = swap.open(q.clone(), f.signature.clone(), B256::ZERO);
                 let gas = gas_with_headroom(call.estimate_gas().await.context("estimate open")?);
                 let r = call.gas(gas).send().await?.get_receipt().await?;
                 ensure!(r.status(), "open reverted");
                 println!("order opened on Base (tx {})", r.transaction_hash);
+                // The payment is scheduled in "opened": a stop right here never opens twice.
                 f.status = "opened".into();
             }
             "opened" => {
-                // Marks the order "paid" (with the opening) before the broadcast: a resume never
-                // pays twice, it rebroadcasts.
-                pay(wallet, lwd_url, &mut f, &q, &path).await?;
+                let o = swap.order(f.order_id).call().await?;
+                ensure!(
+                    OrderStatus::from_u8(o.status)? == OrderStatus::Open,
+                    "the order is no longer open on Base: nothing was paid"
+                );
+                let mut client = lwd_connect(lwd_url).await?;
+                let tip = lwd_tip(&mut client).await?;
+                let x = PayFacts {
+                    tip,
+                    now: base_now(&provider).await?,
+                    deadline: o.payDeadline,
+                    proofs: proof_path(&provider, &pin, version_of(&mut version, &prover)?, tip).await?,
+                    fits_epoch: fits_epoch(&provider, &pin, tip, q.zatoshi, opts.pay_delay_max_blocks).await?,
+                };
+                match pay_move(&f, &x, opts) {
+                    PayMove::Schedule => {
+                        schedule(&mut f, tip, opts.pay_delay_max_blocks);
+                        eprintln!("the payment waits a random privacy delay of a few Zcash blocks");
+                    }
+                    PayMove::Wait(why) => {
+                        eprintln!("{why}; waiting");
+                        tokio::time::sleep(Duration::from_secs(30)).await;
+                        continue;
+                    }
+                    PayMove::GiveUp(why) => bail!("{why}"),
+                    // Marks the order "paid" (with the opening) before the broadcast: a resume never
+                    // pays twice, it rebroadcasts.
+                    PayMove::Pay => pay(wallet, lwd_url, &mut f, &q, &path).await?,
+                }
             }
             "paid" => {
-                if prove(wallet, lwd_url, &f, &q, opts, &provider).await? {
+                // A proof only lands by the deadline: past it, the maker refunds itself.
+                let deadline = swap.order(f.order_id).call().await?.payDeadline;
+                ensure!(
+                    base_now(&provider).await? <= deadline,
+                    "the deadline passed before the payment was proven: the order goes back to the maker"
+                );
+                let version = version_of(&mut version, &prover)?;
+                if prove(lwd_url, &mut f, &q, opts, &provider, &pin, &prover, version, &path).await? {
                     f.status = "proven".into();
                 } else {
                     tokio::time::sleep(Duration::from_secs(30)).await;
@@ -429,12 +649,7 @@ async fn advance(wallet: &Path, lwd_url: &str, mut f: SwapFile, opts: &SwapOpts)
                     f.status = "paid".into();
                 } else {
                     let relay = relay_tip(&provider, pin.swap).await?;
-                    let now = provider
-                        .get_block_by_number(BlockNumberOrTag::Latest)
-                        .await?
-                        .context("no latest Base block")?
-                        .header
-                        .timestamp;
+                    let now = base_now(&provider).await?;
                     if settlement_ready(&p, relay, now) {
                         let tx = finalize_settlement(&provider, pin.swap, f.order_id).await?;
                         println!("settled: {} USDC units to {me} (tx {tx})", q.usdc);
@@ -447,9 +662,12 @@ async fn advance(wallet: &Path, lwd_url: &str, mut f: SwapFile, opts: &SwapOpts)
                 }
             }
             "settled" => {
-                // The payment's opening is no longer needed.
+                // The payment's opening and schedule are no longer needed.
                 f.opening = None;
                 f.raw_tx = None;
+                f.pay_after_height = None;
+                f.planned_anchor_height = None;
+                f.anchor_draw = None;
                 write_json(&path, &f)?;
                 println!("order {} settled", f.order_id);
                 return Ok(());
@@ -498,37 +716,65 @@ async fn pay(wallet: &Path, lwd_url: &str, f: &mut SwapFile, q: &SwapQuote, path
     Ok(())
 }
 
-/// Proves a mined payment and submits the proof; false while it is unmined or its anchor is not on
-/// the relay yet.
+/// Proves a mined payment under the anchor it planned (W-10) and submits the proof; false while the
+/// payment is unmined, its anchor has not the order's tier of work on the relay yet, or no proof of
+/// Swap version `version` could land (W-7).
+#[allow(clippy::too_many_arguments)]
 async fn prove(
-    wallet: &Path,
     lwd_url: &str,
-    f: &SwapFile,
+    f: &mut SwapFile,
     q: &SwapQuote,
     opts: &SwapOpts,
     provider: &DynProvider,
+    pin: &SwapPin,
+    prover: &Prover,
+    version: B256,
+    path: &Path,
 ) -> Result<bool> {
     let mut client = lwd_connect(lwd_url).await?;
     let txid = TxId::from_hex(f.txid.as_deref().context("no txid")?).context("stored txid")?;
-    // Unknown to the server (a payment just broadcast may not have reached its node yet, or the
-    // node dropped it) or in its mempool: rebroadcast and wait.
-    let height = lwd::raw_transaction_if_known(&mut client, &txid).await?.map_or(0, |(_, h)| h);
-    if height == 0 {
-        if let Some(raw) = &f.raw_tx {
-            let _ = spend::broadcast_raw(&mut client, hex::decode(raw)?).await;
+    // Not mined yet (a payment just broadcast may not have reached the server's node, the node
+    // dropped it, or it is in a block off the main chain): rebroadcast and wait. A transport error
+    // is an error, never "not mined".
+    let height = match payment_seen(&mut client, &txid).await? {
+        Seen::Mined(h) => h,
+        Seen::NotMined => {
+            if let Some(raw) = &f.raw_tx {
+                let _ = spend::broadcast_raw(&mut client, hex::decode(raw)?).await;
+            }
+            eprintln!("the payment is not mined yet; waiting");
+            return Ok(false);
         }
-        eprintln!("the payment is not mined yet; waiting");
-        return Ok(false);
-    }
-    let height = u32::try_from(height)?;
-    let Some(anchor) = payment_anchor(provider, f.swap, height, q.zatoshi).await? else {
-        eprintln!("the relay has not the order's work on top of the payment yet; waiting");
+    };
+    // A payment from before anchors were planned draws its anchor's `r` now, once.
+    let r = match f.anchor_draw {
+        Some(r) => r,
+        None => {
+            let (_, r) = anchor::draw(opts.pay_delay_max_blocks);
+            f.anchor_draw = Some(r);
+            write_json(path, f)?;
+            r
+        }
+    };
+    let network = zcash_network();
+    let epoch_last = anchor::epoch_last_height(network, height);
+    let anchor_height = anchor::anchor_height(f.planned_anchor_height, r, height, epoch_last)
+        .context("the payment is in the last block of its epoch: no anchor can prove it")?;
+    let Some(anchor) = anchor_at(provider, pin.swap, anchor_height, q.zatoshi).await? else {
+        eprintln!("the relay has not the order's tier of work on top of the proof's anchor yet; waiting");
         return Ok(false);
     };
-    let (headers, network) = (opts.headers.clone(), zcash_network());
+    // W-7: no proving run while ZecuredSwap would not take the proof.
+    if !swap_version_working(provider, pin.swap, version).await? {
+        eprintln!(
+            "ZecuredSwap takes no proof of this wallet's payment guest now (its Swap version is not working); waiting"
+        );
+        return Ok(false);
+    }
+    let headers = opts.headers.clone();
     let have =
         tokio::task::spawn_blocking(move || p2p::extend_file(network, &headers, &p2p::seed_peers(network))).await??;
-    ensure!(have >= anchor, "the P2P peers are behind the relay");
+    ensure!(have >= anchor_height, "the P2P peers are behind the relay");
     let opening = f.opening.clone().context("no opening")?;
     let built = payment::build(
         &mut client,
@@ -539,21 +785,21 @@ async fn prove(
         &opening,
         Some(f.order_id.0),
         Some(q.makerReceiverCommitment.0),
-        anchor,
+        anchor_height,
     )
     .await?;
-    let prover = Prover {
-        host: opts.host.clone(),
-        mock: opts.mock,
-        work: wallet.with_file_name(format!("proof-swap-{}", hex::encode(&f.order_id[..8]))),
-    };
+    ensure!(
+        B256::from(built.journal.anchor) == anchor,
+        "the P2P headers' block at the anchor's height is not the relay's"
+    );
     let witness = built.witness;
+    let prover = prover.clone();
     let seal = tokio::task::spawn_blocking(move || prover.seal(&witness)).await??;
     ensure!(
-        swap_version_active(provider, f.swap, seal.selector()?, seal.image_id).await?,
-        "ZecuredSwap takes no proof of this guest and verifier (not an active Swap version)"
+        swap_version_working(provider, pin.swap, swap_version_id(seal.selector()?, seal.image_id)).await?,
+        "ZecuredSwap takes no proof of this guest and verifier now (its Swap version is not working)"
     );
-    let tx = prove_settlement(provider, f.swap, f.order_id, &seal).await?;
+    let tx = prove_settlement(provider, pin.swap, f.order_id, &seal).await?;
     println!(
         "payment proven{} (tx {tx}); the settlement waits for the relay to move on (K3)",
         if opts.mock { " (MOCK seal)" } else { "" }
@@ -612,10 +858,17 @@ mod tests {
             headers: "headers.json".into(),
             summaries: "summaries.json".into(),
             min_window: 10_800,
+            prove_secs: 7_200,
+            pay_delay_max_blocks: 8,
+            max_relay_lag: 5,
             pin: PinOpts {
                 swap_deployment: deployment.into(),
             },
         }
+    }
+
+    fn some_opts() -> SwapOpts {
+        opts("http://127.0.0.1:9", Path::new("base-sepolia.swap.json"), &PrivateKeySigner::random())
     }
 
     fn temp_dir() -> PathBuf {
@@ -821,10 +1074,119 @@ mod tests {
             maker_receiver: "ab".repeat(43),
             maker_salt: "5a".repeat(32),
             status: "opened".into(),
+            pay_after_height: None,
+            planned_anchor_height: None,
+            anchor_draw: None,
             opening: None,
             txid: None,
             raw_tx: None,
         }
+    }
+
+    fn facts(tip: u32) -> PayFacts {
+        PayFacts {
+            tip,
+            now: 1_000_000,
+            deadline: 1_000_000 + 21_600,
+            proofs: ProofPath {
+                version_working: true,
+                relay_lag: 1,
+            },
+            fits_epoch: true,
+        }
+    }
+
+    /// An opened order scheduled at tip 4,500,000: broadcast once the tip reaches 4,500,003, the
+    /// anchor at 4,500,001 + 8 + 1 + 2.
+    fn scheduled() -> SwapFile {
+        let mut f = file();
+        f.pay_after_height = Some(4_500_003);
+        f.planned_anchor_height = Some(4_500_012);
+        f.anchor_draw = Some(2);
+        f
+    }
+
+    /// W-10: the CLI plans its proof's anchor first, then pays after its random delay; the order's
+    /// draw is kept when a payment held past its anchor is planned again, and in its file.
+    #[test]
+    fn w10_the_cli_delays_its_payment() {
+        let o = some_opts();
+        let mut f = file();
+        assert_eq!(pay_move(&f, &facts(4_500_000), &o), PayMove::Schedule, "nothing planned yet");
+        schedule(&mut f, 4_500_000, 8);
+        let (after, planned, r) =
+            (f.pay_after_height.unwrap(), f.planned_anchor_height.unwrap(), f.anchor_draw.unwrap());
+        assert!((4_500_001..=4_500_008).contains(&after), "1 to 8 blocks: {after}");
+        assert!(r <= 8);
+        assert_eq!(planned, 4_500_001 + 8 + 1 + r, "c + pay_delay_max_blocks + 1 + r, c the block being mined");
+        assert_eq!(pay_move(&f, &facts(after - 1), &o), PayMove::Wait("the payment's random privacy delay"));
+        assert_eq!(pay_move(&f, &facts(after), &o), PayMove::Pay);
+        // Held until a payment could no longer land below the planned anchor: planned again.
+        assert_eq!(pay_move(&f, &facts(planned - 2), &o), PayMove::Pay);
+        assert_eq!(pay_move(&f, &facts(planned - 1), &o), PayMove::Schedule);
+        schedule(&mut f, planned - 1, 8);
+        assert_eq!(f.anchor_draw, Some(r), "one draw per order");
+        assert_eq!(f.planned_anchor_height, Some(planned + 8 + 1 + r));
+        let back: SwapFile = serde_json::from_value(serde_json::to_value(&f).unwrap()).unwrap();
+        assert_eq!(
+            (back.pay_after_height, back.planned_anchor_height, back.anchor_draw),
+            (f.pay_after_height, f.planned_anchor_height, f.anchor_draw),
+            "a resume keeps the schedule"
+        );
+    }
+
+    /// W-7: no payment while no proof could land: the Swap version not working (removed, or the
+    /// router's verifier stopped), or the relay behind.
+    #[test]
+    fn w7_the_cli_does_not_pay_while_no_proof_could_land() {
+        let o = some_opts();
+        let f = scheduled();
+        let mut x = facts(4_500_003);
+        assert_eq!(pay_move(&f, &x, &o), PayMove::Pay);
+        x.proofs.version_working = false;
+        assert!(
+            matches!(pay_move(&f, &x, &o), PayMove::Wait(why) if why.contains("not working")),
+            "a stopped version"
+        );
+        x.proofs = ProofPath {
+            version_working: true,
+            relay_lag: 6,
+        };
+        assert!(matches!(pay_move(&f, &x, &o), PayMove::Wait(why) if why.contains("relay")), "a lagging relay");
+    }
+
+    /// W-20: no payment whose anchor and tier of work would not fit before a known activation.
+    #[test]
+    fn w20_the_cli_does_not_pay_near_a_known_activation() {
+        let o = some_opts();
+        let mut x = facts(4_500_003);
+        x.fits_epoch = false;
+        assert!(matches!(pay_move(&scheduled(), &x, &o), PayMove::Wait(why) if why.contains("activation")));
+    }
+
+    /// The CLI never pays with less than `--prove-secs` left before the deadline.
+    #[test]
+    fn the_cli_does_not_pay_too_close_to_its_deadline() {
+        let o = some_opts();
+        let mut x = facts(4_500_003);
+        x.now = x.deadline - 7_200;
+        assert_eq!(pay_move(&scheduled(), &x, &o), PayMove::Pay);
+        x.now += 1;
+        assert!(matches!(pay_move(&scheduled(), &x, &o), PayMove::GiveUp(_)));
+    }
+
+    /// W-10: the options keep a privacy delay outside a local fork, and room for it in the window.
+    #[test]
+    fn w10_the_options_keep_a_privacy_delay() {
+        let mut o = some_opts();
+        o.mock = false;
+        check_opts(&o).unwrap();
+        o.pay_delay_max_blocks = 1;
+        assert!(check_opts(&o).is_err(), "one block outside a local fork");
+        o.mock = true;
+        check_opts(&o).unwrap();
+        o.min_window = 7_200;
+        assert!(check_opts(&o).is_err(), "no room for the delays");
     }
 
     /// W-9: the pin is DeploySwap's record; an order file of another contract or chain is refused.
