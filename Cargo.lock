@@ -7343,6 +7343,7 @@ dependencies = [
  "hex",
  "serde",
  "serde_json",
+ "sha2 0.10.9",
  "tokio",
  "zecured-policy",
 ]
@@ -7405,9 +7406,9 @@ dependencies = [
 name = "zecured-deposit-k4"
 version = "0.1.0"
 dependencies = [
- "orchard",
  "zcash_address",
  "zcash_history",
+ "zcash_primitives",
  "zcash_protocol",
  "zecured-deposit-statement",
 ]

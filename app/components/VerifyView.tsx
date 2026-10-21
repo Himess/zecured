@@ -120,8 +120,8 @@ export function VerifyView() {
             </li>
             <li>Or import the key as a view-only account in an Ironwood-capable wallet that accepts a UFVK.</li>
             <li>
-              You should see your deposit note of exactly the vault&apos;s amount, any non-conforming notes (refundable), and
-              later the vault&apos;s spends when you exit.
+              You should see your deposit note of exactly the vault&apos;s amount, any other payment to the vault (it comes back
+              only as a refund proven on Base), and later the vault&apos;s spends when you exit.
             </li>
           </ol>
         </Card>

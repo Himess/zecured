@@ -35,7 +35,7 @@ use zecured_base::events::{self, RegistryEvent};
 use zecured_zcash_ops::spend::zip317_fee;
 
 use crate::chain::{
-    CloseRequest, DeleverageRequest, Deployment, IRegistryView, ISettlementAdapter, ORACLE_PRICE_SCALE,
+    CloseRequest, DeleverageRequest, Deployment, IRegistryView, ISettlementAdapter, Liquidation, ORACLE_PRICE_SCALE,
 };
 
 #[derive(Parser)]
@@ -194,8 +194,48 @@ async fn liquidator(
     }
 }
 
-/// Base blocks of Registry events the liquidator reads per pass at most.
+/// Base blocks of Registry events the liquidator reads per step (`events::fetch` splits them into
+/// the ranges the provider accepts).
 const EVENT_STEP: u64 = 20_000;
+/// Review H-11: how long one pass keeps reading Registry events before it checks the vaults it
+/// knows (at least one step is read). A bound in time, not blocks: at Base's 200 ms blocks
+/// (Denim) one 20,000-block step per pass would take hours to catch up after a restart, while
+/// the vaults activated meanwhile went unwatched.
+const EVENT_SCAN_BUDGET: Duration = Duration::from_secs(20);
+
+/// Reads Registry events after `cursor` up to `head` through `fetch`, step by step, for at most
+/// `budget` (at least one step), adding the vaults activated in them to `accounts`. `cursor`
+/// moves past every step read, so a backlog makes progress pass after pass, and a failing step
+/// keeps what the steps before it found.
+async fn scan_activations<F, Fut>(
+    cursor: &mut u64,
+    head: u64,
+    budget: Duration,
+    accounts: &mut BTreeMap<B256, Address>,
+    mut fetch: F,
+) -> Result<()>
+where
+    F: FnMut(u64, u64) -> Fut,
+    Fut: std::future::Future<Output = Result<Vec<events::VaultEvent>>>,
+{
+    let started = std::time::Instant::now();
+    while *cursor < head {
+        let to = head.min(cursor.saturating_add(EVENT_STEP));
+        for ev in fetch(*cursor + 1, to).await? {
+            if let RegistryEvent::VaultActivated { account, .. } = ev.event {
+                accounts.insert(ev.vault_id, account);
+            }
+        }
+        *cursor = to;
+        if started.elapsed() >= budget {
+            break;
+        }
+    }
+    Ok(())
+}
+
+/// A liquidation's receipt is waited for at most this long (alloy's default is forever).
+const RECEIPT_TIMEOUT: Duration = Duration::from_secs(120);
 
 async fn liquidation_pass<P: Provider>(
     p: &P,
@@ -207,41 +247,92 @@ async fn liquidation_pass<P: Provider>(
     cursor: &mut u64,
 ) -> Result<()> {
     let head = p.get_block_number().await?;
-    if head > *cursor {
-        // A bounded step per pass, so that a long backlog (a restart weeks after the deployment)
-        // makes progress pass after pass instead of failing as a whole.
-        let to = head.min(cursor.saturating_add(EVENT_STEP));
-        for ev in events::fetch(p, d.registry, *cursor + 1, to).await? {
-            if let RegistryEvent::VaultActivated { account, .. } = ev.event {
-                accounts.insert(ev.vault_id, account);
-            }
-        }
-        *cursor = to;
+    scan_activations(cursor, head, EVENT_SCAN_BUDGET, accounts, |from, to| events::fetch(p, d.registry, from, to))
+        .await?;
+    if accounts.is_empty() {
+        return Ok(());
     }
+    let market = chain::market_state(p, d).await?;
     for (vault_id, account) in accounts.clone() {
-        let pos = chain::position(p, d, account).await?;
-        if pos.borrow_shares == 0 || pos.healthy() {
-            continue;
-        }
-        info!(vault = %hex::encode(&vault_id[..4]), "unhealthy position: liquidating");
-        let commitment = chain::fresh_commitment(backend, zaddr, receiver).await?;
-        let adapter = ISettlementAdapter::new(d.adapter, p);
-        let call = adapter.liquidate(account, U256::ZERO, U256::from(pos.borrow_shares), commitment);
-        // Simulate first: the adapter enforces the dust floor and may revert.
-        if let Err(e) = call.call().await {
-            warn!("liquidation would revert: {e}");
-            continue;
-        }
-        let gas = zecured_base::gas_with_headroom(call.estimate_gas().await?);
-        let receipt = call.gas(gas).send().await?.get_receipt().await?;
-        ensure!(receipt.status(), "liquidation reverted");
-        info!(tx = %receipt.transaction_hash, "liquidated");
-        if pos.collateral > 0 {
-            accounts.remove(&vault_id);
+        // One vault's failure (a flaky RPC answer, a refused commitment) must not starve the
+        // vaults after it.
+        match watch_vault(p, backend, d, zaddr, receiver, &market, vault_id, account).await {
+            Ok(Watch::Keep) => {}
+            Ok(Watch::Closed) => {
+                accounts.remove(&vault_id);
+            }
+            Err(e) => warn!(vault = %hex::encode(&vault_id[..4]), "liquidation check failed: {e:#}"),
         }
     }
     Ok(())
 }
+
+/// Whether a vault stays on the watch list.
+enum Watch {
+    Keep,
+    /// The Registry closed the vault: nothing is left to liquidate.
+    Closed,
+}
+
+/// H-04: checks one vault and liquidates its position if it is unhealthy. A vault leaves the watch
+/// list only once the Registry reports it closed, never because it was liquidated: a partial
+/// liquidation leaves collateral, and the borrower may borrow against it again.
+#[allow(clippy::too_many_arguments)]
+async fn watch_vault<P: Provider>(
+    p: &P,
+    backend: &str,
+    d: &Deployment,
+    zaddr: &str,
+    receiver: &[u8; 43],
+    market: &chain::MarketState,
+    vault_id: B256,
+    account: Address,
+) -> Result<Watch> {
+    let v = IRegistryView::new(d.registry, p).vault(vault_id).call().await?;
+    match v.status {
+        chain::VAULT_CLOSED => return Ok(Watch::Closed),
+        chain::VAULT_ACTIVE => {}
+        _ => return Ok(Watch::Keep),
+    }
+    let pos = chain::position_in(p, d, market, account).await?;
+    let Some(plan) = chain::plan_liquidation(&pos, v.outstanding) else {
+        return Ok(Watch::Keep);
+    };
+    let short = hex::encode(&vault_id[..4]);
+    info!(vault = %short, underwater = matches!(plan, Liquidation::SeizeAll(_)), "unhealthy position: liquidating");
+    let adapter = ISettlementAdapter::new(d.adapter, p);
+    // Simulated first, with a placeholder commitment (the Adapter only refuses zero): the Adapter
+    // enforces the dust floor, and Morpho's accrued debt may differ from the stored one the plan was
+    // made from. A recipient is revealed to the signers (a rate-limited backend call) only for a
+    // liquidation that goes through.
+    let mut passing = None;
+    for attempt in chain::liquidation_attempts(plan, &pos, v.outstanding) {
+        let (seized_assets, repaid_shares) = attempt.arguments();
+        match adapter.liquidate(account, seized_assets, repaid_shares, PROBE_COMMITMENT).call().await {
+            Ok(_) => {
+                passing = Some(attempt);
+                break;
+            }
+            Err(e) => debug!(vault = %short, "liquidation {attempt:?} would revert: {e}"),
+        }
+    }
+    let Some(attempt) = passing else {
+        warn!(vault = %short, "every liquidation of this position would revert");
+        return Ok(Watch::Keep);
+    };
+    let commitment = chain::fresh_commitment(backend, zaddr, receiver).await?;
+    let (seized_assets, repaid_shares) = attempt.arguments();
+    let call = adapter.liquidate(account, seized_assets, repaid_shares, commitment);
+    let gas = zecured_base::gas_with_headroom(call.estimate_gas().await?);
+    let receipt = call.gas(gas).send().await?.with_timeout(Some(RECEIPT_TIMEOUT)).get_receipt().await?;
+    ensure!(receipt.status(), "liquidation reverted");
+    info!(vault = %short, tx = %receipt.transaction_hash, "liquidated");
+    // Kept: the next pass reads the vault again and drops it only once it is closed.
+    Ok(Watch::Keep)
+}
+
+/// A non-zero commitment for simulations only; never sent.
+const PROBE_COMMITMENT: B256 = B256::repeat_byte(0x01);
 
 // ------------------------------------------------------------------------- market maker
 
@@ -689,6 +780,71 @@ async fn close(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn activation(block: u64, id: u8) -> events::VaultEvent {
+        events::VaultEvent {
+            vault_id: B256::repeat_byte(id),
+            block,
+            log_index: 0,
+            block_hash: None,
+            timestamp: 0,
+            event: RegistryEvent::VaultActivated {
+                account: Address::repeat_byte(id),
+                amount: 1_000_000,
+                deposit_tag: B256::repeat_byte(id),
+            },
+        }
+    }
+
+    /// Activations at blocks 10, 45,000 and 60,001 (vaults 1, 2, 3).
+    async fn registry_logs(from: u64, to: u64) -> Result<Vec<events::VaultEvent>> {
+        Ok([(10, 1u8), (45_000, 2), (60_001, 3)]
+            .into_iter()
+            .filter(|(b, _)| (from..=to).contains(b))
+            .map(|(b, i)| activation(b, i))
+            .collect())
+    }
+
+    fn vaults(accounts: &BTreeMap<B256, Address>) -> Vec<u8> {
+        accounts.keys().map(|v| v[0]).collect()
+    }
+
+    /// H-11: a pass reads Registry events in steps until it has caught up or its time budget is
+    /// spent (at least one step), so a backlog of millions of 200 ms blocks no longer takes one
+    /// 20,000-block step per pass; the cursor and the vaults found keep every step read, even when
+    /// a later step fails.
+    #[tokio::test]
+    async fn the_event_scan_is_bounded_in_time_not_blocks() {
+        // Within the budget: everything up to the head in one pass.
+        let (mut cursor, mut accounts) = (0, BTreeMap::new());
+        scan_activations(&mut cursor, 70_000, Duration::from_secs(60), &mut accounts, registry_logs)
+            .await
+            .unwrap();
+        assert_eq!((cursor, vaults(&accounts)), (70_000, vec![1, 2, 3]));
+        // A spent budget: one step per pass, the cursor moving on.
+        let (mut cursor, mut accounts) = (0, BTreeMap::new());
+        scan_activations(&mut cursor, 70_000, Duration::ZERO, &mut accounts, registry_logs).await.unwrap();
+        assert_eq!((cursor, vaults(&accounts)), (EVENT_STEP, vec![1]));
+        scan_activations(&mut cursor, 70_000, Duration::ZERO, &mut accounts, registry_logs).await.unwrap();
+        assert_eq!((cursor, vaults(&accounts)), (2 * EVENT_STEP, vec![1]));
+        // Caught up: nothing is read.
+        let reads = std::sync::atomic::AtomicU32::new(0);
+        let counted = |from, to| {
+            reads.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+            registry_logs(from, to)
+        };
+        let mut caught_up = 70_000;
+        scan_activations(&mut caught_up, 70_000, Duration::ZERO, &mut accounts, counted).await.unwrap();
+        assert_eq!(reads.into_inner(), 0);
+        // A failing step: the steps before it are kept.
+        let (mut cursor, mut accounts) = (0, BTreeMap::new());
+        let flaky = |from: u64, to: u64| async move {
+            anyhow::ensure!(from < 40_000, "provider error");
+            registry_logs(from, to).await
+        };
+        assert!(scan_activations(&mut cursor, 70_000, Duration::from_secs(60), &mut accounts, flaky).await.is_err());
+        assert_eq!((cursor, vaults(&accounts)), (2 * EVENT_STEP, vec![1]));
+    }
 
     /// H-3: a borrower share that would be dust for the signers is refused, at quote time
     /// and on the signed minimum at execution time.

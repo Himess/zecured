@@ -4,8 +4,8 @@
  */
 import { useCallback, useEffect, useRef, useState } from "react";
 import type { Address, Hex } from "viem";
-import { api, describeError, type Vault } from "./api";
-import { readPosition, type PositionSnapshot } from "./chain";
+import { api, describeError, type MintingStatus, type Vault } from "./api";
+import { readPosition, readRefundReason, readVaultLedger, type PositionSnapshot, type RefundReason, type VaultLedger } from "./chain";
 import { config } from "./config";
 import { loanStore, type StoredLoan } from "./keys";
 import { storedVault, verifyVaultOpened, type VaultCheck } from "./signers";
@@ -60,9 +60,9 @@ export type VaultProofState =
   /** The loan has no vault yet. */
   | { state: "none" }
   | { state: "checking" }
-  /** Every signer vouches for the stored address and viewing key hash (C-4). */
+  /** Every signer vouches for the stored address and tag key hash (C-4). */
   | { state: "vouched"; check: VaultCheck }
-  /** Opened before vaults were signed: its address cannot be checked. */
+  /** Opened before vaults were signed, or under `VaultOpened` v1: its address cannot be checked. */
   | { state: "legacy" }
   /** The signatures do not check out, or this build cannot check them: never pay it. */
   | { state: "refused"; message: string };
@@ -80,7 +80,7 @@ export function useVaultProof(loan: StoredLoan | null): VaultProofState {
         loan.vaultId,
         loan.vaultAddress,
         loan.expiryHeight,
-        loan.ufvkHash,
+        loan.tagKeyHash,
         loan.amount,
         loan.owner,
         loan.account,
@@ -248,6 +248,78 @@ export function usePosition(account: Address | undefined, intervalMs = 30_000): 
   }, [account]);
   usePolling(refresh, intervalMs, enabled);
   return { data, error, loading, refresh };
+}
+
+/**
+ * The vault's v3 ledger on Base (claims, pending activation, freeze), polled through the RPC
+ * proxy; disabled while the contracts are not configured.
+ */
+export function useVaultLedger(vaultId: Hex | undefined, intervalMs = 30_000): Remote<VaultLedger> {
+  const enabled = Boolean(vaultId) && config.contractsDeployed;
+  const [data, setData] = useState<VaultLedger | null>(null);
+  const [error, setError] = useState<string | null>(null);
+  const [loading, setLoading] = useState(enabled);
+  const refresh = useCallback(async () => {
+    if (!vaultId || !config.contractsDeployed) return;
+    try {
+      setData(await readVaultLedger(vaultId));
+      setError(null);
+    } catch (e) {
+      setError(describeError(e));
+    } finally {
+      setLoading(false);
+    }
+  }, [vaultId]);
+  usePolling(refresh, intervalMs, enabled);
+  return { data, error, loading, refresh };
+}
+
+/** GET /status's minting gates (public state), polled; null data while the backend reports none. */
+export function useMintingStatus(intervalMs = 60_000): Remote<MintingStatus> {
+  const [data, setData] = useState<MintingStatus | null>(null);
+  const [error, setError] = useState<string | null>(null);
+  const [loading, setLoading] = useState(true);
+  const refresh = useCallback(async () => {
+    try {
+      setData(await api.getMintingStatus());
+      setError(null);
+    } catch (e) {
+      setError(describeError(e));
+    } finally {
+      setLoading(false);
+    }
+  }, []);
+  usePolling(refresh, intervalMs, true);
+  return { data, error, loading, refresh };
+}
+
+/** One lookup per Refund claim and creation time, shared by every component that shows it. */
+const refundReasons = new Map<string, Promise<RefundReason | null>>();
+
+/**
+ * Why the deposit behind a Refund claim landed as a refund (the Intake's event), looked up once;
+ * undefined while looking, null when it could not be found. Only for a claim without a
+ * destination: giving one moves `createdAt`.
+ */
+export function useRefundReason(vaultId: Hex, claimId: Hex, createdAt: number, enabled: boolean): RefundReason | null | undefined {
+  const [reason, setReason] = useState<RefundReason | null | undefined>(undefined);
+  useEffect(() => {
+    if (!enabled || !config.contractsDeployed) return;
+    const key = `${claimId}:${createdAt}`;
+    let lookup = refundReasons.get(key);
+    if (!lookup) {
+      lookup = readRefundReason(vaultId, claimId, createdAt).catch(() => null);
+      refundReasons.set(key, lookup);
+    }
+    let live = true;
+    void lookup.then((r) => {
+      if (live) setReason(r);
+    });
+    return () => {
+      live = false;
+    };
+  }, [vaultId, claimId, createdAt, enabled]);
+  return reason;
 }
 
 // ------------------------------------------------------------------ actions

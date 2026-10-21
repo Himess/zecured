@@ -33,6 +33,8 @@ contract ZecuredEIP712Test is Test {
         "DeleverageRequest(bytes32 vaultId,address account,address executor,uint16 marginBps,uint256 repayAssets,uint64 maxCollateral,uint256 nonce,uint64 deadline)";
     string internal constant SPEND_COMMIT =
         "SpendCommit(bytes32 vaultId,bytes32 inputTag,bytes32[] claimIds,bytes32[] claimRefs,uint8[] claimOutputs,bytes32 payoutRef,bytes32 changeTag,uint64 changeValue)";
+    string internal constant VAULT_OPENED =
+        "VaultOpened(bytes32 vaultId,address owner,address account,uint64 amount,uint32 expiryHeight,bytes32 addressHash,bytes32 tagKeyHash)";
 
     // ------------------------------------------------------------------ fixed vector inputs (Base Sepolia)
 
@@ -55,6 +57,16 @@ contract ZecuredEIP712Test is Test {
     bytes32 internal constant PAYOUT_REF = 0xaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa;
     bytes32 internal constant CHANGE_TAG = 0xbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb;
     uint64 internal constant CHANGE_VALUE = 3_800_000;
+    // VaultOpened v2 (the Rust signer's and the app's vector): a real Ironwood-only testnet address and the tag key K of
+    // the UFVK of the first ZIP 2005 use_qsk vector (signer/crates/zcash-ops/tests/fixtures/zip2005_use_qsk.json).
+    address internal constant OWNER = 0x8888888888888888888888888888888888888888;
+    uint32 internal constant EXPIRY_HEIGHT = 4_486_288;
+    string internal constant VECTOR_ADDRESS =
+        "utest1yv0hq77h4th2c882kdmcgt47xrm5zmhkfnfpw6dcack8e6kgfmg5new7vxed0trhkc67cmf2tjea8pnd09key4v85kmqdnz33yuas40f";
+    /// K = BLAKE2b-256(personal "Zecured_TagKey__", UFVK string), computed by tier2/statement, zecured_policy and Python.
+    bytes32 internal constant TAG_KEY = 0x2f30a290051344422e07e110c75334c79f0fe84e23db3ea0d7666c0bedab8066;
+    /// Foundry / anvil test account #0: a publicly known key, for test vectors only.
+    uint256 internal constant TEST_KEY = 0xac0974bec39a17e36ba4a6b4d238ff944bacb478cbed5efcae784d7bf4f2ff80;
 
     bytes32 internal constant DOMAIN_TYPEHASH =
         keccak256("EIP712Domain(string name,string version,uint256 chainId,address verifyingContract)");
@@ -152,6 +164,7 @@ contract ZecuredEIP712Test is Test {
         assertEq(ZecuredEIP712.VIEW_KEY_REQUEST_TYPEHASH, keccak256(bytes(VIEW_KEY_REQUEST)));
         assertEq(ZecuredEIP712.SPEND_COMMIT_TYPEHASH, keccak256(bytes(SPEND_COMMIT)));
         assertEq(ZecuredEIP712.DELEVERAGE_REQUEST_TYPEHASH, keccak256(bytes(DELEVERAGE_REQUEST)));
+        assertEq(ZecuredEIP712.VAULT_OPENED_TYPEHASH, keccak256(bytes(VAULT_OPENED)));
     }
 
     function test_typeHashesMatchIndependentImplementation() public pure {
@@ -164,6 +177,7 @@ contract ZecuredEIP712Test is Test {
         assertEq(ZecuredEIP712.VIEW_KEY_REQUEST_TYPEHASH, vm.eip712HashType(VIEW_KEY_REQUEST));
         assertEq(ZecuredEIP712.SPEND_COMMIT_TYPEHASH, vm.eip712HashType(SPEND_COMMIT));
         assertEq(ZecuredEIP712.DELEVERAGE_REQUEST_TYPEHASH, vm.eip712HashType(DELEVERAGE_REQUEST));
+        assertEq(ZecuredEIP712.VAULT_OPENED_TYPEHASH, vm.eip712HashType(VAULT_OPENED));
     }
 
     // ------------------------------------------------------------------ struct hashes
@@ -456,6 +470,104 @@ contract ZecuredEIP712Test is Test {
         assertEq(ours, GOLDEN_DELEVERAGE_REQUEST_DIGEST, "golden vector");
     }
 
+    // ------------------------------------------------------------------ VaultOpened v2 (guest round, T-09)
+
+    function _vaultOpenedHash(bytes32 tagKeyHash) internal pure returns (bytes32) {
+        return ZecuredEIP712.hashVaultOpened(
+            VAULT_ID, OWNER, ACCOUNT, AMOUNT, EXPIRY_HEIGHT, keccak256(bytes(VECTOR_ADDRESS)), tagKeyHash
+        );
+    }
+
+    function test_vaultOpenedHashes() public pure {
+        assertEq(keccak256(bytes(VECTOR_ADDRESS)), GOLDEN_VAULT_OPENED_ADDRESS_HASH, "addressHash");
+        assertEq(keccak256(abi.encodePacked(TAG_KEY)), GOLDEN_VAULT_OPENED_TAG_KEY_HASH, "tagKeyHash: keccak256 of K");
+        bytes32 structHash = _vaultOpenedHash(GOLDEN_VAULT_OPENED_TAG_KEY_HASH);
+        assertEq(
+            structHash,
+            vm.eip712HashStruct(
+                VAULT_OPENED,
+                abi.encode(
+                    VAULT_ID,
+                    OWNER,
+                    ACCOUNT,
+                    AMOUNT,
+                    EXPIRY_HEIGHT,
+                    GOLDEN_VAULT_OPENED_ADDRESS_HASH,
+                    GOLDEN_VAULT_OPENED_TAG_KEY_HASH
+                )
+            )
+        );
+        assertEq(structHash, GOLDEN_VAULT_OPENED_STRUCT_HASH, "golden vector");
+    }
+
+    function test_vaultOpenedDigest_matchesTypedDataJson() public pure {
+        string memory json = string.concat(
+            '{"types":{',
+            DOMAIN_TYPES_JSON,
+            ',"VaultOpened":[{"name":"vaultId","type":"bytes32"},{"name":"owner","type":"address"},{"name":"account","type":"address"},{"name":"amount","type":"uint64"},{"name":"expiryHeight","type":"uint32"},{"name":"addressHash","type":"bytes32"},{"name":"tagKeyHash","type":"bytes32"}]},',
+            '"primaryType":"VaultOpened",',
+            _domainJson("ZecuredRegistry", REGISTRY),
+            _vaultOpenedMessageJson()
+        );
+        bytes32 ours = _digest(
+            _domainSeparator(ZecuredEIP712.REGISTRY_DOMAIN_NAME, REGISTRY),
+            _vaultOpenedHash(GOLDEN_VAULT_OPENED_TAG_KEY_HASH)
+        );
+        assertEq(ours, vm.eip712HashTypedData(json));
+        assertEq(ours, GOLDEN_VAULT_OPENED_DIGEST, "golden vector");
+    }
+
+    function _vaultOpenedMessageJson() internal pure returns (string memory) {
+        return string.concat(
+            ',"message":{"vaultId":"',
+            vm.toString(VAULT_ID),
+            '","owner":"',
+            vm.toString(OWNER),
+            '","account":"',
+            vm.toString(ACCOUNT),
+            '","amount":"',
+            vm.toString(AMOUNT),
+            '","expiryHeight":"',
+            vm.toString(EXPIRY_HEIGHT),
+            '","addressHash":"',
+            vm.toString(GOLDEN_VAULT_OPENED_ADDRESS_HASH),
+            '","tagKeyHash":"',
+            vm.toString(GOLDEN_VAULT_OPENED_TAG_KEY_HASH),
+            '"}}'
+        );
+    }
+
+    /// The signature of Foundry's test key over the golden digest is the one alloy (Rust), viem (TypeScript) and
+    /// `cast wallet sign` produce (RFC 6979 nonces).
+    function test_vaultOpenedSignatureOfTheTestKey() public pure {
+        (uint8 v, bytes32 r, bytes32 s) = vm.sign(TEST_KEY, GOLDEN_VAULT_OPENED_DIGEST);
+        assertEq(abi.encodePacked(r, s, v), GOLDEN_VAULT_OPENED_SIGNATURE);
+        assertEq(vm.addr(TEST_KEY), 0xf39Fd6e51aad88F6F4ce6aB8827279cffFb92266);
+    }
+
+    /// v2 signs keccak256(K), not keccak256 of the UFVK (v1): the type and so every digest differ, and every field is
+    /// covered by the hash.
+    function test_vaultOpenedHash_coversEveryField() public pure {
+        bytes32 base = _vaultOpenedHash(GOLDEN_VAULT_OPENED_TAG_KEY_HASH);
+        assertTrue(
+            ZecuredEIP712.VAULT_OPENED_TYPEHASH
+                != keccak256(
+                    "VaultOpened(bytes32 vaultId,address owner,address account,uint64 amount,uint32 expiryHeight,bytes32 addressHash,bytes32 ufvkHash)"
+                ),
+            "not the v1 type"
+        );
+        assertTrue(_vaultOpenedHash(keccak256(abi.encodePacked(TAG_KEY ^ bytes32(uint256(1))))) != base, "another K");
+        bytes32 h = keccak256(bytes(VECTOR_ADDRESS));
+        bytes32 k = GOLDEN_VAULT_OPENED_TAG_KEY_HASH;
+        assertTrue(ZecuredEIP712.hashVaultOpened(~VAULT_ID, OWNER, ACCOUNT, AMOUNT, EXPIRY_HEIGHT, h, k) != base);
+        assertTrue(ZecuredEIP712.hashVaultOpened(VAULT_ID, ACCOUNT, ACCOUNT, AMOUNT, EXPIRY_HEIGHT, h, k) != base);
+        assertTrue(ZecuredEIP712.hashVaultOpened(VAULT_ID, OWNER, OWNER, AMOUNT, EXPIRY_HEIGHT, h, k) != base);
+        assertTrue(ZecuredEIP712.hashVaultOpened(VAULT_ID, OWNER, ACCOUNT, AMOUNT + 1, EXPIRY_HEIGHT, h, k) != base);
+        assertTrue(ZecuredEIP712.hashVaultOpened(VAULT_ID, OWNER, ACCOUNT, AMOUNT, EXPIRY_HEIGHT + 1, h, k) != base);
+        assertTrue(ZecuredEIP712.hashVaultOpened(VAULT_ID, OWNER, ACCOUNT, AMOUNT, EXPIRY_HEIGHT, ~h, k) != base);
+        assertTrue(ZecuredEIP712.hashVaultOpened(VAULT_ID, OWNER, ACCOUNT, AMOUNT, EXPIRY_HEIGHT, h, ~k) != base);
+    }
+
     /// Prints the vectors (run with -vv) so other implementations can copy them.
     function test_printVectors() public pure {
         console.log("chainId 84532, Registry", REGISTRY, "Adapter", ADAPTER);
@@ -474,6 +586,9 @@ contract ZecuredEIP712Test is Test {
         console.log("SpendCommit struct hash and digest");
         console.logBytes32(ZecuredEIP712.hashSpendCommit(_spendCommit()));
         console.logBytes32(GOLDEN_SPEND_COMMIT_DIGEST);
+        console.log("VaultOpened v2 struct hash and digest");
+        console.logBytes32(GOLDEN_VAULT_OPENED_STRUCT_HASH);
+        console.logBytes32(GOLDEN_VAULT_OPENED_DIGEST);
     }
 
     // ------------------------------------------------------------------ golden vectors
@@ -498,4 +613,17 @@ contract ZecuredEIP712Test is Test {
     // claimOutputs [2, 0], payoutRef 0xaaaa..aa, changeTag 0xbbbb..bb, changeValue 3,800,000.
     bytes32 internal constant GOLDEN_SPEND_COMMIT_DIGEST =
         0x3dd9f2e94c96d5aa0a5c016684697f2283f0447f4d0eb81739052c0a07217d7a;
+    // VaultOpened v2: owner 0x8888..88, account, vaultId and amount as above, expiryHeight 4,486,288, the vector address
+    // and K above. Also computed by signer/crates/base-client (alloy), tier2/statement, app/lib/signers.test.ts (viem)
+    // and independently with Python (hashlib BLAKE2b, pycryptodome keccak) and `cast wallet sign --data`.
+    bytes32 internal constant GOLDEN_VAULT_OPENED_ADDRESS_HASH =
+        0x4871c7074d79798b7991d7f71f57e723823958fec9d143805fd5127ccfa55f59;
+    bytes32 internal constant GOLDEN_VAULT_OPENED_TAG_KEY_HASH =
+        0x4998e90f251bfc9d596388325cf58132bb23a71bf6e71f6ff15275e11ad308b6;
+    bytes32 internal constant GOLDEN_VAULT_OPENED_STRUCT_HASH =
+        0xd63b647d9eba421dde278de2765b71900dc7372c7013dc925ae63dd3c28f5d13;
+    bytes32 internal constant GOLDEN_VAULT_OPENED_DIGEST =
+        0x9b9497f4504df5fad1cae863057ab04daad3c761561ca930f7da90fddbcf080f;
+    bytes internal constant GOLDEN_VAULT_OPENED_SIGNATURE =
+        hex"71640f0953e8ee9f7149ff3245a7aa8af5d3035d573ae9b85b23f2c04403798d75bb84946c4620fa2d3519759d95713b2269c2cc3cc0ca9905895d5145876f7d1b";
 }

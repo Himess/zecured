@@ -25,7 +25,7 @@ use serde_json::json;
 use zcash_protocol::consensus::{BlockHeight, Network};
 use zecured_base::{
     Destination, OpenVault, RefundRequest, VaultOpened, ViewKeyRequest, check_signed_by_all, registry_domain,
-    sign_typed, text_hash,
+    sign_typed, tag_key_hash, text_hash,
 };
 use zecured_zcash_ops::{
     keys::{encode_ironwood_ua, ironwood_receiver},
@@ -35,6 +35,7 @@ use zecured_zcash_ops::{
 };
 
 mod base_test;
+mod claims;
 mod prove;
 mod watch;
 
@@ -158,13 +159,49 @@ enum LoanCmd {
         #[arg(long)]
         to: Option<String>,
     },
-    /// Ask for a non-conforming deposit back (defaults to this wallet).
+    /// T-02: the vault's Refund claims on Base. A deposit that cannot back the vault and that a
+    /// guest of the deployment can land (under journal v2: almost any; under v1: a second payment
+    /// of the vault's amount) lands on Base as a Refund claim once proven; it is paid back from its
+    /// own note to the destination the vault's account gives (`refund-destination`).
+    Refunds {
+        vault: B256,
+        #[arg(long, env = "BASE_SEPOLIA_RPC_URL", default_value = "https://sepolia.base.org")]
+        rpc: String,
+    },
+    /// T-02: give a Refund claim its destination (defaults to this wallet). The destination is
+    /// pre-validated with the signers exactly like a release's, then set on Base from the account
+    /// (TEST ONLY: the owner EOA acts as the account; the app sends it from the smart account).
+    RefundDestination {
+        vault: B256,
+        #[arg(long)]
+        claim: B256,
+        #[arg(long)]
+        to: Option<String>,
+        #[arg(long, env = "BASE_SEPOLIA_RPC_URL", default_value = "https://sepolia.base.org")]
+        rpc: String,
+    },
+    /// P5: ask for a deposit back off-chain (defaults to this wallet). Only for a deposit that no
+    /// guest of the deployment can land on Base (`offChain` in `status`): the signers refuse any
+    /// other, which is refunded on Base as a Refund claim instead (I30).
     Refund {
         vault: B256,
         #[arg(long)]
         note: B256,
         #[arg(long)]
         to: Option<String>,
+    },
+    /// T-05 (a): dispute the confirmation of one of the loan's claims whose payout never reached
+    /// this wallet (its claimant only, within the dispute window): the signers must then prove the
+    /// payout is in a Zcash block. With `--reopen`, reopen a disputed claim whose payout nobody
+    /// proved in time. TEST ONLY: the owner EOA acts as the account.
+    Dispute {
+        vault: B256,
+        #[arg(long)]
+        claim: B256,
+        #[arg(long)]
+        reopen: bool,
+        #[arg(long, env = "BASE_SEPOLIA_RPC_URL", default_value = "https://sepolia.base.org")]
+        rpc: String,
     },
     /// Fetch the vault's viewing key (UFVK) to verify it independently; refused unless it is
     /// the key the signers signed when the vault opened.
@@ -254,9 +291,14 @@ struct LoanFile {
     registry: Address,
     chain_id: u64,
     next_nonce: u64,
-    /// `keccak256` of the vault's viewing key as every signer signed it when the vault opened
-    /// (C-4); `None` for loans opened before the signers signed vaults.
+    /// `keccak256` of the vault's tag key `K = BLAKE2b-256("Zecured_TagKey__", UFVK)` as every
+    /// signer signed it when the vault opened (`VaultOpened` v2, C-4); `None` for loans opened
+    /// before.
     #[serde(default)]
+    tag_key_hash: Option<B256>,
+    /// `keccak256` of the vault's viewing key itself, as the signers signed it in `VaultOpened` v1
+    /// (loans opened before the guest round): kept to check such a loan's viewing key.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     ufvk_hash: Option<B256>,
     /// The vault's expiry height and the five signers' `VaultOpened` signatures (by node
     /// index), kept for a Tier 2 deposit proof (`loan prove`).
@@ -408,6 +450,27 @@ struct NetworkParams {
     chain_id: u64,
     #[serde(default)]
     nodes: Vec<SignerParams>,
+    /// H-01: the network's open-vault limits; only the stamp's bits matter here.
+    #[serde(default)]
+    open_vault: OpenVaultParams,
+}
+
+#[derive(Deserialize)]
+struct OpenVaultParams {
+    #[serde(default = "default_stamp_bits")]
+    stamp_bits: u32,
+}
+
+impl Default for OpenVaultParams {
+    fn default() -> Self {
+        Self {
+            stamp_bits: default_stamp_bits(),
+        }
+    }
+}
+
+fn default_stamp_bits() -> u32 {
+    zecured_base::stamp::DEFAULT_BITS
 }
 
 fn network_params() -> Result<NetworkParams> {
@@ -423,7 +486,7 @@ struct OpenedVault {
     address: String,
     amount: u64,
     expiry_height: u32,
-    ufvk_hash: B256,
+    tag_key_hash: B256,
     /// `VaultOpened` signatures by node index.
     signatures: Vec<(u16, Bytes)>,
 }
@@ -446,13 +509,13 @@ fn parse_opened(r: &serde_json::Value) -> Result<OpenedVault> {
         address: text("address")?.to_owned(),
         amount: text("amount")?.parse()?,
         expiry_height: u32::try_from(field("expiryHeight")?.as_u64().context("malformed expiryHeight")?)?,
-        ufvk_hash: text("ufvkHash")?.parse()?,
+        tag_key_hash: text("tagKeyHash")?.parse()?,
         signatures,
     })
 }
 
-/// C-4: a vault's address, and the hash of its viewing key, count only if every signer of
-/// the local network config signed `VaultOpened` for them and for this owner's own request.
+/// C-4: a vault's address, and the hash of its tag key, count only if every signer of the local
+/// network config signed `VaultOpened` for them and for this owner's own request.
 fn check_vault_opened(
     net: &NetworkParams,
     owner: Address,
@@ -473,17 +536,23 @@ fn check_vault_opened(
         amount,
         expiryHeight: v.expiry_height,
         addressHash: text_hash(&v.address),
-        ufvkHash: v.ufvk_hash,
+        tagKeyHash: v.tag_key_hash,
     };
     check_signed_by_all(&registry_domain(net.chain_id, net.registry), &message, &signers, &v.signatures)
 }
 
-/// C-4: the viewing key must hash to the `ufvkHash` all five signers signed when the vault
-/// opened. Ok(false): a loan opened before that, with nothing to check against.
-fn check_viewing_key(ufvk: &str, expected: Option<B256>) -> Result<bool> {
-    let Some(expected) = expected else { return Ok(false) };
+/// C-4: the viewing key must be the one all five signers signed for when the vault opened: its
+/// tag key hashes to the signed `tagKeyHash` (`VaultOpened` v2), or, for a loan opened before the
+/// guest round, the key itself hashes to the signed `ufvkHash` (v1). Ok(false): a loan opened
+/// before vaults were signed, with nothing to check against.
+fn check_viewing_key(ufvk: &str, l: &LoanFile) -> Result<bool> {
+    let signed = match (l.tag_key_hash, l.ufvk_hash) {
+        (Some(expected), _) => tag_key_hash(ufvk) == expected,
+        (None, Some(expected)) => text_hash(ufvk) == expected,
+        (None, None) => return Ok(false),
+    };
     ensure!(
-        text_hash(ufvk) == expected,
+        signed,
         "the backend returned a viewing key that the signers did not sign for this vault: not printing it"
     );
     Ok(true)
@@ -510,7 +579,7 @@ async fn viewing_key(wallet: &Path, backend: &str, vault: &B256) -> Result<(Stri
     l.next_nonce += 1;
     write_json(&loan_path(wallet, vault), &l)?;
     let ufvk = r["ufvk"].as_str().context("the backend returned no viewing key")?.to_owned();
-    let checked = check_viewing_key(&ufvk, l.ufvk_hash)?;
+    let checked = check_viewing_key(&ufvk, &l)?;
     Ok((ufvk, checked))
 }
 
@@ -758,12 +827,22 @@ async fn loan(wallet: &Path, lwd_url: &str, backend: &str, cmd: LoanCmd) -> Resu
             let amount = zats(amount)?;
             let mut rid = [0u8; 32];
             OsRng.fill_bytes(&mut rid);
+            let request_id = B256::from(rid);
+            // H-01: the request's hashcash stamp, with the bits of the local network config,
+            // computed before the request's deadline starts.
+            let bits = net.open_vault.stamp_bits;
+            ensure!(
+                bits <= zecured_base::stamp::MAX_BITS,
+                "the network config asks for a {bits}-bit stamp, more than {}",
+                zecured_base::stamp::MAX_BITS
+            );
+            let stamp = zecured_base::stamp::solve(&request_id, &owner.address(), bits, 0);
             let deadline = now() + REQUEST_TTL_SECS;
             let msg = OpenVault {
                 owner: owner.address(),
                 account,
                 amount,
-                requestId: B256::from(rid),
+                requestId: request_id,
                 deadline,
             };
             let sig = sign_typed(&owner, &registry_domain(net.chain_id, net.registry), &msg)?;
@@ -771,7 +850,8 @@ async fn loan(wallet: &Path, lwd_url: &str, backend: &str, cmd: LoanCmd) -> Resu
                 backend,
                 "/vaults",
                 json!({ "owner": owner.address(), "account": account, "amount": amount.to_string(),
-                        "requestId": B256::from(rid), "deadline": deadline.to_string(), "signature": sig }),
+                        "requestId": request_id, "deadline": deadline.to_string(), "signature": sig,
+                        "stamp": stamp.to_string() }),
             )
             .await?;
             // C-4: nothing is kept or shown unless every signer vouches for the vault.
@@ -789,7 +869,8 @@ async fn loan(wallet: &Path, lwd_url: &str, backend: &str, cmd: LoanCmd) -> Resu
                     registry: net.registry,
                     chain_id: net.chain_id,
                     next_nonce: 1,
-                    ufvk_hash: Some(v.ufvk_hash),
+                    tag_key_hash: Some(v.tag_key_hash),
+                    ufvk_hash: None,
                     expiry_height: Some(v.expiry_height),
                     opened_signatures: v.signatures.clone(),
                     deposit_txid: None,
@@ -846,6 +927,58 @@ async fn loan(wallet: &Path, lwd_url: &str, backend: &str, cmd: LoanCmd) -> Resu
             l.next_nonce += 1;
             write_json(&loan_path(wallet, &vault), &l)?;
             println!("{}", serde_json::to_string_pretty(&r)?);
+        }
+        LoanCmd::Refunds { vault, rpc } => {
+            let net = network_params()?;
+            let rows = claims::refund_table(&claims::vault_claims(net.registry, vault, &rpc).await?);
+            if rows.is_empty() {
+                println!("no Refund claim for this vault on Base");
+            }
+            for row in rows {
+                println!("{row}");
+            }
+        }
+        LoanCmd::RefundDestination { vault, claim, to, rpc } => {
+            let l: LoanFile = read_secret_json(&loan_path(wallet, &vault))?;
+            // Refunds come from deposit proofs, which prove VaultOpened v2 (the tag key's hash).
+            ensure!(
+                l.tag_key_hash.is_some(),
+                "this loan's vault was opened under VaultOpened v1, whose deposits are never proven as refunds"
+            );
+            let net = network_params()?;
+            let on_base = claims::vault_claims(net.registry, vault, &rpc).await?;
+            let c = on_base.iter().find(|c| c.id == claim).context("no such claim of this vault on Base")?;
+            claims::refund_destination_allowed(c)?;
+            // The signers learn the salt and receiver (owner-signed `Destination`), validated as an
+            // Ironwood receiver, before anything goes to Base.
+            let commitment = destination(wallet, backend, &vault, to).await?;
+            base_test::set_refund_destination(wallet, &vault, claim, commitment, &rpc).await?;
+        }
+        LoanCmd::Dispute {
+            vault,
+            claim,
+            reopen,
+            rpc,
+        } => {
+            let l: LoanFile = read_secret_json(&loan_path(wallet, &vault))?;
+            let net = network_params()?;
+            let on_base = claims::vault_claims(net.registry, vault, &rpc).await?;
+            let c = on_base.iter().find(|c| c.id == claim).context("no such claim of this vault on Base")?;
+            if reopen {
+                ensure!(c.status == zecured_base::verify::CLAIM_DISPUTED, "the claim is not disputed");
+            } else {
+                ensure!(c.status == zecured_base::verify::CLAIM_PAID, "only a claim confirmed paid can be disputed");
+                let owner: PrivateKeySigner = l.owner_key.parse()?;
+                ensure!(
+                    c.claimant == owner.address(),
+                    "only the claim's claimant may dispute it (here: the account, the owner EOA in this test mode)"
+                );
+                eprintln!(
+                    "dispute only a payout that never arrived: `zecured-wallet watch --tier3 --claims-of` checks each \
+                     committed payment of this loan's claims"
+                );
+            }
+            base_test::dispute(wallet, &vault, claim, reopen, &rpc).await?;
         }
         LoanCmd::ViewingKey { vault } => {
             let (ufvk, checked) = viewing_key(wallet, backend, &vault).await?;
@@ -1035,6 +1168,7 @@ mod vault_checks {
                 registry: Address::repeat_byte(0x11),
                 chain_id: 84_532,
                 nodes,
+                open_vault: OpenVaultParams::default(),
             },
             keys,
             owner: Address::repeat_byte(0xaa),
@@ -1053,7 +1187,7 @@ mod vault_checks {
             .map(|(k, index)| json!({ "index": index, "signature": sign_typed(k, &domain, &msg).unwrap() }))
             .collect();
         json!({ "vaultId": vault_id, "address": address, "zip321": "zcash:x", "amount": "1000000",
-                "expiryHeight": expiry, "ufvkHash": text_hash(UFVK), "signatures": signatures })
+                "expiryHeight": expiry, "tagKeyHash": tag_key_hash(UFVK), "signatures": signatures })
     }
 
     fn check(f: &Fixture, r: &serde_json::Value) -> Result<()> {
@@ -1067,7 +1201,7 @@ mod vault_checks {
         check(&f, &honest).unwrap();
         let v = parse_opened(&honest).unwrap();
         assert_eq!((v.address.as_str(), v.amount, v.expiry_height), (ADDRESS, 1_000_000, 4_486_288));
-        assert_eq!(v.ufvk_hash, text_hash(UFVK));
+        assert_eq!(v.tag_key_hash, tag_key_hash(UFVK));
 
         // The backend's own address, signed by nobody or by keys outside the network config.
         let mut swapped = honest.clone();
@@ -1075,13 +1209,17 @@ mod vault_checks {
         assert!(check(&f, &swapped).is_err());
         let strangers: Vec<PrivateKeySigner> = (0..SIGNERS).map(|_| PrivateKeySigner::random()).collect();
         assert!(check(&f, &answer(&f, &strangers, "utest1attacker")).is_err());
-        // Four signatures, another viewing key, another amount, or no signatures at all.
+        // Four signatures, another viewing key's tag key, another amount, or no signatures at all.
         let mut four = honest.clone();
         four["signatures"].as_array_mut().unwrap().pop();
         assert!(check(&f, &four).is_err());
         let mut ufvk = honest.clone();
-        ufvk["ufvkHash"] = json!(text_hash("uviewtest1attacker"));
+        ufvk["tagKeyHash"] = json!(tag_key_hash("uviewtest1attacker"));
         assert!(check(&f, &ufvk).is_err());
+        // VaultOpened v1's hash of the viewing key itself is not what v2 signers sign.
+        let mut v1 = honest.clone();
+        v1["tagKeyHash"] = json!(text_hash(UFVK));
+        assert!(check(&f, &v1).is_err());
         let v = parse_opened(&honest).unwrap();
         assert!(check_vault_opened(&f.net, f.owner, f.account, 5_000_000, &v).is_err());
         let mut unsigned = honest.clone();
@@ -1094,26 +1232,51 @@ mod vault_checks {
             registry: f.net.registry,
             chain_id: f.net.chain_id,
             nodes: vec![],
+            open_vault: OpenVaultParams::default(),
         };
         assert!(check_vault_opened(&bare, f.owner, f.account, 1_000_000, &v).is_err());
     }
 
+    /// H-01: the stamp's bits come from the local network config, the network's default otherwise.
     #[test]
-    fn the_viewing_key_must_be_the_one_the_signers_signed() {
-        assert!(check_viewing_key(UFVK, Some(text_hash(UFVK))).unwrap());
-        assert!(check_viewing_key("uviewtest1attacker", Some(text_hash(UFVK))).is_err());
-        // A loan opened before vaults were signed: nothing to check against.
-        assert!(!check_viewing_key(UFVK, None).unwrap());
+    fn the_stamp_bits_come_from_the_network_config() {
+        let base = json!({ "registry": Address::repeat_byte(0x11), "chain_id": 84_532 });
+        let net: NetworkParams = serde_json::from_value(base.clone()).unwrap();
+        assert_eq!(net.open_vault.stamp_bits, zecured_base::stamp::DEFAULT_BITS);
+        let mut set = base;
+        set["open_vault"] = json!({ "stamp_bits": 12, "max_pending": 512 });
+        let net: NetworkParams = serde_json::from_value(set).unwrap();
+        assert_eq!(net.open_vault.stamp_bits, 12);
     }
 
-    /// Loan files written before C-4 still load.
+    fn loan(fields: serde_json::Value) -> LoanFile {
+        let mut l = json!({ "vault_id": B256::repeat_byte(7), "owner_key": "11", "account": Address::ZERO,
+                            "amount": 1_000_000, "address": ADDRESS, "registry": Address::ZERO, "chain_id": 84_532,
+                            "next_nonce": 3 });
+        l.as_object_mut().unwrap().extend(fields.as_object().unwrap().clone());
+        serde_json::from_value(l).unwrap()
+    }
+
+    #[test]
+    fn the_viewing_key_must_be_the_one_the_signers_signed() {
+        let v2 = loan(json!({ "tag_key_hash": tag_key_hash(UFVK) }));
+        assert!(check_viewing_key(UFVK, &v2).unwrap());
+        assert!(check_viewing_key("uviewtest1attacker", &v2).is_err());
+        // A loan opened under VaultOpened v1 (the hash of the viewing key itself).
+        let v1 = loan(json!({ "ufvk_hash": text_hash(UFVK) }));
+        assert!(check_viewing_key(UFVK, &v1).unwrap());
+        assert!(check_viewing_key("uviewtest1attacker", &v1).is_err());
+        // A loan opened before vaults were signed: nothing to check against.
+        assert!(!check_viewing_key(UFVK, &loan(json!({}))).unwrap());
+    }
+
+    /// Loan files written before C-4 still load, and new ones carry no v1 hash.
     #[test]
     fn old_loan_files_have_no_viewing_key_hash() {
-        let old = json!({ "vault_id": B256::repeat_byte(7), "owner_key": "11", "account": Address::ZERO,
-                          "amount": 1_000_000, "address": ADDRESS, "registry": Address::ZERO, "chain_id": 84_532,
-                          "next_nonce": 3 });
-        let l: LoanFile = serde_json::from_value(old).unwrap();
-        assert!(l.ufvk_hash.is_none());
+        let l = loan(json!({}));
+        assert!(l.tag_key_hash.is_none() && l.ufvk_hash.is_none());
+        let written = serde_json::to_value(loan(json!({ "tag_key_hash": tag_key_hash(UFVK) }))).unwrap();
+        assert!(written.get("ufvk_hash").is_none());
     }
 
     #[test]

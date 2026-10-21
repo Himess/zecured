@@ -75,11 +75,6 @@ async fn round3(State(n): State<Arc<Node>>, Json(b): Json<dkg::Round3In>) -> Api
     Ok(Json(n.dkg_round3(b).await?))
 }
 
-async fn attest(State(n): State<Arc<Node>>, Path(id): Path<B256>) -> ApiResult<crate::AttestResponse> {
-    online(&n).await?;
-    Ok(Json(n.attest(id).await?))
-}
-
 async fn recipients(State(n): State<Arc<Node>>, Json(b): Json<RecipientIn>) -> ApiResult<serde_json::Value> {
     online(&n).await?;
     Ok(Json(json!({ "commitment": n.add_recipient(b).await? })))
@@ -102,15 +97,6 @@ async fn refund(
     online(&n).await?;
     n.refund_request(id, b).await?;
     Ok(Json(json!({ "accepted": true })))
-}
-
-async fn cancel(
-    State(n): State<Arc<Node>>,
-    Path(id): Path<B256>,
-    Json(b): Json<RefundIn>,
-) -> ApiResult<crate::ConfirmResponse> {
-    online(&n).await?;
-    Ok(Json(n.cancel(id, b).await?))
 }
 
 async fn commit(
@@ -199,10 +185,8 @@ pub fn router(node: Arc<Node>) -> Router {
         .route("/v1/dkg/round1", post(round1))
         .route("/v1/dkg/round2", post(round2))
         .route("/v1/dkg/round3", post(round3))
-        .route("/v1/vaults/{id}/attest", post(attest))
         .route("/v1/vaults/{id}/destination", post(destination))
         .route("/v1/vaults/{id}/refund", post(refund))
-        .route("/v1/vaults/{id}/cancel", post(cancel))
         .route("/v1/vaults/{id}/confirm", post(confirm))
         .route("/v1/recipients", post(recipients))
         .route("/v1/sign/commit", post(commit))

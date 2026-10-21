@@ -27,7 +27,10 @@ use zcash_protocol::{
     consensus::{BlockHeight, BranchId, Network},
 };
 use zecured_policy::{
-    ledger::{PayoutPlan, PlannedPayment},
+    ledger::{
+        Claim, ClaimKind, ClaimState, MAX_CLAIMS_PER_PAYOUT, NextPayout, PayoutInput, PayoutPlan, PlannedPayment,
+        Recipient, next_payout,
+    },
     verify::{ExpectedInput, TxExpectations, VerifyError, verify_payout},
 };
 use zecured_threshold as threshold;
@@ -135,6 +138,7 @@ fn plan(liquidator: Address, seized: u64) -> PayoutPlan {
         inputs: 1,
         change: NOTE - seized,
         fee,
+        input: PayoutInput::Main,
     }
 }
 
@@ -297,11 +301,71 @@ fn a_close_pairs_payments_map_to_their_own_actions() {
         inputs: 1,
         change: NOTE - 1_200_000 - 2_300_000,
         fee,
+        input: PayoutInput::Main,
     };
     let pczt = build(&fvk, anchor, &[&ns[0]], &honest_payments(&p));
     let v = verify_payout(&pczt, &fvk, &inputs(&[&ns[0]]), &p, &expect()).unwrap();
     assert_eq!(v.payment_actions, vec![output_action(&pczt, &user), output_action(&pczt, &mm)]);
     assert_ne!(v.payment_actions[0], v.payment_actions[1]);
+}
+
+/// Review H-06: the planner's payout of eight claims (the Registry's most per commitment)
+/// builds and verifies like any other: each payment maps to its own action, the first claim bears
+/// the fee of nine outputs, the change returns to the vault; the same transaction without one of
+/// the eight is refused.
+#[test]
+fn a_planned_payout_of_eight_claims_builds_and_verifies() {
+    let fvk = vault_fvk();
+    let (ns, anchor) = notes(&fvk, &[NOTE]);
+    let receivers: Vec<Address> = (0..10).map(|_| other()).collect();
+    let recipients: Vec<Recipient> = receivers
+        .iter()
+        .zip(1u8..)
+        .map(|(r, i)| Recipient {
+            receiver: r.to_raw_address_bytes(),
+            salt: [i; 32],
+        })
+        .collect();
+    let claims: Vec<Claim> = recipients
+        .iter()
+        .zip(1u8..)
+        .map(|(r, i)| Claim {
+            id: [i; 32],
+            kind: ClaimKind::Liquidation,
+            amount: 300_000,
+            commitment: r.commitment(),
+            order: (100 + u64::from(i), 0),
+            created_at: 1_000,
+            partner: None,
+            state: ClaimState::Unpaid,
+            refund_tag: None,
+            bond_paid: false,
+        })
+        .collect();
+    let recipient = |c: &[u8; 32]| recipients.iter().find(|r| r.commitment() == *c).copied();
+    let NextPayout::Pay(p) = next_payout(&claims, recipient, NOTE, 1, 2_000, &[]).unwrap() else {
+        panic!("a payout")
+    };
+    assert_eq!(p.claims.len(), MAX_CLAIMS_PER_PAYOUT);
+    assert_eq!(p.fee, zip317_fee(1, MAX_CLAIMS_PER_PAYOUT + 1));
+    assert_eq!(p.change, NOTE - 8 * 300_000);
+
+    let pczt = build(&fvk, anchor, &[&ns[0]], &honest_payments(&p));
+    let v = verify_payout(&pczt, &fvk, &inputs(&[&ns[0]]), &p, &expect()).unwrap();
+    assert_eq!(v.spends.len(), 1);
+    let actions: Vec<usize> = receivers[..8].iter().map(|r| output_action(&pczt, r)).collect();
+    assert_eq!(v.payment_actions, actions, "each claim names the action paying its receiver");
+    let mut distinct = actions.clone();
+    distinct.sort_unstable();
+    distinct.dedup();
+    assert_eq!(distinct.len(), 8);
+    let change = fvk.address_at(0u32, Scope::Internal);
+    assert_eq!(v.change_cmx, Some(output_cmx(&pczt, &change)));
+
+    // The coordinator leaves one of the eight claims out of the transaction: refused.
+    let short = honest_payments(&p)[..7].to_vec();
+    let pczt = build(&fvk, anchor, &[&ns[0]], &short);
+    assert!(verify_payout(&pczt, &fvk, &inputs(&[&ns[0]]), &p, &expect()).is_err());
 }
 
 #[test]

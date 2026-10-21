@@ -5,7 +5,7 @@ import {IERC1271} from "@openzeppelin/contracts/interfaces/IERC1271.sol";
 import {MessageHashUtils} from "@openzeppelin/contracts/utils/cryptography/MessageHashUtils.sol";
 import {IMorpho, IMorphoBase} from "morpho-blue/src/interfaces/IMorpho.sol";
 import {MorphoBalancesLib} from "morpho-blue/src/libraries/periphery/MorphoBalancesLib.sol";
-import {VaultStatus, ClaimKind, ClaimStatus} from "../../src/interfaces/IZecuredRegistry.sol";
+import {VaultStatus, ClaimKind, ClaimStatus} from "../../src/interfaces/v3/IZecuredRegistry.sol";
 import {ISettlementAdapter} from "../../src/interfaces/ISettlementAdapter.sol";
 import {CloseRequest} from "../../src/libraries/ZecuredEIP712.sol";
 import {ZecuredFixture} from "../utils/ZecuredFixture.sol";

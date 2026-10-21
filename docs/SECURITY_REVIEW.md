@@ -54,7 +54,7 @@ sources for availability, not for authorization.
 | L-5 | Low | Lost updates in the coordinator | **Fixed.** Read-modify-write under the lock |
 | L-6 | Low | A confirmation could drop a newer in-flight record | **Fixed.** Compare-and-clear |
 | L-7 | Low | Signing sessions and pending DKGs never expired | **Fixed.** TTLs and caps |
-| L-8 | Low | A conforming deposit that can never be attested has no refund path | **Fixed** (D23). `cancelVault` (3 of 5) retires a never-activated vault on Base; the owner's refund request then pays the deposit back through P5, only once the cancellation is applied |
+| L-8 | Low | A conforming deposit that can never be attested has no refund path | **Fixed** (D23). `cancelVault` (3 of 5) retired a never-activated vault on Base; the owner's refund request then paid the deposit back through P5, only once the cancellation was applied. Superseded in v3 (D41): a proven deposit that cannot activate its vault lands as a Refund claim on Base, paid like any claim |
 | L-9 | Low | Concurrent opens could bind one account to two vaults off-chain | **Fixed.** Each node allows one DKG in progress per account and per owner and checks again before round 3 saves the vault; the Registry still enforces one account ↔ one vault (I4), and a deposit stranded by a lost race is refundable after cancellation (D23) |
 | L-10 | Low | `GET /vaults/:id` exposed more than the app needs | **Fixed.** Minimal view, no lock nesting |
 | L-11 | Low | App: `'unsafe-inline'` CSP, identifiable backup filenames, polling pattern | **Partly fixed.** Neutral filenames, staggered polling; nonce-based CSP and passphrase-encrypted keys remain |
@@ -89,6 +89,14 @@ Checked and found sound: the zZEC transfer guard (I2), supply and claim accounti
 threshold and malleability (I6), close-request binding and ERC-1271 (I8), Morpho callbacks and reentrancy, the
 Morpho authorization surface (no path borrows or withdraws loan assets), D14's LTV rounding, liquidation share caps,
 close arithmetic, event privacy, and the relay's consensus rules.
+
+## v3 integration (2026-10-16)
+
+Found while switching the signers and the coordinator to the v3 contracts.
+
+| ID | Severity | Finding | Status |
+|---|---|---|---|
+| V-1 | Medium | A disputed claim reopened after its inclusion window could never be committed again when its input's claim list also held a claim that stayed confirmed (the opening fee, which nobody can dispute): RT-4 asks for the same list, and every member had to be pending. The bonds then paid it, their reimbursement was blocked the same way, and the vault never settled, so no bond could leave in full; a payout proven after the window kept its vault open the same way | **Fixed** (D57). A new commitment of the input names its whole list again, confirmed claims included, and a later proof still upholds a reopened claim (`DisputedFeePayoutTest`, three more dispute tests) |
 
 ## Remaining risks
 

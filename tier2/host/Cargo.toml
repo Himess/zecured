@@ -19,6 +19,9 @@ sha2 = "0.10"
 serde_json = "1"
 
 [features]
+# The Mainnet host: the native statement and both embedded guests prove Mainnet deposits and
+# violations (NU6.3 and NU7 epochs, Mainnet addresses). Without it, Testnet (NU7).
+mainnet = ["zecured-deposit-statement/mainnet", "zecured-tier2-methods/mainnet"]
 # Proves on an NVIDIA GPU (needs the CUDA toolkit to build), and wraps in Groth16 natively through the
 # `risc0-groth16` rzup component instead of Docker (docs/TIER2.md § 8).
 cuda = ["risc0-zkvm/cuda", "dep:risc0-groth16", "risc0-groth16/cuda"]

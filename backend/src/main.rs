@@ -40,8 +40,11 @@ use zecured_node::config::NetworkConfig;
 
 mod allowlist;
 mod limits;
+mod minting;
+mod onchain;
 mod paymaster;
 mod proxy;
+mod versions;
 
 #[derive(Parser)]
 #[command(about = "Zecured backend: coordinator + public API")]
@@ -118,6 +121,10 @@ struct Cli {
     deposit_proof_headers: PathBuf,
     #[arg(long, env = "DEPOSIT_PROOF_SUMMARIES", default_value = "data/tier2/summaries.json")]
     deposit_proof_summaries: PathBuf,
+    /// Deposit proofs run at once, 1 or 2 (review H-12: a proof takes about 10 GB of RAM on a CPU,
+    /// 13 GB of GPU memory); the others wait in a first-in-first-out queue, one job per vault.
+    #[arg(long, env = "DEPOSIT_PROOF_CONCURRENCY", default_value_t = 1)]
+    deposit_proof_concurrency: usize,
 }
 
 // ------------------------------------------------------------------------- errors (L-2)
@@ -151,6 +158,9 @@ impl ApiError {
     );
     const MM_REFUSED: Self =
         Self::new(StatusCode::BAD_GATEWAY, "market_maker_refused", "The market maker refused the request.");
+    /// The same answer as the rate-limit middleware's (`limits::too_many_requests`).
+    const RATE_LIMITED: Self =
+        Self::new(StatusCode::TOO_MANY_REQUESTS, "rate_limited", "Too many requests. Try again later.");
 }
 
 impl From<PublicError> for ApiError {
@@ -233,25 +243,41 @@ struct OpenBody {
     request_id: B256,
     deadline: serde_json::Value,
     signature: Bytes,
+    /// H-01: the nonce of the request's hashcash stamp (decimal string or number).
+    #[serde(default)]
+    stamp: serde_json::Value,
 }
 
-async fn open_vault(State(c): App, Body(b): Body<OpenBody>) -> ApiResult {
-    let r = c
-        .open_vault(OpenVaultRequest {
-            owner: b.owner,
-            account: b.account,
-            amount: num(&b.amount)?,
-            request_id: b.request_id,
-            deadline: num(&b.deadline)?,
-            signature: b.signature,
-        })
-        .await?;
+/// `POST /vaults`'s rate limit. Only a request whose stamp checks out takes a token (H-01), so
+/// requests without the work can no longer use the limit up for everyone.
+#[derive(Clone)]
+struct OpenVaultLimiter(Arc<limits::TokenBucket>);
+
+async fn open_vault(
+    State(c): App,
+    axum::Extension(limiter): axum::Extension<OpenVaultLimiter>,
+    Body(b): Body<OpenBody>,
+) -> ApiResult {
+    let req = OpenVaultRequest {
+        owner: b.owner,
+        account: b.account,
+        amount: num(&b.amount)?,
+        request_id: b.request_id,
+        deadline: num(&b.deadline)?,
+        signature: b.signature,
+        stamp: if b.stamp.is_null() { 0 } else { num(&b.stamp)? },
+    };
+    c.check_open_stamp(&req)?;
+    if !limiter.0.try_take() {
+        return Err(ApiError::RATE_LIMITED);
+    }
+    let r = c.open_vault(req).await?;
     Ok(Json(open_vault_json(&r)))
 }
 
-/// `POST /vaults` response: the vault, the hash of its viewing key and every signer's
-/// `VaultOpened` signature for them, which the app and the CLI check against the signer set
-/// pinned in their build before showing the address (C-4).
+/// `POST /vaults` response: the vault, the hash of its tag key and every signer's `VaultOpened`
+/// signature for them, which the app and the CLI check against the signer set pinned in their
+/// build before showing the address (C-4).
 fn open_vault_json(r: &OpenVaultResponse) -> serde_json::Value {
     json!({
         "vaultId": r.vault_id,
@@ -259,7 +285,7 @@ fn open_vault_json(r: &OpenVaultResponse) -> serde_json::Value {
         "zip321": r.zip321,
         "amount": r.amount.to_string(),
         "expiryHeight": r.expiry_height,
-        "ufvkHash": r.ufvk_hash,
+        "tagKeyHash": r.tag_key_hash,
         "signatures": r.signatures.iter().map(|s| json!({ "index": s.index, "signature": s.signature })).collect::<Vec<_>>(),
     })
 }
@@ -277,10 +303,11 @@ async fn get_vault(State(c): App, Param(id): Param<B256>) -> ApiResult {
         "payoutInFlight": v.inflight,
         "birthdayHeight": v.birthday_height,
         "tipHeight": v.tip_height,
-        "nonConforming": v.non_conforming.iter().map(|n| json!({ "noteId": n.note_id, "amount": n.amount.to_string() })).collect::<Vec<_>>(),
-        // D23: a deposit never minted against; refunding it cancels the vault on Base first.
-        "cancellable": v.cancellable.as_ref().map(|n| json!({ "noteId": n.note_id, "amount": n.amount.to_string() })),
-        "claims": v.claims.iter().map(|c| json!({ "claimId": c.claim_id, "kind": c.kind, "amount": c.amount.to_string(), "paid": c.paid })).collect::<Vec<_>>(),
+        // Deposits that have not landed on Base: each is refunded once a proof lands it (T-02), or,
+        // when no guest of the deployment can land it (`offChain`), off-chain on request (P5, I30).
+        "nonConforming": v.non_conforming.iter().map(|n| json!({ "noteId": n.note_id, "amount": n.amount.to_string(), "offChain": n.offchain })).collect::<Vec<_>>(),
+        // A Refund claim waits for its account's destination (`destinationSet`, T-02).
+        "claims": v.claims.iter().map(|c| json!({ "claimId": c.claim_id, "kind": c.kind, "amount": c.amount.to_string(), "paid": c.paid, "status": zecured_coordinator::claim_status(c.state), "destinationSet": c.destination_set })).collect::<Vec<_>>(),
     })))
 }
 
@@ -312,6 +339,8 @@ struct RefundBody {
     signature: Bytes,
 }
 
+/// P5: the off-chain refund of a deposit that no guest of the deployment can land on Base (I30);
+/// any other deposit is refunded on Base, as a Refund claim.
 async fn refund(State(c): App, Param(id): Param<B256>, Body(b): Body<RefundBody>) -> ApiResult {
     c.request_refund(id, b.note_id, &b.receiver, salt(&b.salt)?, num(&b.nonce)?, num(&b.deadline)?, b.signature)
         .await?;
@@ -577,18 +606,58 @@ async fn close_submit(
 
 // ------------------------------------------------------------------------- demo price controls
 
-/// RQ-06: the market's oracle is a DemoShockOracle (MOCK / DEMO) around a base ZEC/USD price.
+/// RQ-06: off Base mainnet the market's oracle is a DemoShockOracle (MOCK / DEMO) around a base
+/// ZEC/USD price; on Base mainnet the market prices with the ZecuredPriceFeed itself (T-10), and
+/// the demo price controls refuse with [`NOT_DEMO_ORACLE`].
 #[derive(Clone)]
 struct Oracle {
     rpc: String,
-    /// The market's oracle (DemoShockOracle).
+    /// The market's oracle.
     market: Option<Address>,
+    /// The market's oracle when it is the deployment's DemoShockOracle.
+    demo: Option<Address>,
     /// The base oracle, when it is the owner-set MockZecOracle (local fork, or no real feed yet).
     base_mock: Option<Address>,
     owner_key: String,
 }
 
+impl Oracle {
+    /// From the deployment file: `market.oracle`, `contracts.DemoShockOracle` (written only when
+    /// it is the market's oracle, which is checked here too) and `contracts.MockZecOracle`.
+    fn from_deployment(rpc: String, deployment: &serde_json::Value, owner_key: String) -> Self {
+        let address = |section: &str, name: &str| deployment.get(section)?.get(name)?.as_str()?.parse::<Address>().ok();
+        let market = address("market", "oracle");
+        Self {
+            rpc,
+            market,
+            demo: address("contracts", "DemoShockOracle").filter(|demo| Some(*demo) == market),
+            base_mock: address("contracts", "MockZecOracle"),
+            owner_key,
+        }
+    }
+
+    /// The DemoShockOracle, if the market's oracle is one; a fixed refusal otherwise, before any
+    /// chain access.
+    fn demo(&self) -> Result<Address, ApiError> {
+        self.market.ok_or(ApiError::NOT_CONFIGURED)?;
+        self.demo.ok_or(NOT_DEMO_ORACLE)
+    }
+}
+
+/// The market's oracle is a real price feed (Base mainnet): no demo price control.
+const NOT_DEMO_ORACLE: ApiError = ApiError::new(
+    StatusCode::CONFLICT,
+    "not_demo_oracle",
+    "The market's oracle is a real price feed: the demo price controls are off.",
+);
+
 alloy::sol! {
+    /// Morpho's oracle interface, which every market oracle has.
+    #[sol(rpc)]
+    interface IMarketOracle {
+        function price() external view returns (uint256);
+    }
+
     #[sol(rpc)]
     interface IMockZecOracle {
         function price() external view returns (uint256);
@@ -619,19 +688,27 @@ async fn admin_get_oracle(
     check_admin(&t, &headers)?;
     let market = o.market.ok_or(ApiError::NOT_CONFIGURED)?;
     let p = alloy::providers::ProviderBuilder::new().connect_http(o.rpc.parse().map_err(chain_error)?);
-    let shock = IDemoShockOracle::new(market, &p);
-    let effective = shock.price().call().await.map_err(chain_error)?;
-    let base_address = shock.base().call().await.map_err(chain_error)?;
-    let base = IMockZecOracle::new(base_address, &p).price().call().await.map_err(chain_error)?;
-    let shock_bps = shock.shockBps().call().await.map_err(chain_error)?;
+    // The market's price, which Morpho uses: any market oracle has it.
+    let effective = IMarketOracle::new(market, &p).price().call().await.map_err(chain_error)?;
     let cents = |raw: alloy::primitives::U256| (raw / alloy::primitives::U256::from(ORACLE_SCALE_PER_CENT)).to_string();
+    // The demo shock and the price below it, only on a DemoShockOracle (none on Base mainnet).
+    let (base, shock_bps) = match o.demo {
+        Some(demo) => {
+            let shock = IDemoShockOracle::new(demo, &p);
+            let base_address = shock.base().call().await.map_err(chain_error)?;
+            let base = IMockZecOracle::new(base_address, &p).price().call().await.map_err(chain_error)?;
+            let shock_bps = shock.shockBps().call().await.map_err(chain_error)?;
+            (json!(cents(base)), json!(shock_bps.to_string()))
+        }
+        None => (serde_json::Value::Null, serde_json::Value::Null),
+    };
     Ok(Json(json!({
-        // The market's price, which Morpho uses.
         "priceUsdCents": cents(effective),
         "raw": effective.to_string(),
-        "basePriceUsdCents": cents(base),
+        "demo": o.demo.is_some(),
+        "basePriceUsdCents": base,
         "baseIsMock": o.base_mock.is_some(),
-        "shockBps": shock_bps.to_string(),
+        "shockBps": shock_bps,
     })))
 }
 
@@ -648,7 +725,7 @@ fn owner_provider(o: &Oracle) -> Result<impl alloy::providers::Provider, ApiErro
         .connect_http(o.rpc.parse().map_err(chain_error)?))
 }
 
-/// MOCK base price (only when the base oracle is the MockZecOracle).
+/// MOCK base price (only when the base oracle is the MockZecOracle below a DemoShockOracle).
 async fn admin_set_oracle(
     axum::Extension(t): axum::Extension<AdminToken>,
     axum::Extension(o): axum::Extension<Oracle>,
@@ -656,6 +733,7 @@ async fn admin_set_oracle(
     Body(b): Body<OracleBody>,
 ) -> ApiResult {
     check_admin(&t, &headers)?;
+    o.demo()?;
     let address = o.base_mock.ok_or(ApiError::new(
         StatusCode::CONFLICT,
         "real_price",
@@ -685,7 +763,8 @@ struct ShockBody {
 }
 
 /// DEMO: the market's shock (DemoShockOracle.setShock: a lowering keeps at least 75 % of the
-/// current shock and comes at least two minutes after the last one).
+/// current shock and comes at least two minutes after the last one). Refused when the market's
+/// oracle is not a DemoShockOracle (Base mainnet).
 async fn admin_set_shock(
     axum::Extension(t): axum::Extension<AdminToken>,
     axum::Extension(o): axum::Extension<Oracle>,
@@ -693,9 +772,9 @@ async fn admin_set_shock(
     Body(b): Body<ShockBody>,
 ) -> ApiResult {
     check_admin(&t, &headers)?;
-    let market = o.market.ok_or(ApiError::NOT_CONFIGURED)?;
+    let demo = o.demo()?;
     let p = owner_provider(&o)?;
-    let shock = IDemoShockOracle::new(market, &p);
+    let shock = IDemoShockOracle::new(demo, &p);
     let call = shock.setShock(alloy::primitives::U256::from(b.shock_bps));
     // A refused step (too deep, too soon) is the contract's answer, not an outage.
     call.call().await.map_err(|_| {
@@ -734,12 +813,17 @@ async fn health() -> Json<serde_json::Value> {
 }
 
 /// What `GET /status` shows that never changes while the backend runs: the commit it was built
-/// from and the deployment it serves (review G5).
+/// from, the deployment it serves (review G5) and the privacy delays it runs with (H-05).
 #[derive(Clone)]
 struct StatusInfo {
     fixed: Arc<serde_json::Value>,
     /// The signer nodes' modes, cached so that `/status` never fans out to the nodes per request.
     nodes: Arc<tokio::sync::Mutex<Option<NodeModes>>>,
+    /// v3's minting gates (T-01, T-03), read from the Intake and the bond and cached; `None`
+    /// without a v3 deployment file.
+    minting: Option<Arc<minting::MintingGates>>,
+    /// The verifier versions (T-07a), read from ZecuredVersions and cached; `None` without one.
+    versions: Option<Arc<versions::VerifierVersions>>,
 }
 
 /// When the nodes' modes were read, and what they were.
@@ -747,7 +831,7 @@ type NodeModes = (Instant, Vec<serde_json::Value>);
 
 const STATUS_NODES_TTL: Duration = Duration::from_secs(15);
 
-fn status_info(dep: &serde_json::Value) -> StatusInfo {
+fn status_info(dep: &serde_json::Value, cfg: &NetworkConfig) -> StatusInfo {
     let field = |path: &[&str]| path.iter().fold(dep, |v, k| &v[*k]).clone();
     let fixed = json!({
         "commit": env!("ZECURED_COMMIT"),
@@ -757,24 +841,74 @@ fn status_info(dep: &serde_json::Value) -> StatusInfo {
             "chainId": field(&["chainId"]),
             "block": field(&["block"]),
             "registry": field(&["contracts", "ZecuredRegistry"]),
+            "intake": field(&["contracts", "ZecuredIntake"]),
             "slasher": field(&["contracts", "ZecuredSlasher"]),
             "signerBond": field(&["contracts", "SignerBond"]),
+            "compensator": field(&["contracts", "ZecuredCompensator"]),
+            "versions": field(&["contracts", "ZecuredVersions"]),
             "mintMode": field(&["depositProofs", "mintMode"]),
             "verifierIsMock": field(&["depositProofs", "verifierIsMock"]),
+            // The guests the deployment started with; `versions` below lists the current ones.
             "depositImageId": field(&["depositProofs", "imageId"]),
             "violationImageId": field(&["tier3", "violationImageId"]),
             "challengeWindow": field(&["tier3", "challengeWindow"]),
             "theftDemo": field(&["tier3", "theftDemo"]),
+            "v3": v3_parameters(dep),
+        },
+        // L5 and L23: the random delays that hide when a deposit is minted and when a payout is broadcast.
+        "privacyDelays": {
+            "attestMaxBlocks": cfg.attest_delay_max_blocks,
+            "payoutMaxBlocks": cfg.payout_delay_max_blocks,
+            "localFork": cfg.local_fork,
         },
     });
+    let contract = |name: &str| dep.get("contracts")?.get(name)?.as_str()?.parse::<Address>().ok();
+    let minting = contract("ZecuredIntake").zip(contract("SignerBond")).and_then(|(intake, bond)| {
+        minting::MintingGates::new(cfg.base_rpc_url.clone(), intake, bond, cfg.denominations.clone())
+            .ok()
+            .map(Arc::new)
+    });
+    let versions = contract("ZecuredVersions")
+        .and_then(|registry| versions::VerifierVersions::new(cfg.base_rpc_url.clone(), registry).ok().map(Arc::new));
     StatusInfo {
         fixed: Arc::new(fixed),
         nodes: Arc::new(tokio::sync::Mutex::new(None)),
+        minting,
+        versions,
     }
 }
 
+/// The deployment file's public v3 parameters that the app and anyone checking the deployment
+/// read (design notes T-01 to T-06: the opening fee, the refund floor and abandon period, the
+/// pause, the liveness penalty, the coverage cap, the incident window); `null` before v3.
+fn v3_parameters(dep: &serde_json::Value) -> serde_json::Value {
+    const KEYS: [&str; 12] = [
+        "feeBps",
+        "minFeeZat",
+        "minRefundZat",
+        "refundAbandonPeriod",
+        "pendingRefundDelay",
+        "maxPause",
+        "livenessPeriod",
+        "commitGrace",
+        "livenessPremiumBps",
+        "coverageBps",
+        "maxTotalZat",
+        "incidentWindow",
+    ];
+    let Some(v3) = dep.get("v3").and_then(serde_json::Value::as_object) else {
+        return serde_json::Value::Null;
+    };
+    KEYS.iter()
+        .filter_map(|k| Some(((*k).to_owned(), v3.get(*k)?.clone())))
+        .collect::<serde_json::Map<_, _>>()
+        .into()
+}
+
 /// `GET /status`: the running commit and image ids (G5), the Zcash tip of the last coordinator
-/// pass, and each signer node's mode. Nothing about any vault or user.
+/// pass, each signer node's mode, the deposit-proof queue's counts (H-12), v3's minting gates
+/// (cached 15 s) and the verifier versions (T-07a, cached 60 s), each `null` while unreadable or
+/// without v3. Nothing about any vault or user.
 async fn status(State(c): App, axum::Extension(s): axum::Extension<StatusInfo>) -> Json<serde_json::Value> {
     let nodes = {
         let mut cache = s.nodes.lock().await;
@@ -795,6 +929,16 @@ async fn status(State(c): App, axum::Extension(s): axum::Extension<StatusInfo>) 
     let mut out = (*s.fixed).clone();
     out["zcashTip"] = c.zcash_tip().into();
     out["nodes"] = nodes.into();
+    // Counts only (`null` without deposit proofs): proofs waiting, running, and run at once.
+    out["depositProofs"] = serde_json::to_value(c.proving_status()).unwrap_or_default();
+    out["minting"] = match &s.minting {
+        Some(gates) => gates.json().await,
+        None => serde_json::Value::Null,
+    };
+    out["versions"] = match &s.versions {
+        Some(versions) => versions.json().await,
+        None => serde_json::Value::Null,
+    };
     Json(out)
 }
 
@@ -818,18 +962,23 @@ fn deployment_signers(dep: &serde_json::Value) -> Option<Vec<Address>> {
 /// `GET /config`: chain, contract addresses, market, signer set and signer-network parameters.
 /// The app checks the addresses and the signer set against the ones pinned in its build.
 /// `sponsorship`: the bundler, the paymaster and the paymaster allowlist are all configured, so the
-/// app can send sponsored UserOps.
+/// app can send sponsored UserOps. `intake` and `v3`: the deployment's ZecuredIntake and its public
+/// v3 parameters (`null` before v3).
 fn public_config_json(cfg: &NetworkConfig, dep: &serde_json::Value, sponsorship: bool) -> serde_json::Value {
     json!({
         "chainId": cfg.chain_id,
         "registry": cfg.registry,
         "adapter": cfg.adapter,
+        "intake": dep.pointer("/contracts/ZecuredIntake").cloned().unwrap_or(serde_json::Value::Null),
+        "v3": v3_parameters(dep),
         "contracts": dep.get("contracts").cloned().unwrap_or(serde_json::Value::Null),
         "market": dep.get("market").cloned().unwrap_or(serde_json::Value::Null),
         "signers": deployment_signers(dep),
         "denominations": cfg.denominations.iter().map(|d| d.to_string()).collect::<Vec<_>>(),
         "confirmations": cfg.confirmations,
         "vaultExpiryBlocks": cfg.vault_expiry_blocks,
+        // H-01: the zero bits `POST /vaults`'s stamp needs.
+        "openVaultStampBits": cfg.open_vault.stamp_bits,
         "sponsorship": sponsorship,
     })
 }
@@ -843,12 +992,6 @@ fn signer_sets_agree(cfg: &NetworkConfig, dep: &serde_json::Value) -> bool {
 }
 
 /// Reads the allowlist parameters from the deployment file written by the deploy script.
-/// `contracts.<name>` of the deployment file, if present.
-fn deployment_contract(path: &std::path::Path, name: &str) -> Option<Address> {
-    let raw: serde_json::Value = serde_json::from_slice(&std::fs::read(path).ok()?).ok()?;
-    raw.get("contracts")?.get(name)?.as_str()?.parse().ok()
-}
-
 fn load_allowlist(path: &std::path::Path) -> Option<allowlist::Allowlist> {
     let raw: serde_json::Value = serde_json::from_slice(&std::fs::read(path).ok()?).ok()?;
     let contract = |name: &str| raw.get("contracts")?.get(name)?.as_str()?.parse::<Address>().ok();
@@ -857,6 +1000,10 @@ fn load_allowlist(path: &std::path::Path) -> Option<allowlist::Allowlist> {
         morpho: market("morphoBlue")?.parse().ok()?,
         registry: contract("ZecuredRegistry")?,
         adapter: contract("SettlementAdapter")?,
+        // v3: `refundPending` (T-03). A deployment file without it (v2) sponsors nothing.
+        intake: contract("ZecuredIntake")?,
+        // v3: `slashLiveness` (T-05); the proxy confirms it is the Registry's `signerBond()`.
+        bond: contract("SignerBond")?,
         // RQ-06: Circle's testnet USDC on Base Sepolia, a MockUSDC on the local fork.
         usdc: contract("LoanToken").or_else(|| contract("MockUSDC"))?,
         loan_token: market("loanToken")?.parse().ok()?,
@@ -920,7 +1067,12 @@ fn router(
         .route("/admin/vaults/{id}/drain", post(admin_drain))
         .route("/admin/oracle", get(admin_get_oracle).post(admin_set_oracle))
         .route("/admin/shock", post(admin_set_shock))
-        .merge(Router::new().route("/vaults", post(open_vault)).route_layer(limited(&limits.open_vault)))
+        // H-01: the open-vault limit is taken inside the handler, once the request's stamp checks out.
+        .merge(
+            Router::new()
+                .route("/vaults", post(open_vault))
+                .route_layer(axum::Extension(OpenVaultLimiter(limits.open_vault.clone()))),
+        )
         .merge(Router::new().route("/recipients", post(recipients)).route_layer(limited(&limits.recipients)))
         .merge(
             Router::new()
@@ -1003,9 +1155,8 @@ async fn main() -> Result<()> {
         );
     }
     let allowlist = load_allowlist(&cli.deployments);
-    let allowlist_oracle = allowlist.as_ref().map(|a| a.oracle);
     if allowlist.is_none() {
-        warn!("no deployment file: paymaster sponsorship disabled");
+        warn!("no v3 deployment file: paymaster sponsorship disabled");
     }
     let proxy_rpc = if cli.proxy_rpc_url.is_empty() {
         cfg.base_rpc_url.clone()
@@ -1044,10 +1195,15 @@ async fn main() -> Result<()> {
                 mock: cli.deposit_proof_mock,
                 headers: cli.deposit_proof_headers.clone(),
                 summaries: cli.deposit_proof_summaries.clone(),
+                concurrency: cli.deposit_proof_concurrency,
             },
             &cli.data,
         )?;
-        info!(mock = cli.deposit_proof_mock, "deposits are activated with Tier 2 proofs");
+        info!(
+            mock = cli.deposit_proof_mock,
+            concurrency = cli.deposit_proof_concurrency,
+            "deposits are activated with Tier 2 proofs"
+        );
     }
     let coordinator = Arc::new(coordinator);
 
@@ -1059,15 +1215,14 @@ async fn main() -> Result<()> {
 
     let wiring = Wiring {
         public_config: PublicConfig(Arc::new(public_config_json(&coordinator.cfg, &deployment, sponsorship))),
-        status: status_info(&deployment),
+        status: status_info(&deployment, &coordinator.cfg),
         admin_token: AdminToken(Arc::new(cli.admin_token.clone())),
         modes,
-        oracle: Oracle {
-            rpc: coordinator.cfg.base_rpc_url.clone(),
-            market: allowlist_oracle,
-            base_mock: deployment_contract(&cli.deployments, "MockZecOracle"),
-            owner_key: cli.oracle_owner_key.clone(),
-        },
+        oracle: Oracle::from_deployment(
+            coordinator.cfg.base_rpc_url.clone(),
+            &deployment,
+            cli.oracle_owner_key.clone(),
+        ),
         market_maker: MarketMaker {
             url: Arc::new(cli.market_maker_url.trim_end_matches('/').to_owned()),
             http: reqwest::Client::builder().timeout(Duration::from_secs(180)).build()?,
@@ -1145,7 +1300,7 @@ mod tests {
         assert_eq!(nodes[0], json!({ "index": 1, "mode": "normal", "vaults": 2, "compromisable": false }));
     }
 
-    /// C-4: the vault comes with the hash of its viewing key and every signer's signature.
+    /// C-4: the vault comes with the hash of its tag key and every signer's signature.
     #[test]
     fn open_vault_answers_with_the_signers_signatures() {
         let signature = |b: u8| Bytes::from(vec![b; 65]);
@@ -1155,7 +1310,7 @@ mod tests {
             zip321: "zcash:utest1vault?amount=0.01".into(),
             amount: 1_000_000,
             expiry_height: 4_486_288,
-            ufvk_hash: B256::repeat_byte(9),
+            tag_key_hash: B256::repeat_byte(9),
             signatures: (1..=5u8)
                 .map(|i| zecured_coordinator::NodeSignature {
                     index: u16::from(i),
@@ -1166,7 +1321,8 @@ mod tests {
         let v = open_vault_json(&r);
         assert_eq!(v["vaultId"], json!(B256::repeat_byte(7)));
         assert_eq!((v["amount"].as_str(), v["expiryHeight"].as_u64()), (Some("1000000"), Some(4_486_288)));
-        assert_eq!(v["ufvkHash"], json!(format!("0x{}", "09".repeat(32))));
+        assert_eq!(v["tagKeyHash"], json!(format!("0x{}", "09".repeat(32))));
+        assert!(v.get("ufvkHash").is_none(), "VaultOpened v2 signs no hash of the viewing key");
         let sigs = v["signatures"].as_array().unwrap();
         assert_eq!(sigs.len(), 5);
         assert_eq!(sigs[1], json!({ "index": 2, "signature": format!("0x{}", "02".repeat(65)) }));
@@ -1192,6 +1348,8 @@ mod tests {
         let dep = json!({ "contracts": {}, "signers": reversed });
         let c = public_config_json(&cfg, &dep, true);
         assert_eq!(c["signers"], json!(keys));
+        // H-01: the stamp's bits, the default when the network config sets none.
+        assert_eq!(c["openVaultStampBits"], 20);
         assert!(signer_sets_agree(&cfg, &dep));
         // Another set: reported as is (the app then refuses it), and flagged at startup.
         let other = json!({ "signers": [Address::repeat_byte(9), keys[1], keys[2], keys[3], keys[4]] });
@@ -1205,6 +1363,125 @@ mod tests {
             assert_eq!(public_config_json(&cfg, &dep, false)["signers"], serde_json::Value::Null);
             assert!(signer_sets_agree(&cfg, &dep));
         }
+    }
+
+    /// A v3 deployment file as the deploy script writes it (`contracts/script/DeployZecured.s.sol`
+    /// `_writeJson`; addresses of a simulated deployment on a Base Sepolia fork), the parts the
+    /// backend reads.
+    fn v3_deployment() -> serde_json::Value {
+        json!({
+            "chainId": 84_532,
+            "block": 48_198_682,
+            "contracts": {
+                "BaseOracle": "0xC2f3515C272383D2b5e055D4CF39c9d719D232e1",
+                "CapPrice": "0x2860F0aB28D7ADa29CFB4D74B60bCD29C414BD20",
+                "DemoShockOracle": "0x6065991f617AF84f4BC48B9B42A14c2CEfFfBF58",
+                "LoanToken": "0x036CbD53842c5426634e7929541eC2318f3dCF7e",
+                "MarketOracle": "0x6065991f617AF84f4BC48B9B42A14c2CEfFfBF58",
+                "MockZecOracle": "0xC2f3515C272383D2b5e055D4CF39c9d719D232e1",
+                "SettlementAdapter": "0x3074AcAEa758A41C42f6EbCf5686f4a7f24ac957",
+                "SignerBond": "0xf42821eF06F68a01bba08c91a16368A83C002586",
+                "ZZEC": "0xbB63C296eb88567318C36fa29a26be77D8695b84",
+                "ZecuredCompensator": "0xEe045dF461915D9E4C919DAFbB2Df2af7e62922b",
+                "ZecuredIntake": "0x5197D7051ac19aD80dbD8829E46062B8d6d451aE",
+                "ZecuredRegistry": "0x2849a4FA18C4bD42687bD9B8eBDC2F4D89ECfB2F",
+                "ZecuredSlasher": "0xCcF6091bB163431D3C51C3B48CC853549df003E2",
+                "ZecuredSpendLogic": "0xDB0768AE34e9926ddF58eF1aBC4C82547616a542",
+                "ZecuredVersions": "0x9BfbaDc8108F2e1959A2a58a647a6DAf07C99527",
+            },
+            "market": {
+                "collateralToken": "0xbB63C296eb88567318C36fa29a26be77D8695b84",
+                "irm": "0x46415998764C29aB2a25CbeA6254146D50D22687",
+                "lltv": "625000000000000000",
+                "loanToken": "0x036CbD53842c5426634e7929541eC2318f3dCF7e",
+                "marketId": "0xabd581e8f7e88ea8e3e7abde60d9aea72986782f9b5d3fb3518b42968a89817e",
+                "morphoBlue": "0xBBBBBbbBBb9cC5e90e3b3Af64bdAF62C37EEFFCb",
+                "oracle": "0x6065991f617AF84f4BC48B9B42A14c2CEfFfBF58",
+            },
+            "depositProofs": {
+                "intake": "0x5197D7051ac19aD80dbD8829E46062B8d6d451aE",
+                "versions": "0x9BfbaDc8108F2e1959A2a58a647a6DAf07C99527",
+                "imageId": format!("0x{}", "11".repeat(32)),
+                "mintMode": "proof-only",
+                "verifierIsMock": false,
+            },
+            "tier3": { "challengeWindow": 86_400, "theftDemo": false, "violationImageId": format!("0x{}", "22".repeat(32)) },
+            "v3": {
+                "autoPauseOnCase": false, "bountyBps": 1_000, "bountyCap": "50000000", "capPriceMaxAge": 3_600,
+                "commitGrace": 7_200, "coverageBps": 10_000, "feeBps": 50,
+                "feeCommitment": format!("0x{}", "33".repeat(32)), "incidentWindow": 259_200,
+                "leftoverSink": "0x000000000000000000000000000000000000dEaD", "livenessPeriod": 86_400,
+                "livenessPremiumBps": 500, "maxPause": 2_592_000, "maxTotalZat": 150_000_000, "minBond": "100000000",
+                "minFeeZat": 20_000, "minRefundZat": 20_000, "minSeizeBps": 0, "pendingRefundDelay": 86_400,
+                "refundAbandonPeriod": 2_592_000, "unbondingPeriod": 194_400,
+            },
+        })
+    }
+
+    /// `v3_deployment()` as on Base mainnet: the market prices with the ZecuredPriceFeed itself
+    /// (T-10), so the file has no DemoShockOracle and no MockZecOracle.
+    fn mainnet_deployment() -> serde_json::Value {
+        let mut dep = v3_deployment();
+        let feed = json!(Address::repeat_byte(0xf0));
+        let contracts = dep["contracts"].as_object_mut().unwrap();
+        contracts.remove("DemoShockOracle");
+        contracts.remove("MockZecOracle");
+        contracts.insert("BaseOracle".into(), feed.clone());
+        contracts.insert("MarketOracle".into(), feed.clone());
+        dep["market"]["oracle"] = feed;
+        dep["chainId"] = json!(8_453);
+        dep
+    }
+
+    /// RQ-06: the demo price controls act only on the market's own DemoShockOracle; without one
+    /// (Base mainnet) they refuse with a fixed error.
+    #[test]
+    fn the_demo_price_controls_need_the_markets_demo_oracle() {
+        let address = |v: &serde_json::Value| v.as_str().unwrap().parse::<Address>().unwrap();
+        let oracle = |dep: &serde_json::Value| Oracle::from_deployment(String::new(), dep, String::new());
+        let dep = v3_deployment();
+        let o = oracle(&dep);
+        assert_eq!(o.market, Some(address(&dep["market"]["oracle"])));
+        assert_eq!(o.demo(), Ok(address(&dep["contracts"]["DemoShockOracle"])));
+        assert_eq!(o.base_mock, Some(address(&dep["contracts"]["MockZecOracle"])));
+        let mainnet = mainnet_deployment();
+        let o = oracle(&mainnet);
+        assert_eq!(o.market, Some(Address::repeat_byte(0xf0)));
+        assert_eq!((o.demo(), o.base_mock), (Err(NOT_DEMO_ORACLE), None));
+        // A DemoShockOracle that is not the market's is never shocked.
+        let mut stray = dep.clone();
+        stray["market"]["oracle"] = json!(Address::repeat_byte(0xf0));
+        assert_eq!(oracle(&stray).demo(), Err(NOT_DEMO_ORACLE));
+        assert_eq!(oracle(&serde_json::Value::Null).demo(), Err(ApiError::NOT_CONFIGURED));
+    }
+
+    /// The paymaster allowlist's contracts come from the deployment file, the Intake and the bond
+    /// included; a file without them (v2) sponsors nothing.
+    #[test]
+    fn the_allowlist_reads_the_v3_deployment_file() {
+        let dir = std::env::temp_dir().join(format!("zecured-backend-test-{}", hex::encode(keccak256(b"allowlist"))));
+        std::fs::create_dir_all(&dir).unwrap();
+        let path = dir.join("deployment.json");
+        let dep = v3_deployment();
+        std::fs::write(&path, dep.to_string()).unwrap();
+        let l = load_allowlist(&path).expect("a v3 deployment file");
+        let address = |v: &serde_json::Value| v.as_str().unwrap().parse::<Address>().unwrap();
+        assert_eq!(l.intake, address(&dep["contracts"]["ZecuredIntake"]));
+        assert_eq!(l.bond, address(&dep["contracts"]["SignerBond"]));
+        assert_eq!(l.registry, address(&dep["contracts"]["ZecuredRegistry"]));
+        assert_eq!(l.adapter, address(&dep["contracts"]["SettlementAdapter"]));
+        // RQ-06: the loan token, Circle's USDC here; the market as Morpho knows it.
+        assert_eq!(l.usdc, address(&dep["contracts"]["LoanToken"]));
+        assert_eq!(l.oracle, address(&dep["market"]["oracle"]));
+        assert_eq!(l.lltv, alloy::primitives::U256::from(625_000_000_000_000_000u64));
+        for v3_contract in ["ZecuredIntake", "SignerBond"] {
+            let mut v2 = dep.clone();
+            v2["contracts"].as_object_mut().unwrap().remove(v3_contract);
+            std::fs::write(&path, v2.to_string()).unwrap();
+            assert!(load_allowlist(&path).is_none(), "no {v3_contract}, no sponsorship");
+        }
+        assert!(load_allowlist(&dir.join("missing.json")).is_none());
+        let _ = std::fs::remove_dir_all(&dir);
     }
 
     /// L-2: callers only ever get a fixed message and a code.
@@ -1286,6 +1563,7 @@ mod tests {
             "lightwalletd_url": "http://127.0.0.1:9", "base_rpc_url": "http://127.0.0.1:9", "chain_id": 84_532,
             "registry": Address::repeat_byte(0x11), "adapter": Address::repeat_byte(0x22), "registry_from_block": 1,
             "confirmations": 3, "vault_expiry_blocks": 288, "denominations": [1_000_000], "nodes": nodes,
+            "open_vault": { "stamp_bits": 8 },
         }))
         .unwrap();
         let key = hex::encode(alloy::signers::local::PrivateKeySigner::random().to_bytes());
@@ -1294,17 +1572,14 @@ mod tests {
             proxy::Proxy::new("http://127.0.0.1:9".into(), "http://127.0.0.1:9".into(), None, None, None, None)
                 .unwrap(),
         );
+        let status = status_info(&serde_json::Value::Null, &coordinator.cfg);
         let wiring = Wiring {
             public_config: PublicConfig(Arc::new(json!({}))),
-            status: status_info(&serde_json::Value::Null),
+            status,
             admin_token: AdminToken(Arc::new("tok".into())),
             modes: ModePolicy::parse("4,5", &[1, 2, 3, 4, 5]).unwrap(),
-            oracle: Oracle {
-                rpc: "http://127.0.0.1:9".into(),
-                market: None,
-                base_mock: None,
-                owner_key: String::new(),
-            },
+            // Base mainnet: the market prices with a real feed.
+            oracle: Oracle::from_deployment("http://127.0.0.1:9".into(), &mainnet_deployment(), String::new()),
             market_maker: MarketMaker {
                 url: Arc::new("http://127.0.0.1:9".into()),
                 http: reqwest::Client::new(),
@@ -1342,6 +1617,13 @@ mod tests {
         let (status, body, _) = call(Method::GET, "/status", "").await;
         assert_eq!(status, StatusCode::OK);
         assert_eq!(body["commit"], env!("ZECURED_COMMIT"));
+        // H-05: the privacy delays the network runs with are public.
+        assert_eq!(body["privacyDelays"], json!({ "attestMaxBlocks": 0, "payoutMaxBlocks": 0, "localFork": false }));
+        // H-12: no deposit-proof queue on this backend.
+        assert_eq!(body["depositProofs"], serde_json::Value::Null);
+        // No v3 deployment file: no minting gates, no verifier versions.
+        assert_eq!(body["minting"], serde_json::Value::Null);
+        assert_eq!(body["versions"], serde_json::Value::Null);
         let nodes = body["nodes"].as_array().expect("nodes");
         assert_eq!(nodes.len(), 5);
         assert!(nodes.iter().all(|n| n.as_object().is_some_and(|o| o.len() == 2) && n["mode"] == "unreachable"));
@@ -1349,6 +1631,15 @@ mod tests {
         let (status, body, _) = call(Method::GET, &unknown, "").await;
         assert_eq!((status, body["code"].as_str()), (StatusCode::NOT_FOUND, Some("unknown_vault")));
         assert!(body.get("address").is_none());
+        // RQ-06: on a real feed the demo price controls refuse with a fixed error, before any chain
+        // access (this backend's RPC is unreachable).
+        for (uri, body) in [
+            ("/admin/shock", r#"{"shockBps":500}"#),
+            ("/admin/oracle", r#"{"priceUsdCents":100000}"#),
+        ] {
+            let (status, body, _) = call(Method::POST, uri, body).await;
+            assert_eq!((status, body["code"].as_str()), (StatusCode::CONFLICT, Some("not_demo_oracle")), "{uri}");
+        }
         // C-3: no third compromised node, whatever the token.
         let (status, body, _) = call(Method::POST, "/admin/nodes/1/mode", r#"{"mode":"compromised"}"#).await;
         assert_eq!((status, body["code"].as_str()), (StatusCode::FORBIDDEN, Some("mode_not_allowed")));
@@ -1362,16 +1653,108 @@ mod tests {
             .map(|n| (n["index"].as_u64().unwrap(), n["compromisable"].as_bool().unwrap()))
             .collect();
         assert_eq!(compromisable, [(1, false), (2, false), (3, false), (4, true), (5, true)]);
-        // M-8: POST /vaults allows a burst of 3, then answers 429.
-        for _ in 0..3 {
+        // M-8, H-01: POST /vaults allows a burst of 3 stamped requests, then answers 429. A request
+        // without a valid stamp never spends the limit: malformed, unstamped or under-stamped ones.
+        for _ in 0..5 {
             let (status, body, _) = call(Method::POST, "/vaults", "{}").await;
             assert_eq!((status, body["code"].as_str()), (StatusCode::BAD_REQUEST, Some("bad_request")));
         }
-        let (status, body, cors) = call(Method::POST, "/vaults", "{}").await;
+        let open_body = |owner: Address, stamped: bool| -> &'static str {
+            let request_id = B256::repeat_byte(0x44);
+            let valid = |nonce: u64| zecured_base::stamp::is_valid(&request_id, &owner, nonce, 8);
+            let stamp = (0u64..).find(|n| valid(*n) == stamped).unwrap();
+            let body = json!({
+                "owner": owner, "account": Address::repeat_byte(0x55), "amount": "1000000", "requestId": request_id,
+                "deadline": "99999999999", "signature": "0x", "stamp": stamp.to_string(),
+            });
+            Box::leak(body.to_string().into_boxed_str())
+        };
+        for i in 0..5u8 {
+            let (status, body, _) = call(Method::POST, "/vaults", open_body(Address::repeat_byte(i), false)).await;
+            assert_eq!((status, body["code"].as_str()), (StatusCode::UNPROCESSABLE_ENTITY, Some("bad_stamp")));
+        }
+        // Stamped but not signed by the owner: each takes a token, then the coordinator refuses it.
+        for i in 0..3u8 {
+            let (status, body, _) = call(Method::POST, "/vaults", open_body(Address::repeat_byte(i), true)).await;
+            assert_eq!((status, body["code"].as_str()), (StatusCode::FORBIDDEN, Some("not_owner")));
+        }
+        let (status, body, cors) = call(Method::POST, "/vaults", open_body(Address::repeat_byte(9), true)).await;
         assert_eq!((status, body["code"].as_str(), cors), (StatusCode::TOO_MANY_REQUESTS, Some("rate_limited"), true));
         // Other routes have their own buckets.
         let (status, _, _) = call(Method::POST, "/recipients", "{}").await;
         assert_eq!(status, StatusCode::BAD_REQUEST);
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// H-12: `/status` shows the deposit-proof queue's counts, and nothing else about it.
+    #[tokio::test]
+    async fn status_counts_the_deposit_proofs() {
+        let dir = std::env::temp_dir().join(format!("zecured-backend-test-{}", hex::encode(keccak256(b"proof-queue"))));
+        let nodes: Vec<serde_json::Value> = (1..=5u8)
+            .map(|i| json!({ "index": i, "url": "http://127.0.0.1:9", "x25519": "00", "eth": Address::repeat_byte(i) }))
+            .collect();
+        let cfg: NetworkConfig = serde_json::from_value(json!({
+            "lightwalletd_url": "http://127.0.0.1:9", "base_rpc_url": "http://127.0.0.1:9", "chain_id": 84_532,
+            "registry": Address::repeat_byte(0x11), "adapter": Address::repeat_byte(0x22), "registry_from_block": 1,
+            "confirmations": 3, "vault_expiry_blocks": 288, "denominations": [1_000_000], "nodes": nodes,
+        }))
+        .unwrap();
+        let key = hex::encode(alloy::signers::local::PrivateKeySigner::random().to_bytes());
+        let proofs = DepositProofs {
+            host: PathBuf::from("zecured-tier2-host"),
+            mock: true,
+            headers: PathBuf::new(),
+            summaries: PathBuf::new(),
+            concurrency: 2,
+        };
+        let coordinator = Coordinator::new(cfg, &dir, &key).unwrap().with_deposit_proofs(proofs, &dir).unwrap();
+        let info = status_info(&serde_json::Value::Null, &coordinator.cfg);
+        let Json(body) = status(State(Arc::new(coordinator)), axum::Extension(info)).await;
+        assert_eq!(body["depositProofs"], json!({ "queued": 0, "running": 0, "concurrency": 2 }));
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// v3: `/config` names the Intake and the deployment's public v3 parameters; `/status` too,
+    /// with the minting gates once the chain answers (`null` here: the node is unreachable).
+    #[tokio::test]
+    async fn status_and_config_report_the_v3_deployment() {
+        let dir = std::env::temp_dir().join(format!("zecured-backend-test-{}", hex::encode(keccak256(b"v3-status"))));
+        let nodes: Vec<serde_json::Value> = (1..=5u8)
+            .map(|i| json!({ "index": i, "url": "http://127.0.0.1:9", "x25519": "00", "eth": Address::repeat_byte(i) }))
+            .collect();
+        let cfg: NetworkConfig = serde_json::from_value(json!({
+            "lightwalletd_url": "http://127.0.0.1:9", "base_rpc_url": "http://127.0.0.1:9", "chain_id": 84_532,
+            "registry": Address::repeat_byte(0x11), "adapter": Address::repeat_byte(0x22), "registry_from_block": 1,
+            "confirmations": 3, "vault_expiry_blocks": 288, "denominations": [1_000_000, 5_000_000], "nodes": nodes,
+        }))
+        .unwrap();
+        let dep = v3_deployment();
+        let parameters = json!({
+            "feeBps": 50, "minFeeZat": 20_000, "minRefundZat": 20_000, "refundAbandonPeriod": 2_592_000,
+            "pendingRefundDelay": 86_400, "maxPause": 2_592_000, "livenessPeriod": 86_400, "commitGrace": 7_200,
+            "livenessPremiumBps": 500, "coverageBps": 10_000, "maxTotalZat": 150_000_000, "incidentWindow": 259_200,
+        });
+        let c = public_config_json(&cfg, &dep, true);
+        assert_eq!(c["intake"], dep["contracts"]["ZecuredIntake"]);
+        assert_eq!(c["v3"], parameters, "only the parameters the app reads");
+        assert_eq!(c["contracts"]["ZecuredCompensator"], dep["contracts"]["ZecuredCompensator"]);
+        let before = public_config_json(&cfg, &serde_json::Value::Null, false);
+        assert_eq!((&before["intake"], &before["v3"]), (&serde_json::Value::Null, &serde_json::Value::Null));
+
+        let info = status_info(&dep, &cfg);
+        assert!(info.minting.is_some(), "a v3 file names the Intake and the bond");
+        assert!(info.versions.is_some(), "and ZecuredVersions");
+        let none = status_info(&serde_json::Value::Null, &cfg);
+        assert!(none.minting.is_none() && none.versions.is_none());
+        let key = hex::encode(alloy::signers::local::PrivateKeySigner::random().to_bytes());
+        let coordinator = Coordinator::new(cfg, &dir, &key).unwrap();
+        let Json(body) = status(State(Arc::new(coordinator)), axum::Extension(info)).await;
+        assert_eq!(body["deployment"]["intake"], dep["contracts"]["ZecuredIntake"]);
+        assert_eq!(body["deployment"]["compensator"], dep["contracts"]["ZecuredCompensator"]);
+        assert_eq!(body["deployment"]["versions"], dep["contracts"]["ZecuredVersions"]);
+        assert_eq!(body["deployment"]["v3"], parameters);
+        assert_eq!(body["minting"], serde_json::Value::Null);
+        assert_eq!(body["versions"], serde_json::Value::Null);
         let _ = std::fs::remove_dir_all(&dir);
     }
 

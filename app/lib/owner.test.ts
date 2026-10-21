@@ -4,23 +4,12 @@ import { generatePrivateKey, privateKeyToAccount } from "viem/accounts";
 import { DRY_RUN_CONFIG, DRY_RUN_ENV } from "./__fixtures__/deployment";
 import { createApi, parseRemoteConfig } from "./api";
 import { buildConfig } from "./config";
-import {
-  destinationTypedData,
-  openVaultTypedData,
-  refundRequestTypedData,
-  vaultOpenedTypedData,
-  viewKeyRequestTypedData,
-} from "./eip712";
+import { destinationTypedData, openVaultTypedData, vaultOpenedTypedData, viewKeyRequestTypedData } from "./eip712";
 import { createLoan, type StoredLoan } from "./keys";
-import {
-  checkVaultAddress,
-  fetchViewingKey,
-  openVault,
-  OwnerSigningDisabledError,
-  requestRefund,
-  submitDestination,
-} from "./owner";
-import { textHash, vaultOpenedMessage, VaultProofError } from "./signers";
+import * as owner from "./owner";
+import { checkVaultAddress, fetchViewingKey, openVault, OwnerSigningDisabledError, submitDestination } from "./owner";
+import { tagKeyHash, textHash, vaultOpenedMessage, VaultProofError } from "./signers";
+import { isValidStamp } from "./stamp";
 import { encodeUnifiedAddress, TYPECODE_ORCHARD, TYPECODE_SAPLING } from "./ua";
 
 const REGISTRY: Address = "0x1111111111111111111111111111111111111111";
@@ -45,7 +34,7 @@ async function vaultSignatures(loan: StoredLoan, address: string, keys: readonly
     amount: BigInt(loan.amount),
     expiryHeight: EXPIRY,
     address,
-    ufvkHash: textHash(ufvk),
+    tagKeyHash: tagKeyHash(ufvk),
   });
   const typedData = vaultOpenedTypedData(REGISTRY, message);
   return Promise.all(keys.map(async (k, i) => ({ index: i + 1, signature: await privateKeyToAccount(k).signTypedData(typedData) })));
@@ -60,7 +49,7 @@ async function opened(loan: StoredLoan, opts: { address?: string; signedAddress?
     zip321: `zcash:${address}?amount=0.01`,
     amount: loan.amount,
     expiryHeight: EXPIRY,
-    ufvkHash: textHash(UFVK),
+    tagKeyHash: tagKeyHash(UFVK),
     signatures: await vaultSignatures(loan, opts.signedAddress ?? address, opts.keys),
   };
 }
@@ -85,11 +74,14 @@ describe("openVault", () => {
     const loan = createLoan(1_000_000n);
     const answer = await opened(loan);
     const { api, bodies } = backend(() => answer);
-    const res = await openVault(loan, { api, registry: REGISTRY, signers: SIGNERS, now: NOW });
-    expect(res).toMatchObject({ vaultId: VAULT, address: vaultUa, expiryHeight: EXPIRY, ufvkHash: textHash(UFVK), check: "pinned" });
+    const res = await openVault(loan, { api, registry: REGISTRY, signers: SIGNERS, now: NOW, stampBits: 8 });
+    expect(res).toMatchObject({ vaultId: VAULT, address: vaultUa, expiryHeight: EXPIRY, tagKeyHash: tagKeyHash(UFVK), check: "pinned" });
     expect(res.signatures).toHaveLength(5);
     const b = bodies[0]!;
     expect(b).toMatchObject({ owner: loan.owner, account: loan.account, amount: "1000000", requestId: loan.requestId, deadline: "1700000600" });
+    // H-01: the request's stamp, a decimal string, with the bits asked for.
+    expect(b.stamp).toMatch(/^\d+$/);
+    expect(isValidStamp(loan.requestId, loan.owner, BigInt(b.stamp!), 8)).toBe(true);
     const signer = await recoverTypedDataAddress({
       ...openVaultTypedData(REGISTRY, {
         owner: loan.owner,
@@ -107,14 +99,14 @@ describe("openVault", () => {
     const loan = createLoan(1_000_000n);
     const answer = { ...(await opened(loan)), amount: "5000000" };
     const { api } = backend(() => answer);
-    await expect(openVault(loan, { api, registry: REGISTRY, signers: SIGNERS })).rejects.toThrow(/different amount/);
+    await expect(openVault(loan, { api, registry: REGISTRY, signers: SIGNERS, stampBits: 8 })).rejects.toThrow(/different amount/);
   });
 
   /** Security review C-4: a compromised backend hands out an address of its own. */
   it("refuses a vault that not every pinned signer vouches for", async () => {
     const loan = createLoan(1_000_000n);
     const attacker = encodeUnifiedAddress("test", [{ typecode: TYPECODE_ORCHARD, data: new Uint8Array(43).fill(0x66) }]);
-    const ctx = { registry: REGISTRY, signers: SIGNERS };
+    const ctx = { registry: REGISTRY, signers: SIGNERS, stampBits: 8 };
     const answers = [
       // The signers' signatures, relayed with the backend's own (well-formed, Ironwood-only) address.
       await opened(loan, { address: attacker, signedAddress: vaultUa }),
@@ -122,8 +114,10 @@ describe("openVault", () => {
       await opened(loan, { address: attacker, keys: Array.from({ length: 5 }, () => generatePrivateKey()) }),
       // Four of the five signers.
       { ...(await opened(loan)), signatures: (await opened(loan)).signatures.slice(1) },
-      // Another viewing key than the one they signed.
-      { ...(await opened(loan)), ufvkHash: textHash("uviewtest1attacker") },
+      // Another viewing key's tag key than the one they signed.
+      { ...(await opened(loan)), tagKeyHash: tagKeyHash("uviewtest1attacker") },
+      // VaultOpened v1's hash of the viewing key itself.
+      { ...(await opened(loan)), tagKeyHash: textHash(UFVK) },
     ];
     for (const answer of answers) {
       const { api } = backend(() => answer);
@@ -142,6 +136,20 @@ describe("openVault", () => {
     expect(config.ownerSigning).toBe(true);
     await expect(openVault(loan, { api, config })).rejects.toBeInstanceOf(VaultProofError);
     expect(bodies).toHaveLength(0);
+  });
+
+  /** Review H-01: the stamp has the zero bits the backend's GET /config asks for. */
+  it("stamps the request with the backend's bits", async () => {
+    const loan = createLoan(1_000_000n);
+    const answer = await opened(loan);
+    const { api, bodies } = backend(() => answer);
+    const config = { ...buildConfig({}), openVaultStampBits: 12 };
+    await openVault(loan, { api, config, registry: REGISTRY, signers: SIGNERS });
+    const stamp = BigInt(bodies[0]!.stamp!);
+    expect(isValidStamp(loan.requestId, loan.owner, stamp, 12)).toBe(true);
+    // The first such nonce: a retry of the same loan sends the same stamp.
+    await openVault(loan, { api, config, registry: REGISTRY, signers: SIGNERS });
+    expect(bodies[1]!.stamp).toBe(bodies[0]!.stamp);
   });
 });
 
@@ -203,20 +211,9 @@ describe("submitDestination", () => {
   });
 });
 
-describe("refund and viewing key", () => {
-  it("signs a RefundRequest bound to the note and the salted destination", async () => {
-    const loan = createLoan(1_000_000n);
-    const noteId: Hex = `0x${"cc".repeat(32)}`;
-    const { api, bodies } = backend(() => ({ accepted: true }));
-    expect(await requestRefund(loan, VAULT, noteId, destUa, { api, registry: REGISTRY })).toBe(true);
-    const b = bodies[0]!;
-    expect(b.noteId).toBe(noteId);
-    const commitment = keccak256(concatBytes([Uint8Array.from(Buffer.from(b.salt!.slice(2), "hex")), receiver]));
-    const signer = await recoverTypedDataAddress({
-      ...refundRequestTypedData(REGISTRY, { vaultId: VAULT, noteId, commitment, nonce: BigInt(b.nonce!), deadline: BigInt(b.deadline!) }),
-      signature: b.signature as Hex,
-    });
-    expect(signer).toBe(loan.owner);
+describe("refunds and viewing key", () => {
+  it("v3 has no off-chain refund: a refund's destination is a Destination, then a UserOp (lib/calls.ts)", () => {
+    expect("requestRefund" in owner).toBe(false);
   });
 
   it("signs a ViewKeyRequest and returns the UFVK", async () => {
@@ -241,13 +238,13 @@ describe("the viewing key is the one the signers signed (C-4)", () => {
       vaultId: VAULT,
       vaultAddress: vaultUa,
       expiryHeight: EXPIRY,
-      ufvkHash: textHash(UFVK),
+      tagKeyHash: tagKeyHash(UFVK),
       vaultSignatures: await vaultSignatures(loan, vaultUa),
     };
   }
   const ctx = { registry: REGISTRY, signers: SIGNERS };
 
-  it("shows a key that hashes to the signed ufvkHash", async () => {
+  it("shows a key whose tag key hashes to the signed tagKeyHash", async () => {
     const loan = await signedLoan();
     const { api } = backend(() => ({ ufvk: UFVK }));
     expect(await fetchViewingKey(loan, VAULT, { api, ...ctx })).toEqual({ ufvk: UFVK, checked: true });
@@ -263,7 +260,7 @@ describe("the viewing key is the one the signers signed (C-4)", () => {
     const loan = await signedLoan();
     const { api, bodies } = backend(() => ({ ufvk: "uviewtest1attacker" }));
     // A record whose hash was swapped (say, in an imported backup) is refused before any request.
-    const tampered = { ...loan, ufvkHash: textHash("uviewtest1attacker") };
+    const tampered = { ...loan, tagKeyHash: tagKeyHash("uviewtest1attacker") };
     await expect(fetchViewingKey(tampered, VAULT, { api, ...ctx })).rejects.toBeInstanceOf(VaultProofError);
     await expect(fetchViewingKey(loan, `0x${"cd".repeat(32)}`, { api, ...ctx })).rejects.toThrow(/another vault/);
     expect(bodies).toHaveLength(0);
@@ -291,7 +288,6 @@ describe("owner signatures follow the pinned configuration (H-6)", () => {
     expect(config.ownerSigning).toBe(false);
     await expect(openVault(loan, { api, config })).rejects.toBeInstanceOf(OwnerSigningDisabledError);
     await expect(submitDestination(loan, VAULT, destUa, { api, config })).rejects.toBeInstanceOf(OwnerSigningDisabledError);
-    await expect(requestRefund(loan, VAULT, VAULT, destUa, { api, config })).rejects.toBeInstanceOf(OwnerSigningDisabledError);
     await expect(fetchViewingKey(loan, VAULT, { api, config })).rejects.toThrow(/Owner requests are disabled/);
     expect(bodies).toHaveLength(0);
   });

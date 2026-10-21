@@ -20,15 +20,22 @@ selling or unshielding it, and USDC lenders on Base gain a new market backed by 
 
 Base never has to trust the signers on either side:
 - **Minting:** zZEC is minted only on a zero-knowledge proof (RISC Zero) that the deposit is in a
-  Zcash block whose header an on-chain relay verified with Equihash.
+  Zcash block whose header an on-chain relay verified with Equihash. Minting needs no signer,
+  except that all five together can schedule a new verifier version, which takes effect only after
+  a public delay. New collateral is accepted only while the bonds cover its value.
 - **Payouts:** signers must commit every payout on Base before they can sign it. Taking ZEC that
   backs loans (without a commitment, or under a false one), or paying any claim to anyone but its
   owner, is provable on Base with a zero-knowledge proof that reveals no Zcash transaction, note
-  or address, and it slashes the signers' bonds.
+  or address, and it slashes the signers' bonds; the bonds compensate the victims: liquidators and
+  lenders before the borrower's own equity.
+- **Liveness:** if the signers stop paying a claim for 24 hours (72 on mainnet), its claimant is
+  paid from the bonds; a payout they confirm but never send can be disputed. Three of five signers
+  can pause new minting for up to 30 days at a time; withdrawals, repayments, liquidations and
+  payouts never stop.
 
-Two things remain outside these proofs:
-- refunds of non-conforming deposits;
-- liveness: signers refusing to pay, in which case the funds stay in the vault.
+A deposit of another amount than the vault's, or paid after its expiry, is proven too, as a refund,
+and paid back like any claim. What remains outside: all five signers together
+([docs/ECONOMICS.md](ECONOMICS.md)).
 
 ## Why it does not leak
 

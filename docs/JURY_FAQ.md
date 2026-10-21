@@ -15,11 +15,15 @@ touch your account.
 Signers must commit every payout on Base before they can sign it. Taking ZEC that backs loans —
 without a commitment or under a false one — or paying any claim to anyone but its owner is provable
 on Base with a zero-knowledge proof that reveals no Zcash transaction, note or address, and it
-slashes the signers' bonds ([TIER3.md](TIER3.md)). Two things remain outside these proofs: refunds
-of non-conforming deposits, and liveness — signers refusing to pay, in which case the funds stay in
-the vault. Nor can they mint unbacked zZEC: a deposit is activated on a zero-knowledge proof (RISC
-Zero) that the note is in a Zcash block committed by a header our on-chain relay verified with
-Equihash, without revealing which block ([TIER2.md](TIER2.md)).
+slashes the signers' bonds ([TIER3.md](TIER3.md)); the bonds compensate the victims: liquidators and
+lenders before the borrower's own equity. If they just stop paying, the claimant is paid from the
+bonds after 24 hours (72 on mainnet); a payout they confirm but never send can be disputed. Nor can
+they mint unbacked zZEC: a deposit is activated on a zero-knowledge proof (RISC Zero) that the note
+is in a Zcash block committed by a header our on-chain relay verified with Equihash, without
+revealing which block ([TIER2.md](TIER2.md)), and new collateral is accepted only while the bonds
+cover its value ([ECONOMICS.md](ECONOMICS.md)). A deposit of another amount than the vault's, or
+paid after its expiry, is proven as a refund and paid back like any claim. What remains outside:
+all five signers together.
 
 On Zcash testnet a single Equihash ASIC out-mines the whole network about 40 times over, so every
 proof-of-work-based guarantee here — Tier 2 minting and Tier 3 slashing — is demonstrative on

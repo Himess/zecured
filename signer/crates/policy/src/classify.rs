@@ -5,10 +5,11 @@
 //! the transaction's Ironwood bundle), the deadline is a block height, and nothing depends
 //! on wall-clock time.
 //!
-//! The **first** note in that order that meets every rule is *conforming*; it is the only
-//! note that can ever be attested (minted against). Every other externally received note is
-//! *non-conforming* and can only leave the vault through a P5 refund. Classification stops
-//! at the first note that does not have enough confirmations yet, so a decision, once made,
+//! The **first** note in that order that meets every rule is *conforming*: the deposit a proof
+//! activates the vault with. Every other externally received note is *non-conforming*: it leaves
+//! the vault as a Refund claim once a proof lands it on Base (T-02), or, only if no guest of the
+//! deployment can land it, through an off-chain P5 refund ([`Landing`], I30). Classification
+//! stops at the first note that does not have enough confirmations yet, so a decision, once made,
 //! never changes (short of a reorg deeper than the confirmation depth).
 
 use serde::{Deserialize, Serialize};
@@ -72,6 +73,38 @@ pub enum Classification {
     NonConforming(NonConformingReason),
     /// Not enough confirmations yet (this note and every later one).
     Pending,
+}
+
+/// I30: what the deployment's deposit guests can land on Base, as the Intake says (its journal
+/// version and `minRefundZat`). A note a guest can land becomes a lineage note once someone proves
+/// it, and an off-chain refund of it would then look exactly like a theft (F1): such a note leaves
+/// the vault only as a Refund claim. Only a note no guest can land may be refunded off-chain (P5).
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub enum Landing {
+    /// Journal v1: Activate mode only. The deposit rule D5, the vault's amount, mined at or
+    /// below its expiry height, to its published receiver; it lands as collateral, or as a
+    /// refund once the vault cannot take it (a second payment, T-02).
+    ActivateOnly,
+    /// Journal v2: Refund mode too, any note to the vault's published receiver of at least
+    /// `min_refund` zatoshi, at any height, in any transaction with an Ironwood bundle (T-09).
+    WithRefunds { min_refund: u64 },
+}
+
+impl Landing {
+    /// Whether a guest of the deployment can land `note` on Base, as collateral or as a refund.
+    /// In doubt it can: the notes this says no to are those no mode proves at all (another
+    /// address of the vault, K2-c), or that Activate mode refuses under v1 and that v2 would take
+    /// only above its floor.
+    pub fn can_land(&self, note: &DepositNote, rules: &DepositRules) -> bool {
+        if !note.to_vault_receiver {
+            return false;
+        }
+        let activates = note.ironwood_only && note.value == rules.amount && note.position.height <= rules.expiry_height;
+        match *self {
+            Landing::ActivateOnly => activates,
+            Landing::WithRefunds { min_refund } => activates || note.value >= min_refund,
+        }
+    }
 }
 
 /// Number of confirmations of a note mined at `height` when the chain tip is `tip`.
@@ -259,6 +292,35 @@ mod tests {
 
     /// RQ-10: the outcome does not depend on the order a data source lists the notes in, even
     /// with a (forged) duplicate position.
+    /// I30: under v1 only a deposit Activate mode proves can land (a second payment of the
+    /// vault's amount lands as a refund); under v2 every note to the published receiver from the
+    /// Intake's floor on. A note to another address of the vault never lands.
+    #[test]
+    fn what_a_deployment_can_land() {
+        let v1 = Landing::ActivateOnly;
+        let v2 = Landing::WithRefunds { min_refund: 20_000 };
+        let good = note(900, 0, 0, AMOUNT, true);
+        for landing in [v1, v2] {
+            assert!(landing.can_land(&good, &RULES), "the deposit itself, or a second payment of it");
+            let elsewhere = DepositNote {
+                to_vault_receiver: false,
+                ..good.clone()
+            };
+            assert!(!landing.can_land(&elsewhere, &RULES), "another address of the vault");
+        }
+        let late = note(1_001, 0, 0, AMOUNT, true);
+        let other_amount = note(900, 0, 0, AMOUNT + 1, true);
+        let crossing = note(900, 0, 0, AMOUNT, false);
+        let tiny = note(900, 0, 0, 19_999, true);
+        for n in [&late, &other_amount, &crossing, &tiny] {
+            assert!(!v1.can_land(n, &RULES), "{n:?} under v1");
+        }
+        for n in [&late, &other_amount, &crossing] {
+            assert!(v2.can_land(n, &RULES), "{n:?} under v2");
+        }
+        assert!(!v2.can_land(&tiny, &RULES), "below the Intake's refund floor");
+    }
+
     #[test]
     fn duplicate_positions_are_classified_the_same_in_any_input_order() {
         let a = note(900, 0, 0, AMOUNT, true);

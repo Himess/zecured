@@ -1,7 +1,8 @@
 #!/usr/bin/env bash
-# The theft demo's own deployment (review T3-6, docs/TIER3.md § 8): THEFT_DEMO=true,
-# DEPLOYMENT_NAME=base-sepolia-theft-demo, a 2-minute challenge window, and the theft-demo
-# network's own five signers (`THEFT_DEMO=1 scripts/signer-network.sh init` creates them). The judge
+# The theft demo's own deployment (review T3-6, docs/TIER3.md § 8):
+# DEPLOYMENT_NAME=base-sepolia-theft-demo with contracts/config/zecured-base-sepolia-theft-demo.json
+# (a 2-minute challenge window and other short windows), and the theft-demo network's own five
+# signers (`THEFT_DEMO=1 scripts/signer-network.sh init` creates them). The judge
 # network's signers (SIGNER_ADDRESSES in .env) go to the deploy script as JUDGE_SIGNER_ADDRESSES,
 # and it refuses any overlap.
 #
@@ -37,5 +38,5 @@ PY
 )"
 
 cd "$ROOT/contracts"
-DEPLOYMENT_NAME=base-sepolia-theft-demo THEFT_DEMO=true JUDGE_SIGNER_ADDRESSES="$JUDGE" \
+DEPLOYMENT_NAME=base-sepolia-theft-demo JUDGE_SIGNER_ADDRESSES="$JUDGE" \
   SIGNER_ADDRESSES="$THEFT_SIGNERS" forge script script/DeployZecured.s.sol --rpc-url "$RPC" "$@"

@@ -14,7 +14,7 @@ import {IMorphoLiquidateCallback, IMorphoRepayCallback} from "morpho-blue/src/in
 import {MarketParamsLib} from "morpho-blue/src/libraries/MarketParamsLib.sol";
 import {ORACLE_PRICE_SCALE} from "morpho-blue/src/libraries/ConstantsLib.sol";
 import {IZZEC} from "./interfaces/IZZEC.sol";
-import {IZecuredRegistry, VaultStatus} from "./interfaces/IZecuredRegistry.sol";
+import {IZecuredRegistry, VaultStatus} from "./interfaces/v3/IZecuredRegistry.sol";
 import {ISettlementAdapter} from "./interfaces/ISettlementAdapter.sol";
 import {ZecuredEIP712, CloseRequest, DeleverageRequest} from "./libraries/ZecuredEIP712.sol";
 
@@ -34,9 +34,11 @@ contract SettlementAdapter is ISettlementAdapter, EIP712, ReentrancyGuardTransie
     using MarketParamsLib for MarketParams;
 
     /// @inheritdoc ISettlementAdapter
-    uint256 public constant MIN_SEIZE = 100_000;
+    uint256 public immutable MIN_SEIZE;
     /// @inheritdoc ISettlementAdapter
-    uint16 public constant MAX_MARGIN_BPS = 500;
+    uint16 public immutable minSeizeBps;
+    /// @inheritdoc ISettlementAdapter
+    uint16 public immutable MAX_MARGIN_BPS;
     uint256 private constant BPS = 10_000;
 
     // In-flight operation, so that Morpho callbacks are only honored inside the matching Adapter call.
@@ -66,7 +68,14 @@ contract SettlementAdapter is ISettlementAdapter, EIP712, ReentrancyGuardTransie
     address private transient _payer;
 
     /// @dev Deployed right after the Registry, at the address the Registry and zZEC were built with.
-    constructor(IZecuredRegistry registry_) EIP712(ZecuredEIP712.ADAPTER_DOMAIN_NAME, ZecuredEIP712.DOMAIN_VERSION) {
+    /// @param minSeize_ D11 floor in zatoshi (100,000 on the testnet deployments).
+    /// @param minSeizeBps_ T-08 (decision 2e): the floor also scales with the vault, in basis points of its outstanding
+    ///        (0 on the testnet deployments; at most 50 %).
+    /// @param maxMarginBps_ Highest market maker margin a close or deleverage request may quote (500; at most 20 %).
+    constructor(IZecuredRegistry registry_, uint256 minSeize_, uint16 minSeizeBps_, uint16 maxMarginBps_)
+        EIP712(ZecuredEIP712.ADAPTER_DOMAIN_NAME, ZecuredEIP712.DOMAIN_VERSION)
+    {
+        if (minSeize_ == 0 || minSeizeBps_ > BPS / 2 || maxMarginBps_ > BPS / 5) revert AdapterMisconfigured();
         IZZEC zzec_ = registry_.zzec();
         if (
             registry_.adapter() != address(this) || zzec_.adapter() != address(this)
@@ -75,6 +84,9 @@ contract SettlementAdapter is ISettlementAdapter, EIP712, ReentrancyGuardTransie
         MarketParams memory params = registry_.marketParams();
 
         registry = registry_;
+        MIN_SEIZE = minSeize_;
+        minSeizeBps = minSeizeBps_;
+        MAX_MARGIN_BPS = maxMarginBps_;
         morpho = registry_.morpho();
         zzec = zzec_;
         loanToken = IERC20(params.loanToken);
@@ -123,12 +135,14 @@ contract SettlementAdapter is ISettlementAdapter, EIP712, ReentrancyGuardTransie
         // A smaller seizure is also allowed when it clears the borrower's whole debt: otherwise a small position (for
         // example the floor a partial release leaves) could not be liquidated at all between LLTV and the LTV at which
         // repaying everything seizes MIN_SEIZE (contracts review L-1).
-        if (seized < MIN_SEIZE && seized != outstanding && morpho.position(marketId, borrower).borrowShares != 0) {
-            revert SeizeBelowMinimum(seized, MIN_SEIZE);
+        uint256 floor = minSeize(outstanding);
+        if (seized < floor && seized != outstanding && morpho.position(marketId, borrower).borrowShares != 0) {
+            revert SeizeBelowMinimum(seized, floor);
         }
 
-        // seized <= outstanding (a uint64): the checked cast cannot fail.
-        registry.recordLiquidation(vaultId, SafeCast.toUint64(seized), liquidatorCommitment);
+        // seized <= outstanding (a uint64): the checked cast cannot fail. The liquidator is the claim's claimant
+        // (T-04, T-05).
+        registry.recordLiquidation(vaultId, SafeCast.toUint64(seized), liquidatorCommitment, msg.sender);
     }
 
     /// @inheritdoc IMorphoLiquidateCallback
@@ -162,7 +176,7 @@ contract SettlementAdapter is ISettlementAdapter, EIP712, ReentrancyGuardTransie
         _withdrawCollateralToSelf(req.account, outstanding);
 
         // 3. The Registry burns it and creates the user claim, then the market maker claim (I7).
-        registry.recordClose(req.vaultId, mmAmount, userAmount, mmCommitment, req.userCommitment);
+        registry.recordClose(req.vaultId, mmAmount, userAmount, mmCommitment, req.userCommitment, msg.sender);
     }
 
     // ------------------------------------------------------------------ self-deleverage (S18)
@@ -187,9 +201,10 @@ contract SettlementAdapter is ISettlementAdapter, EIP712, ReentrancyGuardTransie
         // 2. The executor's collateral: the repaid value plus margin, within what the borrower signed and the floors.
         uint256 mm = _marketMakerAmount(repaidAssets, req.marginBps);
         if (mm > req.maxCollateral) revert DeleverageAboveMaximum(mm, req.maxCollateral);
-        if (mm < MIN_SEIZE) revert SeizeBelowMinimum(mm, MIN_SEIZE);
-        if (mm + MIN_SEIZE > outstanding) {
-            revert DeleverageRemainderTooSmall(outstanding - Math.min(mm, outstanding), MIN_SEIZE);
+        uint256 floor = minSeize(outstanding);
+        if (mm < floor) revert SeizeBelowMinimum(mm, floor);
+        if (mm + floor > outstanding) {
+            revert DeleverageRemainderTooSmall(outstanding - Math.min(mm, outstanding), floor);
         }
         mmAmount = SafeCast.toUint64(mm); // < outstanding, a uint64
         if (mmAmount < minMmAmount) revert MarketMakerAmountBelowMinimum(mmAmount, minMmAmount);
@@ -197,7 +212,7 @@ contract SettlementAdapter is ISettlementAdapter, EIP712, ReentrancyGuardTransie
         // 3. Withdraw it (Morpho checks the position's health after the repayment) and record it: the Registry burns it
         //    and creates the executor's claim (I8, I9).
         _withdrawCollateralToSelf(req.account, mmAmount);
-        registry.recordLiquidation(req.vaultId, mmAmount, mmCommitment);
+        registry.recordLiquidation(req.vaultId, mmAmount, mmCommitment, msg.sender);
     }
 
     /// @inheritdoc IMorphoRepayCallback
@@ -216,6 +231,11 @@ contract SettlementAdapter is ISettlementAdapter, EIP712, ReentrancyGuardTransie
     }
 
     // ------------------------------------------------------------------ views
+
+    /// @inheritdoc ISettlementAdapter
+    function minSeize(uint64 outstanding) public view returns (uint256) {
+        return Math.max(MIN_SEIZE, uint256(outstanding) * minSeizeBps / BPS);
+    }
 
     /// @inheritdoc ISettlementAdapter
     function nonceUsed(address account, uint256 nonce) external view returns (bool) {

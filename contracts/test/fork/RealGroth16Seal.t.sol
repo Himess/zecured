@@ -3,22 +3,18 @@ pragma solidity 0.8.28;
 
 import {MessageHashUtils} from "@openzeppelin/contracts/utils/cryptography/MessageHashUtils.sol";
 import {Position} from "morpho-blue/src/interfaces/IMorpho.sol";
-import {IZecuredRegistry, VaultStatus, DepositProofConfig, MintMode} from "../../src/interfaces/IZecuredRegistry.sol";
+import {IZecuredRegistry, VaultStatus} from "../../src/interfaces/v3/IZecuredRegistry.sol";
+import {PendingActivation} from "../../src/interfaces/v3/IZecuredIntake.sol";
 import {IRiscZeroVerifier} from "../../src/interfaces/IRiscZeroVerifier.sol";
-import {IZcashHeaderRelay} from "../../src/relay/IZcashHeaderRelay.sol";
 import {ZcashHeaderRelay} from "../../src/relay/ZcashHeaderRelay.sol";
 import {RelayFixtures} from "../relay/RelayFixtures.sol";
-import {SignerBond} from "../../src/SignerBond.sol";
-import {ZecuredSlasher} from "../../src/ZecuredSlasher.sol";
-import {ISignerBond} from "../../src/interfaces/ISignerBond.sol";
-import {ViolationKind} from "../../src/interfaces/IZecuredSlasher.sol";
-import {DepositAttestation} from "../../src/libraries/ZecuredEIP712.sol";
+import {ViolationKind} from "../../src/interfaces/v3/IZecuredSlasher.sol";
 import {MockHeaderRelay} from "../mocks/MockHeaderRelay.sol";
 import {ZecuredFixture} from "../utils/ZecuredFixture.sol";
 
 /// @notice The real deposit of DepositProofs.t.sol with a REAL Groth16 seal: nothing in the path is a MOCK. RISC Zero's
-///         verifier router on Base Sepolia checks the seal, the real header relay checks the anchor, and the Registry
-///         runs as the judge deployment does (`ProofOnly`, K1).
+///         verifier router on Base Sepolia checks the seal, the real header relay checks the anchor, and the Intake
+///         runs as the judge deployment does (minting only on a proof).
 /// @dev The seal proves the deposit statement (tier2/statement) on the TEST-ONLY vault 9 witness
 ///      (tier2/statement/tests/fixtures) for the guest's reproducible image id. The STARK was proven on an RTX 4090 and
 ///      wrapped with RISC Zero's Docker Groth16 prover (docs/TESTING.md § 2b).
@@ -31,9 +27,7 @@ contract RealGroth16SealTest is ZecuredFixture, RelayFixtures {
     bytes4 internal constant GROTH16 = 0x73c457ba;
 
     string internal constant ANCHOR = "test/relay/fixtures/testnet_deposit_anchor.json";
-    uint256 internal constant MIN_WORK = 1_000_000;
-    uint64 internal constant FINALIZE_DEPTH = 6;
-    uint64 internal constant FINALIZE_DELAY = 150;
+    uint256 internal constant SUITE_MIN_WORK = 1_000_000;
     uint256 internal constant CONFIRMED = 4;
 
     // The real deposit's journal, as in DepositProofs.t.sol.
@@ -56,16 +50,15 @@ contract RealGroth16SealTest is ZecuredFixture, RelayFixtures {
     RealFixture internal anchor;
     uint256 internal relayed;
 
-    function _depositProofConfig() internal override returns (DepositProofConfig memory) {
+    function _proofSetup() internal override returns (ProofSetup memory) {
         anchor = _loadReal(ANCHOR);
         relay = _deploy(anchor);
-        return DepositProofConfig({
-            verifier: ROUTER,
+        return ProofSetup({
+            relay: address(relay),
+            verifier: address(ROUTER),
             imageId: IMAGE_ID,
-            relay: IZcashHeaderRelay(address(relay)),
-            minConfirmationWork: MIN_WORK,
-            mintMode: MintMode.ProofOnly,
             sealSelector: GROTH16,
+            minWork: SUITE_MIN_WORK,
             finalizeDepth: FINALIZE_DEPTH,
             finalizeDelay: FINALIZE_DELAY
         });
@@ -74,7 +67,7 @@ contract RealGroth16SealTest is ZecuredFixture, RelayFixtures {
     /// Submits the anchor's headers up to 4,488,560 + n - 1 (those not submitted yet).
     function _relayHeaders(uint256 n) internal {
         for (uint256 i = relayed; i < n; ++i) {
-            _warpTo(anchor.headers[i]);
+            _warpForward(anchor.headers[i]);
             relay.submitHeader(anchor.headers[i]);
         }
         if (n > relayed) relayed = n;
@@ -97,26 +90,26 @@ contract RealGroth16SealTest is ZecuredFixture, RelayFixtures {
     function test_realSeal_mintsTheRealDepositThroughTheRealRouter() public {
         _relayHeaders(CONFIRMED);
         uint256 gasBefore = gasleft();
-        registry.attestDepositWithProof(_journal(AMOUNT), SEAL, _openedSigs());
+        intake.attestDepositWithProof(_journal(AMOUNT), SEAL, proofs.imageId, _openedSigs());
         emit log_named_uint("attestDepositWithProof gas, real Groth16 verification included", gasBefore - gasleft());
 
         // K3: minted once the relay has moved FINALIZE_DEPTH headers on and the anchor is still on its best chain.
         _relayHeaders(CONFIRMED + FINALIZE_DEPTH);
-        (,,,, uint256 readyHeight, uint256 readyTime) = registry.pendingActivation(VAULT_ID);
+        PendingActivation memory p = intake.pendingActivation(VAULT_ID);
         (, uint256 height,) = relay.bestChainTip();
-        assertGe(height, readyHeight, "the relay is past the ready height");
-        if (block.timestamp < readyTime) vm.warp(readyTime);
+        assertGe(height, p.readyHeight, "the relay is past the ready height");
+        if (block.timestamp < p.readyTime) vm.warp(p.readyTime);
         vm.expectEmit(address(registry));
         emit IZecuredRegistry.VaultActivated(VAULT_ID, ACCOUNT, AMOUNT, TAG);
-        registry.finalizeActivation(VAULT_ID);
+        intake.finalizeActivation(VAULT_ID);
 
         (address account, uint64 outstanding, VaultStatus status) = registry.vault(VAULT_ID);
         assertEq(account, ACCOUNT);
         assertEq(outstanding, AMOUNT);
         assertEq(uint8(status), uint8(VaultStatus.Active));
         assertEq(zzec.totalSupply(), AMOUNT, "I1: the proven amount, minted");
-        Position memory p = MORPHO.position(registry.marketId(), ACCOUNT);
-        assertEq(p.collateral, AMOUNT, "supplied straight into the account's Morpho position");
+        Position memory pos = MORPHO.position(registry.marketId(), ACCOUNT);
+        assertEq(pos.collateral, AMOUNT, "supplied straight into the account's Morpho position");
         assertEq(zzec.balanceOf(ACCOUNT), 0, "I2: the account holds no zZEC");
     }
 
@@ -126,7 +119,7 @@ contract RealGroth16SealTest is ZecuredFixture, RelayFixtures {
         bytes memory journal = _journal(AMOUNT + 1);
         bytes[] memory sigs = _openedSigs();
         vm.expectRevert();
-        registry.attestDepositWithProof(journal, SEAL, sigs);
+        intake.attestDepositWithProof(journal, SEAL, proofs.imageId, sigs);
     }
 }
 
@@ -139,10 +132,8 @@ contract RealGroth16SealTest is ZecuredFixture, RelayFixtures {
 contract RealViolationSealTest is ZecuredFixture {
     IRiscZeroVerifier internal constant ROUTER = IRiscZeroVerifier(0x0b144E07A0826182B6b59788c34b32Bfa86Fb711);
     bytes32 internal constant DEPOSIT_IMAGE = 0x62feed13b2948aa427275fb6003e717ccc88945d033b99b196936ca99a80cdf5;
-    bytes32 internal constant VIOLATION_IMAGE = 0x7d8c9dd23e813e0e44ffea2b18ec9ec451b52a8a7b634ae998583d49b73cc526;
+    bytes32 internal constant REAL_VIOLATION_IMAGE = 0x7d8c9dd23e813e0e44ffea2b18ec9ec451b52a8a7b634ae998583d49b73cc526;
     bytes4 internal constant GROTH16 = 0x73c457ba;
-    uint256 internal constant SLASH_WORK = 38_000_000;
-    uint64 internal constant WINDOW = 1 days;
 
     bytes32 internal constant TAG = 0xd8ad478d40e42d2acd10a3846eeebc19d3ff0146c406e765654395b778ab813e;
     bytes32 internal constant THEFT_ANCHOR = 0xe47bcc107dbac24aa6026bdc610e8605642035559a33ec4e1fb6e4423f2a0000;
@@ -165,56 +156,31 @@ contract RealViolationSealTest is ZecuredFixture {
         hex"523507b54765da344c4ba584acccf3a078d6dad2";
 
     MockHeaderRelay internal relay;
-    SignerBond internal bond;
-    /// The nonce the bond predicted for the slasher.
-    uint64 internal slasherNonce;
-    ZecuredSlasher internal slasher;
 
-    function _depositProofConfig() internal override returns (DepositProofConfig memory) {
+    function _proofSetup() internal override returns (ProofSetup memory) {
         relay = new MockHeaderRelay();
-        return DepositProofConfig({
-            verifier: ROUTER,
+        return ProofSetup({
+            relay: address(relay),
+            verifier: address(ROUTER),
             imageId: DEPOSIT_IMAGE,
-            relay: IZcashHeaderRelay(address(relay)),
-            minConfirmationWork: 3_500_000,
-            mintMode: MintMode.SignerAttested, // vault 9 is opened by attestation here
             sealSelector: GROTH16,
-            finalizeDepth: 6,
-            finalizeDelay: 150
+            minWork: MIN_WORK,
+            finalizeDepth: FINALIZE_DEPTH,
+            finalizeDelay: FINALIZE_DELAY
         });
     }
 
-    /// The bond at the next nonce, then ZZEC, Registry and Adapter (the fixture), then the slasher (setUp).
-    function _signerBond() internal override returns (ISignerBond) {
-        uint64 n = vm.getNonce(address(this));
-        slasherNonce = n + 4;
-        bond = new SignerBond(
-            vm.computeCreateAddress(address(this), n + 2), vm.computeCreateAddress(address(this), n + 4), WINDOW
-        );
-        return ISignerBond(address(bond));
+    function _bonded() internal pure override returns (bool) {
+        return true;
+    }
+
+    function _violationImageId() internal pure override returns (bytes32) {
+        return REAL_VIOLATION_IMAGE;
     }
 
     function setUp() public override {
         super.setUp();
-        // `forge test --isolate` runs each call as a transaction, which also advances this contract's nonce: put it
-        // back where the bond expects the slasher (a no-op without --isolate).
-        vm.setNonceUnsafe(address(this), slasherNonce);
-        slasher = new ZecuredSlasher(
-            address(registry),
-            address(bond),
-            address(relay),
-            address(ROUTER),
-            VIOLATION_IMAGE,
-            GROTH16,
-            SLASH_WORK,
-            WINDOW
-        );
-        assertEq(bond.slasher(), address(slasher), "slasher address prediction");
-        for (uint256 i; i < 5; ++i) {
-            vm.deal(signerSet[i], 1 ether);
-            vm.prank(signerSet[i]);
-            bond.deposit{value: 0.01 ether}();
-        }
+        _bondAll();
     }
 
     function _totalBonds() internal view returns (uint256 sum) {
@@ -223,41 +189,35 @@ contract RealViolationSealTest is ZecuredFixture {
         }
     }
 
+    /// Vault 9, activated without its proof (TEST-ONLY harness): only its deposit tag matters to the F1 case.
+    function _openVault9() internal returns (bytes32 vaultId) {
+        vaultId = keccak256("zecured.tier3.vault9");
+        intake.harnessActivate(vaultId, makeAddr("zecured.tier3.vault9"), VAULT_001, TAG);
+    }
+
     function test_realSeal_slashesAllFiveBondsForTheRealUncommittedSpend() public {
-        DepositAttestation memory att = DepositAttestation({
-            vaultId: keccak256("zecured.tier3.vault9"),
-            account: makeAddr("zecured.tier3.vault9"),
-            amount: VAULT_001,
-            depositTag: TAG
-        });
-        registry.attestDeposit(att, _threeSigs(registry.hashDepositAttestation(att)));
+        bytes32 vaultId = _openVault9();
         relay.setBlock(THEFT_ANCHOR, true, SLASH_WORK);
 
         uint256 gasBefore = gasleft();
-        bytes32 caseId = slasher.proveViolation(ViolationKind.Uncommitted, JOURNAL, SEAL);
+        bytes32 caseId = slasher.proveViolation(ViolationKind.Uncommitted, JOURNAL, SEAL, violationImage);
         emit log_named_uint("proveViolation gas, real Groth16 verification included", gasBefore - gasleft());
-        assertEq(slasher.caseOf(caseId).vaultId, att.vaultId);
+        assertEq(slasher.caseOf(caseId).vaultId, vaultId);
 
         vm.warp(block.timestamp + WINDOW);
         slasher.executeSlash(caseId);
         assertEq(_totalBonds(), 0, "all five bonds slashed");
-        assertEq(bond.bountyOf(BENEFICIARY), 0.005 ether, "the bounty goes to the journal's beneficiary");
+        assertEq(bond.bountyOf(BENEFICIARY), BOUNTY_CAP, "the bounty goes to the journal's beneficiary");
         assertTrue(bond.halted(), "minting halted");
     }
 
     /// The seal proves this journal only: another beneficiary and the router refuses it.
     function test_realSeal_provesNoOtherBeneficiary() public {
-        DepositAttestation memory att = DepositAttestation({
-            vaultId: keccak256("zecured.tier3.vault9"),
-            account: makeAddr("zecured.tier3.vault9"),
-            amount: VAULT_001,
-            depositTag: TAG
-        });
-        registry.attestDeposit(att, _threeSigs(registry.hashDepositAttestation(att)));
+        _openVault9();
         relay.setBlock(THEFT_ANCHOR, true, SLASH_WORK);
         bytes memory journal = JOURNAL;
         journal[95] = 0xbf; // the beneficiary's last byte
         vm.expectRevert();
-        slasher.proveViolation(ViolationKind.Uncommitted, journal, SEAL);
+        slasher.proveViolation(ViolationKind.Uncommitted, journal, SEAL, violationImage);
     }
 }

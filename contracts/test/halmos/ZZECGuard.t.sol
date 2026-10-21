@@ -167,7 +167,8 @@ contract ZZECGuardCheck is Test {
     /// G6, as an induction step: from any state in which `other` holds nothing and the Registry, the Adapter and Morpho
     /// hold the whole supply, any call by anyone keeps both. Both hold at deployment, and G3 keeps the expectation's
     /// recipient the Registry or the Adapter, so they hold after every sequence of calls: no account ever holds zZEC
-    /// (I2).
+    /// (I2). Its hardest queries take minutes on a CI runner, more than the default solver timeout: none here.
+    /// @custom:halmos --solver-timeout-assertion 0
     function check_noOtherAddressEverHoldsZzec(address armedBy, uint256 armedMax, Call memory c, address other) public {
         vm.assume(other != REGISTRY && other != ADAPTER && other != MORPHO);
         _anyState(armedBy, armedMax);

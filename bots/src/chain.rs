@@ -82,6 +82,10 @@ sol! {
     }
 }
 
+/// `VaultStatus.Active` and `VaultStatus.Closed` (the same in the v2 and v3 Registries).
+pub const VAULT_ACTIVE: u8 = 1;
+pub const VAULT_CLOSED: u8 = 2;
+
 /// Morpho's virtual shares/assets (SharesMathLib).
 const VIRTUAL_SHARES: u128 = 1_000_000;
 const VIRTUAL_ASSETS: u128 = 1;
@@ -134,20 +138,128 @@ impl Deployment {
     }
 }
 
-/// A borrower's position, in asset units.
+/// Morpho's liquidation incentive constants (ConstantsLib).
+const LIQUIDATION_CURSOR: u128 = 300_000_000_000_000_000;
+const MAX_LIQUIDATION_INCENTIVE_FACTOR: u128 = 1_150_000_000_000_000_000;
+
+/// What Morpho's math needs of the market, read once per pass: the borrow totals as last stored
+/// (interest accrued since the market's last update is not in them), the oracle price and the LLTV.
+#[derive(Clone, Copy, Debug)]
+pub struct MarketState {
+    pub total_borrow_assets: u128,
+    pub total_borrow_shares: u128,
+    pub price: u128,
+    pub lltv: u128,
+}
+
+/// A borrower's position, in asset units, with Morpho's rounding.
 #[derive(Clone, Copy, Debug)]
 pub struct Position {
     pub borrow_shares: u128,
+    /// The debt, rounded up (`toAssetsUp`, as Morpho's health check counts it).
     pub debt: u128,
     pub collateral: u128,
     pub price: u128,
     /// Maximum debt at the liquidation threshold.
     pub max_debt: u128,
+    /// The debt as Morpho's liquidation counts it when every share is repaid (`toAssetsDown`).
+    pub debt_down: u128,
+    /// Morpho's liquidation incentive factor for this market, in WAD.
+    pub incentive: u128,
 }
 
 impl Position {
+    pub fn new(borrow_shares: u128, collateral: u128, m: &MarketState) -> Self {
+        let (assets, shares) = (m.total_borrow_assets + VIRTUAL_ASSETS, m.total_borrow_shares + VIRTUAL_SHARES);
+        let collateral_value = mul_div_down(collateral, m.price, ORACLE_PRICE_SCALE);
+        Self {
+            borrow_shares,
+            debt: mul_div_up(borrow_shares, assets, shares),
+            collateral,
+            price: m.price,
+            max_debt: mul_div_down(collateral_value, m.lltv, WAD),
+            debt_down: mul_div_down(borrow_shares, assets, shares),
+            incentive: liquidation_incentive_factor(m.lltv),
+        }
+    }
+
     pub fn healthy(&self) -> bool {
         self.debt <= self.max_debt
+    }
+
+    /// The collateral Morpho seizes for repaying every borrow share (`Morpho.liquidate` with
+    /// `seizedAssets = 0`): the debt plus the incentive, at the oracle price. `None` at a zero
+    /// price, where Morpho's division reverts.
+    pub fn seized_for_all_shares(&self) -> Option<u128> {
+        (self.price != 0)
+            .then(|| mul_div_down(mul_div_down(self.debt_down, self.incentive, WAD), ORACLE_PRICE_SCALE, self.price))
+    }
+}
+
+/// Morpho's liquidation incentive factor: `min(1.15, 1 / (1 - 0.3 * (1 - lltv)))`, in WAD, rounded
+/// as Morpho rounds it (1.126760563380281690 at the market's 62.5 % LLTV).
+pub fn liquidation_incentive_factor(lltv: u128) -> u128 {
+    let lltv = lltv.min(WAD);
+    let denominator = WAD - mul_div_down(LIQUIDATION_CURSOR, WAD - lltv, WAD);
+    mul_div_down(WAD, WAD, denominator).min(MAX_LIQUIDATION_INCENTIVE_FACTOR)
+}
+
+/// How the liquidator calls `SettlementAdapter.liquidate` (review H-04).
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Liquidation {
+    /// `liquidate(account, 0, shares)`: repay the whole debt. Morpho seizes what it is worth plus the
+    /// incentive; the rest of the collateral stays in the vault, which stays open.
+    RepayShares(u128),
+    /// `liquidate(account, collateral, 0)`: the position is underwater (past 1/LIF, about 88.75 % LTV
+    /// here), so repaying every share would seize more collateral than there is and Morpho would
+    /// revert. Seize all of it instead; Morpho realizes the rest of the debt as bad debt and the vault
+    /// closes.
+    SeizeAll(u64),
+}
+
+impl Liquidation {
+    /// `(seizedAssets, repaidShares)` for the Adapter.
+    pub fn arguments(self) -> (U256, U256) {
+        match self {
+            Self::RepayShares(shares) => (U256::ZERO, U256::from(shares)),
+            Self::SeizeAll(collateral) => (U256::from(collateral), U256::ZERO),
+        }
+    }
+}
+
+/// H-04: the liquidation of an unhealthy position, from the same state Morpho reads (`None` for a
+/// healthy position or one without debt). `outstanding` is the vault's outstanding on the Registry,
+/// which bounds what the Adapter lets Morpho seize; it equals the position's collateral (I1, I2).
+///
+/// Repaying every share works exactly when the collateral it seizes is no more than the collateral
+/// there is; when it is more, Morpho underflows. With Morpho's rounding, whenever repaying every share
+/// would seize too much, seizing all the collateral repays at most every share, so one of the two
+/// always goes through at the state they are computed from.
+pub fn plan_liquidation(pos: &Position, outstanding: u64) -> Option<Liquidation> {
+    if pos.borrow_shares == 0 || pos.healthy() {
+        return None;
+    }
+    let seizable = pos.collateral.min(u128::from(outstanding));
+    if seizable == 0 {
+        return None;
+    }
+    match pos.seized_for_all_shares() {
+        Some(seized) if seized <= seizable => Some(Liquidation::RepayShares(pos.borrow_shares)),
+        // `seizable <= outstanding`, a u64.
+        _ => Some(Liquidation::SeizeAll(u64::try_from(seizable).ok()?)),
+    }
+}
+
+/// The liquidations to try, in order. Morpho accrues interest before it liquidates, so the debt it
+/// sees can exceed the stored debt the plan was made from: a position just short of underwater by
+/// the plan may be underwater for Morpho. Seizing all the collateral is then what goes through, so
+/// it is the fallback of a full repayment (the other way round cannot happen: interest only adds
+/// debt).
+pub fn liquidation_attempts(plan: Liquidation, pos: &Position, outstanding: u64) -> Vec<Liquidation> {
+    let seizable = u64::try_from(pos.collateral.min(u128::from(outstanding))).unwrap_or(outstanding);
+    match plan {
+        Liquidation::RepayShares(_) if seizable > 0 => vec![plan, Liquidation::SeizeAll(seizable)],
+        _ => vec![plan],
     }
 }
 
@@ -163,24 +275,27 @@ fn mul_div_down(a: u128, b: u128, d: u128) -> u128 {
     u128::try_from(q).unwrap_or(u128::MAX)
 }
 
-pub async fn position<P: Provider>(p: &P, d: &Deployment, user: Address) -> Result<Position> {
-    let morpho = IMorpho::new(d.morpho, p);
-    let pos = morpho.position(d.market_id, user).call().await?;
-    let mkt = morpho.market(d.market_id).call().await?;
+/// The market's borrow totals, the oracle price and the LLTV.
+pub async fn market_state<P: Provider>(p: &P, d: &Deployment) -> Result<MarketState> {
+    let mkt = IMorpho::new(d.morpho, p).market(d.market_id).call().await?;
     let price = IOracle::new(d.market.oracle, p).price().call().await?;
-    let price = u128::try_from(price).map_err(|_| anyhow!("price overflow"))?;
-    let lltv = u128::try_from(d.market.lltv).map_err(|_| anyhow!("lltv overflow"))?;
-    let borrow_shares = pos.borrowShares;
-    let debt =
-        mul_div_up(borrow_shares, mkt.totalBorrowAssets + VIRTUAL_ASSETS, mkt.totalBorrowShares + VIRTUAL_SHARES);
-    let collateral_value = mul_div_down(pos.collateral, price, ORACLE_PRICE_SCALE);
-    Ok(Position {
-        borrow_shares,
-        debt,
-        collateral: pos.collateral,
-        price,
-        max_debt: mul_div_down(collateral_value, lltv, WAD),
+    Ok(MarketState {
+        total_borrow_assets: mkt.totalBorrowAssets,
+        total_borrow_shares: mkt.totalBorrowShares,
+        price: u128::try_from(price).map_err(|_| anyhow!("price overflow"))?,
+        lltv: u128::try_from(d.market.lltv).map_err(|_| anyhow!("lltv overflow"))?,
     })
+}
+
+/// `user`'s position in a market whose state was read with [`market_state`].
+pub async fn position_in<P: Provider>(p: &P, d: &Deployment, m: &MarketState, user: Address) -> Result<Position> {
+    let pos = IMorpho::new(d.morpho, p).position(d.market_id, user).call().await?;
+    Ok(Position::new(pos.borrowShares, pos.collateral, m))
+}
+
+pub async fn position<P: Provider>(p: &P, d: &Deployment, user: Address) -> Result<Position> {
+    let m = market_state(p, d).await?;
+    position_in(p, d, &m, user).await
 }
 
 /// The raw 43-byte Orchard-protocol (Ironwood) receiver of the bot's unified address.
@@ -224,13 +339,31 @@ fn keep_destination(commitment: B256, salt: &[u8; 32], receiver: &[u8; 43]) -> R
 
 /// Writes `data` to `path` atomically, readable by its owner only.
 fn write_private(path: &Path, data: &[u8]) -> Result<()> {
-    use std::os::unix::fs::{DirBuilderExt, OpenOptionsExt, PermissionsExt};
     if let Some(dir) = path.parent().filter(|d| !d.as_os_str().is_empty()) {
-        fs::DirBuilder::new().recursive(true).mode(0o700).create(dir)?;
+        let mut builder = fs::DirBuilder::new();
+        builder.recursive(true);
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::DirBuilderExt;
+            builder.mode(0o700);
+        }
+        builder.create(dir)?;
     }
     let tmp = path.with_extension("tmp");
-    let mut f = fs::OpenOptions::new().write(true).create(true).truncate(true).mode(0o600).open(&tmp)?;
-    f.set_permissions(fs::Permissions::from_mode(0o600))?;
+    let mut options = fs::OpenOptions::new();
+    options.write(true).create(true).truncate(true);
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::OpenOptionsExt;
+        options.mode(0o600);
+    }
+    let mut f = options.open(&tmp)?;
+    // `mode` only applies to a new file; a leftover temporary file keeps its permissions.
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        f.set_permissions(fs::Permissions::from_mode(0o600))?;
+    }
     f.write_all(data)?;
     f.sync_all()?;
     fs::rename(&tmp, path)?;
@@ -312,7 +445,6 @@ mod tests {
     /// layout `zecured-wallet watch-claims` reads.
     #[tokio::test]
     async fn every_commitment_is_kept_with_its_salt() {
-        use std::os::unix::fs::PermissionsExt;
         let path = std::env::temp_dir().join(format!("zecured-bots-destinations-{}.json", std::process::id()));
         keep_destinations_in(path);
         let file = DESTINATIONS.get().unwrap();
@@ -323,7 +455,11 @@ mod tests {
         let salt: [u8; 32] = hex::decode(mine["salt"].as_str().unwrap()).unwrap().try_into().unwrap();
         assert_eq!(commitment(&salt, &ours), c);
         assert_eq!(mine["receiver"], json!(hex::encode(ours)));
-        assert_eq!(fs::metadata(file).unwrap().permissions().mode() & 0o777, 0o600);
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            assert_eq!(fs::metadata(file).unwrap().permissions().mode() & 0o777, 0o600);
+        }
         let _ = fs::remove_file(file);
     }
 
@@ -340,5 +476,256 @@ mod tests {
         assert_eq!(mul_div_down(10, 3, 4), 7);
         // 0.01 ZEC (1e6 zat) at $40 (price = 40e34): value 40e34 * 1e6 / 1e36 = 0.4 USDC = 400_000 units.
         assert_eq!(mul_div_down(1_000_000, 40 * 10u128.pow(34), ORACLE_PRICE_SCALE), 400_000);
+    }
+
+    // ----- H-04: which liquidation the bot sends
+
+    const LLTV: u128 = 625_000_000_000_000_000; // 62.5 %
+    /// `price` in dollars per ZEC times 100 (cents), on Morpho's scale.
+    const fn cents(c: u128) -> u128 {
+        c * 10u128.pow(32)
+    }
+
+    /// The contracts' fork tests (ZecuredFixture): a 0.01 ZEC vault borrowing 40 % of $40 (160,000
+    /// units) alone in a fresh market, so 160,000 assets for 1.6e11 shares.
+    fn fork_test_loan(price: u128) -> Position {
+        let market = MarketState {
+            total_borrow_assets: 160_000,
+            total_borrow_shares: 160_000 * VIRTUAL_SHARES,
+            price,
+            lltv: LLTV,
+        };
+        Position::new(160_000 * VIRTUAL_SHARES, 1_000_000, &market)
+    }
+
+    /// Morpho.liquidate's arithmetic and checks (morpho-blue/src/Morpho.sol), written out apart from
+    /// the bot's: the collateral seized and the shares repaid, or why Morpho reverts.
+    fn morpho_liquidate(
+        borrow_shares: u128,
+        collateral: u128,
+        m: &MarketState,
+        seized: u128,
+        repaid_shares: u128,
+    ) -> Result<(u128, u128), &'static str> {
+        assert!((seized == 0) != (repaid_shares == 0), "INCONSISTENT_INPUT");
+        let (assets, shares) = (m.total_borrow_assets + 1, m.total_borrow_shares + 1_000_000);
+        let borrowed = mul_div_up(borrow_shares, assets, shares);
+        let max_borrow = mul_div_down(mul_div_down(collateral, m.price, ORACLE_PRICE_SCALE), m.lltv, WAD);
+        if max_borrow >= borrowed {
+            return Err("HEALTHY_POSITION");
+        }
+        let cursor_term = mul_div_down(300_000_000_000_000_000, WAD - m.lltv, WAD);
+        let lif = mul_div_down(WAD, WAD, WAD - cursor_term).min(1_150_000_000_000_000_000);
+        let (seized, repaid_shares) = if seized > 0 {
+            let quoted = mul_div_up(seized, m.price, ORACLE_PRICE_SCALE);
+            (seized, mul_div_up(mul_div_up(quoted, WAD, lif), shares, assets))
+        } else {
+            if m.price == 0 {
+                return Err("division by zero");
+            }
+            let repaid = mul_div_down(repaid_shares, assets, shares);
+            (mul_div_down(mul_div_down(repaid, lif, WAD), ORACLE_PRICE_SCALE, m.price), repaid_shares)
+        };
+        if repaid_shares > borrow_shares {
+            return Err("borrowShares underflow");
+        }
+        if seized > collateral {
+            return Err("collateral underflow");
+        }
+        Ok((seized, repaid_shares))
+    }
+
+    fn run(pos: &Position, m: &MarketState, plan: Liquidation) -> Result<(u128, u128), &'static str> {
+        let (seized, repaid) = plan.arguments();
+        let (seized, repaid) = (u128::try_from(seized).unwrap(), u128::try_from(repaid).unwrap());
+        morpho_liquidate(pos.borrow_shares, pos.collateral, m, seized, repaid)
+    }
+
+    /// A deterministic generator for the property test.
+    struct Lcg(u64);
+
+    impl Lcg {
+        fn below(&mut self, bound: u128) -> u128 {
+            let mut draw = || {
+                self.0 = self.0.wrapping_mul(6_364_136_223_846_793_005).wrapping_add(1_442_695_040_888_963_407);
+                u128::from(self.0 >> 11)
+            };
+            ((draw() << 53) | draw()) % bound
+        }
+    }
+
+    #[test]
+    fn the_incentive_factor_is_morphos() {
+        assert_eq!(liquidation_incentive_factor(LLTV), 1_126_760_563_380_281_690);
+        // The cap: a low LLTV would give more than 1.15.
+        assert_eq!(liquidation_incentive_factor(0), MAX_LIQUIDATION_INCENTIVE_FACTOR);
+        assert_eq!(liquidation_incentive_factor(WAD), WAD);
+    }
+
+    /// A healthy position (or one without debt) is left alone, up to Morpho's exact LLTV boundary.
+    #[test]
+    fn healthy_positions_are_not_liquidated() {
+        assert_eq!(plan_liquidation(&fork_test_loan(cents(4_000)), 1_000_000), None);
+        // At $25.60 the collateral is worth 256,000 units and 62.5 % of it is the debt exactly.
+        assert_eq!(plan_liquidation(&fork_test_loan(cents(2_560)), 1_000_000), None);
+        let just_below = fork_test_loan(cents(2_560) - 1);
+        assert_eq!(plan_liquidation(&just_below, 1_000_000), Some(Liquidation::RepayShares(160_000 * VIRTUAL_SHARES)));
+        let mut repaid = fork_test_loan(cents(1_000));
+        repaid.borrow_shares = 0;
+        assert_eq!(plan_liquidation(&repaid, 1_000_000), None);
+    }
+
+    /// Liquidatable but not underwater: the whole debt is repaid and part of the collateral seized,
+    /// what the contracts' `test_liquidate_repayAllShares_partialSeize` asserts at $25.50.
+    #[test]
+    fn a_liquidatable_position_repays_every_share() {
+        for (price, seized) in [(cents(2_550), 706_984), (cents(1_850), 974_491)] {
+            let pos = fork_test_loan(price);
+            let plan = plan_liquidation(&pos, 1_000_000).unwrap();
+            assert_eq!(plan, Liquidation::RepayShares(160_000 * VIRTUAL_SHARES));
+            assert_eq!(pos.seized_for_all_shares(), Some(seized));
+            let market = MarketState {
+                total_borrow_assets: 160_000,
+                total_borrow_shares: 160_000 * VIRTUAL_SHARES,
+                price,
+                lltv: LLTV,
+            };
+            assert_eq!(run(&pos, &market, plan), Ok((seized, 160_000 * VIRTUAL_SHARES)));
+        }
+    }
+
+    /// Underwater (past 1/LIF): repaying every share would seize more than the vault holds, which
+    /// Morpho reverts (the review's repro at $17); seizing all of it goes through, as the contracts'
+    /// `test_liquidate_wholeVault_closesTheVault` does at $18.
+    #[test]
+    fn an_underwater_position_seizes_all_the_collateral() {
+        for price in [cents(1_800), cents(1_700), cents(100), 1] {
+            let pos = fork_test_loan(price);
+            let market = MarketState {
+                total_borrow_assets: 160_000,
+                total_borrow_shares: 160_000 * VIRTUAL_SHARES,
+                price,
+                lltv: LLTV,
+            };
+            assert_eq!(plan_liquidation(&pos, 1_000_000), Some(Liquidation::SeizeAll(1_000_000)));
+            assert_eq!(
+                run(&pos, &market, Liquidation::RepayShares(pos.borrow_shares)),
+                Err("collateral underflow"),
+                "what the bot used to send"
+            );
+            let (seized, repaid) = run(&pos, &market, Liquidation::SeizeAll(1_000_000)).unwrap();
+            assert_eq!(seized, 1_000_000);
+            assert!(repaid <= pos.borrow_shares, "the rest is bad debt");
+        }
+        // A zero price: Morpho cannot divide by it, but seizing everything needs no division.
+        let pos = fork_test_loan(0);
+        assert_eq!(plan_liquidation(&pos, 1_000_000), Some(Liquidation::SeizeAll(1_000_000)));
+    }
+
+    /// The boundary, with Morpho's rounding: repaying every share is chosen exactly while the collateral
+    /// it seizes (1,001,561 at $18) is no more than the vault holds.
+    #[test]
+    fn the_underwater_boundary_follows_morphos_rounding() {
+        let market = MarketState {
+            total_borrow_assets: 160_000,
+            total_borrow_shares: 160_000 * VIRTUAL_SHARES,
+            price: cents(1_800),
+            lltv: LLTV,
+        };
+        let shares = 160_000 * VIRTUAL_SHARES;
+        let at = |collateral: u128| Position::new(shares, collateral, &market);
+        assert_eq!(at(1_000_000).seized_for_all_shares(), Some(1_001_561));
+        for collateral in [1_001_561, 1_001_562, 1_001_600] {
+            let pos = at(collateral);
+            let outstanding = u64::try_from(collateral).unwrap();
+            assert_eq!(plan_liquidation(&pos, outstanding), Some(Liquidation::RepayShares(shares)));
+            assert_eq!(run(&pos, &market, Liquidation::RepayShares(shares)), Ok((1_001_561, shares)));
+        }
+        for collateral in [1_001_560, 1_001_000] {
+            let pos = at(collateral);
+            let outstanding = u64::try_from(collateral).unwrap();
+            assert_eq!(plan_liquidation(&pos, outstanding), Some(Liquidation::SeizeAll(outstanding)));
+            assert_eq!(run(&pos, &market, Liquidation::RepayShares(shares)), Err("collateral underflow"));
+            assert!(run(&pos, &market, Liquidation::SeizeAll(outstanding)).is_ok());
+        }
+        // The Registry's outstanding bounds the seizure too (the Adapter arms the zZEC transfer with it).
+        let pos = at(1_001_561);
+        assert_eq!(plan_liquidation(&pos, 1_001_560), Some(Liquidation::SeizeAll(1_001_560)));
+        assert_eq!(plan_liquidation(&pos, 0), None);
+    }
+
+    /// Over many positions and prices: the planned liquidation always goes through Morpho's checks,
+    /// and the whole collateral is seized only when repaying every share would revert.
+    #[test]
+    fn the_planned_liquidation_never_reverts_in_morpho() {
+        let mut rng = Lcg(0x5eed_2026_1015);
+        let (mut repaid_all, mut seized_all) = (0, 0);
+        for _ in 0..20_000 {
+            let total_assets = 1 + rng.below(10_000_000_000);
+            // Share prices from Morpho's initial 1e-6 up to 2e-6 assets per share (accrued interest).
+            let total_shares = (total_assets * VIRTUAL_SHARES * (1_000 - rng.below(500)) / 1_000).max(1);
+            let borrow_shares = 1 + rng.below(total_shares);
+            let collateral = 1 + rng.below(100_000_000_000);
+            let debt = mul_div_up(borrow_shares, total_assets + VIRTUAL_ASSETS, total_shares + VIRTUAL_SHARES);
+            // An LTV from 30 % to 150 % (healthy, liquidatable and underwater), or any price at all.
+            let price = if rng.below(10) == 0 {
+                1 + rng.below(cents(200_000))
+            } else {
+                let ltv_permille = 300 + rng.below(1_200);
+                mul_div_down(debt * 1_000, ORACLE_PRICE_SCALE, ltv_permille * collateral).clamp(1, cents(1_000_000))
+            };
+            let market = MarketState {
+                total_borrow_assets: total_assets,
+                total_borrow_shares: total_shares,
+                price,
+                lltv: LLTV,
+            };
+            let pos = Position::new(borrow_shares, collateral, &market);
+            let outstanding = u64::try_from(collateral).unwrap();
+            let healthy =
+                morpho_liquidate(borrow_shares, collateral, &market, 0, borrow_shares) == Err("HEALTHY_POSITION");
+            match plan_liquidation(&pos, outstanding) {
+                None => assert!(healthy, "{pos:?}"),
+                Some(plan) => {
+                    assert!(!healthy);
+                    assert!(run(&pos, &market, plan).is_ok(), "{plan:?} reverts for {pos:?} at {market:?}");
+                    if let Liquidation::SeizeAll(_) = plan {
+                        assert!(run(&pos, &market, Liquidation::RepayShares(borrow_shares)).is_err());
+                        seized_all += 1;
+                    } else {
+                        repaid_all += 1;
+                    }
+                }
+            }
+        }
+        assert!(repaid_all > 1_000 && seized_all > 1_000, "both paths covered: {repaid_all}, {seized_all}");
+    }
+
+    /// Morpho accrues interest before it liquidates: a plan made from the stored debt that repays
+    /// every share falls back on seizing everything, which then goes through.
+    #[test]
+    fn a_full_repayment_falls_back_on_seizing_everything() {
+        let stored = MarketState {
+            total_borrow_assets: 160_000,
+            total_borrow_shares: 160_000 * VIRTUAL_SHARES,
+            price: cents(1_800),
+            lltv: LLTV,
+        };
+        let shares = 160_000 * VIRTUAL_SHARES;
+        let pos = Position::new(shares, 1_001_561, &stored);
+        let plan = plan_liquidation(&pos, 1_001_561).unwrap();
+        assert_eq!(plan, Liquidation::RepayShares(shares));
+        assert_eq!(liquidation_attempts(plan, &pos, 1_001_561), vec![plan, Liquidation::SeizeAll(1_001_561)]);
+        // A few units of interest later, repaying every share seizes too much; seizing everything works.
+        let accrued = MarketState {
+            total_borrow_assets: 160_010,
+            ..stored
+        };
+        assert_eq!(run(&pos, &accrued, plan), Err("collateral underflow"));
+        assert!(run(&pos, &accrued, Liquidation::SeizeAll(1_001_561)).is_ok());
+        // An underwater plan has no fallback to try.
+        let under = Position::new(shares, 1_000_000, &stored);
+        let plan = plan_liquidation(&under, 1_000_000).unwrap();
+        assert_eq!(liquidation_attempts(plan, &under, 1_000_000), vec![Liquidation::SeizeAll(1_000_000)]);
     }
 }

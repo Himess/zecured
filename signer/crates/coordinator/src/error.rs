@@ -18,10 +18,14 @@ pub enum PublicError {
     AlreadyBound,
     /// Too many vaults are waiting for their deposit (M-8).
     Busy,
+    /// The open-vault request's hashcash stamp is missing or too weak (H-01).
+    BadStamp,
     InvalidReceiver,
     NotOwner,
     Expired,
     NonceUsed,
+    /// I30: an off-chain refund of a deposit that a guest of the deployment can land on Base.
+    RefundOnBase,
     /// Fewer than three signers accepted, and at least one refused under its policy.
     SignersRefused,
     /// Fewer than three signers answered (unreachable, offline or broken).
@@ -40,10 +44,12 @@ impl PublicError {
             Self::NotDenomination => "not_a_denomination",
             Self::AlreadyBound => "already_bound",
             Self::Busy => "busy",
+            Self::BadStamp => "bad_stamp",
             Self::InvalidReceiver => "invalid_receiver",
             Self::NotOwner => "not_owner",
             Self::Expired => "expired",
             Self::NonceUsed => "nonce_used",
+            Self::RefundOnBase => "refund_on_base",
             Self::SignersRefused => "signers_refused",
             Self::SignersUnavailable => "signers_unavailable",
             Self::ChainUnavailable => "chain_unavailable",
@@ -59,10 +65,14 @@ impl PublicError {
             Self::NotDenomination => "Not a standard collateral denomination.",
             Self::AlreadyBound => "This account or owner key already has a vault.",
             Self::Busy => "Too many vaults are waiting for a deposit. Try again later.",
+            Self::BadStamp => "The request's proof of work is missing or too weak.",
             Self::InvalidReceiver => "Not a valid unified address with an Ironwood (Orchard-protocol) receiver.",
             Self::NotOwner => "Not signed by the vault owner.",
             Self::Expired => "The request has expired.",
             Self::NonceUsed => "This request nonce was already used.",
+            Self::RefundOnBase => {
+                "This deposit can land on Base: it is refunded there, as a Refund claim, once a proof lands it."
+            }
             Self::SignersRefused => "The signers refused the request.",
             Self::SignersUnavailable => "Not enough signers are available. Try again later.",
             Self::ChainUnavailable => "A blockchain service is unavailable. Try again later.",
@@ -76,8 +86,9 @@ impl PublicError {
             Self::BadRequest => 400,
             Self::NotOwner => 403,
             Self::UnknownVault => 404,
-            Self::AlreadyBound | Self::NonceUsed => 409,
+            Self::AlreadyBound | Self::NonceUsed | Self::RefundOnBase => 409,
             Self::NotDenomination | Self::InvalidReceiver | Self::Expired | Self::SignersRefused => 422,
+            Self::BadStamp => 422,
             Self::Busy => 429,
             Self::Internal => 500,
             Self::SignersUnavailable | Self::ChainUnavailable => 503,

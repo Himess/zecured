@@ -2,10 +2,12 @@
  * EIP-712 domains and types, exactly as docs/INTERFACES.md § 2 (tests pin the type strings
  * against that file and against the Solidity golden vectors).
  *
- * - Registry domain ("ZecuredRegistry", "1", 84532, Registry): DepositAttestation,
- *   PayoutConfirmation, VaultCancellation, VaultOpened (signed by the signer nodes; the app checks
- *   VaultOpened: lib/signers.ts)
- *   and every off-chain owner request (OpenVault, Destination, RefundRequest, ViewKeyRequest).
+ * - Registry domain ("ZecuredRegistry", "1", 84532, Registry): PayoutConfirmation, VaultOpened
+ *   (signed by the signer nodes; the app checks VaultOpened: lib/signers.ts) and every off-chain
+ *   owner request (OpenVault, Destination, ViewKeyRequest). v3 has no signer-attested deposit
+ *   (DepositAttestation), no vault cancellation (VaultCancellation) and no off-chain refund
+ *   (RefundRequest): a deposit that cannot back a loan comes back as a Refund claim on Base,
+ *   whose destination is a `Destination` like any payout's.
  * - Adapter domain ("ZecuredSettlementAdapter", "1", 84532, Adapter): CloseRequest, which the
  *   owner signs *through the Safe* (ERC-1271, SafeMessage wrapping; see docs/spikes/SPIKE_C.md).
  */
@@ -35,17 +37,10 @@ export function adapterDomain(adapter: Address) {
 /** Every Zecured EIP-712 struct (field order matters: it defines the type string). */
 export const types = {
   // § 2.2 — signed by signer nodes
-  DepositAttestation: [
-    { name: "vaultId", type: "bytes32" },
-    { name: "account", type: "address" },
-    { name: "amount", type: "uint64" },
-    { name: "depositTag", type: "bytes32" },
-  ],
   PayoutConfirmation: [
     { name: "vaultId", type: "bytes32" },
     { name: "claimIdsHash", type: "bytes32" },
   ],
-  VaultCancellation: [{ name: "vaultId", type: "bytes32" }],
   // § 2.3 — signed by the per-loan owner key, verified off-chain by every signer node
   OpenVault: [
     { name: "owner", type: "address" },
@@ -56,13 +51,6 @@ export const types = {
   ],
   Destination: [
     { name: "vaultId", type: "bytes32" },
-    { name: "commitment", type: "bytes32" },
-    { name: "nonce", type: "uint64" },
-    { name: "deadline", type: "uint64" },
-  ],
-  RefundRequest: [
-    { name: "vaultId", type: "bytes32" },
-    { name: "noteId", type: "bytes32" },
     { name: "commitment", type: "bytes32" },
     { name: "nonce", type: "uint64" },
     { name: "deadline", type: "uint64" },
@@ -91,7 +79,7 @@ export const types = {
     { name: "amount", type: "uint64" },
     { name: "expiryHeight", type: "uint32" },
     { name: "addressHash", type: "bytes32" },
-    { name: "ufvkHash", type: "bytes32" },
+    { name: "tagKeyHash", type: "bytes32" },
   ],
 } as const;
 
@@ -113,13 +101,6 @@ export interface OpenVaultMessage {
 }
 export interface DestinationMessage {
   vaultId: Hex;
-  commitment: Hex;
-  nonce: bigint;
-  deadline: bigint;
-}
-export interface RefundRequestMessage {
-  vaultId: Hex;
-  noteId: Hex;
   commitment: Hex;
   nonce: bigint;
   deadline: bigint;
@@ -148,8 +129,11 @@ export interface VaultOpenedMessage {
   expiryHeight: number;
   /** keccak256 of the vault address's UTF-8 bytes. */
   addressHash: Hex;
-  /** keccak256 of the vault UFVK's UTF-8 bytes. */
-  ufvkHash: Hex;
+  /**
+   * keccak256 of the vault's tag key K = BLAKE2b-256(personal "Zecured_TagKey__", UFVK string)
+   * (VaultOpened v2, lib/signers.ts `tagKeyHash`).
+   */
+  tagKeyHash: Hex;
 }
 
 // Typed-data builders (one per request kind, so every message is fully typed).
@@ -163,15 +147,6 @@ export function destinationTypedData(registry: Address, message: DestinationMess
     domain: registryDomain(registry),
     types: { Destination: types.Destination },
     primaryType: "Destination",
-    message,
-  } as const;
-}
-
-export function refundRequestTypedData(registry: Address, message: RefundRequestMessage) {
-  return {
-    domain: registryDomain(registry),
-    types: { RefundRequest: types.RefundRequest },
-    primaryType: "RefundRequest",
     message,
   } as const;
 }

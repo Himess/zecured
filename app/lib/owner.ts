@@ -1,21 +1,23 @@
 /**
  * The borrower's off-chain requests, signed with the per-loan owner key (docs/INTERFACES.md
- * § 2.3, § 4): open a vault, pre-validate a payout destination, ask for a refund, fetch the
- * viewing key. Each builds the EIP-712 message, signs it in the browser and calls the API.
+ * § 2.3, § 4): open a vault, pre-validate a payout destination (an exit's or a refund's), fetch
+ * the viewing key. Each builds the EIP-712 message, signs it in the browser and calls the API.
  * A vault's address and viewing key are accepted only with the signers' signatures (C-4,
- * lib/signers.ts).
+ * lib/signers.ts). There is no off-chain refund any more (v3): a deposit that cannot back a loan
+ * comes back as a Refund claim on Base, whose destination the account sets after this same
+ * pre-validation (lib/calls.ts `refundDestinationCalls`).
  */
 import type { Address, Hex } from "viem";
 import { api as defaultApi, type Api, type OpenVaultResult } from "./api";
 import { prepareDestination, decodeUnifiedAddress, isIronwoodOnly } from "./commitment";
 import { config as appConfig, type AppConfig } from "./config";
-import { signerSet, storedVault, textHash, verifyVaultOpened, VaultProofError, type VaultCheck } from "./signers";
+import { signerSet, storedVault, tagKeyHash, verifyVaultOpened, VaultProofError, type VaultCheck } from "./signers";
+import { solveStamp, STAMP_DEFAULT_BITS } from "./stamp";
 import {
   deadlineIn,
   destinationTypedData,
   openVaultTypedData,
   randomNonce64,
-  refundRequestTypedData,
   REQUEST_TTL_SECONDS,
   signWithOwnerKey,
   viewKeyRequestTypedData,
@@ -31,6 +33,8 @@ export interface OwnerContext {
   signers?: readonly Address[];
   config?: AppConfig;
   now?: number;
+  /** Compute the open-vault stamp with these zero bits instead of the backend's (tests). */
+  stampBits?: number;
 }
 
 /** The configuration forbids owner signatures (H-6: pins and backend disagree, or no Registry pin). */
@@ -92,9 +96,11 @@ export interface OpenedVault extends OpenVaultResult {
 }
 
 /**
- * POST /vaults with a fresh OpenVault signature. Throws `VaultProofError` unless all five
- * signers signed `VaultOpened` for the returned address and viewing key and for this request:
- * nothing it returns may be shown or stored as payable before that.
+ * POST /vaults with a fresh OpenVault signature and the request's hashcash stamp (review H-01:
+ * a second or two of work in this browser, with the zero bits `GET /config` reports). Throws
+ * `VaultProofError` unless all five signers signed `VaultOpened` for the returned address and
+ * tag key and for this request: nothing it returns may be shown or stored as payable before
+ * that.
  */
 export async function openVault(loan: StoredLoan, ctx: OwnerContext = {}): Promise<OpenedVault> {
   const a = ctx.api ?? defaultApi;
@@ -103,10 +109,14 @@ export async function openVault(loan: StoredLoan, ctx: OwnerContext = {}): Promi
   // A build that cannot check the signers' signatures opens no vault (no DKG for nothing).
   if (!ctx.signers) signerSet(c);
   const amount = BigInt(loan.amount);
+  // The stamp binds the request id and the owner key: a retry of the same loan finds the same
+  // one, which the backend accepts again unless a vault opened with it. Computed first, so the
+  // work does not eat into the request's deadline.
+  const stamp = await solveStamp(loan.requestId, loan.owner, ctx.stampBits ?? c.openVaultStampBits ?? STAMP_DEFAULT_BITS);
   const deadline = deadlineIn(REQUEST_TTL_SECONDS, ctx.now);
   const message = { owner: loan.owner, account: loan.account, amount, requestId: loan.requestId, deadline };
   const signature = await signWithOwnerKey(loan.ownerKey, openVaultTypedData(registry, message));
-  const res = await a.openVault({ ...message, signature });
+  const res = await a.openVault({ ...message, signature, stamp });
   if (res.amount !== amount) throw new Error("The backend opened a vault for a different amount.");
   const check = await verifyVaultOpened(
     {
@@ -116,7 +126,7 @@ export async function openVault(loan: StoredLoan, ctx: OwnerContext = {}): Promi
       amount,
       expiryHeight: res.expiryHeight,
       address: res.address,
-      ufvkHash: res.ufvkHash,
+      tagKeyHash: res.tagKeyHash,
     },
     res.signatures,
     { config: c, registry, signers: ctx.signers },
@@ -125,9 +135,9 @@ export async function openVault(loan: StoredLoan, ctx: OwnerContext = {}): Promi
 }
 
 /**
- * Pre-validates the Ironwood destination of an exit (P2 / P6) with the signers. The app
- * computes the commitment itself and checks that the backend returns the same value.
- * Returns the commitment to use on Base. The salt is sent to the signers only.
+ * Pre-validates the Ironwood destination of an exit (P2 / P6) or of a Refund claim (T-02) with
+ * the signers. The app computes the commitment itself and checks that the backend returns the
+ * same value. Returns the commitment to use on Base. The salt is sent to the signers only.
  */
 export async function submitDestination(
   loan: StoredLoan,
@@ -151,32 +161,13 @@ export async function submitDestination(
   return { commitment: dest.commitment, hasOtherReceivers: dest.hasOtherReceivers };
 }
 
-/** P5: asks for a non-conforming note back, to an Ironwood address. */
-export async function requestRefund(
-  loan: StoredLoan,
-  vaultId: Hex,
-  noteId: Hex,
-  ua: string,
-  ctx: OwnerContext = {},
-): Promise<boolean> {
-  const a = ctx.api ?? defaultApi;
-  const registry = signingRegistry(ctx);
-  const dest = prepareDestination(ua, "test");
-  const nonce = randomNonce64();
-  const deadline = deadlineIn(REQUEST_TTL_SECONDS, ctx.now);
-  const signature = await signWithOwnerKey(
-    loan.ownerKey,
-    refundRequestTypedData(registry, { vaultId, noteId, commitment: dest.commitment, nonce, deadline }),
-  );
-  return a.postRefund(vaultId, { noteId, receiver: dest.ua, salt: dest.saltHex, nonce, deadline, signature });
-}
-
 /** A vault's viewing key, as the backend returned it. */
 export interface ViewingKey {
   ufvk: string;
   /**
-   * It hashes to the `ufvkHash` all five signers signed when the vault opened. False only for
-   * a loan opened before vaults were signed: nothing to check it against.
+   * Its tag key hashes to the `tagKeyHash` all five signers signed when the vault opened. False
+   * only for a loan opened before vaults were signed (or under `VaultOpened` v1): nothing this
+   * build can check it against.
    */
   checked: boolean;
 }
@@ -205,7 +196,7 @@ export async function fetchViewingKey(loan: StoredLoan, vaultId: Hex, ctx: Owner
   const signature = await signWithOwnerKey(loan.ownerKey, viewKeyRequestTypedData(registry, { vaultId, nonce, deadline }));
   const ufvk = await a.postViewingKey(vaultId, { nonce, deadline, signature });
   if (!stored) return { ufvk, checked: false };
-  if (textHash(ufvk) !== stored.fields.ufvkHash.toLowerCase()) {
+  if (tagKeyHash(ufvk) !== stored.fields.tagKeyHash.toLowerCase()) {
     throw new VaultProofError(
       "The backend returned a viewing key that the signers did not sign for this vault. It is not shown: do not trust it.",
     );

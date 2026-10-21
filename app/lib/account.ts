@@ -12,15 +12,15 @@
  * bundler and mock paymaster (scripts/local-fork.sh): account deployment + authorizations +
  * borrow in the first UserOp, then a partial release, the account never holding ETH or zZEC.
  */
-import { createClient, http, HttpRequestError, type Address, type Hex, type PublicClient, type Transport } from "viem";
+import { createClient, getAddress, http, HttpRequestError, type Address, type Hex, type PublicClient, type Transport } from "viem";
 import { createBundlerClient, createPaymasterClient } from "viem/account-abstraction";
 import { privateKeyToAccount } from "viem/accounts";
 import { baseSepolia } from "viem/chains";
 import { toSafeSmartAccount } from "permissionless/accounts";
 import { getUserOperationGasPrice } from "permissionless/actions/pimlico";
 import { api as defaultApi, type Api } from "./api";
-import { assertAllowlisted, type Call } from "./calls";
-import { ContractsNotDeployedError, isDeployedAt, publicClient } from "./chain";
+import { assertAllowlisted, pinnedTargets, type Call, type NamedTargets } from "./calls";
+import { ContractsNotDeployedError, isDeployedAt, publicClient, readLinks, type ChainDeps } from "./chain";
 import { config as defaultConfig, type AppConfig } from "./config";
 import { signCloseRequestAsSafe, type CloseRequestMessage } from "./eip712";
 import { predictAccountAddress, SAFE } from "./safe";
@@ -89,6 +89,21 @@ export class AccountNotDeployedError extends Error {
 
 const USER_OP_TIMEOUT_MS = 120_000;
 
+/**
+ * The contracts the pinned Registry names that `calls` go to (the bond, T-05), read through the
+ * proxy only when a call is to none of the pinned contracts. Unreadable: none, so the allowlist
+ * mirror refuses such a call.
+ */
+async function namedTargets(calls: readonly Call[], d: Required<ChainDeps>): Promise<NamedTargets> {
+  const pinned = pinnedTargets(d.config);
+  if (calls.every((c) => pinned.includes(getAddress(c.to)))) return { bond: null };
+  try {
+    return { bond: (await readLinks(d)).bond };
+  } catch {
+    return { bond: null };
+  }
+}
+
 /** Overridable dependencies (tests); the app uses the defaults. */
 export interface AccountDeps {
   config?: AppConfig;
@@ -128,8 +143,9 @@ export function loanAccount(ownerKey: Hex, deps: AccountDeps = {}): LoanAccount 
             : "the backend's configuration could not be loaded",
         );
       }
-      // Never ask the paymaster for anything outside the allowlist (INTERFACES § 4.1).
-      assertAllowlisted(calls, address, config);
+      // Never ask the paymaster for anything outside the allowlist (INTERFACES § 4.1). The bond is
+      // not pinned at build time: it is the one the pinned Registry names.
+      assertAllowlisted(calls, address, config, await namedTargets(calls, chain()));
 
       const client = chain().client; // reads through /proxy/rpc
       const account = await toSafeSmartAccount({

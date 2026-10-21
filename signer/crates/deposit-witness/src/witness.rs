@@ -1,6 +1,11 @@
 //! The private input of a deposit proof, built from public chain data plus what any holder of
 //! the vault's viewing key knows (the vault's `VaultOpened` values; the deposit note is found by
 //! trial decryption), and checked with the statement natively before anything is proven.
+//!
+//! The builder needs the viewing key; the witness does not carry it (statement v2, review H-10):
+//! it carries the vault's tag key K, which `VaultOpened` binds. Whoever proves the witness (our GPU
+//! server, say) learns K, which links the vault's notes and payouts on Zcash, never the viewing key,
+//! which would also show their amounts and recipients.
 
 use std::{collections::BTreeMap, fs, path::Path};
 
@@ -17,7 +22,8 @@ use zcash_protocol::{
     TxId,
     consensus::{BlockHeight, BranchId, Network},
 };
-use zecured_deposit_statement::{Journal, MmrStep, Witness, verify};
+pub use zecured_deposit_statement::Mode;
+use zecured_deposit_statement::{Journal, MmrStep, Witness, tag_key, vault_receiver, verify};
 use zecured_zcash_ops::lwd::{self, LwdClient};
 
 use crate::{
@@ -33,7 +39,8 @@ pub struct Vault {
     pub vault_id: [u8; 32],
     pub owner: [u8; 20],
     pub account: [u8; 20],
-    /// Unified address and unified full viewing key, exactly as signed.
+    /// Unified address and unified full viewing key, exactly as signed (the address hashed, the
+    /// viewing key through its tag key K). The viewing key finds the note; the witness gets K.
     pub address: String,
     pub ufvk: String,
     pub expiry_height: u32,
@@ -189,36 +196,53 @@ pub fn ufvk_fvk(ufvk: &str) -> Result<orchard::keys::FullViewingKey> {
         .context("UFVK without an Orchard-protocol key")
 }
 
-/// Builds the witness of deposit `txid` into `vault`, anchored at header `tip` (after the
-/// deposit's block; the relay must accept that header and enough work on top of it), and
-/// checks it with the statement.
+/// Builds the witness of a note of transaction `txid` to `vault`, anchored at header `tip`
+/// (after the transaction's block; the relay must accept that header and enough work on top of
+/// it), and checks it with the statement.
+///
+/// The note is an output of the transaction to the vault's published receiver: the one created
+/// by action `action` if given; otherwise, in Activate mode, the first of the vault's amount and,
+/// in Refund mode, the first of any value. The epoch's branch id is the transaction's own.
+#[allow(clippy::too_many_arguments)]
 pub async fn build(
     client: &mut LwdClient,
     headers_path: &Path,
     summaries_path: &Path,
     txid: TxId,
     vault: &Vault,
+    mode: Mode,
+    action: Option<u32>,
     tip: u32,
 ) -> Result<Built> {
     let at = locate(client, headers_path, summaries_path, txid, tip).await?;
 
-    // The deposit note, found with the vault's incoming viewing key.
+    // The note, found with the vault's incoming viewing key, to the vault's published receiver.
     let fvk = ufvk_fvk(&vault.ufvk)?;
     let ivk = PreparedIncomingViewingKey::new(&fvk.to_ivk(Scope::External));
+    let published = vault_receiver(&vault.address).map_err(|e| anyhow!("the vault's address: {e:?}"))?;
     let tx = at.transaction()?;
     let bundle = tx.ironwood_bundle().context("no Ironwood bundle")?;
     let (action_index, note, recipient) = bundle
         .actions()
         .iter()
         .enumerate()
+        .filter(|(i, _)| action.is_none_or(|a| usize::try_from(a).is_ok_and(|a| a == *i)))
         .find_map(|(i, a)| {
             try_note_decryption(&IronwoodDomain::for_action(a), &ivk, a)
-                .filter(|(n, _, _)| n.value().inner() == vault.amount)
+                .filter(|(n, r, _)| {
+                    r.to_raw_address_bytes() == published
+                        && (mode == Mode::Refund || action.is_some() || n.value().inner() == vault.amount)
+                })
                 .map(|(n, r, _)| (i, n, r))
         })
-        .context("no note of the vault's amount to the vault")?;
+        .context(match mode {
+            Mode::Activate => "no note of the vault's amount to the vault's address",
+            Mode::Refund => "no note to the vault's address",
+        })?;
 
     let witness = Witness {
+        mode: mode as u8,
+        branch_id: u32::from(tx.consensus_branch_id()),
         tx: at.raw_tx.clone(),
         action_index: u32::try_from(action_index)?,
         note_recipient: recipient.to_raw_address_bytes().to_vec(),
@@ -237,7 +261,8 @@ pub async fn build(
         owner: vault.owner,
         account: vault.account,
         vault_address: vault.address.clone(),
-        vault_ufvk: vault.ufvk.clone(),
+        tag_key: tag_key(&vault.ufvk),
+        vault_amount: vault.amount,
         expiry_height: vault.expiry_height,
     };
     let journal = verify(&witness).map_err(|e| anyhow!("the statement refuses the witness: {e:?}"))?;

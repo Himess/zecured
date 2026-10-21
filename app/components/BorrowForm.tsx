@@ -56,7 +56,7 @@ export function BorrowForm({
   if (!config.contractsDeployed) {
     return (
       <Notice tone="info" title="Borrowing opens once the Base contracts are deployed">
-        <p>The app is running with placeholder contract addresses. Off-chain steps (vault, deposit, refunds) work already.</p>
+        <p>The app is running with placeholder contract addresses. Off-chain steps (opening a vault, the deposit) work already.</p>
       </Notice>
     );
   }
@@ -66,7 +66,7 @@ export function BorrowForm({
   if (collateral === 0n) {
     return (
       <Notice tone="info" title="No collateral yet">
-        <p>Your position has no zZEC collateral yet. It appears once the signers attest your deposit on Base.</p>
+        <p>Your position has no zZEC collateral yet. It appears once your deposit is proven and activated on Base.</p>
       </Notice>
     );
   }

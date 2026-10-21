@@ -7,9 +7,12 @@
 //!
 //!   ... -- misdirected --claim-file f3-<claim>.json --tip <height> --beneficiary 0x...
 //!
+//!   ... -- included --ufvk-file ufvk.txt --txid <payout txid> --tip <height>
+//!
 //! The viewing key comes from a file, never the command line (F3: the claim file that
-//! `zecured-wallet watch --claims-of` writes). The witness contains it: keep the witness on this
-//! machine.
+//! `zecured-wallet watch --claims-of` writes). An F1, F2 or F3 witness contains it: keep the
+//! witness on this machine. An F4 or Included witness holds only the vault's tag key K, derived
+//! here.
 
 use std::{fs, path::PathBuf};
 
@@ -26,7 +29,7 @@ struct Args {
     /// Height of the header the proof is anchored to (after the transaction's block).
     #[arg(long, global = true)]
     tip: Option<u32>,
-    /// Receives the bounty (an EOA; never a vault's smart account).
+    /// Receives the bounty (an EOA; never a vault's smart account). Not used by `included`.
     #[arg(long, global = true)]
     beneficiary: Option<String>,
     /// JSON Lines headers from NU7 activation on.
@@ -87,6 +90,14 @@ enum KindArgs {
         #[arg(long)]
         claim_file: PathBuf,
     },
+    /// Not a violation (T-05): a payout of the vault is in a block under the anchor. The journal
+    /// names it by its payoutRef; the v2 slasher refuses this kind.
+    Included {
+        #[arg(long)]
+        ufvk_file: PathBuf,
+        #[arg(long)]
+        txid: String,
+    },
 }
 
 fn hex32(s: &str) -> Result<[u8; 32]> {
@@ -97,10 +108,12 @@ fn hex32(s: &str) -> Result<[u8; 32]> {
 async fn main() -> Result<()> {
     let args = Args::parse();
     let tip = args.tip.context("--tip")?;
-    let beneficiary: [u8; 20] =
-        hex::decode(args.beneficiary.as_deref().context("--beneficiary")?.trim_start_matches("0x"))?
+    let beneficiary: [u8; 20] = match (&args.kind, args.beneficiary.as_deref()) {
+        (KindArgs::Included { .. }, _) => [0; 20],
+        (_, b) => hex::decode(b.context("--beneficiary")?.trim_start_matches("0x"))?
             .try_into()
-            .map_err(|_| anyhow!("beneficiary: 20 bytes"))?;
+            .map_err(|_| anyhow!("beneficiary: 20 bytes"))?,
+    };
     if args.update_headers {
         let path = args.headers.clone();
         let height = tokio::task::spawn_blocking(move || p2p::extend_file(&path, &p2p::seed_peers())).await??;
@@ -181,6 +194,17 @@ async fn main() -> Result<()> {
                 e.output_index,
                 tip,
                 beneficiary,
+            )
+            .await?
+        }
+        KindArgs::Included { ufvk_file, txid } => {
+            violation::included(
+                &mut client,
+                &args.headers,
+                &args.summaries,
+                zecured_deposit_statement::tag_key(&read_ufvk(ufvk_file)?),
+                TxId::from_hex(txid).context("txid")?,
+                tip,
             )
             .await?
         }

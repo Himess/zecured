@@ -1,7 +1,7 @@
 //! Tier 2 (docs/TIER2.md): the borrower proves their own deposit and activates the vault with
 //! the proof. Nothing here needs the signers or the coordinator to cooperate: the vault's
 //! `VaultOpened` signatures were kept when the vault opened, the viewing key was checked against
-//! them, the chain data is public, and the Registry trusts only the proof.
+//! them, the chain data is public, and the Intake trusts only the proof.
 
 use std::{
     fs,
@@ -22,11 +22,14 @@ use anyhow::{Context, Result, ensure};
 use serde::Deserialize;
 use zcash_protocol::TxId;
 use zecured_base::{
-    events::{IZcashHeaderRelay, IZecuredRegistry},
+    events::{IZcashHeaderRelay, IZecuredIntake, IZecuredRegistry, IZecuredVersions, VERSION_DEPOSIT, version_id},
     gas_with_headroom,
-    relay::anchor_above,
+    relay::deposit_anchor,
 };
-use zecured_deposit_witness::{p2p, witness};
+use zecured_deposit_witness::{
+    p2p,
+    witness::{self, Mode},
+};
 use zecured_zcash_ops::lwd;
 
 use crate::{LoanFile, NetworkParams};
@@ -35,7 +38,7 @@ pub struct Paths {
     pub host: PathBuf,
     pub headers: PathBuf,
     pub summaries: PathBuf,
-    /// Owner-only directory for the witness (it holds the viewing key) and the seal.
+    /// Owner-only directory for the witness (it holds the vault's tag key) and the seal.
     pub work: PathBuf,
 }
 
@@ -65,8 +68,13 @@ fn host(paths: &Paths, command: &str, args: &[&Path]) -> Result<()> {
     Ok(())
 }
 
+/// The Intake the Registry names (Registry v3: deposit proofs go there).
+pub async fn intake_of<P: Provider>(provider: &P, registry: Address) -> Result<Address> {
+    IZecuredRegistry::new(registry, provider).intake().call().await.context("Registry.intake")
+}
+
 /// Builds the witness on this machine and proves it (or makes a MOCK seal): the seal file the
-/// Registry takes, for the deposit `txid` of the loan `l`.
+/// Intake takes, for the deposit `txid` of the loan `l`.
 #[allow(clippy::too_many_arguments)]
 pub async fn make_seal(
     l: &LoanFile,
@@ -80,13 +88,19 @@ pub async fn make_seal(
 ) -> Result<SealFile> {
     let expiry_height = l.expiry_height.context("this loan file has no expiry height (opened before Tier 2)")?;
     ensure!(l.opened_signatures.len() == 5, "this loan file has no VaultOpened signatures (opened before C-4)");
+    // The deposit guest computes VaultOpened v2 (`tagKeyHash`); v1 signatures (`ufvkHash`) never match it.
+    ensure!(
+        l.tag_key_hash.is_some(),
+        "this loan's vault was opened under VaultOpened v1, which the deposit guest no longer proves"
+    );
     let txid = TxId::from_hex(txid).context("deposit txid")?;
     let mut client = lwd::connect(lwd_url).await?;
     let (_, height) = lwd::raw_transaction(&mut client, &txid).await?;
     let height = u32::try_from(height)?;
 
     let provider = ProviderBuilder::new().connect_http(rpc.parse()?);
-    let anchor = anchor_above(&provider, net.registry, height)
+    let intake = intake_of(&provider, net.registry).await?;
+    let anchor = deposit_anchor(&provider, intake, height, l.amount)
         .await?
         .context("the header relay has not reached the deposit with enough work on top yet; try again later")?;
     let headers = paths.headers.clone();
@@ -103,7 +117,9 @@ pub async fn make_seal(
         expiry_height,
         amount: l.amount,
     };
-    let built = witness::build(&mut client, &paths.headers, &paths.summaries, txid, &vault, anchor).await?;
+    let built =
+        witness::build(&mut client, &paths.headers, &paths.summaries, txid, &vault, Mode::Activate, None, anchor)
+            .await?;
     fs::create_dir_all(&paths.work)?;
     #[cfg(unix)]
     {
@@ -127,13 +143,19 @@ pub async fn make_seal(
 }
 
 /// TEST ONLY: submits the proof with the owner EOA, which pays the Base gas, and finalizes the
-/// activation itself (anyone may do both: the proof is all the Registry trusts). Without
+/// activation itself (anyone may do both: the proof is all the Intake trusts). Without
 /// `--self-submit`, the CLI hands the seal to the backend instead (Y10).
 pub async fn submit_with_owner(l: &LoanFile, net: &NetworkParams, s: SealFile, mock: bool, rpc: &str) -> Result<()> {
     let key: PrivateKeySigner = l.owner_key.parse()?;
     let p = ProviderBuilder::new().wallet(EthereumWallet::from(key)).connect_http(rpc.parse()?);
-    let registry = IZecuredRegistry::new(net.registry, &p);
-    ensure!(registry.depositImageId().call().await? == s.image_id, "the Registry expects another deposit guest");
+    let intake = IZecuredIntake::new(intake_of(&p, net.registry).await?, &p);
+    // T-07a: the Intake takes a seal only from an active version (guest image id and verifier).
+    let versions = IZecuredVersions::new(intake.versions().call().await.context("Intake.versions")?, &p);
+    let selector: [u8; 4] = s.seal.get(..4).and_then(|b| b.try_into().ok()).context("seal without a selector")?;
+    ensure!(
+        versions.isActive(version_id(VERSION_DEPOSIT, selector, s.image_id)).call().await?,
+        "Base takes no deposit proof of this guest and verifier (not an active version, T-07a)"
+    );
     let mut sigs: Vec<(Address, Bytes)> = l
         .opened_signatures
         .iter()
@@ -143,7 +165,7 @@ pub async fn submit_with_owner(l: &LoanFile, net: &NetworkParams, s: SealFile, m
         })
         .collect::<Result<_>>()?;
     sigs.sort_by_key(|(a, _)| *a);
-    let call = registry.attestDepositWithProof(s.journal, s.seal, sigs.into_iter().map(|(_, s)| s).collect());
+    let call = intake.attestDepositWithProof(s.journal, s.seal, s.image_id, sigs.into_iter().map(|(_, s)| s).collect());
     let gas = gas_with_headroom(call.estimate_gas().await.context("estimate attestDepositWithProof")?);
     let r = call.gas(gas).send().await?.get_receipt().await?;
     ensure!(r.status(), "attestDepositWithProof reverted");
@@ -153,11 +175,11 @@ pub async fn submit_with_owner(l: &LoanFile, net: &NetworkParams, s: SealFile, m
         r.transaction_hash
     );
 
-    // K3: anyone may finalize once the Registry allows it; the borrower does not need the
+    // K3: anyone may finalize once the Intake allows it; the borrower does not need the
     // coordinator for that either.
-    let relay = IZcashHeaderRelay::new(registry.relay().call().await?, &p);
+    let relay = IZcashHeaderRelay::new(intake.relay().call().await?, &p);
     loop {
-        let pending = registry.pendingActivation(l.vault_id).call().await?;
+        let pending = intake.pendingActivation(l.vault_id).call().await?;
         if pending.account == Address::ZERO {
             println!("the activation is no longer pending (finalized or dropped by someone else)");
             return Ok(());
@@ -179,7 +201,7 @@ pub async fn submit_with_owner(l: &LoanFile, net: &NetworkParams, s: SealFile, m
         eprintln!("relay at {} of {}; waiting", tip.height, pending.readyHeight);
         tokio::time::sleep(Duration::from_secs(30)).await;
     }
-    let call = registry.finalizeActivation(l.vault_id);
+    let call = intake.finalizeActivation(l.vault_id);
     let gas = gas_with_headroom(call.estimate_gas().await.context("estimate finalizeActivation")?);
     let r = call.gas(gas).send().await?.get_receipt().await?;
     ensure!(r.status(), "finalizeActivation reverted");

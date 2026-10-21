@@ -5,7 +5,8 @@
 //! Round 2: run DKG part 2; seal each recipient's round-2 package together with `r_i`.
 //! Round 3: open the packages sealed to us, check every `r_j` against its commitment,
 //! finish the DKG, derive `sk = H(vault_id, r_1..r_5)` and the vault's viewing keys, and sign
-//! `VaultOpened` for the address and viewing key we derived (C-4).
+//! `VaultOpened` for the address we derived and the tag key of the viewing key we derived (C-4;
+//! v2 signs `tagKeyHash = keccak256(K)`, which binds every deposit proof to the vault's own K).
 //!
 //! The coordinator relays every message but only ever sees public packages, commitments
 //! and ciphertexts. Sealed messages are bound to the round-1 transcript (M-4): if the
@@ -99,7 +100,7 @@ pub struct Round3Out {
     /// Public: group key + verifying shares (needed by the coordinator to aggregate).
     pub public_key_package: serde_json::Value,
     /// `VaultOpened` (EIP-712, Registry domain) signed with this node's attestation key, for
-    /// the owner's checked request and the `address` and `ufvk` above (C-4).
+    /// the owner's checked request, the `address` above and the tag key of the `ufvk` above (C-4).
     pub signature: Bytes,
 }
 
@@ -317,8 +318,10 @@ pub fn round3(
     let ufvk = encode_ufvk(&network, &fvk)?;
     let address = encode_ironwood_ua(&network, vault_address(&fvk))?;
     let open = pending.open;
-    // C-4: vouch for the address and viewing key derived here, for the request checked in
-    // round 1 (owner signature, account, denomination, expiry height against our own tip).
+    // C-4: vouch for the address and the viewing key's tag key K derived here, for the request
+    // checked in round 1 (owner signature, account, denomination, expiry height against our own
+    // tip). `tagKeyHash = keccak256(K)` binds K to the vault: a deposit proof's tag is derived with
+    // K, and a proof under any other key carries a `VaultOpened` we never signed.
     let opened = vault_opened(vault_id, open.owner, open.account, open.amount, open.expiry_height, &address, &ufvk);
     let signature = sign_typed(eth, &registry_domain(cfg.chain_id, cfg.registry), &opened)?;
     let out = Round3Out {
@@ -343,7 +346,6 @@ pub fn round3(
         ufvk: out.ufvk.clone(),
         address: out.address.clone(),
         decisions: vec![],
-        attestation: None,
         activated: false,
         outstanding: 0,
         claims: vec![],
@@ -352,7 +354,6 @@ pub fn round3(
         inflight: None,
         confirmed: vec![],
         last_event: None,
-        cancelled: false,
         activated_tag: None,
     })?;
     Ok(out)
@@ -381,6 +382,9 @@ mod tests {
             attest_delay_max_blocks: 0,
             payout_delay_max_blocks: 0,
             commit_depth_blocks: 3,
+            commit_depth_secs: 120,
+            local_fork: true,
+            open_vault: Default::default(),
         }
     }
 

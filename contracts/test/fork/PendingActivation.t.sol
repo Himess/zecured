@@ -2,26 +2,20 @@
 pragma solidity 0.8.28;
 
 import {MessageHashUtils} from "@openzeppelin/contracts/utils/cryptography/MessageHashUtils.sol";
-import {IZecuredRegistry, VaultStatus, DepositProofConfig, MintMode} from "../../src/interfaces/IZecuredRegistry.sol";
-import {IRiscZeroVerifier} from "../../src/interfaces/IRiscZeroVerifier.sol";
-import {DepositAttestation} from "../../src/libraries/ZecuredEIP712.sol";
+import {IZecuredRegistry, VaultStatus, ClaimKind, ClaimStatus} from "../../src/interfaces/v3/IZecuredRegistry.sol";
+import {IZecuredIntake, PendingActivation, RefundReason} from "../../src/interfaces/v3/IZecuredIntake.sol";
+import {LineageNote} from "../../src/interfaces/v3/IZecuredSpendCommits.sol";
 import {MockRiscZeroVerifier} from "../../src/mocks/MockRiscZeroVerifier.sol";
-import {IZcashHeaderRelay} from "../../src/relay/IZcashHeaderRelay.sol";
 import {MockHeaderRelay} from "../mocks/MockHeaderRelay.sol";
 import {MockSignerBond} from "../mocks/MockSignerBond.sol";
-import {ISignerBond} from "../../src/interfaces/ISignerBond.sol";
-import {IZecuredSpendCommits, LineageNote} from "../../src/interfaces/IZecuredSpendCommits.sol";
 import {ZecuredFixture} from "../utils/ZecuredFixture.sol";
 
-/// @notice K1 (`ProofOnly`: no signer attestation can mint) and K3 (a proven deposit only mints once the relay has
-///         moved on with the proof's anchor still on its best chain, and is dropped if the anchor leaves it), driven
-///         through a MOCK relay whose best chain the test sets (real Equihash headers cannot fork in a test; the real
-///         relay path is in DepositProofs.t.sol). The proof itself is the MOCK verifier's.
+/// @notice K3 (a proven deposit only mints once the relay has moved on with the proof's anchor still on its best chain,
+///         and is dropped if the anchor leaves it), E2, and what a halt or a pause does to a pending activation (T-02,
+///         T-03), driven through a MOCK relay whose best chain the test sets (real Equihash headers cannot fork in a
+///         test; the real relay path is in DepositProofs.t.sol), the MOCK verifier, and a MOCK bond and slasher.
 contract PendingActivationTest is ZecuredFixture {
     bytes32 internal constant IMAGE_ID = keccak256("zecured.test.pending.imageId");
-    uint256 internal constant MIN_WORK = 3_500_000;
-    uint64 internal constant DEPTH = 6;
-    uint64 internal constant DELAY = 150;
     uint256 internal constant TIP_HEIGHT = 4_500_000;
 
     bytes32 internal constant ANCHOR = keccak256("zecured.test.pending.anchor");
@@ -32,33 +26,32 @@ contract PendingActivationTest is ZecuredFixture {
 
     MockHeaderRelay internal relay;
     MockRiscZeroVerifier internal verifier;
-    MockSignerBond internal bond;
+    MockSignerBond internal mockBond;
     address internal account = makeAddr("zecured.test.pending.account");
 
-    function _depositProofConfig() internal override returns (DepositProofConfig memory) {
+    function _proofSetup() internal override returns (ProofSetup memory) {
         relay = new MockHeaderRelay();
         verifier = new MockRiscZeroVerifier();
-        return DepositProofConfig({
-            verifier: IRiscZeroVerifier(address(verifier)),
+        return ProofSetup({
+            relay: address(relay),
+            verifier: address(verifier),
             imageId: IMAGE_ID,
-            relay: IZcashHeaderRelay(address(relay)),
-            minConfirmationWork: MIN_WORK,
-            mintMode: MintMode.ProofOnly,
             sealSelector: verifier.SELECTOR(),
-            finalizeDepth: DEPTH,
-            finalizeDelay: DELAY
+            minWork: MIN_WORK,
+            finalizeDepth: FINALIZE_DEPTH,
+            finalizeDelay: FINALIZE_DELAY
         });
     }
 
-    function _signerBond() internal override returns (ISignerBond) {
-        bond = new MockSignerBond();
-        return ISignerBond(address(bond));
+    function _mockBondAndSlasher() internal override returns (address) {
+        mockBond = new MockSignerBond();
+        return address(mockBond);
     }
 
     // ------------------------------------------------------------------ helpers
 
-    function _journal(bytes32 anchor) internal view returns (bytes memory) {
-        return abi.encode(anchor, VAULT, account, VAULT_001, TAG, OPENED);
+    function _journal(bytes32 anchor, bytes32 tag) internal view returns (bytes memory) {
+        return abi.encode(anchor, VAULT, account, VAULT_001, tag, OPENED);
     }
 
     function _all5() internal pure returns (uint256[] memory r) {
@@ -66,33 +59,53 @@ contract PendingActivationTest is ZecuredFixture {
         (r[0], r[1], r[2], r[3], r[4]) = (0, 1, 2, 3, 4);
     }
 
-    function _prove(bytes32 anchor) internal {
+    /// The relay set up for a proof anchored at `anchor`, and the proof (journal, MOCK seal, the five signatures).
+    function _proofOf(bytes32 anchor, bytes32 tag)
+        internal
+        returns (bytes memory journal, bytes memory seal, bytes[] memory sigs)
+    {
         relay.setBlock(anchor, true, MIN_WORK);
         relay.setTipHeight(TIP_HEIGHT);
-        bytes memory journal = _journal(anchor);
-        bytes[] memory sigs = _signerSigs(MessageHashUtils.toTypedDataHash(registry.domainSeparator(), OPENED), _all5());
-        registry.attestDepositWithProof(journal, verifier.mockSeal(IMAGE_ID, sha256(journal)), sigs);
+        journal = _journal(anchor, tag);
+        seal = verifier.mockSeal(IMAGE_ID, sha256(journal));
+        sigs = _signerSigs(MessageHashUtils.toTypedDataHash(registry.domainSeparator(), OPENED), _all5());
+    }
+
+    function _proveTag(bytes32 anchor, bytes32 tag) internal {
+        (bytes memory journal, bytes memory seal, bytes[] memory sigs) = _proofOf(anchor, tag);
+        intake.attestDepositWithProof(journal, seal, proofs.imageId, sigs);
+    }
+
+    function _prove(bytes32 anchor) internal {
+        _proveTag(anchor, TAG);
     }
 
     function _ready() internal {
-        relay.setTipHeight(TIP_HEIGHT + DEPTH);
-        vm.warp(block.timestamp + DELAY);
+        relay.setTipHeight(TIP_HEIGHT + FINALIZE_DEPTH);
+        vm.warp(block.timestamp + FINALIZE_DELAY);
     }
 
-    function _pendingAccount(bytes32 vaultId) internal view returns (address pendingAccount) {
-        (pendingAccount,,,,,) = registry.pendingActivation(vaultId);
+    function _pendingAccount(bytes32 vaultId) internal view returns (address) {
+        return intake.pendingActivation(vaultId).account;
     }
 
-    // ------------------------------------------------------------------ K1
+    function _pause(uint64 until) internal {
+        uint256 nonce = intake.guardNonce();
+        uint64 deadline = uint64(block.timestamp + 1 hours);
+        intake.pauseMinting(until, nonce, deadline, _threeSigs(intake.hashPauseMinting(until, nonce, deadline)));
+    }
 
-    function test_proofOnly_noAttestationCanMint() public {
-        assertEq(uint8(registry.mintMode()), uint8(MintMode.ProofOnly));
-        DepositAttestation memory att =
-            DepositAttestation({vaultId: VAULT, account: account, amount: VAULT_001, depositTag: TAG});
-        // Even all five signers.
-        bytes[] memory sigs = _signerSigs(registry.hashDepositAttestation(att), _all5());
-        vm.expectRevert(IZecuredRegistry.MintRequiresProof.selector);
-        registry.attestDeposit(att, sigs);
+    // ------------------------------------------------------------------ Tier 1 is gone
+
+    /// Signer-attested minting does not exist in v3: neither the Intake nor the Registry has `attestDeposit`.
+    function test_noSignerAttestedMinting() public {
+        bytes memory call = abi.encodeWithSignature(
+            "attestDeposit((bytes32,address,uint64,bytes32),bytes[])", VAULT, account, VAULT_001, TAG, new bytes[](0)
+        );
+        (bool okIntake,) = address(intake).call(call);
+        (bool okRegistry,) = address(registry).call(call);
+        assertFalse(okIntake);
+        assertFalse(okRegistry);
         assertEq(zzec.totalSupply(), 0);
     }
 
@@ -101,85 +114,85 @@ contract PendingActivationTest is ZecuredFixture {
     function test_finalize_waitsForTheRelayAndTheDelay() public {
         uint256 provedAt = block.timestamp;
         _prove(ANCHOR);
-        (, uint64 amount, bytes32 tag, bytes32 anchor, uint256 readyHeight, uint256 readyTime) =
-            registry.pendingActivation(VAULT);
-        assertEq(amount, VAULT_001);
-        assertEq(tag, TAG);
-        assertEq(anchor, ANCHOR);
-        assertEq(readyHeight, TIP_HEIGHT + DEPTH);
-        assertEq(readyTime, provedAt + DELAY);
+        PendingActivation memory p = intake.pendingActivation(VAULT);
+        assertEq(p.amount, VAULT_001);
+        assertEq(p.depositTag, TAG);
+        assertEq(p.anchor, ANCHOR);
+        assertEq(p.readyHeight, TIP_HEIGHT + FINALIZE_DEPTH);
+        assertEq(p.readyTime, provedAt + FINALIZE_DELAY);
         bytes memory notReady =
-            abi.encodeWithSelector(IZecuredRegistry.ActivationNotReady.selector, VAULT, readyHeight, readyTime);
+            abi.encodeWithSelector(IZecuredIntake.ActivationNotReady.selector, VAULT, p.readyHeight, p.readyTime);
 
         // Neither condition.
         vm.expectRevert(notReady);
-        registry.finalizeActivation(VAULT);
+        intake.finalizeActivation(VAULT);
         // Time without the relay: the feeders may be down.
-        vm.warp(readyTime);
-        relay.setTipHeight(readyHeight - 1);
+        vm.warp(p.readyTime);
+        relay.setTipHeight(p.readyHeight - 1);
         vm.expectRevert(notReady);
-        registry.finalizeActivation(VAULT);
+        intake.finalizeActivation(VAULT);
         // The relay without the time: someone may be feeding a branch of their own.
-        vm.warp(readyTime - 1);
-        relay.setTipHeight(readyHeight);
+        vm.warp(p.readyTime - 1);
+        relay.setTipHeight(p.readyHeight);
         vm.expectRevert(notReady);
-        registry.finalizeActivation(VAULT);
+        intake.finalizeActivation(VAULT);
 
-        vm.warp(readyTime);
+        vm.warp(p.readyTime);
         vm.expectEmit(address(registry));
         emit IZecuredRegistry.VaultActivated(VAULT, account, VAULT_001, TAG);
         vm.prank(stranger); // anyone
-        registry.finalizeActivation(VAULT);
+        intake.finalizeActivation(VAULT);
         assertEq(uint8(_status(VAULT)), uint8(VaultStatus.Active));
         assertEq(zzec.totalSupply(), VAULT_001);
         assertEq(_pendingAccount(VAULT), address(0));
 
-        vm.expectRevert(abi.encodeWithSelector(IZecuredRegistry.NoPendingActivation.selector, VAULT));
-        registry.finalizeActivation(VAULT);
+        vm.expectRevert(abi.encodeWithSelector(IZecuredIntake.NoPendingActivation.selector, VAULT));
+        intake.finalizeActivation(VAULT);
     }
 
     function test_revert_finalizeAfterTheAnchorLeftTheBestChain() public {
         _prove(ANCHOR);
         _ready();
         relay.setBlock(ANCHOR, false, 0); // a heavier branch replaced it
-        vm.expectRevert(abi.encodeWithSelector(IZecuredRegistry.AnchorNotConfirmed.selector, ANCHOR, 0));
-        registry.finalizeActivation(VAULT);
+        vm.expectRevert(abi.encodeWithSelector(IZecuredIntake.AnchorNotConfirmed.selector, ANCHOR, 0));
+        intake.finalizeActivation(VAULT);
     }
 
     function test_revert_finalizeRechecksTheWork() public {
         _prove(ANCHOR);
         _ready();
         relay.setBlock(ANCHOR, true, MIN_WORK - 1);
-        vm.expectRevert(abi.encodeWithSelector(IZecuredRegistry.AnchorNotConfirmed.selector, ANCHOR, MIN_WORK - 1));
-        registry.finalizeActivation(VAULT);
+        vm.expectRevert(abi.encodeWithSelector(IZecuredIntake.AnchorNotConfirmed.selector, ANCHOR, MIN_WORK - 1));
+        intake.finalizeActivation(VAULT);
     }
 
     // ------------------------------------------------------------------ K3: dropping a pending activation
 
     function test_drop_onlyOnceTheAnchorLeftTheBestChain_thenTheNoteCanBeProvenAgain() public {
         _prove(ANCHOR);
-        vm.expectRevert(abi.encodeWithSelector(IZecuredRegistry.AnchorStillOnBestChain.selector, VAULT));
-        registry.dropPendingActivation(VAULT);
+        vm.expectRevert(abi.encodeWithSelector(IZecuredIntake.AnchorStillOnBestChain.selector, VAULT));
+        intake.dropPendingActivation(VAULT);
 
         relay.setBlock(ANCHOR, false, 0);
-        vm.expectEmit(address(registry));
-        emit IZecuredRegistry.PendingActivationDropped(VAULT);
+        vm.expectEmit(address(intake));
+        emit IZecuredIntake.PendingActivationDropped(VAULT);
         vm.prank(stranger); // anyone
-        registry.dropPendingActivation(VAULT);
+        intake.dropPendingActivation(VAULT);
         assertEq(_pendingAccount(VAULT), address(0));
         assertFalse(registry.depositTagUsed(TAG), "the tag is free again");
         assertEq(registry.vaultOf(account), bytes32(0), "the account is free again");
         assertEq(uint8(_status(VAULT)), uint8(VaultStatus.None));
         assertEq(zzec.totalSupply(), 0, "nothing was ever minted");
-        vm.expectRevert(abi.encodeWithSelector(IZecuredRegistry.NoPendingActivation.selector, VAULT));
-        registry.finalizeActivation(VAULT);
-        vm.expectRevert(abi.encodeWithSelector(IZecuredRegistry.NoPendingActivation.selector, VAULT));
-        registry.dropPendingActivation(VAULT);
+        assertEq(intake.pendingTotal(), 0);
+        vm.expectRevert(abi.encodeWithSelector(IZecuredIntake.NoPendingActivation.selector, VAULT));
+        intake.finalizeActivation(VAULT);
+        vm.expectRevert(abi.encodeWithSelector(IZecuredIntake.NoPendingActivation.selector, VAULT));
+        intake.dropPendingActivation(VAULT);
 
         // The same deposit, anchored on the chain that won.
         _prove(ANCHOR_2);
         _ready();
-        registry.finalizeActivation(VAULT);
+        intake.finalizeActivation(VAULT);
         assertEq(uint8(_status(VAULT)), uint8(VaultStatus.Active));
         assertEq(zzec.totalSupply(), VAULT_001);
     }
@@ -197,7 +210,7 @@ contract PendingActivationTest is ZecuredFixture {
 
         relay.setBlock(ANCHOR, false, 0);
         vm.warp(block.timestamp + 1 days);
-        registry.dropPendingActivation(VAULT);
+        intake.dropPendingActivation(VAULT);
         assertEq(registry.lineageOf(TAG).vaultId, bytes32(0));
         assertEq(registry.openVaultCount(), 0);
         assertEq(registry.lastVaultSettledAt(), block.timestamp);
@@ -205,7 +218,7 @@ contract PendingActivationTest is ZecuredFixture {
         // Proven again on the chain that won: lineage again, through the activation.
         _prove(ANCHOR_2);
         _ready();
-        registry.finalizeActivation(VAULT);
+        intake.finalizeActivation(VAULT);
         assertEq(registry.lineageOf(TAG).value, VAULT_001);
         assertEq(registry.openVaultCount(), 1);
     }
@@ -215,69 +228,164 @@ contract PendingActivationTest is ZecuredFixture {
     function test_E2_anOpenCaseHoldsTheActivation() public {
         _prove(ANCHOR);
         _ready();
-        bond.setOpenCases(VAULT, 1);
-        vm.expectRevert(abi.encodeWithSelector(IZecuredSpendCommits.ViolationCaseOpen.selector, VAULT));
-        registry.finalizeActivation(VAULT);
-        bond.setOpenCases(VAULT, 0);
-        registry.finalizeActivation(VAULT);
+        mockBond.setOpenCases(VAULT, 1);
+        vm.expectRevert(abi.encodeWithSelector(IZecuredIntake.ViolationCaseOpen.selector, VAULT));
+        intake.finalizeActivation(VAULT);
+        mockBond.setOpenCases(VAULT, 0);
+        intake.finalizeActivation(VAULT);
         assertEq(uint8(_status(VAULT)), uint8(VaultStatus.Active));
     }
 
-    /// E3: while its activation is pending, the deposit can be neither refunded nor cancelled: the two reads a signer
-    /// makes before a refund (D23, K2) say the vault is not Cancelled and the note's tag is used. After a drop the
-    /// tag is free and the vault can be cancelled (test_cancel_refusedWhilePending_allowedAfterTheDrop).
-    function test_E3_aPendingDepositIsNeitherRefundableNorCancellable() public {
+    /// E3: while its activation is pending, the deposit is not refundable by the signers: the vault is Pending and
+    /// the note's tag is used; a refund needs a Refund claim on Base (T-02).
+    function test_E3_aPendingDepositIsNotRefundable() public {
         _prove(ANCHOR);
-        assertEq(uint8(_status(VAULT)), uint8(VaultStatus.None), "a signer refunds only from a Cancelled vault");
-        assertTrue(registry.depositTagUsed(TAG), "or a note whose tag no vault uses");
-        bytes[] memory sigs = _threeSigs(registry.hashVaultCancellation(VAULT));
-        vm.expectRevert(abi.encodeWithSelector(IZecuredRegistry.ActivationIsPending.selector, VAULT));
-        registry.cancelVault(VAULT, sigs);
+        assertEq(uint8(_status(VAULT)), uint8(VaultStatus.Pending));
+        assertTrue(registry.depositTagUsed(TAG));
+        assertEq(registry.claimCount(VAULT), 0, "no claim: nothing to pay out");
+        vm.expectRevert(abi.encodeWithSelector(IZecuredIntake.NotPendingAccount.selector, VAULT, stranger));
+        vm.prank(stranger);
+        intake.refundPending(VAULT);
     }
 
-    /// After a slash (the bond halted), no new deposit proof is accepted and no pending one is activated.
-    function test_halt_stopsProofsAndFinalization() public {
+    // ------------------------------------------------------------------ halt (T-02)
+
+    /// After a slash (the bond halted), no pending activation is activated: anyone converts it into a refund; and a
+    /// new proof lands as a refund at once.
+    function test_halt_pendingBecomesARefund_newProofsLandAsRefunds() public {
         _prove(ANCHOR);
-        bond.setHalted(true);
+        mockBond.setHalted(true);
         _ready();
-        vm.expectRevert(IZecuredSpendCommits.MintingHalted.selector);
-        registry.finalizeActivation(VAULT);
+        vm.expectRevert(IZecuredIntake.MintingHalted.selector);
+        intake.finalizeActivation(VAULT);
 
-        relay.setBlock(ANCHOR, false, 0);
-        registry.dropPendingActivation(VAULT);
-        relay.setBlock(ANCHOR_2, true, MIN_WORK);
-        bytes memory journal = _journal(ANCHOR_2);
-        bytes memory seal = verifier.mockSeal(IMAGE_ID, sha256(journal));
-        bytes[] memory sigs = _signerSigs(MessageHashUtils.toTypedDataHash(registry.domainSeparator(), OPENED), _all5());
-        vm.expectRevert(IZecuredSpendCommits.MintingHalted.selector);
-        registry.attestDepositWithProof(journal, seal, sigs);
-        assertEq(zzec.totalSupply(), 0);
+        bytes32 claimId = registry.claimIdOf(VAULT, 0);
+        vm.expectEmit(address(intake));
+        emit IZecuredIntake.DepositRefunded(VAULT, claimId, RefundReason.PendingConverted);
+        vm.prank(stranger); // anyone, after a halt
+        assertEq(intake.refundPending(VAULT), claimId);
+        assertEq(uint8(_status(VAULT)), uint8(VaultStatus.Cancelled));
+        _assertClaim(claimId, VAULT, ClaimKind.Refund, VAULT_001, bytes32(0), ClaimStatus.Pending);
+        assertEq(intake.pendingTotal(), 0);
+        assertEq(registry.lineageOf(TAG).value, VAULT_001, "still a lineage note");
+        assertEq(registry.openVaultCount(), 1, "open until the refund is paid");
+
+        // A second deposit to the vault: a refund too.
+        bytes32 tag2 = keccak256("zecured.test.pending.tag2");
+        _proveTag(ANCHOR_2, tag2);
+        _assertClaim(registry.claimIdOf(VAULT, 1), VAULT, ClaimKind.Refund, VAULT_001, bytes32(0), ClaimStatus.Pending);
+        assertEq(zzec.totalSupply(), 0, "nothing minted after the halt");
     }
 
-    function test_cancel_refusedWhilePending_allowedAfterTheDrop() public {
-        _prove(ANCHOR);
-        bytes[] memory sigs = _threeSigs(registry.hashVaultCancellation(VAULT));
-        vm.expectRevert(abi.encodeWithSelector(IZecuredRegistry.ActivationIsPending.selector, VAULT));
-        registry.cancelVault(VAULT, sigs);
-
-        relay.setBlock(ANCHOR, false, 0);
-        registry.dropPendingActivation(VAULT);
-        registry.cancelVault(VAULT, sigs);
+    function test_halt_aNewVaultsProofLandsAsARefund() public {
+        mockBond.setHalted(true);
+        bytes32 claimId = registry.claimIdOf(VAULT, 0);
+        (bytes memory journal, bytes memory seal, bytes[] memory sigs) = _proofOf(ANCHOR, TAG);
+        vm.expectEmit(address(intake));
+        emit IZecuredIntake.DepositRefunded(VAULT, claimId, RefundReason.Halted);
+        intake.attestDepositWithProof(journal, seal, proofs.imageId, sigs);
         assertEq(uint8(_status(VAULT)), uint8(VaultStatus.Cancelled));
-        // A cancelled vault can never be proven again (I14: cancelled <=> never activated).
-        relay.setBlock(ANCHOR_2, true, MIN_WORK);
-        bytes memory journal = _journal(ANCHOR_2);
-        bytes memory seal = verifier.mockSeal(IMAGE_ID, sha256(journal));
-        bytes[] memory opened =
-            _signerSigs(MessageHashUtils.toTypedDataHash(registry.domainSeparator(), OPENED), _all5());
-        vm.expectRevert(abi.encodeWithSelector(IZecuredRegistry.VaultIdUsed.selector, VAULT));
-        registry.attestDepositWithProof(journal, seal, opened);
+        assertEq(registry.vaultOf(account), bytes32(0), "a refund binds no account");
+    }
+
+    function test_revert_refundPendingOfAReorgedDeposit() public {
+        _prove(ANCHOR);
+        mockBond.setHalted(true);
+        relay.setBlock(ANCHOR, false, 0);
+        vm.expectRevert(abi.encodeWithSelector(IZecuredIntake.NotRefundableYet.selector, VAULT));
+        intake.refundPending(VAULT);
+        intake.dropPendingActivation(VAULT); // the drop is the way out
+        assertEq(uint8(_status(VAULT)), uint8(VaultStatus.None));
+    }
+
+    // ------------------------------------------------------------------ pause (T-03)
+
+    function test_pause_newProofsPend_finalizeWaits_accountRefundsAfterTheDelay() public {
+        uint64 until = uint64(block.timestamp + 10 days);
+        _pause(until);
+        assertTrue(intake.mintingPaused());
+        _prove(ANCHOR); // pends: a short pause costs nobody the loan
+        assertEq(uint8(_status(VAULT)), uint8(VaultStatus.Pending));
+        _ready();
+        vm.expectRevert(IZecuredIntake.MintingIsPaused.selector);
+        intake.finalizeActivation(VAULT);
+
+        // Before the delay, not even the account; after it, only the account.
+        vm.prank(account);
+        vm.expectRevert(abi.encodeWithSelector(IZecuredIntake.NotRefundableYet.selector, VAULT));
+        intake.refundPending(VAULT);
+        vm.warp(intake.pausedSince() + PENDING_REFUND_DELAY);
+        vm.prank(stranger);
+        vm.expectRevert(abi.encodeWithSelector(IZecuredIntake.NotPendingAccount.selector, VAULT, stranger));
+        intake.refundPending(VAULT);
+        vm.prank(account);
+        intake.refundPending(VAULT);
+        assertEq(uint8(_status(VAULT)), uint8(VaultStatus.Cancelled));
+    }
+
+    function test_pause_endsByItself_orBySignatures() public {
+        uint64 until = uint64(block.timestamp + 1 days);
+        _pause(until);
+        _prove(ANCHOR);
+        _ready();
+        vm.warp(until); // the pause lifts by itself
+        assertFalse(intake.mintingPaused());
+        intake.finalizeActivation(VAULT);
+
+        _pause(uint64(block.timestamp + 30 days));
+        uint256 nonce = intake.guardNonce();
+        uint64 deadline = uint64(block.timestamp + 1 hours);
+        intake.unpauseMinting(nonce, deadline, _threeSigs(intake.hashUnpauseMinting(nonce, deadline)));
+        assertFalse(intake.mintingPaused());
+    }
+
+    function test_revert_pauseRules() public {
+        uint256 nonce = intake.guardNonce();
+        uint64 deadline = uint64(block.timestamp + 1 hours);
+        uint64 tooLong = uint64(block.timestamp + MAX_PAUSE + 1);
+        bytes[] memory sigs = _threeSigs(intake.hashPauseMinting(tooLong, nonce, deadline));
+        vm.expectRevert(
+            abi.encodeWithSelector(IZecuredIntake.PauseTooLong.selector, tooLong, uint64(block.timestamp + MAX_PAUSE))
+        );
+        intake.pauseMinting(tooLong, nonce, deadline, sigs);
+
+        uint64 until = uint64(block.timestamp + 1 days);
+        sigs = _signerSigs(intake.hashPauseMinting(until, nonce, deadline), _idx(0, 1));
+        vm.expectRevert(abi.encodeWithSelector(IZecuredIntake.InsufficientSignatures.selector, 2));
+        intake.pauseMinting(until, nonce, deadline, sigs);
+
+        sigs = _threeSigs(intake.hashPauseMinting(until, nonce + 1, deadline));
+        vm.expectRevert(abi.encodeWithSelector(IZecuredIntake.BadGuardNonce.selector, nonce));
+        intake.pauseMinting(until, nonce + 1, deadline, sigs);
+
+        sigs = _threeSigs(intake.hashPauseMinting(until, nonce, deadline));
+        intake.pauseMinting(until, nonce, deadline, sigs);
+        vm.expectRevert(abi.encodeWithSelector(IZecuredIntake.BadGuardNonce.selector, nonce + 1));
+        intake.pauseMinting(until, nonce, deadline, sigs); // no replay
+
+        vm.warp(deadline + 1);
+        uint256 next = intake.guardNonce();
+        sigs = _threeSigs(intake.hashUnpauseMinting(next, deadline));
+        vm.expectRevert(abi.encodeWithSelector(IZecuredIntake.SignatureExpired.selector, deadline));
+        intake.unpauseMinting(next, deadline, sigs);
+    }
+
+    /// I22: a pause never stops an exit.
+    function test_pause_neverStopsAnExit() public {
+        bytes32 vaultId = _attest(stranger, VAULT_001);
+        _pause(uint64(block.timestamp + 30 days));
+        _authorizeBoth(stranger);
+        vm.prank(stranger);
+        registry.requestRelease(vaultId, RELEASE_COMMITMENT);
+        assertEq(uint8(_status(vaultId)), uint8(VaultStatus.Closed));
     }
 
     function test_revert_dropOrFinalizeWithoutAPendingActivation() public {
-        vm.expectRevert(abi.encodeWithSelector(IZecuredRegistry.NoPendingActivation.selector, VAULT));
-        registry.finalizeActivation(VAULT);
-        vm.expectRevert(abi.encodeWithSelector(IZecuredRegistry.NoPendingActivation.selector, VAULT));
-        registry.dropPendingActivation(VAULT);
+        vm.expectRevert(abi.encodeWithSelector(IZecuredIntake.NoPendingActivation.selector, VAULT));
+        intake.finalizeActivation(VAULT);
+        vm.expectRevert(abi.encodeWithSelector(IZecuredIntake.NoPendingActivation.selector, VAULT));
+        intake.dropPendingActivation(VAULT);
+        vm.expectRevert(abi.encodeWithSelector(IZecuredIntake.NoPendingActivation.selector, VAULT));
+        intake.refundPending(VAULT);
     }
 }

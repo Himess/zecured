@@ -28,17 +28,21 @@ without it and says what is unavailable.
 
 Every address the app signs for or sends calls to is **pinned in the build** (security review
 H-6): a compromised backend must not be able to point the account's Morpho authorization or a
-USDC approval at its own contract. The backend's `GET /config` is only checked against the
-pins; it supplies the values that carry no authority.
+USDC approval at its own contract. The one exception is the signer bond, which the pinned
+Registry names on-chain (`signerBond()`, immutable; the Intake must name the same one): the
+account only ever calls its `slashLiveness` (T-05), which approves nothing and moves nothing out
+of the account. The backend's `GET /config` is only checked against the pins; it supplies the
+values that carry no authority.
 
 | Variable | Default | Purpose |
 |---|---|---|
 | `NEXT_PUBLIC_BACKEND_URL` | `http://127.0.0.1:8080` | Coordinator API and `/proxy/{rpc,bundler,paymaster}`. Also the only extra origin allowed by the CSP `connect-src`. |
-| `NEXT_PUBLIC_REGISTRY` | none (pin) | `ZecuredRegistry`; EIP-712 `verifyingContract` of every owner request. |
+| `NEXT_PUBLIC_REGISTRY` | none (pin) | `ZecuredRegistry`; EIP-712 `verifyingContract` of every owner request; also serves the dispute path (`IZecuredDisputes`) through its fallback. |
 | `NEXT_PUBLIC_ADAPTER` | none (pin) | `SettlementAdapter`; EIP-712 domain of `CloseRequest`. |
+| `NEXT_PUBLIC_INTAKE` | none (pin) | `ZecuredIntake` (v3): pending activations, and the account's `refundPending`. Must be the Intake the Registry names. |
 | `NEXT_PUBLIC_MARKET_ID` | none (pin) | Morpho market id; must equal `marketIdOf` of the pinned market parameters. |
-| `NEXT_PUBLIC_USDC` | none (pin) | MockUSDC (loan token). |
-| `NEXT_PUBLIC_ORACLE` | none (pin) | MockZecOracle (price = ZEC/USD × 1e34). |
+| `NEXT_PUBLIC_USDC` | none (pin) | The loan token: Circle's testnet USDC on Base Sepolia, a MockUSDC on a local fork. |
+| `NEXT_PUBLIC_ORACLE` | none (pin) | The market's oracle (price = ZEC/USD × 1e34): on testnets the DemoShockOracle (MOCK / DEMO) around a MockZecOracle (MOCK). |
 | `NEXT_PUBLIC_ZZEC` | none (pin) | zZEC (collateral token). |
 | `NEXT_PUBLIC_SIGNERS` | none (pin) | The five signer addresses, comma-separated (to verify signer signatures in the app). |
 | `NEXT_PUBLIC_MORPHO` | `0xBBBBBbbBBb9cC5e90e3b3Af64bdAF62C37EEFFCb` | Morpho Blue on Base Sepolia (the default is a pin too). |
@@ -55,7 +59,16 @@ All values are public (inlined into the bundle at build time). Rebuild after cha
   transactions are disabled, and the reason is shown.
 - From `GET /config` at runtime: `sponsorship` (bundler, paymaster and allowlist configured;
   without it `loanAccount().send()` refuses before signing), the collateral denominations, the
-  confirmations and the deposit window (`vaultExpiryBlocks`).
+  confirmations, the deposit window (`vaultExpiryBlocks`) and the deployment's public v3
+  parameters (`v3`: the opening fee shown before a deposit, the refund abandon period, the
+  pending-refund delay and the liveness period the pages explain). They carry no authority: the
+  contracts enforce their own.
+- From Base, through the pinned Registry and Intake (`lib/chain.ts` `readLinks`, once per
+  session): the slasher, the compensator and the relay the app only reads, the bond (whose
+  `slashLiveness` the account calls), the dispute and inclusion windows. A Registry that names
+  another Intake than the pinned one, or another bond than the Intake's, is refused.
+- From `GET /status`, every minute: the minting gates (paused, halted, bonds short, the coverage
+  cap's room per denomination), shown as a banner on every page.
 
 `components/ConfigGate.tsx` (in the root layout) fetches `GET /config` once before any page
 renders, with a compact loading state; after 6 s without an answer the page renders with the
@@ -66,9 +79,10 @@ build's configuration. Configuration problems and warnings are listed above ever
 ```bash
 jq -r '"NEXT_PUBLIC_REGISTRY=\(.contracts.ZecuredRegistry)
 NEXT_PUBLIC_ADAPTER=\(.contracts.SettlementAdapter)
+NEXT_PUBLIC_INTAKE=\(.contracts.ZecuredIntake)
 NEXT_PUBLIC_MARKET_ID=\(.market.marketId)
-NEXT_PUBLIC_USDC=\(.contracts.MockUSDC)
-NEXT_PUBLIC_ORACLE=\(.contracts.MockZecOracle)
+NEXT_PUBLIC_USDC=\(.market.loanToken)
+NEXT_PUBLIC_ORACLE=\(.market.oracle)
 NEXT_PUBLIC_ZZEC=\(.contracts.ZZEC)
 NEXT_PUBLIC_MORPHO=\(.market.morphoBlue)
 NEXT_PUBLIC_IRM=\(.market.irm)
@@ -84,11 +98,11 @@ addresses are what the app trusts.
 |---|---|
 | `/` | Pitch, how it works in three steps, "what the world sees" preview. |
 | `/prepare` | Why Ironwood only (pool crossings reveal amounts at the turnstile), migration advice, what counts as a valid deposit, refunds. |
-| `/borrow` | Wizard: amount (the signers' denominations from `GET /config`) → fresh key + Safe address, `OpenVault` signature, `POST /vaults` → key backup → Ironwood-only vault address signed by all five signers (checked in the browser), ZIP 321 QR, deadline, live status → borrow up to 40 % LTV. |
+| `/borrow` | Wizard: amount (the signers' denominations from `GET /config`, with the opening fee when the deployment charges one; a size whose deposit would only come back as a refund now, halted or over the coverage cap, cannot be opened) → fresh key + Safe address, `OpenVault` signature, `POST /vaults` → key backup → Ironwood-only vault address signed by all five signers (checked in the browser), ZIP 321 QR, deadline, live status (seen, proven on Base and waiting to be activated, active) → borrow up to 40 % LTV. |
 | `/loans` | Loan keys held in this browser: export, import (validated against the derived account), forget. |
-| `/position#<vaultId>` | Collateral, debt (with accrued interest), health factor, liquidation price, payouts; exits: close from collateral, repay + release, release after liquidation; withdraw part of the ZEC (D14); send USDC; borrow more. |
+| `/position#<vaultId>` | Collateral, debt (with accrued interest), health factor, liquidation price; a pending activation (readiness height and time, what holds it, turning it into a refund after a long pause or a halt); refunds; every claim in plain words, with "My payout did not arrive" (a dispute) within the dispute window and a reopening once the signers' time to prove the payout passed, and for an overdue claim of the account what the signers' bonds would pay for it now, with "Claim from the bonds"; a frozen or compromised vault, and what the compensator owes it (read-only); exits: close from collateral, repay + release, release after liquidation; withdraw part of the ZEC (D14); send USDC; borrow more. |
 | `/verify#<vaultId>` | Owner-signed `ViewKeyRequest` → the vault's UFVK (never stored), what it shows and hides, and the `zecured-wallet watch` command from the vault's birthday height. |
-| `/refund#<vaultId>` | Non-conforming notes and owner-signed `RefundRequest`s. |
+| `/refund#<vaultId>` | The vault's Refund claims on Base (why each landed, its destination step, reviving an abandoned one) and its pending activation. There is no refund outside Base. |
 | `/world` | Everyone / signer network / you, with live Registry events, market totals and the signers' view of your vaults. |
 | `/demo` | Admin-token panel: node modes, the sweep (threshold) demo, the MOCK oracle price (presets $40 and $20); bot status is a placeholder. |
 
@@ -105,6 +119,43 @@ amount that keeps the loan at or below 50 % LTV with at least 0.001 TAZ left in 
 LTV after, then sends `[setAuthorization(Registry) if missing, requestPartialRelease]` as one
 sponsored UserOp and follows the new Release claim until it is paid.
 
+v3 (contracts/src/interfaces/v3, docs/DECISIONS.md D40 to D54):
+
+- **Refunds (T-02).** A deposit that cannot back a loan (a second payment, a deposit while
+  minting is halted or the coverage cap is full, a Refund-mode proof) lands on Base as a Refund
+  claim. Its destination is pre-validated exactly like an exit's, then set with one sponsored
+  UserOp, `Registry.setRefundDestination(claimId, commitment)`; the same revives a refund written
+  off after `refundAbandonPeriod` without a destination. The reason it landed is read from the
+  Intake's `DepositRefunded` event of the claim's creation second.
+- **Pending activations (K3, T-03).** A proven deposit waits for the relay and a short delay;
+  anyone activates it then (the backend's keeper does). While minting is paused it waits; once a
+  pause by signatures has lasted `pendingRefundDelay` (or after a halt), its account can turn it
+  into a refund: `Intake.refundPending(vaultId)`, sponsored for the vault's own account only.
+- **Disputes (T-05 (a)).** For `disputeWindow` after the signers confirm a claim paid, its
+  claimant can dispute the confirmation ("My payout did not arrive",
+  `Registry.disputePayout(claimId)`, served by its fallback); the signers then have
+  `inclusionWindow` to prove the payout is in a Zcash block, and otherwise the claim can be
+  reopened (`reopenDisputedClaim`) and is paid again. Both are sponsored for the claim's own
+  claimant only.
+- **Overdue claims (T-05).** When one of the account's own claims with a destination is still
+  unpaid `livenessPeriod` after it became payable (up to `commitGrace` longer while a payout is in
+  flight), the vault page shows what the signers' bonds would pay for it now (`livenessDue`: its
+  value in USDC at the current price plus `livenessPremiumBps`) and offers "Claim from the bonds":
+  `SignerBond.slashLiveness(claimId)`, sponsored for the claim's own claimant, and only when the
+  bonds can pay it at once. The USDC goes to the loan account; the claim's ZEC then goes to the
+  bonds instead, to reimburse them. Before it is due, the page says from when.
+- **The minting gates (T-01, T-03).** A banner says when new deposits wait (a pause, short
+  bonds) or would come back as refunds (a halt, a full cap), with the project's two standing
+  sentences: "Three of five signers can pause new minting for up to 30 days at a time;
+  withdrawals, repayments, liquidations and payouts never stop." and "... the bonds compensate
+  the victims: liquidators and lenders before the borrower's own equity." None of the gates
+  ever stops an exit.
+- **The opening fee (T-06)** is shown before a deposit (`fee = amount * feeBps / 10,000`, waived
+  below `minFeeZat`) and appears among the vault's claims as its Fee claim.
+- **A compromised vault (T-04)**: its exits stop while a theft case is open on it; once one is
+  executed, the compensator pays its claims in USDC, and the vault page shows its tally, the
+  account's equity and each claim's entitlement (read-only).
+
 ## Privacy in the browser
 
 - **Only our backend.** A Content Security Policy (next.config.ts) limits `connect-src` to the
@@ -118,14 +169,15 @@ sponsored UserOp and follows the new Release claim until it is paid.
   resume an interrupted exit. The UFVK is shown once and never stored.
 - **The app checks the backend.** It shows a vault's address, as text or QR code, only once all
   five signers' `VaultOpened` signatures (INTERFACES § 2.5) verify against the signer set pinned
-  in the build (`NEXT_PUBLIC_SIGNERS`), and a viewing key only if it hashes to the `ufvkHash` they
-  signed (security review C-4; a development build without the pin falls back to the backend's set
+  in the build (`NEXT_PUBLIC_SIGNERS`), and a viewing key only if its tag key hashes to the
+  `tagKeyHash` they signed (VaultOpened v2; security review C-4; a development build without the pin falls back to the backend's set
   and says so, a production build refuses). It decodes the vault address itself and refuses to show a QR
   code unless it is an Ironwood-only testnet UA (one Orchard-protocol receiver, D4); it builds
   the ZIP 321 URI itself (no label, message or memo); it computes every commitment itself and
   stops if the signers acknowledge a different one.
 - **Sponsorable calls only.** Before asking the paymaster, the app checks each batch against a
-  mirror of the paymaster allowlist (INTERFACES § 4.1), built from the pinned addresses.
+  mirror of the paymaster allowlist (INTERFACES § 4.1), built from the pinned addresses and,
+  for a payment by the bonds only, the bond the pinned Registry names.
 - **Vault ids stay out of URLs sent anywhere** (fragment routes, no prefetch; M-6). Key backups
   download under a neutral random name, never the account address, and lists of this browser's
   vaults (My loans, What the world sees) fetch them one by one at randomized intervals instead of
@@ -144,21 +196,30 @@ sponsored UserOp and follows the new Release claim until it is paid.
 ```
 app/                     routes (App Router); pages are thin, logic lives in components/ and lib/
 components/              UI: ui.tsx (server-safe primitives), client.tsx (copy, QR, nav, backend status),
-                         ConfigGate (loads GET /config before pages render), borrow/BorrowWizard,
-                         position/{PositionView,Exits,PartialRelease}, DestinationForm, KeyBackup,
-                         BorrowForm, PayoutNotice, VerifyView, RefundView, WorldView, LoansView, DemoPanel
+                         ConfigGate (loads GET /config before pages render), MintingBanner (GET /status),
+                         borrow/BorrowWizard, position/{PositionView,Exits,PartialRelease,Ledger},
+                         DestinationForm, KeyBackup, BorrowForm, PayoutNotice, VerifyView, RefundView,
+                         WorldView, LoansView, DemoPanel
 lib/config.ts            pinned addresses, GET /config consistency check and runtime values, market id
-lib/api.ts               typed client for the coordinator API (§ 4) incl. GET /config and the oracle demo
-                         control, response normalization, errors, loadRuntimeConfig()
+lib/api.ts               typed client for the coordinator API (§ 4) incl. GET /config, GET /status's
+                         minting gates and the oracle demo control, response normalization, errors,
+                         loadRuntimeConfig()
 lib/eip712.ts            domains and types of § 2, owner signing, Safe ERC-1271 signing of CloseRequest
-lib/owner.ts             owner flows: open vault, destination, refund, viewing key; vault address check
+lib/owner.ts             owner flows: open vault, destination (an exit's or a refund's), viewing key;
+                         vault address check
 lib/signers.ts           the signers' VaultOpened signatures on a vault (C-4): checked against the pinned set
 lib/keys.ts              per-loan owner keys: create, store, export/import, wipe
 lib/safe.ts              pinned Safe 1.4.1 + 4337 module config and its counterfactual address (no RPC)
 lib/account.ts           smart-account layer: LoanAccount interface, sponsored UserOps via the proxy
 lib/calls.ts             call batches (borrow, repay+release, release, partial release, transfer,
-                         invalidateNonce), allowlist mirror, Registry / Morpho revert explanations
-lib/chain.ts             Base reads through /proxy/rpc: position, market, oracle, Registry events, release claims
+                         invalidateNonce, refund destination, refundPending, dispute, reopen, claim from
+                         the bonds), allowlist mirror, Registry / Intake / dispute / bond / Morpho
+                         revert explanations
+lib/chain.ts             Base reads through /proxy/rpc: position, market, oracle, Registry events, release
+                         claims; v3: the vault's ledger (claims, pending activation, freeze), refund
+                         reasons, compensation, and the contracts the pinned Registry and Intake name
+lib/v3.ts                v3 in plain words: opening fee, minting banner and gate, pending activation,
+                         refunds, claims, disputes, payments by the bonds
 lib/morpho.ts            Morpho share math, interest accrual, health factor, liquidation price, D14 partial
                          release limits, formatting
 lib/zcash.ts             zatoshi ↔ ZEC, ZIP 321 URIs, testnet UA sanity check
@@ -175,7 +236,17 @@ the version-matched docs in `node_modules/next/dist/docs/`.
 
 ## Tests
 
-`pnpm test` runs about 270 offline unit tests (vitest, no network). Cross-checks against independent sources:
+`pnpm test` runs about 335 offline unit tests (vitest, no network). Cross-checks against independent sources:
+
+- **v3 contracts:** every ABI fragment the app encodes or decodes (Registry, the dispute path,
+  Intake, slasher, bond, compensator) against the compiled ABIs in `contracts/abi`, the enums it
+  reads as numbers (vault and claim statuses and kinds, `MintBlock`, `RefundReason`) against the
+  Solidity interfaces, the opening fee against the Registry's own lines, and the deployment
+  fixture is a simulated v3 deployment on a Base Sepolia fork (its EIP-712 domain separators
+  computed by the contracts). The ledger reader, the refund-reason search (block bisection,
+  2,000-block log windows) and the compensation reader run against a mocked JSON-RPC node; the
+  refund, pending-refund, dispute, reopen and bond-payment UserOps run through the faked bundler
+  and paymaster and pass the allowlist mirror.
 
 - **EIP-712:** the type strings are parsed from `docs/INTERFACES.md` and compared with the app's
   types and with viem's type hashes; domain separators and digests match the Solidity golden
@@ -213,10 +284,11 @@ the version-matched docs in `node_modules/next/dist/docs/`.
 
 | Real | Mock / not live yet |
 |---|---|
-| Owner keys, EIP-712 signing, Safe address derivation, UA decoding, commitments | MockUSDC and MockZecOracle (labelled in the UI) |
-| Coordinator API client (against the running backend's shapes) | Sponsored UserOps: wired and tested against a fake bundler / paymaster; not yet run against a live bundler (`TODO(live)` in lib/account.ts) |
-| Base reads through `/proxy/rpc` (unit-tested against a mocked node; the running proxy answered live Base Sepolia reads in a manual check) | Demo panel: the oracle it sets is the MOCK MockZecOracle; bot status is a placeholder |
-| Demo panel price control (`GET` / `POST /admin/oracle`, the backend holds the owner key) | Close from collateral: needs the market-maker bot behind `GET /quotes/close` / `POST /closes` |
+| Owner keys, EIP-712 signing, Safe address derivation, UA decoding, commitments | The market's price on testnets: the DemoShockOracle (MOCK / DEMO) around a MockZecOracle (MOCK), labelled in the UI; MockUSDC as the loan token on a local fork only (Base Sepolia uses Circle's testnet USDC) |
+| Coordinator API client (against the running backend's shapes) | Sponsored UserOps, the v3 ones (refund destination, pending refund, dispute, reopen, claim from the bonds) included: wired and tested against a fake bundler / paymaster; not yet run against a live bundler (`TODO(live)` in lib/account.ts) |
+| Base reads through `/proxy/rpc` (unit-tested against a mocked node; the running proxy answered live Base Sepolia reads in a manual check), the v3 ledger, refund reasons and compensation included | The v3 reads and pages are unit-tested against a mocked node only: no v3 deployment existed on Base Sepolia when they were written |
+| The minting banner and the borrow gate (GET /status, read by the backend from the Intake and the bond) | Demo panel: the oracle it sets is the MOCK MockZecOracle; bot status is a placeholder |
+| Demo panel price control (`GET` / `POST /admin/oracle`, the backend holds the owner key; refused where the market's oracle is a real feed, as on Base mainnet) | Close from collateral: needs the market-maker bot behind `GET /quotes/close` / `POST /closes` |
 
 ## Open points
 

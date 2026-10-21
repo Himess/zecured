@@ -8,5 +8,10 @@ publish = false
 [build-dependencies]
 risc0-build = "=3.0.6"
 
+[features]
+# Builds both guests for Mainnet (design notes T-09: the network is a build parameter): build.rs
+# passes it on to the guests, whose own `mainnet` feature sets the statement's.
+mainnet = []
+
 [package.metadata.risc0]
 methods = ["guest", "violation"]

@@ -66,12 +66,19 @@ fn config(coordinator: Option<Address>) -> NetworkConfig {
         attest_delay_max_blocks: 0,
         payout_delay_max_blocks: 0,
         commit_depth_blocks: 3,
+        commit_depth_secs: 120,
+        local_fork: true,
+        open_vault: Default::default(),
     }
 }
 
 fn node(dir: &TempDir, coordinator: Option<Address>, opts: NodeOptions) -> anyhow::Result<Node> {
+    node_at(dir, coordinator, opts, 1)
+}
+
+fn node_at(dir: &TempDir, coordinator: Option<Address>, opts: NodeOptions, index: u16) -> anyhow::Result<Node> {
     let id = Identity {
-        index: 1,
+        index,
         eth: PrivateKeySigner::random(),
         x25519: StaticSecret::random_from_rng(OsRng),
     };
@@ -167,17 +174,20 @@ fn compromised_mode_is_not_built_without_the_demo_feature() {
     assert!(node(&dir, Some(Address::repeat_byte(1)), opts).is_err());
 }
 
+/// On a demo build only nodes 4 and 5 may run with `--demo-allow-compromise` (D18); node 1 is
+/// refused at start-up, so the test runs node 4.
 #[cfg(feature = "demo")]
 #[tokio::test]
 async fn compromised_mode_needs_the_flag_on_a_demo_build() {
     let dir = TempDir::new();
     let coordinator = PrivateKeySigner::random();
-    let opts = NodeOptions {
+    let opts = || NodeOptions {
         admin_token: Some(TOKEN.into()),
         demo_allow_compromise: true,
         ..Default::default()
     };
-    let addr = serve(node(&dir, Some(coordinator.address()), opts).unwrap()).await;
+    assert!(node_at(&dir, Some(coordinator.address()), opts(), 1).is_err());
+    let addr = serve(node_at(&dir, Some(coordinator.address()), opts(), 4).unwrap()).await;
     let path = "/v1/admin/mode";
     let compromised = mode_body("compromised", TOKEN);
     assert_eq!(request(addr, "POST", path, &compromised, &signed(&coordinator, path, &compromised)).await, 200);
@@ -215,7 +225,6 @@ async fn a_confirmation_can_be_given_again() {
             ufvk: String::new(),
             address: String::new(),
             decisions: vec![],
-            attestation: None,
             activated: true,
             outstanding: 0,
             claims: vec![],
@@ -227,7 +236,6 @@ async fn a_confirmation_can_be_given_again() {
                 txid,
             }],
             last_event: None,
-            cancelled: false,
             activated_tag: None,
         })
         .unwrap();

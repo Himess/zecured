@@ -13,7 +13,7 @@ import {
     MAX_LIQUIDATION_INCENTIVE_FACTOR
 } from "morpho-blue/src/libraries/ConstantsLib.sol";
 import {MorphoBalancesLib} from "morpho-blue/src/libraries/periphery/MorphoBalancesLib.sol";
-import {IZecuredRegistry, VaultStatus, ClaimKind, ClaimStatus} from "../../src/interfaces/IZecuredRegistry.sol";
+import {IZecuredRegistry, VaultStatus, ClaimKind, ClaimStatus} from "../../src/interfaces/v3/IZecuredRegistry.sol";
 import {ISettlementAdapter} from "../../src/interfaces/ISettlementAdapter.sol";
 import {CloseRequest, DeleverageRequest} from "../../src/libraries/ZecuredEIP712.sol";
 import {ZecuredFixture} from "../utils/ZecuredFixture.sol";
@@ -108,7 +108,8 @@ contract SettlementAdapterTest is ZecuredFixture {
         _fundAndApproveAdapter(liquidator, 1 * USDC);
 
         Market memory m = MORPHO.market(marketId);
-        uint256 expectedSeized = shares.toAssetsDown(m.totalBorrowAssets, m.totalBorrowShares).wMulDown(_lif())
+        uint256 expectedSeized = shares.toAssetsDown(m.totalBorrowAssets, m.totalBorrowShares)
+            .wMulDown(_lif())
             .mulDivDown(ORACLE_PRICE_SCALE, PRICE_25_50);
         uint256 expectedRepaid = shares.toAssetsUp(m.totalBorrowAssets, m.totalBorrowShares);
         bytes32 expectedClaimId = registry.claimIdOf(vaultId, 0);

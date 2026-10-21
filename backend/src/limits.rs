@@ -133,7 +133,8 @@ pub async fn limit(State(bucket): State<Arc<TokenBucket>>, req: Request, next: N
 pub struct Limits {
     /// Every request.
     pub global: Arc<TokenBucket>,
-    /// `POST /vaults`: a five-node DKG and a vault scanned until it expires.
+    /// `POST /vaults`: a five-node DKG and a vault scanned until it expires. Taken by the handler,
+    /// and only for a request whose stamp checks out (H-01).
     pub open_vault: Arc<TokenBucket>,
     /// `POST /recipients`: a reveal written on five nodes.
     pub recipients: Arc<TokenBucket>,

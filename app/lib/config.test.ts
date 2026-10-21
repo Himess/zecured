@@ -19,7 +19,7 @@ const DEV = { NODE_ENV: "development", NEXT_PUBLIC_BACKEND_URL: DRY_RUN_ENV.NEXT
 const ATTACKER: `0x${string}` = "0x5555555555555555555555555555555555555555";
 const SIGNERS = DRY_RUN_ENV.NEXT_PUBLIC_SIGNERS.split(",");
 const ALL_PINS =
-  "NEXT_PUBLIC_REGISTRY, NEXT_PUBLIC_ADAPTER, NEXT_PUBLIC_MARKET_ID, NEXT_PUBLIC_USDC, NEXT_PUBLIC_ORACLE, NEXT_PUBLIC_ZZEC and NEXT_PUBLIC_SIGNERS";
+  "NEXT_PUBLIC_REGISTRY, NEXT_PUBLIC_ADAPTER, NEXT_PUBLIC_INTAKE, NEXT_PUBLIC_MARKET_ID, NEXT_PUBLIC_USDC, NEXT_PUBLIC_ORACLE, NEXT_PUBLIC_ZZEC and NEXT_PUBLIC_SIGNERS";
 const HARD_STOP =
   "Owner signatures, Base reads and sponsored transactions are disabled until this build's pinned addresses and the backend agree.";
 const MARKET_MISMATCH = "The market id does not match the market parameters (loan token, collateral, oracle, IRM, LLTV).";
@@ -44,6 +44,7 @@ describe("build-time pins (production rules)", () => {
     expect(c).toMatchObject({ contractsDeployed: false, ownerSigning: false, sponsorship: false, remote: "pending", signersPinned: false });
     expect(c.denominations).toEqual([1_000_000n, 5_000_000n, 12_500_000n]);
     expect(c.confirmations).toBeNull();
+    expect(c.openVaultStampBits).toBeNull();
     expect(configIssues(c)).toEqual([
       `This build does not pin ${ALL_PINS}. Owner signatures, Base reads and sponsored transactions stay disabled until the app is rebuilt with them (see app/.env.example).`,
     ]);
@@ -115,6 +116,7 @@ describe("GET /config is a consistency check, never a source of addresses (H-6)"
       denominations: [1_000_000n, 5_000_000n, 10_000_000n],
       confirmations: 3,
       vaultExpiryBlocks: 288,
+      openVaultStampBits: 20,
       remote: "loaded",
       problems: [],
     });
@@ -128,7 +130,7 @@ describe("GET /config is a consistency check, never a source of addresses (H-6)"
     expect(c.adapter).toBe(DRY_RUN_ENV.NEXT_PUBLIC_ADAPTER);
     expect(c).toMatchObject({ contractsDeployed: false, ownerSigning: false });
     expect(configIssues(c)).toEqual([
-      "This build pins NEXT_PUBLIC_ADAPTER to 0xC0a2…00fc, but the backend's signer network's Settlement Adapter is 0x5555…5555.",
+      "This build pins NEXT_PUBLIC_ADAPTER to 0x3074…c957, but the backend's signer network's Settlement Adapter is 0x5555…5555.",
       HARD_STOP,
     ]);
     // Morpho = attacker (USDC.approve(attacker) during a repay): the built-in pin holds too.
@@ -142,7 +144,7 @@ describe("GET /config is a consistency check, never a source of addresses (H-6)"
   it("checks every value the backend reports, the deployment file included", () => {
     const c = buildConfig(DRY_RUN_ENV, remote({ contracts: { ...REMOTE.contracts!, ZecuredRegistry: ATTACKER } }));
     expect(c.problems).toEqual([
-      "This build pins NEXT_PUBLIC_REGISTRY to 0xbdB9…3AAc, but the backend's deployed ZecuredRegistry is 0x5555…5555.",
+      "This build pins NEXT_PUBLIC_REGISTRY to 0x2849…fB2F, but the backend's deployed ZecuredRegistry is 0x5555…5555.",
     ]);
     const signers = buildConfig(DRY_RUN_ENV, remote({ signers: [...SIGNERS.slice(0, 4), ATTACKER] as `0x${string}`[] }));
     expect(signers.problems).toEqual(["This build pins NEXT_PUBLIC_SIGNERS to a different signer set than the backend's."]);
@@ -187,6 +189,39 @@ describe("GET /config is a consistency check, never a source of addresses (H-6)"
   });
 });
 
+describe("v3: the Intake is pinned; the deployment's parameters come from the backend", () => {
+  it("the backend may only agree with the pinned Intake (it receives the account's refundPending)", () => {
+    const c = buildConfig(DRY_RUN_ENV, REMOTE);
+    expect(c.intake).toBe(DRY_RUN_ENV.NEXT_PUBLIC_INTAKE);
+    expect(c.problems).toEqual([]);
+    const reported = buildConfig(DRY_RUN_ENV, remote({ intake: ATTACKER }));
+    expect(reported.problems).toEqual([
+      "This build pins NEXT_PUBLIC_INTAKE to 0x5197…51aE, but the backend's deployment's Intake is 0x5555…5555.",
+    ]);
+    expect(reported).toMatchObject({ contractsDeployed: false, ownerSigning: false });
+    const deployed = buildConfig(DRY_RUN_ENV, remote({ contracts: { ...REMOTE.contracts!, ZecuredIntake: ATTACKER } }));
+    expect(deployed.problems).toEqual([
+      "This build pins NEXT_PUBLIC_INTAKE to 0x5197…51aE, but the backend's deployed ZecuredIntake is 0x5555…5555.",
+    ]);
+  });
+
+  it("a production build without NEXT_PUBLIC_INTAKE keeps Base disabled; a development build takes the backend's", () => {
+    const { NEXT_PUBLIC_INTAKE: _intake, ...withoutIntake } = DRY_RUN_ENV;
+    const c = buildConfig(withoutIntake, REMOTE);
+    expect(c).toMatchObject({ contractsDeployed: false, unpinned: ["NEXT_PUBLIC_INTAKE"], intake: "0x0000000000000000000000000000000000000000" });
+    const dev = buildConfig({ ...withoutIntake, NODE_ENV: "development" }, REMOTE);
+    expect(dev).toMatchObject({ intake: DRY_RUN_ENV.NEXT_PUBLIC_INTAKE, contractsDeployed: true });
+  });
+
+  it("the v3 parameters are the backend's (no authority: the contracts enforce them), null until it answers", () => {
+    expect(buildConfig(DRY_RUN_ENV, REMOTE).v3).toEqual(REMOTE.v3);
+    expect(REMOTE.v3).toMatchObject({ feeBps: 50, minFeeZat: 20_000n, refundAbandonPeriod: 2_592_000 });
+    expect(buildConfig(DRY_RUN_ENV).v3).toBeNull();
+    expect(buildConfig(DRY_RUN_ENV, { error: "timeout" }).v3).toBeNull();
+    expect(buildConfig(DRY_RUN_ENV, remote({ v3: null })).v3).toBeNull();
+  });
+});
+
 describe("development builds (next dev) may run unpinned", () => {
   it("takes unpinned values from the backend and says so", () => {
     const c = buildConfig(DEV, REMOTE);
@@ -211,7 +246,7 @@ describe("development builds (next dev) may run unpinned", () => {
   it("still refuses an inconsistent backend, and pins still win", () => {
     const inconsistent = buildConfig(DEV, remote({ registry: ATTACKER }));
     expect(inconsistent.problems).toEqual([
-      "The backend is inconsistent: its signer network's Registry is 0x5555…5555, its deployed ZecuredRegistry 0xbdB9…3AAc.",
+      "The backend is inconsistent: its signer network's Registry is 0x5555…5555, its deployed ZecuredRegistry 0x2849…fB2F.",
     ]);
     expect(inconsistent.contractsDeployed).toBe(false);
     const pinned = buildConfig({ ...DEV, NEXT_PUBLIC_REGISTRY: ATTACKER }, REMOTE);

@@ -139,6 +139,8 @@ if os.path.exists(deployments):
     from_block = d["block"]
 if from_block is None:
     from_block = int(subprocess.run(["cast", "block-number", "--rpc-url", rpc], capture_output=True, text=True, check=True).stdout)
+# A local fork (scripts/local-fork.sh): anvil on this machine.
+local = rpc.startswith(("http://127.0.0.1", "http://localhost"))
 cfg = {
     "lightwalletd_url": lwd,
     "base_rpc_url": rpc,
@@ -155,11 +157,22 @@ cfg = {
     "nodes": [json.load(open(p)) for p in infos],
     # D16: nodes only accept requests signed by the coordinator (and refuse to start without it).
     "coordinator": os.environ["COORDINATOR_ADDRESS"],
-    # D15: random extra confirmations before attesting (0 for the demo).
-    "attest_delay_max_blocks": int(os.environ.get("ATTEST_DELAY_MAX_BLOCKS", "0")),
-    "payout_delay_max_blocks": int(os.environ.get("PAYOUT_DELAY_MAX_BLOCKS", "0")),
-    # T3-4: Base blocks under a payout's commitment before round 2 (3 = ~6 s at 2 s blocks).
+    # D15 and L23: random extra confirmations before a mint, and random Zcash blocks between a
+    # payout's commitment and its broadcast. Only a local fork may run without them (H-05).
+    "local_fork": local,
+    "attest_delay_max_blocks": int(os.environ.get("ATTEST_DELAY_MAX_BLOCKS", "0" if local else "2")),
+    "payout_delay_max_blocks": int(os.environ.get("PAYOUT_DELAY_MAX_BLOCKS", "0" if local else "8")),
+    # T3-4, H-11: a payout's commitment must be under Base's safe head before round 2, or, while
+    # that lags, this many seconds old (at most 180); and in any case this many blocks deep.
+    "commit_depth_secs": int(os.environ.get("COMMIT_DEPTH_SECS", "120")),
     "commit_depth_blocks": int(os.environ.get("COMMIT_DEPTH_BLOCKS", "3")),
+    # H-01: a hashcash stamp on every vault opening (20 bits: about a million hashes), a vault
+    # without a seen deposit stops holding one of the 512 slots after 30 minutes.
+    "open_vault": {
+        "stamp_bits": int(os.environ.get("OPEN_VAULT_STAMP_BITS", "20")),
+        "pending_slot_secs": int(os.environ.get("OPEN_VAULT_SLOT_SECS", "1800")),
+        "max_pending": int(os.environ.get("OPEN_VAULT_MAX_PENDING", "512")),
+    },
 }
 json.dump(cfg, open(out, "w"), indent=2)
 print(f"wrote {out} (registry {registry})")

@@ -98,23 +98,26 @@ describe("export / import", () => {
     expect(importLoan(text)).toEqual(loan);
   });
 
-  it("keeps the signers' vault signatures and viewing key hash (C-4); malformed entries are dropped", () => {
+  it("keeps the signers' vault signatures and tag key hash (C-4); malformed entries are dropped", () => {
     const signature = (i: number) => `0x${String(i).repeat(130)}` as const;
     const loan = {
       ...createLoan(1_000_000n),
       vaultId: `0x${"ab".repeat(32)}` as const,
       vaultAddress: "utest1example",
       expiryHeight: 4_500_000,
-      ufvkHash: `0x${"cd".repeat(32)}` as const,
+      tagKeyHash: `0x${"cd".repeat(32)}` as const,
       vaultSignatures: [1, 2, 3, 4, 5].map((index) => ({ index, signature: signature(index) })),
     };
     expect(importLoan(exportLoan(loan))).toEqual(loan);
     const messy = parseLoan({
       ...loan,
-      ufvkHash: "0x12",
+      tagKeyHash: "0x12",
       vaultSignatures: [{ index: 1, signature: signature(1) }, { index: "2", signature: signature(2) }, null, { index: 3 }],
     });
-    expect(messy.ufvkHash).toBeUndefined();
+    expect(messy.tagKeyHash).toBeUndefined();
+    // A VaultOpened v1 record's hash of the viewing key is not kept: such a vault is not vouched for.
+    const { tagKeyHash: _k, ...v1 } = loan;
+    expect(parseLoan({ ...v1, ufvkHash: `0x${"cd".repeat(32)}` })).not.toHaveProperty("ufvkHash");
     // What is left is checked against the pinned signer set before any use (lib/signers.ts).
     expect(messy.vaultSignatures).toEqual([{ index: 1, signature: signature(1) }]);
   });

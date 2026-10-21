@@ -1,6 +1,6 @@
 import { afterEach, describe, expect, it, vi } from "vitest";
 import { DRY_RUN_CONFIG, DRY_RUN_ENV } from "./__fixtures__/deployment";
-import { ApiError, createApi, describeError, parseOpenVault, parseRemoteConfig, parseVault } from "./api";
+import { ApiError, createApi, describeError, parseMintingStatus, parseOpenVault, parseRemoteConfig, parseVault } from "./api";
 
 const BASE = "http://backend.test";
 const VAULT = `0x${"ab".repeat(32)}` as const;
@@ -36,7 +36,7 @@ const OPENED = {
   zip321: "zcash:utest1vault?amount=0.01",
   amount: "1000000",
   expiryHeight: 4_600_288,
-  ufvkHash: `0x${"EE".repeat(32)}`,
+  tagKeyHash: `0x${"EE".repeat(32)}`,
   signatures: [1, 2, 3, 4, 5].map((index) => ({ index, signature: `0x${String(index).repeat(130)}` })),
 };
 
@@ -52,6 +52,7 @@ describe("owner endpoints", () => {
       requestId: `0x${"33".repeat(32)}`,
       deadline: 1_800_000_000n,
       signature: SIG,
+      stamp: 2n ** 40n + 7n,
     });
     expect(calls[0]!.url).toBe(`${BASE}/vaults`);
     expect(calls[0]!.init.method).toBe("POST");
@@ -62,6 +63,7 @@ describe("owner endpoints", () => {
       requestId: `0x${"33".repeat(32)}`,
       deadline: "1800000000",
       signature: SIG,
+      stamp: "1099511627783",
     });
     expect(r).toEqual({
       vaultId: VAULT,
@@ -69,18 +71,20 @@ describe("owner endpoints", () => {
       zip321: "zcash:utest1vault?amount=0.01",
       amount: 1_000_000n,
       expiryHeight: 4_600_288,
-      ufvkHash: `0x${"ee".repeat(32)}`,
+      tagKeyHash: `0x${"ee".repeat(32)}`,
       signatures: OPENED.signatures,
     });
   });
 
-  it("POST /vaults: the signers' signatures and the viewing key hash are required (C-4)", () => {
+  it("POST /vaults: the signers' signatures and the tag key hash are required (C-4)", () => {
     const { signatures: _s, ...unsigned } = OPENED;
-    const { ufvkHash: _h, ...unhashed } = OPENED;
+    const { tagKeyHash: _h, ...unhashed } = OPENED;
     const broken: [string, unknown][] = [
       ["signatures", unsigned],
       ["signatures", { ...OPENED, signatures: "0x11" }],
-      ["ufvkHash", unhashed],
+      ["tagKeyHash", unhashed],
+      // A VaultOpened v1 answer (the hash of the viewing key itself).
+      ["tagKeyHash", { ...unhashed, ufvkHash: OPENED.tagKeyHash }],
       ["signature", { ...OPENED, signatures: [{ index: 1, signature: "0x1234" }] }],
       ["signature index", { ...OPENED, signatures: [{ index: -1, signature: OPENED.signatures[0]!.signature }] }],
       ["expiryHeight", { ...OPENED, expiryHeight: 2 ** 32 }],
@@ -96,11 +100,10 @@ describe("owner endpoints", () => {
     expect((calls[0]!.init.headers as Record<string, string>)["content-type"]).toBeUndefined();
   });
 
-  it("destination, refund and viewing-key bodies", async () => {
+  it("destination and viewing-key bodies; no off-chain refund endpoint (v3)", async () => {
     const commitment = `0x${"cc".repeat(32)}`;
     const { api, calls } = mockFetch((url) => {
       if (url.endsWith("/destination")) return json({ commitment });
-      if (url.endsWith("/refund")) return json({ accepted: true });
       return json({ ufvk: "uviewtest1abc" });
     });
     const salt = `0x${"99".repeat(32)}` as const;
@@ -110,15 +113,10 @@ describe("owner endpoints", () => {
     expect(calls[0]!.url).toBe(`${BASE}/vaults/${VAULT}/destination`);
     expect(calls[0]!.body).toEqual({ receiver: "utest1dest", salt, nonce: "7", deadline: "99", signature: SIG });
 
-    const noteId = `0x${"44".repeat(32)}` as const;
-    expect(
-      await api.postRefund(VAULT, { noteId, receiver: "utest1dest", salt, nonce: 8n, deadline: 99n, signature: SIG }),
-    ).toBe(true);
-    expect(calls[1]!.body).toEqual({ noteId, receiver: "utest1dest", salt, nonce: "8", deadline: "99", signature: SIG });
-
     expect(await api.postViewingKey(VAULT, { nonce: 9n, deadline: 99n, signature: SIG })).toBe("uviewtest1abc");
-    expect(calls[2]!.url).toBe(`${BASE}/vaults/${VAULT}/viewing-key`);
-    expect(calls[2]!.body).toEqual({ nonce: "9", deadline: "99", signature: SIG });
+    expect(calls[1]!.url).toBe(`${BASE}/vaults/${VAULT}/viewing-key`);
+    expect(calls[1]!.body).toEqual({ nonce: "9", deadline: "99", signature: SIG });
+    expect("postRefund" in api).toBe(false);
   });
 
   it("refuses malformed vault ids before calling the backend", async () => {
@@ -221,6 +219,32 @@ describe("GET /vaults/:id normalization", () => {
       ["CloseUser", "pending"],
       ["Unknown", "pending"],
     ]);
+  });
+
+  it("reads v3's claim kinds and statuses (a status string wins over the paid flag)", () => {
+    const v = parseVault({
+      vaultId: VAULT,
+      status: "active",
+      amount: "5000000",
+      expiryHeight: 100,
+      claims: [
+        { claimId: VAULT, kind: "Refund", amount: "20000", status: "written_off" },
+        { claimId: VAULT, kind: "Fee", amount: "25000", status: "Paid" },
+        { claimId: VAULT, kind: "retired", amount: "1000000", status: "compensated" },
+        { claimId: VAULT, kind: "Release", amount: "200000", status: "disputed", paid: true },
+        { claimId: VAULT, kind: "Release", amount: "200000", status: "anything else" },
+      ],
+    });
+    expect(v.claims.map((c) => [c.kind, c.status])).toEqual([
+      ["Refund", "writtenOff"],
+      ["Fee", "paid"],
+      ["Retired", "compensated"],
+      ["Release", "disputed"],
+      ["Release", "pending"],
+    ]);
+    // The other payments the signers saw: none reported, none listed; v3 has no `cancellable` deposit.
+    expect(v.nonConforming).toEqual([]);
+    expect("cancellable" in v).toBe(false);
   });
 
   it("maps unknown statuses to 'unknown' and rejects broken responses", () => {
@@ -344,34 +368,68 @@ describe("GET /config", () => {
     expect((calls[0]!.init.headers as Record<string, string>)["x-admin-token"]).toBeUndefined();
     expect(c).toEqual({
       chainId: 84532,
-      registry: "0xbdB942d882882bF795aA9c0Cd20ADe2115c73AAc",
-      adapter: "0xC0a2A554dcFB5a1bd7e5E769A2Ad0c33BA0500fc",
-      // A deployment from before RQ-06 names only the mocks: they are its loan token and oracle.
+      registry: DRY_RUN_ENV.NEXT_PUBLIC_REGISTRY,
+      adapter: DRY_RUN_ENV.NEXT_PUBLIC_ADAPTER,
+      intake: DRY_RUN_ENV.NEXT_PUBLIC_INTAKE,
+      // T-01 to T-06: the deployment's public parameters (zatoshi as bigint, periods in seconds).
+      v3: {
+        feeBps: 50,
+        minFeeZat: 20_000n,
+        minRefundZat: 20_000n,
+        refundAbandonPeriod: 2_592_000,
+        pendingRefundDelay: 86_400,
+        maxPause: 2_592_000,
+        livenessPeriod: 86_400,
+        commitGrace: 7_200,
+        livenessPremiumBps: 500,
+        coverageBps: 10_000,
+        maxTotalZat: 150_000_000n,
+        incidentWindow: 259_200,
+      },
       contracts: {
-        LoanToken: DRY_RUN_CONFIG.contracts.MockUSDC,
-        MarketOracle: DRY_RUN_CONFIG.contracts.MockZecOracle,
+        LoanToken: DRY_RUN_CONFIG.contracts.LoanToken,
+        MarketOracle: DRY_RUN_CONFIG.contracts.MarketOracle,
         SettlementAdapter: DRY_RUN_CONFIG.contracts.SettlementAdapter,
         ZZEC: DRY_RUN_CONFIG.contracts.ZZEC,
         ZecuredRegistry: DRY_RUN_CONFIG.contracts.ZecuredRegistry,
+        ZecuredIntake: DRY_RUN_CONFIG.contracts.ZecuredIntake,
       },
       market: { ...DRY_RUN_CONFIG.market, lltv: 625_000_000_000_000_000n },
       signers: null,
       denominations: [1_000_000n, 5_000_000n],
       confirmations: 3,
       vaultExpiryBlocks: 288,
+      openVaultStampBits: 20,
       sponsorship: true,
     });
+    // H-01: a backend from before the stamp does not report its bits.
+    const { openVaultStampBits: _bits, ...older } = DRY_RUN_CONFIG;
+    expect(parseRemoteConfig(older).openVaultStampBits).toBeNull();
+    expect(parseRemoteConfig({ ...DRY_RUN_CONFIG, openVaultStampBits: 0 }).openVaultStampBits).toBe(0);
   });
 
-  it("reads the loan token and the shock oracle of an RQ-06 deployment first", () => {
-    const usdc = "0x036CbD53842c5426634e7929541eC2318f3dCF7e";
+  it("reads the market's oracle as MarketOracle, else the shock oracle, else the mocks (older deployments)", () => {
     const shock = "0x1111111111111111111111111111111111111111";
-    const c = parseRemoteConfig({
+    const mock = "0x2222222222222222222222222222222222222222";
+    const { MarketOracle: _m, LoanToken: _l, ...withoutRq06 } = DRY_RUN_CONFIG.contracts;
+    const beforeMarketOracle = parseRemoteConfig({ ...DRY_RUN_CONFIG, contracts: { ...withoutRq06, LoanToken: mock, DemoShockOracle: shock } });
+    expect(beforeMarketOracle.contracts?.MarketOracle).toBe(shock);
+    const mocksOnly = parseRemoteConfig({
       ...DRY_RUN_CONFIG,
-      contracts: { ...DRY_RUN_CONFIG.contracts, MockUSDC: undefined, LoanToken: usdc, DemoShockOracle: shock },
+      contracts: { ...withoutRq06, DemoShockOracle: undefined, MockZecOracle: mock, MockUSDC: mock },
     });
-    expect(c.contracts?.LoanToken).toBe(usdc);
-    expect(c.contracts?.MarketOracle).toBe(shock);
+    expect(mocksOnly.contracts?.LoanToken).toBe(mock);
+    expect(mocksOnly.contracts?.MarketOracle).toBe(mock);
+  });
+
+  it("a backend without a v3 deployment reports no Intake and no v3 parameters", () => {
+    const { intake: _i, v3: _v, ...v2 } = DRY_RUN_CONFIG;
+    const { ZecuredIntake: _z, ...v2Contracts } = DRY_RUN_CONFIG.contracts;
+    const c = parseRemoteConfig({ ...v2, contracts: v2Contracts });
+    expect(c.intake).toBeNull();
+    expect(c.v3).toBeNull();
+    expect(c.contracts?.ZecuredIntake).toBeNull();
+    expect(parseRemoteConfig({ ...DRY_RUN_CONFIG, v3: null, intake: null })).toMatchObject({ v3: null, intake: null });
   });
 
   it("accepts a signer set when the backend reports one (sorted), and checks it", () => {
@@ -402,12 +460,76 @@ describe("GET /config", () => {
       ["config.denominations", { denominations: "1000000" }],
       ["config.confirmations", { confirmations: -1 }],
       ["config.vaultExpiryBlocks", { vaultExpiryBlocks: 0 }],
+      ["config.openVaultStampBits", { openVaultStampBits: 33 }],
+      ["config.openVaultStampBits", { openVaultStampBits: -1 }],
+      ["config.openVaultStampBits", { openVaultStampBits: "20 bits" }],
       ["config.sponsorship", { sponsorship: "true" }],
+      ["config.intake", { intake: "0x12" }],
+      ["config.contracts.ZecuredIntake", { contracts: { ...DRY_RUN_CONFIG.contracts, ZecuredIntake: "nope" } }],
+      ["config.v3", { v3: "50 bps" }],
+      ["config.v3.feeBps", { v3: { ...DRY_RUN_CONFIG.v3, feeBps: 10_001 } }],
+      ["config.v3.minFeeZat", { v3: { ...DRY_RUN_CONFIG.v3, minFeeZat: "0.0002" } }],
+      ["config.v3.refundAbandonPeriod", { v3: { ...DRY_RUN_CONFIG.v3, refundAbandonPeriod: undefined } }],
     ];
     for (const [what, patch] of broken) {
       expect(() => parseRemoteConfig({ ...DRY_RUN_CONFIG, ...patch }), what).toThrow(`Unexpected backend response (${what})`);
     }
     expect(() => parseRemoteConfig([DRY_RUN_CONFIG])).toThrow(ApiError);
+  });
+});
+
+describe("GET /status: the minting gates (T-01, T-03)", () => {
+  /** `minting` as the backend reports it (backend/src/minting.rs), next to fields the app ignores. */
+  const STATUS = {
+    commit: "abc",
+    nodes: [{ index: 1, mode: "normal" }],
+    minting: {
+      paused: true,
+      pausedUntil: 1_800_000_000,
+      pausedSince: 1_799_900_000,
+      halted: false,
+      fullyBonded: true,
+      capRoom: "4000000",
+      mintBlock: { "1000000": "Paused", "5000000": "CapExceeded", "12500000": null },
+      readAt: 1_799_950_000,
+    },
+  };
+
+  it("reads the gates per denomination, a stale cap price as null", async () => {
+    const { api, calls } = mockFetch(() => json(STATUS));
+    const s = await api.getMintingStatus();
+    expect(calls[0]!.url).toBe(`${BASE}/status`);
+    expect(calls[0]!.init.method).toBe("GET");
+    expect(s).toEqual({
+      paused: true,
+      pausedUntil: 1_800_000_000,
+      pausedSince: 1_799_900_000,
+      halted: false,
+      fullyBonded: true,
+      capRoom: 4_000_000n,
+      mintBlock: new Map([
+        [1_000_000n, "Paused"],
+        [5_000_000n, "CapExceeded"],
+        [12_500_000n, null],
+      ]),
+      readAt: 1_799_950_000,
+    });
+  });
+
+  it("no gates (no v3 deployment, the chain unreadable, an older backend) is null; broken ones are refused", () => {
+    expect(parseMintingStatus({ ...STATUS, minting: null })).toBeNull();
+    expect(parseMintingStatus({ commit: "abc" })).toBeNull();
+    const broken: [string, Record<string, unknown>][] = [
+      ["status.minting.paused", { paused: "yes" }],
+      ["status.minting.pausedUntil", { pausedUntil: -1 }],
+      ["status.minting.capRoom", { capRoom: "lots" }],
+      ["status.minting.mintBlock", { mintBlock: { "1000000": "Closed" } }],
+      ["status.minting.mintBlock", { mintBlock: { "0.01": "None" } }],
+      ["status.minting.mintBlock", { mintBlock: null }],
+    ];
+    for (const [what, patch] of broken) {
+      expect(() => parseMintingStatus({ ...STATUS, minting: { ...STATUS.minting, ...patch } }), what).toThrow(`(${what})`);
+    }
   });
 });
 

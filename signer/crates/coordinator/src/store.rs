@@ -12,7 +12,7 @@ use serde::{Deserialize, Serialize};
 use zecured_node::store::write_atomic;
 use zecured_policy::{
     classify::{Classification, NotePosition},
-    ledger::{Claim, Commitment, Recipient},
+    ledger::{Claim, ClaimState, Commitment, Recipient},
 };
 
 use crate::error::PublicError;
@@ -22,17 +22,17 @@ use crate::error::PublicError;
 pub enum VaultStatus {
     /// Waiting for the Ironwood deposit.
     AwaitingDeposit,
-    /// Conforming deposit found; attestation submitted to Base, or a deposit proof accepted
-    /// and waiting for `finalizeActivation` (K3).
+    /// A deposit proof is on Base and its activation pending (K3): the Intake waits for the relay
+    /// to move on before it mints.
     DepositSeen,
     /// zZEC minted into the account's Morpho position.
     Active,
-    /// `outstanding` is zero and every claim is paid.
+    /// `outstanding` is zero and nothing is left to pay.
     Closed,
     /// No conforming deposit before the expiry height.
     Expired,
-    /// Cancelled on Base before it was ever activated (D23): its conforming deposit is
-    /// refundable.
+    /// Never activated and never will be (Registry v3): a deposit landed as a refund while the
+    /// vault was new, or a pending activation was converted into one (T-02).
     Cancelled,
 }
 
@@ -41,7 +41,8 @@ pub enum VaultStatus {
 pub struct Inflight {
     /// Claims settled (empty for a P5 refund).
     pub claim_ids: Vec<B256>,
-    /// Non-conforming note refunded (P5), if any.
+    /// P5: the deposit refunded off-chain, if any (I30: one no guest of the deployment can land).
+    #[serde(default)]
     pub refund_note: Option<B256>,
     pub txid: String,
     pub expiry_height: u32,
@@ -72,7 +73,8 @@ pub struct KeptCommitment {
     pub sigs: Vec<Bytes>,
 }
 
-/// A refund the owner asked for and the signers accepted.
+/// P5: a refund the owner asked for and the signers accepted, of a deposit no guest of the
+/// deployment can land on Base (I30).
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct Refund {
     pub note_id: B256,
@@ -87,11 +89,16 @@ pub struct NodeSignature {
     pub signature: Bytes,
 }
 
-/// A refundable (non-conforming, unspent) note of a vault, as the app shows it.
+/// An unspent deposit of a vault that has not landed on Base, as the app shows it: it is refunded
+/// once a proof lands it as a Refund claim (T-02), or, if no guest of the deployment can land it,
+/// off-chain at its owner's request (P5, I30).
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct NoteView {
     pub note_id: B256,
     pub amount: u64,
+    /// P5: no guest of the deployment can land it, so its owner may ask for it back off-chain.
+    #[serde(default)]
+    pub offchain: bool,
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
@@ -116,39 +123,106 @@ pub struct CoordVault {
     pub claims: Vec<Claim>,
     #[serde(default)]
     pub inflight: Option<Inflight>,
+    /// P5: refunds of deposits no guest can land, as the signers accepted them (I30).
     #[serde(default)]
     pub refunds: Vec<Refund>,
-    /// Extra confirmations before attesting (D15), drawn once.
+    /// The claims this coordinator saw paid on Zcash: their payout mined and settled here.
+    #[serde(default)]
+    pub paid_here: Vec<[u8; 32]>,
+    /// T-05 (a), D57: claims reopened on Base after a dispute. A later proof of their payout still
+    /// upholds them; the coordinator proves the payouts it saw mined.
+    #[serde(default)]
+    pub reopened: Vec<[u8; 32]>,
+    /// Extra confirmations before proving the deposit (D15), drawn once.
     #[serde(default)]
     pub attest_delay: Option<u32>,
     /// `ViewKeyRequest` nonces already used.
     #[serde(default)]
     pub used_view_nonces: Vec<u64>,
-    /// Unspent non-conforming notes as of the last scan. Persisted so that refundable notes
-    /// stay visible after a restart and while an expired or closed vault is scanned only now
-    /// and then (M-10).
+    /// Unspent deposits that have not landed on Base, as of the last scan. Persisted so that they
+    /// stay visible after a restart and while an expired or closed vault is scanned only now and
+    /// then (M-10).
     #[serde(default)]
     pub non_conforming: Vec<NoteView>,
-    /// Every signer's `VaultOpened` signature for `address` and `ufvk`, ordered by node index:
-    /// what the owner checked before paying the vault (C-4). Empty for vaults opened before.
+    /// Every signer's `VaultOpened` signature for `address` and the tag key of `ufvk`, ordered by
+    /// node index: what the owner checked before paying the vault (C-4), and what a deposit proof
+    /// is submitted with. Empty for vaults opened before.
     #[serde(default)]
     pub opened_signatures: Vec<NodeSignature>,
-    /// The conforming deposit of a vault that was never activated, once its deposit window is
-    /// over: the owner may cancel the vault to get it back (D23, L-8).
-    #[serde(default)]
-    pub cancellable: Option<NoteView>,
     /// K2-a: the deposit tag of the `VaultActivated` event (the note that backs the vault):
     /// payouts are planned from the same lineage root as the signers'.
     #[serde(default)]
     pub activated_tag: Option<[u8; 32]>,
+    /// K3: the deposit tag of a pending activation (`VaultReserved`), until it is activated,
+    /// released or converted into a refund.
+    #[serde(default)]
+    pub pending_tag: Option<[u8; 32]>,
+    /// When the vault was opened (Unix seconds; 0 for vaults opened before H-01).
+    #[serde(default)]
+    pub opened_at: u64,
 }
 
 impl CoordVault {
-    /// Nothing is left to do for the vault but to watch for late deposits.
+    /// Nothing is left to do for the vault but to watch for late deposits: no payout in flight,
+    /// no claim payable nor disputed, no accepted off-chain refund waiting. A Refund claim waiting
+    /// for its account's destination does not keep it busy: the destination's event does.
     pub fn is_idle(&self) -> bool {
         matches!(self.status, VaultStatus::Expired | VaultStatus::Closed | VaultStatus::Cancelled)
             && self.inflight.is_none()
+            && self.to_uphold().is_empty()
+            && !self.books().iter().any(|c| c.payable())
             && self.refunds.iter().all(|r| r.done)
+    }
+
+    /// Nothing is left to pay: no claim pending or disputed (written-off dust stays in the
+    /// vault, unpaid for good).
+    pub fn settled(&self) -> bool {
+        !self.books().iter().any(|c| matches!(c.state, ClaimState::Unpaid | ClaimState::Disputed))
+    }
+
+    /// T-05 (a): the claims whose payout this coordinator proves: those disputed on Base, and
+    /// those reopened there whose payout it saw mined (D57: a later proof still upholds them).
+    pub fn to_uphold(&self) -> Vec<[u8; 32]> {
+        self.claims
+            .iter()
+            .filter(|c| {
+                c.state == ClaimState::Disputed
+                    || (c.state == ClaimState::Unpaid
+                        && self.reopened.contains(&c.id)
+                        && self.paid_here.contains(&c.id))
+            })
+            .map(|c| c.id)
+            .collect()
+    }
+
+    /// The claims as this coordinator's books count them, and plans from: a claim it saw paid on
+    /// Zcash stays paid when its confirmation is disputed or reopened on Base (T-05 (a)), exactly
+    /// as it does for every node that confirmed it, so that both plan the same payouts. Its value
+    /// left the vault with that payout.
+    pub fn books(&self) -> Vec<Claim> {
+        self.claims
+            .iter()
+            .cloned()
+            .map(|mut c| {
+                if self.paid_here.contains(&c.id) {
+                    c.state = ClaimState::Paid;
+                }
+                c
+            })
+            .collect()
+    }
+
+    /// A conforming deposit was classified (P1): it is mined and has its confirmations.
+    pub fn deposit_seen(&self) -> bool {
+        self.decisions.iter().any(|(_, c)| *c == Classification::Conforming)
+    }
+
+    /// H-01: whether the vault holds one of the slots of vaults waiting for their deposit: for
+    /// `slot_secs` after it opened, or longer once its deposit is seen. Only the count changes: the
+    /// vault itself waits for its deposit, is scanned and takes a late one exactly as before.
+    pub fn holds_slot(&self, now: u64, slot_secs: u64) -> bool {
+        self.status == VaultStatus::AwaitingDeposit
+            && (now < self.opened_at.saturating_add(slot_secs) || self.deposit_seen())
     }
 }
 
@@ -204,7 +278,7 @@ impl Store {
     }
 
     /// Read-modify-write of one vault record (L-5): `f` sees the current record, so changes
-    /// made by others since the caller's last read (refunds, view-key nonces, Base events) are
+    /// made by others since the caller's last read (view-key nonces, Base events) are
     /// kept. The record changes in memory only once it is on disk.
     pub fn update<R>(&mut self, id: &B256, f: impl FnOnce(&mut CoordVault) -> R) -> Result<R> {
         let mut v = self.vaults.get(id).cloned().context(PublicError::UnknownVault)?;
@@ -233,9 +307,9 @@ impl Store {
         self.vaults.values().any(|v| v.account == account || v.owner == owner)
     }
 
-    /// Vaults still waiting for their deposit.
-    pub fn pending(&self) -> usize {
-        self.vaults.values().filter(|v| v.status == VaultStatus::AwaitingDeposit).count()
+    /// H-01: vaults holding a slot among those waiting for their deposit ([`CoordVault::holds_slot`]).
+    pub fn holding_slots(&self, now: u64, slot_secs: u64) -> usize {
+        self.vaults.values().filter(|v| v.holds_slot(now, slot_secs)).count()
     }
 }
 
@@ -280,28 +354,36 @@ pub(crate) mod tests {
             claims: vec![],
             inflight: None,
             refunds: vec![],
+            paid_here: vec![],
+            reopened: vec![],
             attest_delay: None,
             used_view_nonces: vec![],
             non_conforming: vec![],
             opened_signatures: vec![],
-            cancellable: None,
             activated_tag: None,
+            pending_tag: None,
+            opened_at: 0,
         }
     }
 
-    fn refund(id: u8) -> Refund {
-        Refund {
-            note_id: B256::repeat_byte(id),
-            recipient: Recipient {
-                receiver: [id; 43],
-                salt: [id; 32],
-            },
-            done: false,
+    /// A pending claim of `amount`, with a destination.
+    fn claim(id: u8, amount: u64) -> Claim {
+        Claim {
+            id: [id; 32],
+            kind: zecured_policy::ledger::ClaimKind::Liquidation,
+            amount,
+            commitment: [id; 32],
+            order: (1, u64::from(id)),
+            created_at: 0,
+            partner: None,
+            state: ClaimState::Unpaid,
+            refund_tag: None,
+            bond_paid: false,
         }
     }
 
-    /// L-5: a pass that read the vault before a long scan must not erase a refund (or a
-    /// view-key nonce) added meanwhile.
+    /// L-5: a pass that read the vault before a long scan must not erase a claim (or a view-key
+    /// nonce) added meanwhile.
     #[test]
     fn updates_keep_concurrent_changes() {
         let dir = TempDir::new("update");
@@ -310,21 +392,22 @@ pub(crate) mod tests {
         let id = B256::repeat_byte(1);
 
         let stale = store.vaults[&id].clone(); // a pass starts its scan
-        store.update(&id, |v| v.refunds.push(refund(9))).unwrap(); // a refund request lands
+        store.update(&id, |v| v.claims.push(claim(9, 20_000))).unwrap(); // a Base event lands
         store.update(&id, |v| v.used_view_nonces.push(7)).unwrap(); // a view-key request lands
         let notes = vec![NoteView {
             note_id: B256::repeat_byte(9),
             amount: 20_000,
+            offchain: false,
         }];
         // The pass applies only what its scan produced.
         store.update(&id, |v| v.non_conforming = notes.clone()).unwrap();
-        assert!(stale.refunds.is_empty());
+        assert!(stale.claims.is_empty());
 
         let reopened = Store::open(&dir.0).unwrap();
         let v = &reopened.vaults[&id];
-        assert_eq!(v.refunds.len(), 1);
+        assert_eq!(v.claims.len(), 1);
         assert_eq!(v.used_view_nonces, vec![7]);
-        assert_eq!(v.non_conforming, notes, "refundable notes survive a restart (M-10)");
+        assert_eq!(v.non_conforming, notes, "unlanded deposits survive a restart (M-10)");
         assert!(store.update(&B256::repeat_byte(2), |_| ()).is_err());
     }
 
@@ -354,12 +437,65 @@ pub(crate) mod tests {
         let mut store = Store::open(&dir.0).unwrap();
         let mut v = vault(1);
         assert!(!v.is_idle());
-        v.status = VaultStatus::Expired;
+        v.status = VaultStatus::Cancelled;
         assert!(v.is_idle());
-        v.refunds.push(refund(2));
-        assert!(!v.is_idle(), "a pending refund keeps it busy");
+        // A refund without its destination does not keep it busy; with one, it does.
+        let mut refund = Claim {
+            kind: zecured_policy::ledger::ClaimKind::Refund,
+            commitment: [0; 32],
+            ..claim(2, 50_000)
+        };
+        v.claims.push(refund.clone());
+        assert!(v.is_idle() && !v.settled());
+        refund.commitment = [2; 32];
+        v.claims[0] = refund;
+        assert!(!v.is_idle(), "a payable refund keeps it busy");
         store.save(v).unwrap();
-        store.save(vault(2)).unwrap();
-        assert_eq!(store.pending(), 1);
+        let mut waiting = vault(2);
+        waiting.opened_at = 1_000;
+        store.save(waiting).unwrap();
+        assert_eq!(store.holding_slots(1_000, 1_800), 1);
+    }
+
+    /// H-01: a vault without a deposit releases its slot `slot_secs` after it opened, one with a
+    /// conforming deposit keeps it, and any other status holds none. The released vault itself is
+    /// unchanged: still waiting for its deposit and scanned on every pass (not idle), so a deposit
+    /// that comes later is taken exactly as before.
+    #[test]
+    fn a_vault_without_a_deposit_releases_its_slot() {
+        let position = NotePosition {
+            height: 4_486_100,
+            tx_index: 1,
+            action_index: 0,
+        };
+        let opened = 1_700_000_000;
+        let mut v = vault(1);
+        v.opened_at = opened;
+        assert!(v.holds_slot(opened, 1_800));
+        assert!(v.holds_slot(opened + 1_799, 1_800));
+        assert!(!v.holds_slot(opened + 1_800, 1_800), "released after 30 minutes");
+        assert_eq!(v.status, VaultStatus::AwaitingDeposit);
+        assert!(!v.is_idle(), "still scanned on every pass");
+        // A non-conforming payment does not hold the slot; a conforming deposit does.
+        let wrong_amount = zecured_policy::classify::NonConformingReason::SecondPayment;
+        v.decisions.push((position, Classification::NonConforming(wrong_amount)));
+        assert!(!v.holds_slot(opened + 3_600, 1_800));
+        let later = NotePosition {
+            height: position.height + 1,
+            ..position
+        };
+        v.decisions.push((later, Classification::Conforming));
+        assert!(v.deposit_seen() && v.holds_slot(opened + 3_600, 1_800));
+        for status in [
+            VaultStatus::DepositSeen,
+            VaultStatus::Active,
+            VaultStatus::Expired,
+            VaultStatus::Cancelled,
+        ] {
+            v.status = status;
+            assert!(!v.holds_slot(opened, 1_800), "{status:?}");
+        }
+        // Vaults opened before H-01 (no opening time) hold no slot unless their deposit is seen.
+        assert!(!vault(2).holds_slot(opened, 1_800));
     }
 }

@@ -8,30 +8,40 @@
 //!   zecured-tier2-host shrink-wrap <p254.bin> <receipt.bin> <seal.json>  # ... and its second, in another process
 //!   zecured-tier2-host mock-seal <witness.json> <seal.json>  # MOCK seal for the local fork only
 //!   zecured-tier2-host image-id                              # the guest's image id
+//!   zecured-tier2-host network                               # the network the guests prove on
 //!   zecured-tier2-host export-elf <deposit.bin>              # the embedded guest, to pin it
-//!   zecured-tier2-host parity <witness.json>                 # K4: each change fails alike in the zkVM
+//!   zecured-tier2-host parity <witness.json>                 # K4: each change, the same outcome in the zkVM
 //!
-//! `seal.json` is `{ imageId, journal, seal }`, what `Registry.attestDepositWithProof` (or, for
+//! A witness path may be `-`: the witness is then read from standard input (a pipe, never a file),
+//! which is how the coordinator passes it on a platform without `/dev/stdin` (H-12).
+//!
+//! `seal.json` is `{ imageId, journal, seal }`, what the Intake's `attestDepositWithProof` (or, for
 //! a violation, `ZecuredSlasher.proveViolation`) takes. The violation guest is pinned the same
 //! way, with `ZECURED_VIOLATION_ELF`.
+//!
+//! One build proves on one Zcash network (design notes T-09): Testnet by default, Mainnet with the
+//! `mainnet` feature, which sets both the native statement and the embedded guests (image ids
+//! deposit-test and violation-test, or deposit-main and violation-main).
 //!
 //! The guest's image id depends on where it was built (panic messages carry the source paths
 //! of its dependencies), and the Registry pins one image id for good. So the guest is built
 //! once, exported with `export-elf`, and every prover runs that same file: with
 //! `ZECURED_DEPOSIT_ELF=<deposit.bin>` set, every command uses it instead of the guest
 //! embedded in this binary.
-//! The witness contains the vault's viewing key and stays on the machine that builds and proves
-//! it; the Groth16 step needs only the succinct receipt, which RISC Zero documents as a
-//! zero-knowledge proof.
+//! A deposit witness holds the vault's tag key K, not its viewing key (statement v2, review H-10):
+//! whoever proves it can link the vault's notes and payouts on Zcash, not read them. F1, F2 and F3
+//! witnesses hold a viewing key and stay on the machine that builds and proves them. The Groth16
+//! step needs only the succinct receipt, which RISC Zero documents as a zero-knowledge proof.
 
 use anyhow::{Context, Result, bail, ensure};
 use risc0_zkvm::{ExecutorEnv, ProverOpts, Receipt, compute_image_id, default_executor, default_prover, sha::Digest};
 use sha2::{Digest as _, Sha256};
+use zecured_deposit_k4::Expected;
 use zecured_deposit_statement::{
-    Witness, verify,
+    NETWORK, NU6_3_BRANCH_ID, Witness, tag_key, verify,
     violation::{ViolationWitness, verify_violation},
 };
-use zecured_tier2_methods::{DEPOSIT_ELF, DEPOSIT_ID, VIOLATION_ELF, VIOLATION_ID};
+use zecured_tier2_methods::{DEPOSIT_ELF, DEPOSIT_ID, GUEST_NETWORK, VIOLATION_ELF, VIOLATION_ID};
 
 /// Which statement a command proves.
 #[derive(Clone, Copy, PartialEq, Eq)]
@@ -59,6 +69,9 @@ impl Guest {
                 let id = compute_image_id(&elf).with_context(|| format!("{var} is not a guest program"))?;
                 Ok(Self { elf, id })
             }
+            // A host built without its guests (RISC0_SKIP_BUILD, e.g. where RISC Zero cannot build
+            // them) proves nothing and names no image id until a guest is pinned.
+            None if elf.is_empty() => bail!("this host embeds no guest: set {var} to the pinned guest"),
             None => Ok(Self {
                 elf: elf.to_vec(),
                 id: Digest::from(id),
@@ -74,7 +87,13 @@ impl Guest {
 /// The witness at `path`, checked natively: its bincode frame (the guest's input) and the
 /// journal the guest must commit.
 fn load_witness(statement: Statement, path: &str) -> Result<(Vec<u8>, Vec<u8>)> {
-    let bytes = std::fs::read(path)?;
+    let bytes = if path == "-" {
+        let mut bytes = Vec::new();
+        std::io::Read::read_to_end(&mut std::io::stdin(), &mut bytes)?;
+        bytes
+    } else {
+        std::fs::read(path)?
+    };
     let refused = |e: &dyn std::fmt::Debug| anyhow::anyhow!("statement refuses the witness natively: {e:?}");
     match statement {
         Statement::Deposit => {
@@ -114,8 +133,9 @@ fn write_seal(guest: &Guest, out: &str, journal: &[u8], seal: &[u8]) -> Result<(
 }
 
 /// Tier 3: changes of an F1 witness (`TEST-ONLY_vault9_f1_witness.json`), and the same
-/// transaction as an F2 witness, give the same outcome natively and in the zkVM: the same journal,
-/// or a panic with the statement's own error.
+/// transaction as an F2, an F4 and an `Included` witness, give the same outcome natively and in the
+/// zkVM: the same journal, or a panic with the statement's own error. (On a Mainnet build the
+/// fixture's Testnet viewing key is refused alike by F1 and F2; F4 and `Included` carry only K.)
 fn violation_parity(guest: &Guest, input: &str) -> Result<()> {
     use zecured_deposit_statement::violation::{Detail, Kind};
     let base: ViolationWitness = serde_json::from_slice(&std::fs::read(input)?)?;
@@ -127,7 +147,7 @@ fn violation_parity(guest: &Guest, input: &str) -> Result<()> {
     else {
         bail!("an F1 (uncommitted) witness is expected");
     };
-    let (ufvk, ufvk4, receiver) = (vault_ufvk.clone(), vault_ufvk.clone(), note_recipient.clone());
+    let (ufvk, k, receiver) = (vault_ufvk.clone(), tag_key(vault_ufvk), note_recipient.clone());
     type Change = (&'static str, Box<dyn Fn(&mut ViolationWitness)>);
     let detail = |f: fn(&mut Detail)| -> Box<dyn Fn(&mut ViolationWitness)> { Box::new(move |w| f(&mut w.detail)) };
     let changes: Vec<Change> = vec![
@@ -168,6 +188,8 @@ fn violation_parity(guest: &Guest, input: &str) -> Result<()> {
         ("txid path", Box::new(|w| w.txid_path[0][0] ^= 1)),
         ("tip auth data root", Box::new(|w| w.tip_auth_data_root[0] ^= 1)),
         ("history peak", Box::new(|w| w.peak_index ^= 1)),
+        ("a branch id of no epoch", Box::new(|w| w.branch_id = 0xdead_beef)),
+        ("the branch id of NU6.3", Box::new(|w| w.branch_id = NU6_3_BRANCH_ID)),
         (
             "F2: a change that is not there",
             Box::new(move |w| {
@@ -184,10 +206,26 @@ fn violation_parity(guest: &Guest, input: &str) -> Result<()> {
             Box::new(move |w| {
                 w.kind = Kind::WrongClaimRef;
                 w.detail = Detail::WrongClaimRef {
-                    vault_ufvk: ufvk4.clone(),
+                    tag_key: k,
                     salt: [5; 32],
                     receiver: receiver.clone(),
                 };
+            }),
+        ),
+        (
+            "Included: the payout under the anchor",
+            Box::new(move |w| {
+                w.kind = Kind::Included;
+                w.detail = Detail::Included { tag_key: k };
+            }),
+        ),
+        (
+            "Included under another K",
+            Box::new(move |w| {
+                let mut other = k;
+                other[0] ^= 1;
+                w.kind = Kind::Included;
+                w.detail = Detail::Included { tag_key: other };
             }),
         ),
     ];
@@ -226,8 +264,19 @@ fn main() -> Result<()> {
         Statement::Deposit
     };
     let cmd = args.get(1).context(
-        "command: execute | prove | groth16 | p254 | shrink-wrap | mock-seal | image-id | export-elf | parity",
+        "command: execute | prove | groth16 | p254 | shrink-wrap | mock-seal | image-id | network | export-elf | parity",
     )?;
+    // One switch sets both (the host's `mainnet` feature); building one without the other would
+    // check witnesses natively for another network than the guests prove.
+    ensure!(
+        GUEST_NETWORK == NETWORK.name,
+        "the embedded guests prove on {GUEST_NETWORK}, the native statement on {}: build with or without the host's `mainnet` feature",
+        NETWORK.name
+    );
+    if cmd == "network" {
+        println!("{}", NETWORK.name);
+        return Ok(());
+    }
     let guest = Guest::load(statement)?;
     if cmd == "image-id" {
         println!("0x{}", hex::encode(guest.image_id()));
@@ -236,10 +285,10 @@ fn main() -> Result<()> {
     let input = args.get(2).context("input path")?;
     if cmd == "export-elf" {
         std::fs::write(input, &guest.elf)?;
-        println!("guest 0x{} written to {input}", hex::encode(guest.image_id()));
+        println!("guest 0x{} ({} network) written to {input}", hex::encode(guest.image_id()), NETWORK.name);
         return Ok(());
     }
-    println!("image id 0x{}", hex::encode(guest.image_id()));
+    println!("image id 0x{} ({} network)", hex::encode(guest.image_id()), NETWORK.name);
 
     match cmd.as_str() {
         "execute" => {
@@ -342,36 +391,53 @@ fn main() -> Result<()> {
         }
         "parity" if statement == Statement::Violation => violation_parity(&guest, input)?,
         "parity" => {
-            // K4: every change of the catalog fails natively and in the executor with the same
-            // error (the guest panics with the statement's own error).
-            let base: Witness = serde_json::from_slice(&std::fs::read(input)?)?;
+            // K4: every change of the catalog has its outcome natively (refused with its error,
+            // accepted, or accepted with a `VaultOpened` nobody signed) and the same outcome in the
+            // executor (the guest panics with the statement's own error, or commits the same
+            // journal). The fixture is a Testnet deposit: a Mainnet build proves it under the
+            // Mainnet encoding of the vault's address (`for_network`).
+            let mut base: Witness = serde_json::from_slice(&std::fs::read(input)?)?;
+            zecured_deposit_k4::for_network(&mut base, &NETWORK);
+            let real = verify(&base).map_err(|e| anyhow::anyhow!("the base witness does not prove: {e:?}"))?;
             let started = std::time::Instant::now();
             let session = default_executor().execute(env_for(&base, None)?, &guest.elf)?;
-            println!("unchanged witness: proves, {} cycles in {:.1?}", session.cycles(), started.elapsed());
+            ensure!(session.journal.bytes == real.abi_encode(), "the unchanged witness's journal differs in the zkVM");
+            println!(
+                "unchanged witness ({} network): proves, {} cycles in {:.1?}",
+                NETWORK.name,
+                session.cycles(),
+                started.elapsed()
+            );
             let mut failures = 0;
-            for m in zecured_deposit_k4::mutations() {
+            for m in zecured_deposit_k4::mutations(&NETWORK) {
                 let mut w = base.clone();
                 (m.apply)(&mut w);
-                let native = verify(&w).err();
-                let expected = format!("not a valid deposit: {:?}", m.expected);
+                let native = verify(&w);
                 let started = std::time::Instant::now();
                 let executed = default_executor().execute(env_for(&w, None)?, &guest.elf);
                 let elapsed = started.elapsed();
-                let same_native = native.as_ref() == Some(&m.expected);
-                let same_zkvm = matches!(&executed, Err(e) if format!("{e:#}").contains(&expected));
+                let as_expected = match (m.expected, &native) {
+                    (Expected::Refused(e), Err(got)) => *got == e,
+                    (Expected::Unsigned, Ok(j)) => j.vault_opened_hash != real.vault_opened_hash && j.tag != real.tag,
+                    (Expected::Accepted, Ok(_)) => true,
+                    _ => false,
+                };
+                let same_zkvm = match (&native, &executed) {
+                    (Err(e), Err(x)) => format!("{x:#}").contains(&format!("not a valid deposit: {e:?}")),
+                    (Ok(j), Ok(session)) => session.journal.bytes == j.abi_encode(),
+                    _ => false,
+                };
                 println!(
-                    "{:<46} {:<24} native {} zkVM {} ({elapsed:.1?})",
+                    "{:<66} {:<26} native {} zkVM {} ({elapsed:.1?})",
                     m.name,
                     format!("{:?}", m.expected),
-                    if same_native { "ok" } else { "DIFFERS" },
+                    if as_expected { "ok" } else { "DIFFERS" },
                     if same_zkvm { "ok" } else { "DIFFERS" },
                 );
-                if !(same_native && same_zkvm) {
-                    failures += 1;
-                }
+                failures += usize::from(!(as_expected && same_zkvm));
             }
-            ensure!(failures == 0, "{failures} changes did not fail alike natively and in the zkVM");
-            println!("every change fails with the same error natively and in the zkVM");
+            ensure!(failures == 0, "{failures} changes did not have the same outcome natively and in the zkVM");
+            println!("every change has its outcome natively and the same in the zkVM");
         }
         other => bail!("unknown command {other}"),
     }

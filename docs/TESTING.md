@@ -7,10 +7,11 @@ how to reproduce all of it. Everything here ran on testnets only.
 
 | Layer | Command | Tests | Covers |
 |---|---|---|---|
-| Contracts | `cd contracts && forge test --isolate` | 340 | Unit and fork tests against the real Morpho Blue code; real Groth16 seals of a real deposit and of a real F1 spend, verified by RISC Zero's verifier router on the fork (the deposit minted through the real relay in `ProofOnly` mode, the F1 case slashing all five bonds); handler-based invariants I1, I2, I3 (Base side), I4–I9, I11–I14 (I13 on its Base side), Tier 3's I15–I17 and D14 with attacker actions, cancellations, claim reuse and uncommitted confirmations included; Tier 3: every `commitSpend` rule (one distinct output per claim: E1), the signer bonds, each violation kind with dismissals, the bounty and the halt, an activation held while a case is open on its vault (E2), a pending deposit neither refundable nor cancellable (E3), the red-team review's proofs of concept reversed (F4 on a wrong claim reference, one claim set per note, a pending deposit dropped after a halt, dust written off, one lineage note per tag), and the journal of a real Testnet spend computed by the Rust statement; fuzzing (D14 LTV rule against an independent computation); EIP-712 golden vectors; the Tier 2 Zcash header relay against real testnet headers fetched over the Zcash P2P network (Equihash, NU7 difficulty rules, reorgs); Tier 2 deposit proofs with a real deposit's journal against a relay-verified real header, pending until the relay moves on and then finalized; `ProofOnly` minting and every pending-activation branch on a MOCK relay; the pinned seal selector; the zZEC expectation's settlement; the market maker's ZEC floor; vault cancellation |
-| Contracts, symbolic | `cd contracts && FOUNDRY_PROFILE=halmos halmos` | 10 checks | The zZEC guard from any state, and the Registry's I1, I3, I6, I7 and I9 rules, for every value of their inputs (§ 1b) |
-| Deposit and violation statements (Tiers 2, 3) | `cargo test -p zecured-deposit-statement`, `tier2/target/release/zecured-tier2-host parity tier2/statement/tests/fixtures/TEST-ONLY_vault9_witness.json` and `... violation parity tier2/statement/tests/fixtures/TEST-ONLY_vault9_f1_witness.json` | 32, and 33 + 11 zkVM runs (locally and in CI on the Docker-built guests) | The real deposit's witness proves the journal the contracts test; 33 single changes of it (K4: the transaction's shape and branch, the txid path, B's leaf, the history path and peaks, T's commitments, the expiry, the note opening, the recipient, the vault address) each refused with its exact error natively and, through `parity`, by the guest in the RISC Zero executor; transaction shapes a witness cannot carry (an Orchard-pool bundle, v5, another branch id); the changes accepted on purpose (authorizing data, header bytes outside the commitments) and every vault field binding the journal Tier 3: F1 on a real Testnet spend of the TEST-ONLY vault, F2 on its change, F3 with the vault as claimant (only the claim's own output to its exact receiver counts, and a note that does not match its `cmx` pays nothing: E1), every opening field and key bound, the journal ABI |
-| Rust workspace | `cargo test --workspace` (plus `-p zecured-node --features demo`, `-p zecured-backend --features test-hooks`) | 266 | ZIP 2005 key derivation against published vectors; FROST DKG and re-randomized signing; an offline FROST-signed Ironwood spend; P1 classification; the payout ledger (fees, dust, set-aside claims, I10); PCZT verification (an honest payout passes; another recipient, a split payment, a third-party output readable with the vault's OVK, an extra or a missing vault input, an expiry outside the window, a fee mismatch and the wrong vault are refused); EIP-712 parity with Solidity; D16 request authentication and replay protection; node-to-node DKG envelopes bound to the transcript; scanner reorg detection; the paymaster allowlist (account binding, CREATE2 sender, EntryPoint, caps); a regression test for every finding of the [security review](SECURITY_REVIEW.md) (payout misattribution, foreign or zero-value vault notes, undecryptable third-party outputs, forged Registry events, witness disagreement, idempotent confirmations, demo-mode gating, lock and overflow safety); Tier 3: the commitment each node derives, the claims a payout must keep (T3-5), the coordinator committing once with the agreed record and reusing it on retry, the watchtower's verdicts |
+| Contracts | `cd contracts && forge test --isolate` | 590 (5 skip without a Base mainnet RPC), and an invariant campaign | Unit and fork tests against the real Morpho Blue code, on a Base Sepolia fork: deposits through the Intake (proofs, pending activations, the coverage cap, the pause, refunds), exits, payouts and their commitments, bonds, slashing, compensation, the liveness penalty, disputes of a confirmation, verifier versions, the mainnet price feed (every state, garbage answers, gas), every deployment config; real Groth16 seals of a real deposit and of a real F1 spend, verified by RISC Zero's verifier router (the deposit minted through the real relay, the F1 case slashing all five bonds). The invariant campaign (`test/invariant`) checks 16 invariants after random sequences of deposits, gates, exits, payouts, disputes and attacks; run at 64 x 200 for this commit, no reverts (docs/INVARIANTS.md) |
+| Contracts on a Base mainnet fork | `ZECURED_FORK_NETWORK=base-mainnet ZECURED_FORK_BLOCK=52688338 forge test --isolate` | 533, one skipped | The same suites on mainnet's Morpho Blue and RISC Zero router (same addresses); the real seals verify there too. The skipped test's EIP-712 vectors are for chain id 84532 (docs/MAINNET.md) |
+| Contracts, symbolic | `cd contracts && FOUNDRY_PROFILE=halmos halmos` | 16 checks | The zZEC guard from any state; the Registry's I1, I6, I7, I9 and K3 rules; the bond's effective bond and deposits; the compensation layers' order; for every value of their inputs (§ 1b) |
+| Deposit and violation statements (Tiers 2, 3) | `cargo test -p zecured-deposit-statement` (and with `--features zecured-deposit-statement/mainnet`), `tier2/target/release/zecured-tier2-host parity tier2/statement/tests/fixtures/TEST-ONLY_vault9_witness.json` and `... violation parity tier2/statement/tests/fixtures/TEST-ONLY_vault9_f1_witness.json` (each network's host) | 49 on each network, and 50 (Testnet) or 51 (Mainnet) + 15 zkVM runs (in CI on the Docker-built guests of each network) | Statement v2: the real deposit's witness proves its journal v2 (a cross-language vector for the Intake); K4's single changes of it (the mode, the epoch and branch id, the transaction's shape in each mode, a changed transaction re-anchored in a block of its own, the txid path, B's leaf, the history path and peaks, T's commitments, the expiry in each mode, the note opening, the recipient, the vault address and its network, the vault's amount in each mode, the tag key) each with its outcome natively on both networks and, through `parity`, in the RISC Zero executor; transaction shapes a witness cannot carry (an Orchard-pool bundle, v5, another epoch); the changes accepted on purpose (authorizing data, header bytes outside the commitments), every vault field binding the journal, and the regression of the two-tag attack (one note cannot land under two tag keys, in either mode). Tier 3: F1 on a real Testnet spend of the TEST-ONLY vault, F2 on its change, F3 with the vault as claimant (only the claim's own output to its exact receiver counts, and a note that does not match its `cmx` pays nothing: E1), F4 with the tag key only, `Included`, every opening field and key bound, the epoch, the journal ABI |
+| Rust workspace | `cargo test --workspace` (plus `-p zecured-node --features demo`, `-p zecured-backend --features test-hooks`) | 343 without the bots (4 ignored), 41 with `demo`, 51 with `test-hooks` | ZIP 2005 key derivation against published vectors; FROST DKG and re-randomized signing; an offline FROST-signed Ironwood spend; P1 classification; the payout ledger (fees, dust, set-aside claims, I10); PCZT verification (an honest payout passes; another recipient, a split payment, a third-party output readable with the vault's OVK, an extra or a missing vault input, an expiry outside the window, a fee mismatch and the wrong vault are refused); EIP-712 parity with Solidity; D16 request authentication and replay protection; node-to-node DKG envelopes bound to the transcript; scanner reorg detection; the paymaster allowlist (account binding, CREATE2 sender, EntryPoint, caps); a regression test for every finding of the [security review](SECURITY_REVIEW.md) (payout misattribution, foreign or zero-value vault notes, undecryptable third-party outputs, forged Registry events, witness disagreement, idempotent confirmations, demo-mode gating, lock and overflow safety); Tier 3: the commitment each node derives, the claims a payout must keep (T3-5), the coordinator committing once with the agreed record and reusing it on retry, the watchtower's verdicts; v3: the claim kinds and states (refunds, the opening fee, bond-paid and disputed claims) in the ledger and the planner, every v3 event checked against Registry state, deposit and refund proofs into the Intake, the keeper's finalizations, drops and pending refunds, inclusion proofs for disputed and reopened confirmations, off-chain refunds only for deposits no guest can land (I30), the paymaster's sponsorship of a claim the bonds pay |
 | App | `cd app && pnpm test` | vitest suite | Unified address encoding (F4Jumble), commitments, EIP-712 owner messages, Safe address prediction, call allowlist, Morpho math, API parsing |
 
 The Rust EIP-712 digests are checked against the same golden vectors as the Solidity tests,
@@ -20,7 +21,7 @@ so signers and contracts cannot silently disagree on a message format.
 
 `cd contracts && FOUNDRY_PROFILE=halmos halmos` runs the `check_` functions in
 `contracts/test/halmos/` with [Halmos](https://github.com/a16z/halmos) 0.3.3 (settings in
-`contracts/halmos.toml`). All ten run in under a minute on the 8 GB M2. Their inputs are symbolic:
+`contracts/halmos.toml`). All sixteen run in about three minutes on a 6-core desktop. Their inputs are symbolic:
 callers, recipients, amounts, the function called and the signatures. A passing check holds for
 every value of them, where a fuzz test tries samples.
 
@@ -33,15 +34,23 @@ every value of them, where a fuzz test tries samples.
 | G5 | A transfer out of Morpho goes only to the armed recipient, for at most the armed amount, and only once. Only that recipient settles the expectation, and it learns the exact amount | 53 paths, 0.5 s |
 | G6 | An induction step. Take any storage in which some address other than the Registry, the Adapter and Morpho holds no zZEC, and those three hold the whole supply. Any call by anyone keeps both. Both hold at deployment, and G3 keeps the expectation's recipient the Registry or the Adapter, so no account ever holds zZEC after any sequence of calls (I2) | 232 paths, 21 s |
 | **Registry rules** (`RegistryRules.t.sol`: the real Registry and zZEC, a MOCK Morpho) | | |
-| R1 (I6) | The signature check passes only with at least 3 signatures (5 for `attestDepositWithProof`) that recover to distinct signers. Its bitmap, which Tier 3 slashes by, names exactly those signers. `cancelVault` behaves the same at its entry point | 1,198 paths, 7 s; at `cancelVault` 309 paths, 3 s |
-| R2 (I7) | `recordClose` succeeds only from the Adapter, on an active vault, when the two amounts add up to the outstanding. It burns exactly the outstanding from the Adapter, records exactly the two claims and closes the vault | 27 paths, 1 s |
-| R3 (I9) | `recordLiquidation` succeeds only from the Adapter, on an active vault, seizing more than 0 and at most the outstanding. It burns exactly that amount and records exactly one claim for it | 27 paths, 1 s |
-| R4 (I1, I3) | Whichever exit runs (release, partial release, liquidation or close), whoever calls it, and with any arguments: releases come only from the vault's account and settlements only from the Adapter. The burn equals the total of the new claims and the drop in the outstanding, and the supply stays equal to the outstanding | 48 paths, 1 s |
+| R1 (I6) | The signature check passes only with at least 3 signatures that recover to distinct signers. Its bitmap, which Tier 3 slashes by, names exactly those signers. `setReimburseDestination` behaves the same at its entry point, like `confirmPayout` and `commitSpend` | 1,198 paths, 13 s; at `setReimburseDestination` 315 paths, 20 s |
+| R2 (I7) | `recordClose` succeeds only from the Adapter, on an active vault, when the two amounts add up to the outstanding. It burns exactly the outstanding from the Adapter, records exactly the two claims and closes the vault | 22 paths, 2 s |
+| R3 (I9) | `recordLiquidation` succeeds only from the Adapter, on an active vault, seizing more than 0 and at most the outstanding. It burns exactly that amount and records exactly one claim for it | 26 paths, 2 s |
+| R4 (I1, I3) | Whichever exit runs (release, partial release, liquidation or close), whoever calls it, and with any arguments: releases come only from the vault's account and settlements only from the Adapter. The burn equals the total of the new claims and the drop in the outstanding, and the supply stays equal to the outstanding | 45 paths, 3 s |
+| R5 (K3) | From a pending reservation, whichever deposit hook is called by anyone with any arguments: only the Intake's calls succeed; `activate` mints exactly the reserved amount, for exactly that reservation; every other hook leaves the supply alone, and a refund adds exactly one Refund claim of its amount | 43 paths, 1 s |
+| **Bond rules** (`SignerBondV2Rules.t.sol`: the real bond, MockUSDC) | | |
+| B1 | From any state, the effective bond never exceeds the sum of the bonds | 620 paths, 12 s |
+| B2 | The effective bond's second term is the sum of the three smallest bonds, so any three colluders lose at least 3/5 of the effective bond | 427 paths, 17 s (z3) |
+| B3 | From any state, a deposit adds exactly its amount to its signer's bond and changes no other bond or unbonding | 7 paths, 1 s |
+| **Compensation rules** (`CompensationMath.t.sol`) | | |
+| C1 (I25) | The layers take from the funds in order, never more than their totals or the funds, and hold nothing back: either every layer took its whole total or the funds are used up | 47 paths, 23 s |
+| C2 (I25) | A layer that took its whole total is paid in full; a layer that took nothing of a non-zero total is paid nothing | 3 paths, 0.03 s |
 
 What these checks do not show:
-- **The Registry checks are bounded.** They start from one vault activated through the real
-  `attestDeposit`, with symbolic amounts and part of its collateral already with the Adapter, and
-  run one call. They are not proofs over every sequence of calls; the handler-based invariant suites
+- **The Registry checks are bounded.** They start from one vault opened through the Registry's own
+  Intake hooks, with symbolic amounts and part of its collateral already with the Adapter, and run
+  one call. They are not proofs over every sequence of calls; the handler-based invariant suites
   cover longer sequences by fuzzing. The zZEC checks start from any state of the token instead
   (symbolic storage, and an expectation armed by the Registry, the Adapter or no one). Each one
   therefore holds for every single call, wherever it comes in a sequence, and G6 extends I2 to every
@@ -54,8 +63,10 @@ What these checks do not show:
   fork tests and the D14 fuzz test.
 - **They are not a formal verification or an audit** of the contracts.
 
-None of the checks passes vacuously. Each one was run against a deliberately broken copy of the
-contract and returned a counterexample:
+None of the zZEC and Registry checks passes vacuously: each was run against a deliberately broken
+copy of the contract (the v2 Registry, before the round of docs/DECISIONS.md D40) and returned a
+counterexample. The bond and compensation checks are backed by the fuzz tests named in their
+files:
 
 | Broken rule in `src/` | Caught by |
 |---|---|
@@ -65,7 +76,7 @@ contract and returned a counterexample:
 | zZEC: mint to any address | G1 |
 | zZEC: burn from any address | G6 |
 | zZEC: `expectFromMorpho` arms the Registry as recipient, whoever calls | G3 |
-| Registry: the same signer may sign twice (`<` for `<=` in the order check) | R1, and R1 at `cancelVault` |
+| Registry: the same signer may sign twice (`<` for `<=` in the order check) | R1, at both entry points |
 | Registry: signer 4 sets signer 3's bit | R1 |
 | Registry: a close whose two amounts add up to less than the outstanding | R2 |
 | Registry: a liquidation burns the whole outstanding | R3 |
@@ -77,6 +88,9 @@ an assertion, and Halmos reported an error instead of a counterexample. The zZEC
 from symbolic storage, which no change to the token can break.
 
 ## 2. Live end-to-end runs
+
+The runs in the first table used the v2 contracts (signer attestations, 2026-10-11 to 10-14); the v3 runs on a local
+fork follow it (2026-10-16), and the jury deployment's will follow those.
 
 Setup: Zcash **testnet** after NU7 through `testnet.zec.rocks`, five signer node processes plus
 the coordinator talking over HTTP, and the Base side on a local fork of Base Sepolia (the real
@@ -101,6 +115,27 @@ own fork gas. The app uses a fresh, gasless Safe instead.
 In every run the account's zZEC balance stayed 0 (I2): zZEC only ever sat in Morpho, the
 Registry and the SettlementAdapter.
 
+### v3 on a local fork (2026-10-16)
+
+A fresh v3 deployment on an anvil fork of Base Sepolia (block 48,206,967): the nine contracts, the real header relay
+checkpointed at the Testnet tip and fed over P2P, `MockRiscZeroVerifier` with the v2 Testnet guests' image ids as the
+active versions, five signer node processes and the coordinator, all on the Windows development machine. The Zcash side
+is real Testnet: TAZ from the Valar faucet; every deposit and payout below is a Testnet transaction. The seals are MOCK
+(`mock-host`: the native statement on the real witness, since RISC Zero does not run on Windows); everything else is
+the code the jury deployment runs.
+
+| Flow | What happened | Evidence |
+|---|---|---|
+| Deposit proof, pending activation, activation | 0.01 TAZ paid to vault A. The coordinator built the witness from Testnet data (the first one, with the NU7 epoch's summaries, in about 8 minutes), proved it into the Intake (pending until the relay had gained 6 headers and 150 s had passed), then finalized it: 1,000,000 zat of zZEC straight into the account's Morpho collateral | deposit `dd07aa9e68ed547fd092f8449ca2be5204e99e8bb683b2fe1b5f0b3975524388` (block 4,509,466) |
+| Borrow, repay, release | 0.1 USDC borrowed and repaid; `requestRelease`; the payout committed on Base, FROST-signed by nodes 1, 2 and 4, confirmed: vault closed, zZEC supply 0 | payout `d41c2feb4ab540b811d1d3ac38e98b8c29e21b79f8e0bc6694bcd4e2f0718dde` (block 4,509,505, 990,000 zat) |
+| Refund by proof (T-02) | 0.0123 TAZ (another amount), then 0.01 TAZ paid to vault B. Once B was active the coordinator proved the first note in Refund mode: a Refund claim of 1,230,000 zat, its destination given from the account, paid by nodes 1, 2 and 3 | deposits `66fa53d4d191312cd42fe2d83d52977be59137b63e55723e684e97125b821b71`, `95d51562985c38349cfe33ca2b04c8971637368a80e4efc8a6cac7b3df72fde6`; refund `86e1ffedc5877ccf963fe3b6fb54c9a1055b4c0ed6bd2c5a13fec56548b36463` (block 4,509,534, 1,220,000 zat) |
+| Dispute, reopening, the bonds, a late proof (D53, T-05, D57) | Vault A's confirmed release disputed although it had arrived. The slash's confirmation work (38 M) took about 45 minutes to gather, longer than the fork's 20-minute inclusion window, so the claim was reopened on its original liveness schedule and the account had the bonds pay it (13.2825 USDC). Then the coordinator proved the payout's inclusion and the claim was upheld as paid: the vault settled again | the payout above |
+| Release after a refund | Vault B's collateral released and paid by nodes 1, 2 and 3 | payout `97b7c1deb34ebd4569985e1ac5aa1d00097ba3f4873a7d3ee680122573994896` (block 4,509,573, 990,000 zat) |
+
+Not in this run: the opening fee (the fork's config charges none), liquidation and close from collateral, and the
+app's sponsored UserOps. Twice the coordinator asked for signatures right after a new Base event that the nodes had
+not applied yet; they refused, and its next pass, about 80 seconds later, went through.
+
 ## 2b. Tier 2 deposit proofs (docs/TIER2.md)
 
 | What | How | Result |
@@ -113,8 +148,8 @@ Registry and the SettlementAdapter.
 | Groth16 on that GPU | `risc0-groth16` 3.0.5's CUDA prover (`risc0-groth16-sys` 0.1.0, rzup component 0.1.0), also run alone in a fresh process (`p254`, then `shrink-wrap`) | Fails every time with "illegal memory access". `compute-sanitizer` places it in the prover's `witness_into_poly` kernel, which reads 50–115 GB past the witness buffer. The GPU memory passed a write-and-verify test over all 46 GB. So the Groth16 wrap goes RISC Zero's default way, Docker on x86, from the succinct receipt, which holds no viewing key |
 | Groth16 with Docker on x86 (2026-10-14) | `zecured-tier2-host groth16` (r0vm 3.0.6, RISC Zero's `risc0-groth16-prover:v2025-04-03.1` image) on a 15-vCPU x86 VM, from the two succinct receipts | Deposit seal in 61.5 s, F1 seal in 64.7 s, at most 9 GB of RAM; both verified by the host. About 20 minutes of machine time, about $0.08 |
 | STARK on a CPU (2026-10-14) | `zecured-tier2-host prove` (r0vm 3.0.6, no GPU) on the same x86 VM: 15 vCPU of an i9-11900KB, 48 GB RAM, 2^20-cycle segments, the real deposit's witness | Stopped after 38 min without a receipt: the segments were proven (at most 9.9 GB of RAM) and the recursion was still running. The same proof takes 36 s on the GPU. A server without a GPU would keep a judge's deposit waiting well over half an hour |
-| Real seals on-chain | `RealGroth16Seal.t.sol` on a Base Sepolia fork, and an `eth_call` to the live router | RISC Zero's router (`0x0b14…b711`, Groth16 v3.0.0 selector `0x73c457ba`) accepts both seals, and refuses them for a journal changed by one zatoshi or by one beneficiary byte. The deposit, through the real relay and the real router in `ProofOnly` mode, is activated and minted straight into Morpho: `attestDepositWithProof` costs 520,722 gas. The F1 case slashes all five bonds and pays the bounty to the journal's beneficiary: `proveViolation` costs 471,158 gas |
-| On-chain | `DepositProofs.t.sol`: the same journal against header 4,488,560 verified by the relay on-chain, MOCK verifier | Vault activated: 289,256 gas for the proof with the MOCK verifier (520,722 with the real router, row above); 25 refusal and cancellation tests |
+| Real seals on-chain | `RealGroth16Seal.t.sol` on a Base Sepolia fork, and an `eth_call` to the live router | RISC Zero's router (`0x0b14…b711`, Groth16 v3.0.0 selector `0x73c457ba`) accepts both seals, and refuses them for a journal changed by one zatoshi or by one beneficiary byte. The deposit, through the real relay, the real router and the deposit guest's verifier version, lands as a pending activation and is minted straight into Morpho by `finalizeActivation`: `attestDepositWithProof` costs 652,878 gas (the version lookup, the five `VaultOpened` signatures and the reservation included), `finalizeActivation` 231,423. The F1 case slashes all five bonds and pays the bounty to the journal's beneficiary: `proveViolation` costs 576,469 gas. Both seals verify the same way through the router on a Base mainnet fork |
+| On-chain | `DepositProofs.t.sol`: the same journal against header 4,488,560 verified by the relay on-chain, MOCK verifier | Vault reserved and then activated: 422,568 gas for the proof with the MOCK verifier (652,878 with the real router, row above), 231,423 for `finalizeActivation`; 20 tests, among them every refusal (a seal or image id that is not an active version, the journal's length and words, the anchor's work, the signatures) and the journal v2 golden vector |
 | Headers over P2P (Rust) | `update-headers` / `build-witness --update-headers` | 969 new headers from Testnet peers; the rebuilt witness gives the same journal |
 
 ## 3. Robustness scenarios
