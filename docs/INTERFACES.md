@@ -376,8 +376,13 @@ function payoutDispute(bytes32 claimId) external view returns (uint64 paidAt, ui
   the v4 refund functions run in `ZecuredSpendLogic` (`IZecuredRefunds`), the first two through
   stubs that keep their selectors on the Registry.
 - **The bonds' claims** (T-05): when the bond pays a claim's claimant (`slashLiveness`),
-  `markBondPaid` zeroes its commitment; all five signers then give the destination that
-  reimburses the bonds (`setReimburseDestination`, v4: R-6).
+  `markBondPaid` zeroes its commitment; three signers then give the destination that reimburses
+  the bonds (`setReimburseDestination`). W-6: it is the claim's own treasury destination, derived
+  from the claim id under the signers' treasury keys (`zecured_policy::treasury`: a diversified
+  receiver of the treasury's incoming viewing key at an index drawn from the claim id, and a salt
+  keyed by the treasury's salt key), and each signer signs it only after deriving the same
+  commitment (`zecured-ops sign --treasury`). Two claims never share it (one payout may reimburse
+  several, and the Registry refuses one commitment for two claims of a payout).
 - **Confirmations** (v4, R-1, R-3): `confirmPayout` needs a payout committed for the vault, confirms
   each payout once (`payoutConfirmed`), and every claim must be pending, of the vault and bound to
   that payout's input; never a reopened claim (proof only), never on a frozen vault. A confirmation

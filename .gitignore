@@ -13,6 +13,8 @@
 # Signer / node state (FROST key packages, wallet DBs, salts)
 signer/data/
 signer/data-theft-demo/
+# W-6: the signers' treasury keys file (docs/OPERATORS.md)
+treasury-keys.json
 infra/data/
 *.sqlite
 *.sqlite-journal

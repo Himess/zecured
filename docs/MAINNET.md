@@ -102,7 +102,8 @@ name a public-good address instead of burning what no victim needs.
   returned when the dispute reopens the claim and paid to the prover when an inclusion proof upholds
   the confirmation. Routine inclusion proofs of every payout make disputes rare.
 - **Reimbursement per signer share.** The bonds pay an overdue claim pro rata, but its ZEC goes
-  back to one destination the signers give together (all five of them on the judge deployment).
+  back to one destination the signers give together (three of them, each deriving the claim's own
+  treasury destination from its id, W-6).
   Mainnet splits it: each signer registers its own reimbursement destination, and the claim's ZEC
   is paid back per share, one output per signer. Every commitment of a claim's input carries the
   same claim set (RT-4), so the split must be fixed when the bonds pay, as per-signer sub-claims of

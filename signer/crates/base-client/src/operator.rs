@@ -3,7 +3,8 @@
 //! - Operator messages (O-3), which `zecured-ops` prepares, signs, collects and submits:
 //!   `PauseMinting` and `UnpauseMinting` (the Intake's domain, 3 of 5), `ScheduleVersion` (all 5) and
 //!   `RemoveVersion` (3 of 5; all 5 for the last working deposit version, R-23) in the version
-//!   registry's domain, and `ReimburseDestination` (the Registry's domain, all 5 since R-6).
+//!   registry's domain, and `ReimburseDestination` (the Registry's domain, 3 of 5: W-6 reverted R-6's
+//!   five; each signer signs only the claim's derived treasury destination, `zecured_policy::treasury`).
 //! - Liveness receipts (R-5): `DestinationReceived`, which a signer node signs once it holds and has
 //!   validated a claim's destination, under the bond's domain (`ZecuredSignerBond` `1`);
 //!   `SignerBondV2.armLiveness` accepts any signer's.
@@ -69,8 +70,8 @@ sol! {
         uint64 deadline;
     }
 
-    /// T-05, R-6: all five signers point a claim the bonds paid at the destination that reimburses
-    /// them.
+    /// T-05, W-6: three signers point a claim the bonds paid at the destination that reimburses them
+    /// (the claim's own treasury destination).
     #[derive(Debug, PartialEq, Eq)]
     struct ReimburseDestination {
         bytes32 claimId;
@@ -181,7 +182,7 @@ pub enum OperatorMessage {
         nonce: U256,
         deadline: u64,
     },
-    /// T-05, R-6: the Reimburse destination of a claim the bonds paid.
+    /// T-05, W-6: the Reimburse destination of a claim the bonds paid.
     #[serde(rename_all = "camelCase")]
     ReimburseDestination {
         claim_id: B256,
@@ -205,7 +206,7 @@ impl OperatorMessage {
     /// [`removal_threshold`]).
     pub fn threshold(&self) -> usize {
         match self {
-            OperatorMessage::ScheduleVersion { .. } | OperatorMessage::ReimburseDestination { .. } => 5,
+            OperatorMessage::ScheduleVersion { .. } => 5,
             _ => 3,
         }
     }
@@ -619,7 +620,11 @@ mod tests {
             commitment: B256::ZERO,
             deadline: 3,
         };
-        assert_eq!((reimburse.verifier(), reimburse.threshold()), (Verifier::Registry, 5), "R-6: all five");
+        assert_eq!(
+            (reimburse.verifier(), reimburse.threshold()),
+            (Verifier::Registry, 3),
+            "W-6: three, each checking the derivation"
+        );
         // A message for one contract never verifies under another's domain.
         assert_ne!(pause.signing_hash(CHAIN, INTAKE), pause.signing_hash(CHAIN, VERSIONS));
         assert_ne!(pause.signing_hash(CHAIN, INTAKE), pause.signing_hash(1, INTAKE));

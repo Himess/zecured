@@ -38,6 +38,7 @@ use zecured_base::{
         sorted_signatures,
     },
 };
+use zecured_policy::treasury::TreasuryKeys;
 
 /// The parts of the network config (`signer/data/network.json`) this tool reads.
 #[derive(Clone, Debug, Deserialize)]
@@ -178,10 +179,34 @@ pub fn scrub(text: &str, rpc: &str) -> String {
 
 // --------------------------------------------------------------------------------- sign, collect
 
-/// Signs the request after checking the file and its deadline.
-pub fn sign(request: &Request, key: &PrivateKeySigner, now: u64) -> Result<SignatureFile> {
+/// W-6: a `ReimburseDestination` names the claim's own treasury destination, as the treasury keys
+/// derive it; any other message passes.
+pub fn check_reimbursement(message: &OperatorMessage, treasury: Option<&TreasuryKeys>) -> Result<()> {
+    let OperatorMessage::ReimburseDestination {
+        claim_id, commitment, ..
+    } = message
+    else {
+        return Ok(());
+    };
+    let keys = treasury.context("a reimbursement destination is signed only with the treasury keys (--treasury)")?;
+    ensure!(
+        B256::from(keys.reimbursement(&claim_id.0).commitment()) == *commitment,
+        "not the claim's treasury destination: not signed (W-6)"
+    );
+    Ok(())
+}
+
+/// Signs the request after checking the file, its deadline and, for a reimbursement destination,
+/// that it is the claim's derived treasury destination (W-6).
+pub fn sign(
+    request: &Request,
+    key: &PrivateKeySigner,
+    now: u64,
+    treasury: Option<&TreasuryKeys>,
+) -> Result<SignatureFile> {
     let digest = request.checked_digest()?;
     ensure!(request.message.deadline() >= now, "the message's deadline has passed: prepare it again");
+    check_reimbursement(&request.message, treasury)?;
     let signature = key.sign_hash_sync(&digest).map_err(|_| anyhow!("signing failed"))?;
     let signature = Bytes::from(signature.as_bytes().to_vec());
     ensure!(signature_encoding_ok(&signature), "the signature's encoding would be refused on Base");
@@ -415,6 +440,12 @@ pub enum Spec {
     },
 }
 
+/// W-6: reads the treasury keys file (`{"ivk": <128 hex>, "saltKey": <64 hex>}`, private to the
+/// signers; never printed).
+pub fn read_treasury(path: &Path) -> Result<TreasuryKeys> {
+    TreasuryKeys::read_file(path)
+}
+
 /// A request and the signatures its contract needs.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct Prepared {
@@ -616,6 +647,30 @@ pub fn parse_branch(text: &str) -> Result<u32> {
 
 #[cfg(test)]
 mod tests {
+
+    /// W-6: a signer signs a reimbursement destination only if it is the claim's treasury
+    /// destination as its own treasury keys derive it, and never without the keys.
+    #[test]
+    fn w6_only_the_derived_treasury_destination_is_signed() {
+        use orchard::keys::{FullViewingKey, Scope, SpendingKey};
+        let sk = Option::<SpendingKey>::from(SpendingKey::from_bytes([7; 32])).unwrap();
+        let ivk = FullViewingKey::from(&sk).to_ivk(Scope::External).to_bytes();
+        let treasury = TreasuryKeys::from_bytes(&ivk, [9; 32]).unwrap();
+        let claim = B256::repeat_byte(0xc1);
+        let derived = B256::from(treasury.reimbursement(&claim.0).commitment());
+        let key = PrivateKeySigner::random();
+        let message = |commitment| OperatorMessage::ReimburseDestination {
+            claim_id: claim,
+            commitment,
+            deadline: NOW + 60,
+        };
+        let request = |commitment| Request::new(CHAIN, Address::repeat_byte(0x61), message(commitment));
+        assert!(sign(&request(derived), &key, NOW, Some(&treasury)).is_ok());
+        let e = sign(&request(B256::repeat_byte(0xbb)), &key, NOW, Some(&treasury)).unwrap_err();
+        assert!(e.to_string().contains("W-6"), "{e}");
+        assert!(sign(&request(derived), &key, NOW, None).is_err(), "never without the treasury keys");
+        assert!(check_reimbursement(&pause(1), None).is_ok(), "other messages need no keys");
+    }
     use std::sync::{Arc, Mutex};
 
     use alloy::sol_types::SolCall;
@@ -647,12 +702,13 @@ mod tests {
         let keys = keys();
         let set: Vec<Address> = keys.iter().map(|k| k.address()).collect();
         let request = Request::new(CHAIN, INTAKE, pause(3));
-        let files: Vec<SignatureFile> = keys[..3].iter().map(|k| sign(&request, k, NOW).unwrap()).collect();
+        let files: Vec<SignatureFile> = keys[..3].iter().map(|k| sign(&request, k, NOW, None).unwrap()).collect();
         let bundle = collect(&request, &files, &set, NOW).unwrap();
         assert_eq!(bundle.signatures.len(), 3);
         assert!(bundle.signatures.windows(2).all(|w| w[0].signer < w[1].signer));
         // Collected again with a signer already in: counted once; a fourth comes in another round.
-        let again = collect(&bundle, &[files[0].clone(), sign(&request, &keys[3], NOW).unwrap()], &set, NOW).unwrap();
+        let again =
+            collect(&bundle, &[files[0].clone(), sign(&request, &keys[3], NOW, None).unwrap()], &set, NOW).unwrap();
         assert_eq!(again.signatures.len(), 4);
         // The files round-trip and carry addresses and signatures only.
         let written = serde_json::to_string(&again).unwrap() + &serde_json::to_string(&files).unwrap();
@@ -675,19 +731,19 @@ mod tests {
         // A message changed after preparation (its digest no longer matches) is never signed.
         let mut altered = request.clone();
         altered.message = pause(4);
-        assert!(sign(&altered, &keys[0], NOW).is_err());
+        assert!(sign(&altered, &keys[0], NOW, None).is_err());
         // Expired.
-        assert!(sign(&request, &keys[0], NOW + 3_601).is_err());
-        let good = sign(&request, &keys[0], NOW).unwrap();
+        assert!(sign(&request, &keys[0], NOW + 3_601, None).is_err());
+        let good = sign(&request, &keys[0], NOW, None).unwrap();
         assert!(collect(&request, std::slice::from_ref(&good), &set, NOW + 3_601).is_err());
         // Another message's signature.
-        let other = sign(&Request::new(CHAIN, INTAKE, pause(4)), &keys[1], NOW).unwrap();
+        let other = sign(&Request::new(CHAIN, INTAKE, pause(4)), &keys[1], NOW, None).unwrap();
         assert!(collect(&request, &[other], &set, NOW).is_err());
         // A stranger.
-        let stranger = sign(&request, &PrivateKeySigner::random(), NOW).unwrap();
+        let stranger = sign(&request, &PrivateKeySigner::random(), NOW, None).unwrap();
         assert!(collect(&request, &[stranger], &set, NOW).is_err());
         // A file naming another signer than its signature's.
-        let mut misnamed = sign(&request, &keys[1], NOW).unwrap();
+        let mut misnamed = sign(&request, &keys[1], NOW, None).unwrap();
         misnamed.signer = keys[2].address();
         assert!(collect(&request, &[misnamed], &set, NOW).is_err());
         // The same message under another contract's or chain's domain is another digest.
@@ -847,7 +903,8 @@ mod tests {
         assert_eq!(prepared.request, Request::new(CHAIN, INTAKE, pause(3)));
         assert_eq!(prepared.needed, 3);
         // Two signatures are not enough; three are.
-        let files: Vec<SignatureFile> = keys[..3].iter().map(|k| sign(&prepared.request, k, NOW).unwrap()).collect();
+        let files: Vec<SignatureFile> =
+            keys[..3].iter().map(|k| sign(&prepared.request, k, NOW, None).unwrap()).collect();
         let two = collect(&prepared.request, &files[..2], &net.signers(), NOW).unwrap();
         let e = check_submission(&provider, REGISTRY, &two, NOW).await.unwrap_err();
         assert!(e.to_string().contains("needs 3"), "{e}");
@@ -878,7 +935,7 @@ mod tests {
             &Request::new(CHAIN, Address::repeat_byte(0x67), pause(3)),
             &keys[..3]
                 .iter()
-                .map(|k| sign(&Request::new(CHAIN, Address::repeat_byte(0x67), pause(3)), k, NOW).unwrap())
+                .map(|k| sign(&Request::new(CHAIN, Address::repeat_byte(0x67), pause(3)), k, NOW, None).unwrap())
                 .collect::<Vec<_>>(),
             &net.signers(),
             NOW,
@@ -1020,6 +1077,6 @@ mod tests {
             commitment: B256::ZERO,
             deadline: NOW,
         };
-        assert_eq!(signatures_needed(&provider, &d, &reimburse).await.unwrap(), 5, "R-6");
+        assert_eq!(signatures_needed(&provider, &d, &reimburse).await.unwrap(), 3, "W-6");
     }
 }

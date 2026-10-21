@@ -19,6 +19,11 @@
 //!   commitments made before it, so its claimant gains nothing by waiting).
 //! - W-2 (`followNote`): an F1 case about a note whose tag a deposit took over from this vault's
 //!   (false) change record moves to the deposit's vault at once.
+//!
+//! One more keeper is off-chain: W-6, a bond-paid claim's treasury recipient, derived from the
+//! signers' treasury keys, is registered with the nodes once three signers gave Base its commitment
+//! (the payout is then planned and verified like any other). A destination that is not the derived
+//! one is never registered: the claim waits, and the operators are warned.
 
 use std::time::{Duration, Instant};
 
@@ -61,6 +66,7 @@ pub(crate) enum Keeper {
     Burn,
     Arm,
     Follow,
+    Treasury,
 }
 
 /// R-3: the vault's confirmations by signatures (paid, not final) whose dispute window of `window`
@@ -131,6 +137,19 @@ pub(crate) fn unarmed(v: &CoordVault) -> Vec<B256> {
         .collect()
 }
 
+/// W-6: the vault's bond-paid claims with a destination on Base whose recipient is not `known` here
+/// (claim id, commitment).
+pub(crate) fn unregistered_reimbursements(
+    v: &CoordVault,
+    known: impl Fn(&[u8; 32]) -> bool,
+) -> Vec<([u8; 32], [u8; 32])> {
+    v.claims
+        .iter()
+        .filter(|c| c.bond_paid && c.payable() && !known(&c.commitment))
+        .map(|c| (c.id, c.commitment))
+        .collect()
+}
+
 /// R-2: an executed case's event names neither its vault nor its kind: they are read from the
 /// slasher (`caseOf`), with the payout it names (its `ref`). Done before the events are applied,
 /// without the store's lock. A case that cannot be read stays unresolved (no vault: not applied)
@@ -178,6 +197,9 @@ impl Coordinator {
         }
         if let Err(e) = self.follow_notes(v).await {
             log_failure(&v.vault_id, "moving an F1 case with its note", &e);
+        }
+        if let Err(e) = self.register_reimbursements(v).await {
+            log_failure(&v.vault_id, "registering a reimbursement recipient", &e);
         }
     }
 
@@ -403,6 +425,32 @@ impl Coordinator {
         Ok(())
     }
 
+    /// W-6: registers with the nodes the treasury recipient of each bond-paid claim whose Base
+    /// destination is the claim's derived treasury destination; any other destination is never
+    /// registered (no node can pay it then), and the operators are warned.
+    pub(crate) async fn register_reimbursements(&self, v: &CoordVault) -> Result<()> {
+        let Some(keys) = &self.treasury else {
+            return Ok(());
+        };
+        let todo = {
+            let store = self.store.lock().await;
+            unregistered_reimbursements(v, |c| store.recipient(c).is_some())
+        };
+        if todo.is_empty() || !self.keeper_due(&v.vault_id, Keeper::Treasury) {
+            return Ok(());
+        }
+        for (id, commitment) in todo {
+            let r = keys.reimbursement(&id);
+            if r.commitment() != commitment {
+                warn!(vault = %short(&v.vault_id), "a bond-paid claim's destination is not its treasury destination: not registered (W-6)");
+                continue;
+            }
+            self.register_recipient(r).await?;
+            info!(vault = %short(&v.vault_id), "a bond-paid claim's treasury recipient is registered with the signers (W-6)");
+        }
+        Ok(())
+    }
+
     /// W-2: moves the vault's F1 cases about a note whose tag a deposit took over to the deposit's
     /// vault (`followNote`): an open one at once, rather than at the end of its window; an executed one
     /// too (the victim's vault gets its own case). A case that cannot move (moved already, dismissed,
@@ -468,6 +516,68 @@ mod tests {
 
     use super::*;
     use crate::store::{CommittedPayout, tests::vault};
+
+    /// W-6: a bond-paid claim's treasury recipient is registered with every signer when its Base
+    /// destination is the derived one, and only once; a destination that is not derived never is, and
+    /// a coordinator without the treasury keys registers none.
+    #[tokio::test]
+    async fn w6_derived_treasury_destinations_are_registered() {
+        use std::sync::{Arc, Mutex};
+
+        use orchard::keys::{FullViewingKey, Scope, SpendingKey};
+
+        use crate::TreasuryKeys;
+
+        let sk = Option::<SpendingKey>::from(SpendingKey::from_bytes([7; 32])).unwrap();
+        let ivk = FullViewingKey::from(&sk).to_ivk(Scope::External).to_bytes();
+        let keys = TreasuryKeys::from_bytes(&ivk, [9; 32]).unwrap();
+        let posted: Arc<Mutex<usize>> = Arc::default();
+        let log = posted.clone();
+        let app = Router::new().route(
+            "/v1/recipients",
+            post(move |Json(_): Json<serde_json::Value>| {
+                let log = log.clone();
+                async move {
+                    *log.lock().unwrap() += 1;
+                    Json(serde_json::json!({ "commitment": "0x00" }))
+                }
+            }),
+        );
+        let url = crate::nodes::tests::serve(app).await;
+        let urls = vec![url; 5];
+        let gas = hex::encode(alloy::signers::local::PrivateKeySigner::random().to_bytes());
+        let dir = crate::store::tests::TempDir::new("w6-treasury");
+        let derived = keys.reimbursement(&[1; 32]);
+        let mut v = vault(1);
+        v.claims = vec![
+            Claim {
+                bond_paid: true,
+                commitment: derived.commitment(),
+                ..claim(1, ClaimState::Unpaid, false, 0)
+            },
+            Claim {
+                bond_paid: true,
+                commitment: [0xbb; 32], // not the claim's treasury destination
+                ..claim(2, ClaimState::Unpaid, false, 0)
+            },
+            claim(3, ClaimState::Unpaid, false, 0),
+        ];
+        let without = Coordinator::new(crate::nodes::tests::config(&urls), &dir.0, &gas).unwrap();
+        without.register_reimbursements(&v).await.unwrap();
+        assert_eq!(*posted.lock().unwrap(), 0, "without the treasury keys: none");
+        drop(without);
+
+        let c = Coordinator::new(crate::nodes::tests::config(&urls), &dir.0, &gas).unwrap().with_treasury(keys);
+        c.register_reimbursements(&v).await.unwrap();
+        assert_eq!(*posted.lock().unwrap(), 5, "claim 1's, to each signer");
+        assert!(c.store.lock().await.recipient(&derived.commitment()).is_some());
+        assert!(c.store.lock().await.recipient(&[0xbb; 32]).is_none(), "never a destination that is not derived");
+        let left = unregistered_reimbursements(&v, |x| c.store.try_lock().unwrap().recipient(x).is_some());
+        assert_eq!(left, vec![([2; 32], [0xbb; 32])]);
+        c.keeper_tries.lock().unwrap().clear();
+        c.register_reimbursements(&v).await.unwrap();
+        assert_eq!(*posted.lock().unwrap(), 5, "registered once");
+    }
 
     fn claim(id: u8, state: ClaimState, proven: bool, confirmed_at: u64) -> Claim {
         Claim {

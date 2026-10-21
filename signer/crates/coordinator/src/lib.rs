@@ -85,6 +85,7 @@ use zecured_zcash_ops::{
     spend::{self, Payment},
 };
 
+pub use zecured_policy::treasury::TreasuryKeys;
 pub use zecured_threshold::MIN_SIGNERS;
 
 pub use crate::store::{NodeSignature, NoteView};
@@ -307,6 +308,9 @@ pub struct Coordinator {
     compensator: OnceCell<Address>,
     /// When each keeper last acted for each vault (`keepers.rs`).
     keeper_tries: std::sync::Mutex<HashMap<(B256, keepers::Keeper), Instant>>,
+    /// W-6: the signers' treasury keys, which derive each bond-paid claim's reimbursement recipient;
+    /// `None`: those recipients are not registered here (never logged).
+    treasury: Option<TreasuryKeys>,
     /// TEST ONLY: see [`TEST_WITHHOLD_FLAG`].
     #[cfg(feature = "test-hooks")]
     withhold_flag: std::path::PathBuf,
@@ -776,6 +780,7 @@ impl Coordinator {
             grace_checked: AtomicBool::new(false),
             compensator: OnceCell::new(),
             keeper_tries: std::sync::Mutex::default(),
+            treasury: None,
             #[cfg(feature = "test-hooks")]
             withhold_flag: data_dir.join(TEST_WITHHOLD_FLAG),
             cfg,
@@ -787,6 +792,13 @@ impl Coordinator {
     pub fn with_invites(mut self, file: &Path, data_dir: &Path) -> Result<Self> {
         self.invites = Some(InviteGate::open(file, data_dir)?);
         Ok(self)
+    }
+
+    /// W-6: the signers' treasury keys (`--treasury`): the coordinator registers with the nodes the
+    /// derived recipient of each bond-paid claim whose Base destination is the derived one.
+    pub fn with_treasury(mut self, keys: TreasuryKeys) -> Self {
+        self.treasury = Some(keys);
+        self
     }
 
     /// What `GET /config` says about openings: open and not invite-only without a gate; closed when
@@ -986,6 +998,11 @@ impl Coordinator {
     /// Third-party recipient (liquidator / market maker): reveal to the signers.
     pub async fn add_recipient(&self, ua: &str, salt: [u8; 32]) -> Result<B256> {
         let r = Self::recipient_from_ua(&self.zcash_params(), ua, salt)?;
+        self.register_recipient(r).await
+    }
+
+    /// Reveals a recipient to the signers (at least three must take it) and keeps it here.
+    pub(crate) async fn register_recipient(&self, r: Recipient) -> Result<B256> {
         let answers = self.nodes.post_many(&self.nodes.indices(), "/v1/recipients", &Self::recipient_in(&r)).await;
         at_least::<serde_json::Value>(answers, usize::from(MIN_SIGNERS), "recipient")?;
         Ok(B256::from(self.store.lock().await.add_recipient(r)?))

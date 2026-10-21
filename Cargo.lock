@@ -7526,10 +7526,12 @@ dependencies = [
  "axum",
  "clap",
  "hex",
+ "orchard",
  "serde",
  "serde_json",
  "tokio",
  "zecured-base",
+ "zecured-policy",
 ]
 
 [[package]]
@@ -7574,6 +7576,7 @@ dependencies = [
  "rand 0.10.3",
  "rand_core 0.6.4",
  "serde",
+ "serde_json",
  "sha3 0.10.9",
  "thiserror 2.0.21",
  "zcash_note_encryption",

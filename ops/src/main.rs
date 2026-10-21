@@ -28,7 +28,7 @@ use serde::{Serialize, de::DeserializeOwned};
 use zecured_base::{events::version_id, operator::VersionKind};
 use zecured_ops::{
     Deployment, Network, Request, SignatureFile, Spec, check_submission, collect, list_versions, load_key,
-    parse_branch, parse_time, prepare, scrub, send, sign, simulate,
+    parse_branch, parse_time, prepare, read_treasury, scrub, send, sign, simulate,
 };
 
 #[derive(Parser)]
@@ -78,6 +78,10 @@ enum Cmd {
         /// Sign: without it, only show what would be signed.
         #[arg(long)]
         yes: bool,
+        /// W-6: the treasury keys file; a reimbursement destination is signed only if it is the claim's
+        /// derived one.
+        #[arg(long)]
+        treasury: Option<PathBuf>,
     },
     /// Merge signature files into a bundle (or into an earlier bundle).
     Collect {
@@ -173,13 +177,14 @@ enum Prepare {
         #[command(flatten)]
         common: Common,
     },
-    /// T-05, R-6: the destination that reimburses the bonds for a claim they paid (5 of 5).
+    /// T-05, W-6: the destination that reimburses the bonds for a claim they paid (3 of 5): the
+    /// claim's own treasury destination, derived from the treasury keys.
     ReimburseDestination {
         #[arg(long)]
         claim: B256,
-        /// keccak256(salt || Ironwood receiver) of the destination, revealed to the signers first.
+        /// The treasury keys file (W-6); the destination's commitment is derived from it.
         #[arg(long)]
-        commitment: B256,
+        treasury: PathBuf,
         #[command(flatten)]
         common: Common,
     },
@@ -247,15 +252,19 @@ fn spec_of(what: &Prepare, now: u64) -> Result<(Spec, &Common)> {
         }
         Prepare::ReimburseDestination {
             claim,
-            commitment,
+            treasury,
             common,
-        } => (
-            Spec::ReimburseDestination {
-                claim_id: *claim,
-                commitment: *commitment,
-            },
-            common,
-        ),
+        } => {
+            let keys = read_treasury(treasury)?;
+            let commitment = B256::from(keys.reimbursement(&claim.0).commitment());
+            (
+                Spec::ReimburseDestination {
+                    claim_id: *claim,
+                    commitment,
+                },
+                common,
+            )
+        }
     })
 }
 
@@ -330,6 +339,7 @@ async fn run(cli: Cli, rpc: &str) -> Result<()> {
             key_env,
             out,
             yes,
+            treasury,
         } => {
             let request: Request = read_json(&file)?;
             request.checked_digest()?;
@@ -347,8 +357,9 @@ async fn run(cli: Cli, rpc: &str) -> Result<()> {
                     eprintln!("warning: this key is not in the network config's signer set");
                 }
             }
+            let treasury = treasury.as_deref().map(read_treasury).transpose()?;
             ensure!(yes, "nothing signed: check the message above, then run again with --yes");
-            write_json(&out, &sign(&request, &key, now())?)?;
+            write_json(&out, &sign(&request, &key, now(), treasury.as_ref())?)?;
             println!("signed: {}", out.display());
         }
         Cmd::Collect { file, signatures, out } => {

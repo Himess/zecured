@@ -212,7 +212,8 @@ a witness RPC (set by default outside the local fork).
   on Base with a destination: a Refund claim once its account gave one, from its own note alone (its
   own lineage; the main lineage backs only the main claims, I10); a Fee claim rides with the vault's
   first exit, behind it, and heads a payout only when nothing else waits; a claim the bonds paid goes
-  to the destination all five signers gave for their reimbursement (v4, R-6), without the vault's ovk. A disputed
+  to its own treasury destination, which three signers gave after each derived it from the claim id
+  (W-6), without the vault's ovk. A disputed
   claim counts unpaid but is not payable until it is reopened, and then only by a payout of its input
   with the same claim list (RT-4), which may name the list's confirmed claims again (D57): while the
   input is unspent, no payout of it landed. A node that confirmed the payout itself keeps it paid,

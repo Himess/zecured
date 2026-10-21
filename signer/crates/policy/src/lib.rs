@@ -5,4 +5,5 @@
 pub mod classify;
 pub mod derive;
 pub mod ledger;
+pub mod treasury;
 pub mod verify;

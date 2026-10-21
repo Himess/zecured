@@ -90,6 +90,7 @@ and tightens older files when it opens them.
 |---|---|---|---|
 | `identity.json` | Base attestation key, X25519 secret | Re-deploy the Registry with a new signer set | One of five attestation keys; harmless below the threshold |
 | `store/vaults/*.json` | One FROST share per vault | That vault's other four shares still sign (any three) | One share of each vault; harmless below the threshold |
+| `treasury-keys.json` (W-6, shared by the operators and the coordinator) | The treasury's incoming viewing key and the reimbursement salt key | Copy it from another operator | The treasury's incoming payments and the reimbursement destinations become linkable; no funds |
 
 Back both up together, encrypted, and keep the data directory on an encrypted disk. Losing three
 nodes' stores freezes the affected vaults; three leaked stores are enough to steal them.
@@ -111,6 +112,14 @@ nodes' stores freezes the affected vaults; three leaked stores are enough to ste
   provider it is configured with), on the owner's signed request, after checking on each provider
   that the note is no lineage note and has never landed. Every other non-conforming deposit lands
   as a Refund claim and is paid like any claim.
+- **Reimbursement destinations (T-05, W-6):** when the bonds paid a claim, three operators give the
+  claim the destination that reimburses them. Each prepares or signs it with the treasury keys
+  (`zecured-ops prepare reimburse-destination --claim <id> --treasury treasury-keys.json --out
+  r.json`, then `zecured-ops sign r.json --treasury treasury-keys.json ...`), which derives the
+  claim's own destination from its id; `sign` refuses any other commitment. The coordinator, given the same file
+  (`--treasury`, `ZECURED_TREASURY_KEYS`), registers the derived recipient with the nodes once Base
+  holds the commitment, so the reimbursement is paid like any claim; it never registers a
+  destination that is not the derived one.
 - **Deposit proofs (Tier 2):** every deposit reaches Base by proof (D41); a node needs nothing for
   them and signs nothing for them, it applies the resulting events like any other. Proving (the
   coordinator, or the borrower's CLI) and feeding the header relay (`scripts/relay-feed.sh`, anyone)
