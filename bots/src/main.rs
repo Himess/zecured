@@ -491,7 +491,7 @@ async fn pre_liquidate_vault<P: Provider>(
     info!(vault = %short, ltv = %plan.ltv, "position in its pre-liquidation band: pre-liquidating");
     let mut passing = None;
     for shares in chain::pre_liquidation_attempts(&plan, market, floor) {
-        match adapter.preLiquidate(account, U256::from(shares), PROBE_COMMITMENT).call().await {
+        match adapter.preLiquidate(account, U256::from(shares), PROBE_COMMITMENT, 0).call().await {
             Ok(sim) => {
                 passing = Some((shares, sim.repaidAssets, sim.seized));
                 break;
@@ -505,7 +505,7 @@ async fn pre_liquidate_vault<P: Provider>(
     };
     // The profitability filter only logs: the incentive at the oracle price against the gas and
     // the wait for the signers' payout of the ZEC.
-    let gas = adapter.preLiquidate(account, U256::from(shares), PROBE_COMMITMENT).estimate_gas().await?;
+    let gas = adapter.preLiquidate(account, U256::from(shares), PROBE_COMMITMENT, 0).estimate_gas().await?;
     let gas_price = w.p.get_gas_price().await?;
     let executed = chain::PreLiquidation {
         repaid_shares: shares,
@@ -533,7 +533,8 @@ async fn pre_liquidate_vault<P: Provider>(
         "pre-liquidation economics in USDC units (logged, not enforced)"
     );
     let commitment = chain::fresh_commitment(w.backend, w.zaddr, w.receiver).await?;
-    let call = adapter.preLiquidate(account, U256::from(shares), commitment);
+    // W-17: never for less collateral than the simulation quoted (the price or the debt may move before it lands).
+    let call = adapter.preLiquidate(account, U256::from(shares), commitment, seized);
     let gas = zecured_base::gas_with_headroom(call.estimate_gas().await?);
     let receipt = call.gas(gas).send().await?.with_timeout(Some(RECEIPT_TIMEOUT)).get_receipt().await?;
     ensure!(receipt.status(), "pre-liquidation reverted");

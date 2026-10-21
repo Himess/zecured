@@ -96,6 +96,10 @@ pub struct CommittedPayout {
     pub payout_ref: B256,
     pub input_tag: B256,
     pub claims: Vec<[u8; 32]>,
+    /// W-1: the reference committed for each claim, in `claims`' order (empty in a record made before
+    /// v4.1: then nothing of the payout is proven, see `delivery::landed_payouts`).
+    #[serde(default)]
+    pub claim_refs: Vec<B256>,
 }
 
 /// R-12: a refund proof waiting on the Intake until the relay has moved on.
@@ -227,6 +231,14 @@ pub struct CoordVault {
     /// (`VaultCompensated`).
     #[serde(default)]
     pub compensated: bool,
+    /// W-2: the F1 cases opened on this vault (`ViolationProven` of kind 1), which follow their note
+    /// when a deposit takes its tag over.
+    #[serde(default)]
+    pub f1_cases: Vec<B256>,
+    /// W-2: tags of this vault's change records that a deposit took over (`ChangeTagOverridden`), whose F1
+    /// cases the keeper moves to the deposit's vault (`followNote`).
+    #[serde(default)]
+    pub overridden_tags: Vec<B256>,
 }
 
 /// R-2: an executed case whose journal proved a committed payout of the vault in a block: an F2
@@ -481,6 +493,8 @@ pub(crate) mod tests {
             compromised: false,
             collateral_burned: false,
             compensated: false,
+            f1_cases: vec![],
+            overridden_tags: vec![],
         }
     }
 
@@ -548,6 +562,7 @@ pub(crate) mod tests {
             payout_ref: B256::repeat_byte(7),
             input_tag: B256::repeat_byte(8),
             claims: vec![[1; 32], [2; 32], [3; 32]],
+            claim_refs: vec![],
         }];
         assert_eq!(v.to_uphold(), vec![[1; 32]]);
         assert_eq!(v.to_prove(), vec![[1; 32], [2; 32], [3; 32]]);

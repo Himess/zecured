@@ -473,6 +473,8 @@ fn finish_open(
         compromised: false,
         collateral_burned: false,
         compensated: false,
+        f1_cases: vec![],
+        overridden_tags: vec![],
     };
     let response = OpenVaultResponse {
         vault_id: vault.vault_id,
@@ -500,13 +502,18 @@ fn apply_event(v: &mut CoordVault, ev: &VaultEvent) {
             payout_ref,
             input_tag,
             claims,
+            claim_refs,
         } => {
-            if !v.commitments.iter().any(|c| c.payout_ref == *payout_ref) {
-                v.commitments.push(CommittedPayout {
+            match v.commitments.iter_mut().find(|c| c.payout_ref == *payout_ref) {
+                // W-1: the coordinator's own record of a commitment it made learns its references from Base.
+                Some(c) if c.claim_refs.is_empty() => c.claim_refs = claim_refs.clone(),
+                Some(_) => {}
+                None => v.commitments.push(CommittedPayout {
                     payout_ref: *payout_ref,
                     input_tag: *input_tag,
                     claims: claims.iter().map(|c| c.0).collect(),
-                });
+                    claim_refs: claim_refs.clone(),
+                }),
             }
         }
         RegistryEvent::RefundPending {
@@ -581,11 +588,20 @@ fn apply_event(v: &mut CoordVault, ev: &VaultEvent) {
             }
             v.compensated = true;
         }
-        RegistryEvent::ChangeTagOverridden { .. } => {
+        RegistryEvent::ChangeTagOverridden { tag } => {
             error!(
                 vault = %short(&v.vault_id),
                 "a deposit took a change tag of this vault's commitment (R-16): that commitment's signers registered a false change"
             );
+            // W-2: an F1 case about that note, open or executed, follows it to the deposit's vault.
+            if !v.overridden_tags.contains(tag) {
+                v.overridden_tags.push(*tag);
+            }
+        }
+        RegistryEvent::CaseProven { case_id, kind } => {
+            if *kind == events::VIOLATION_UNCOMMITTED && !v.f1_cases.contains(case_id) {
+                v.f1_cases.push(*case_id);
+            }
         }
         RegistryEvent::Reserved { deposit_tag, .. } => {
             v.pending_tag = Some(deposit_tag.0);
@@ -1888,8 +1904,10 @@ impl Coordinator {
         if bond != Address::ZERO {
             let bond = ISignerBond::new(bond, &provider);
             for c in claims.iter().filter(|c| c.payable() && c.kind.liveness_covered()) {
-                // Unreadable (a stale price, R-9): 0, as every node counts it.
-                dues.push((c.id, bond.livenessDue(B256::from(c.id)).call().await.map(|d| d.dueAt).unwrap_or(0)));
+                // W-4: the due time from the arming alone. A stale price (R-9), a freeze or an open claim case
+                // only delays the bonds' payment, never the time a payout must have landed by. Unreadable: 0, as
+                // every node counts it.
+                dues.push((c.id, bond.livenessDeadline(B256::from(c.id)).call().await.unwrap_or(0)));
             }
         }
         let due_of = |id: &ClaimId| dues.iter().find(|(c, _)| c == id).map_or(0, |(_, d)| *d);
@@ -2176,6 +2194,7 @@ impl Coordinator {
                 payout_ref: kept.record.payout_ref,
                 input_tag: kept.record.input_tag,
                 claims: kept.record.claim_ids.iter().map(|c| c.0).collect(),
+                claim_refs: kept.record.claim_refs.clone(),
             };
             self.update_vault(id, |v| {
                 if !v.commitments.iter().any(|c| c.payout_ref == record.payout_ref) {
@@ -2688,6 +2707,7 @@ mod tests {
             payout_ref: B256::repeat_byte(0xaa),
             input_tag: B256::repeat_byte(0x7a),
             claims: vec![B256::repeat_byte(1)],
+            claim_refs: vec![B256::repeat_byte(0xc1)],
         };
         apply_event(&mut v, &ev(11, committed.clone()));
         apply_event(&mut v, &ev(11, committed));
@@ -2798,7 +2818,7 @@ mod tests {
         );
         assert!(v.compromised && keepers::burn_due(&v), "compromised without a burn: the burn is run again");
         apply_event(&mut v, &at(RegistryEvent::CollateralBurned { retired: 400_000 }));
-        assert!(v.collateral_burned && !keepers::burn_due(&v));
+        assert!(v.collateral_burned && keepers::burn_due(&v), "W-12: simulated again while it is active");
         apply_event(&mut v, &at(RegistryEvent::VaultCompensated { outstanding: 600_000 }));
         assert!(v.compensated);
     }
@@ -2918,6 +2938,16 @@ mod tests {
         c.store.lock().await.save(cased.clone()).unwrap();
         c.prove_by_cases(&cased).await.unwrap();
         assert!(c.vault(&cased.vault_id).await.unwrap().inclusion_cases.is_empty(), "nothing left to prove by it");
+        assert!(
+            !eth_calls(&calls).contains(&selector(IZecuredSlasher::proveInclusionByCaseCall::SELECTOR)),
+            "W-1: a payout without a record here proves no claim of the vault"
+        );
+        assert!(!calls.lock().unwrap().iter().any(|m| m == "eth_sendRawTransaction"));
+        // A case with claims whose simulation upholds none: used up, nothing sent.
+        c.store.lock().await.save(cased.clone()).unwrap();
+        c.prove_cases(&cased, vec![(B256::repeat_byte(0xca), vec![B256::repeat_byte(1)])]).await.unwrap();
+        assert!(c.vault(&cased.vault_id).await.unwrap().inclusion_cases.is_empty());
+        assert!(eth_calls(&calls).contains(&selector(IZecuredSlasher::proveInclusionByCaseCall::SELECTOR)));
         assert!(!calls.lock().unwrap().iter().any(|m| m == "eth_sendRawTransaction"));
         // A case the slasher refuses now (simulated, reverts): kept, tried again later.
         let (rpc, calls) = recording_stub(vec![
@@ -2929,7 +2959,7 @@ mod tests {
         c.cfg.base_rpc_url = rpc;
         c.store.lock().await.save(cased.clone()).unwrap();
         c.keeper_tries.lock().unwrap().clear();
-        c.prove_by_cases(&cased).await.unwrap();
+        c.prove_cases(&cased, vec![(B256::repeat_byte(0xca), vec![B256::repeat_byte(1)])]).await.unwrap();
         assert_eq!(c.vault(&cased.vault_id).await.unwrap().inclusion_cases.len(), 1);
         assert!(eth_calls(&calls).contains(&selector(IZecuredSlasher::proveInclusionByCaseCall::SELECTOR)));
         assert!(!calls.lock().unwrap().iter().any(|m| m == "eth_sendRawTransaction"));
@@ -2951,12 +2981,14 @@ mod tests {
         c.burn_again(&compromised).await.unwrap();
         assert!(eth_calls(&calls).contains(&selector(IZecuredCompensator::burnCollateralCall::SELECTOR)));
         assert!(!calls.lock().unwrap().iter().any(|m| m == "eth_sendRawTransaction"));
-        // Burned already: not tried at all.
+        // W-12: burned already, still active: simulated again (a higher price may free collateral above the
+        // LLTV), and still nothing sent while it would retire nothing.
         compromised.collateral_burned = true;
         c.keeper_tries.lock().unwrap().clear();
         let before = calls.lock().unwrap().len();
         c.burn_again(&compromised).await.unwrap();
-        assert_eq!(calls.lock().unwrap().len(), before);
+        assert!(calls.lock().unwrap().len() > before);
+        assert!(!calls.lock().unwrap().iter().any(|m| m == "eth_sendRawTransaction"));
     }
 
     /// O-2: a signing threshold of nodes must report a Base block at least as recent as the event.

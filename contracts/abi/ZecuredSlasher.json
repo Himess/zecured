@@ -89,6 +89,11 @@
         "name": "noteTag",
         "type": "bytes32",
         "internalType": "bytes32"
+      },
+      {
+        "name": "vaultId",
+        "type": "bytes32",
+        "internalType": "bytes32"
       }
     ],
     "outputs": [
@@ -186,6 +191,25 @@
   },
   {
     "type": "function",
+    "name": "claimCaseOpen",
+    "inputs": [
+      {
+        "name": "claimId",
+        "type": "bytes32",
+        "internalType": "bytes32"
+      }
+    ],
+    "outputs": [
+      {
+        "name": "",
+        "type": "bool",
+        "internalType": "bool"
+      }
+    ],
+    "stateMutability": "view"
+  },
+  {
+    "type": "function",
     "name": "compensator",
     "inputs": [],
     "outputs": [
@@ -231,6 +255,25 @@
   },
   {
     "type": "function",
+    "name": "followNote",
+    "inputs": [
+      {
+        "name": "caseId",
+        "type": "bytes32",
+        "internalType": "bytes32"
+      }
+    ],
+    "outputs": [
+      {
+        "name": "newCaseId",
+        "type": "bytes32",
+        "internalType": "bytes32"
+      }
+    ],
+    "stateMutability": "nonpayable"
+  },
+  {
+    "type": "function",
     "name": "frozenSince",
     "inputs": [
       {
@@ -269,6 +312,25 @@
   },
   {
     "type": "function",
+    "name": "noteSpendProven",
+    "inputs": [
+      {
+        "name": "noteTag",
+        "type": "bytes32",
+        "internalType": "bytes32"
+      }
+    ],
+    "outputs": [
+      {
+        "name": "",
+        "type": "bool",
+        "internalType": "bool"
+      }
+    ],
+    "stateMutability": "view"
+  },
+  {
+    "type": "function",
     "name": "openCaseCount",
     "inputs": [],
     "outputs": [
@@ -286,6 +348,25 @@
     "inputs": [
       {
         "name": "vaultId",
+        "type": "bytes32",
+        "internalType": "bytes32"
+      }
+    ],
+    "outputs": [
+      {
+        "name": "",
+        "type": "uint256",
+        "internalType": "uint256"
+      }
+    ],
+    "stateMutability": "view"
+  },
+  {
+    "type": "function",
+    "name": "openF1CasesOf",
+    "inputs": [
+      {
+        "name": "noteTag",
         "type": "bytes32",
         "internalType": "bytes32"
       }
@@ -626,6 +707,31 @@
   },
   {
     "type": "event",
+    "name": "ViolationMoved",
+    "inputs": [
+      {
+        "name": "caseId",
+        "type": "bytes32",
+        "indexed": true,
+        "internalType": "bytes32"
+      },
+      {
+        "name": "newCaseId",
+        "type": "bytes32",
+        "indexed": true,
+        "internalType": "bytes32"
+      },
+      {
+        "name": "vaultId",
+        "type": "bytes32",
+        "indexed": true,
+        "internalType": "bytes32"
+      }
+    ],
+    "anonymous": false
+  },
+  {
+    "type": "event",
     "name": "ViolationProven",
     "inputs": [
       {
@@ -793,6 +899,17 @@
   {
     "type": "error",
     "name": "NotAnInclusionCase",
+    "inputs": [
+      {
+        "name": "caseId",
+        "type": "bytes32",
+        "internalType": "bytes32"
+      }
+    ]
+  },
+  {
+    "type": "error",
+    "name": "NotMovable",
     "inputs": [
       {
         "name": "caseId",

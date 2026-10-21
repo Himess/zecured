@@ -21,6 +21,13 @@
 //! settlements and routine proofs, since its inclusion window runs (crate::queue). Nothing here is
 //! trusted: the slasher checks the seal, the anchor and the payout's record. The witness holds only
 //! the vault's tag key K and reaches the prover through its standard input (H-12).
+//!
+//! W-1: an `Included` proof says only that X is in a block; it makes final every claim it is given.
+//! Before a claim goes into a proof, its committed reference must be the one its claimant computes,
+//! `keccak256(salt || txid_X)` (the coordinator holds every claim's salt). A claim X's commitment
+//! hid under another reference never goes into a delivery proof: its claimant could never find X, so
+//! the coordinator proves the violation instead (F4, at a dispute's priority), and the compensator
+//! pays the claim.
 
 use std::{collections::BTreeMap, fs, path::PathBuf, time::Instant};
 
@@ -33,11 +40,14 @@ use anyhow::{Context, Result, bail, ensure};
 use tracing::{debug, error, info, warn};
 use zcash_protocol::TxId;
 use zecured_base::{
-    events::{IZcashHeaderRelay, IZecuredRegistry, IZecuredSlasher, VERSION_VIOLATION},
+    events::{IZcashHeaderRelay, IZecuredRegistry, IZecuredSlasher, VERSION_VIOLATION, VIOLATION_WRONG_CLAIM_REF},
     relay::slash_anchor,
 };
 use zecured_deposit_witness::{p2p, violation};
-use zecured_policy::derive::{deposit_tag, payout_ref, tag_key};
+use zecured_policy::{
+    derive::{deposit_tag, payout_ref, tag_key},
+    ledger::{Recipient, claim_ref},
+};
 use zecured_zcash_ops::{lwd, network::ZcashNetwork, scan::ReceivedNote};
 
 use crate::{
@@ -71,7 +81,7 @@ pub(crate) fn inclusion_journal(journal: &[u8]) -> Result<(B256, B256)> {
 }
 
 /// The tag of every spent note of a vault, with the transaction that spent it and its height.
-fn spent_notes(ufvk: &str, notes: &[ReceivedNote]) -> Vec<([u8; 32], TxId, u32)> {
+pub(crate) fn spent_notes(ufvk: &str, notes: &[ReceivedNote]) -> Vec<([u8; 32], TxId, u32)> {
     notes
         .iter()
         .filter_map(|n| {
@@ -91,20 +101,41 @@ pub(crate) struct ToProve {
     pub priority: Priority,
 }
 
+/// W-1: a claim of a landed payout that its commitment names under a reference other than the one
+/// its claimant computes (`keccak256(salt || txid)`): never proven paid by that payout; proven an F4.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub(crate) struct HiddenClaim {
+    pub payout_ref: B256,
+    pub claim: B256,
+    pub txid: TxId,
+    pub height: u32,
+}
+
+/// What the payouts of a vault that landed hold: the claims to prove paid, by payout, the claims
+/// their commitments hid (W-1), and how many claims could not be checked (no salt, or a record
+/// without references): neither proven paid nor proven hidden.
+#[derive(Debug, Default)]
+pub(crate) struct Landed {
+    pub payouts: BTreeMap<B256, ToProve>,
+    pub hidden: Vec<HiddenClaim>,
+    pub unchecked: usize,
+}
+
 /// Section 3: the payouts of the vault's recorded commitments that landed (the transaction that
 /// spent the commitment's input is the commitment's own), with their claims among `wanted`, keyed
 /// by payout reference. A claim of `urgent` (disputed or reopened) makes its payout's proof a
-/// dispute's.
+/// dispute's. W-1: a claim goes in only if its committed reference is `keccak256(salt || txid)` for
+/// its recipient's salt (`salt_of`, by claim id).
 pub(crate) fn landed_payouts(
     v: &CoordVault,
     spent: &[([u8; 32], TxId, u32)],
     wanted: &[[u8; 32]],
     urgent: &[[u8; 32]],
-) -> BTreeMap<B256, ToProve> {
-    let mut payouts: BTreeMap<B256, ToProve> = BTreeMap::new();
+    salt_of: impl Fn(&[u8; 32]) -> Option<[u8; 32]>,
+) -> Landed {
+    let mut landed = Landed::default();
     for c in &v.commitments {
-        let claims: Vec<B256> = c.claims.iter().filter(|id| wanted.contains(id)).map(|id| B256::from(*id)).collect();
-        if claims.is_empty() {
+        if !c.claims.iter().any(|id| wanted.contains(id)) {
             continue;
         }
         let Some(&(_, txid, height)) = spent.iter().find(|(tag, ..)| B256::from(*tag) == c.input_tag) else {
@@ -113,6 +144,25 @@ pub(crate) fn landed_payouts(
         if B256::from(payout_ref(&v.ufvk, txid.as_ref())) != c.payout_ref {
             continue; // another commitment of the same input landed (a rebuilt payout)
         }
+        let mut claims = vec![];
+        for (i, id) in c.claims.iter().enumerate().filter(|(_, id)| wanted.contains(id)) {
+            match (c.claim_refs.get(i), salt_of(id)) {
+                (Some(committed), Some(salt)) if *committed == B256::from(claim_ref(&salt, txid.as_ref())) => {
+                    claims.push(B256::from(*id));
+                }
+                (Some(_), Some(_)) => landed.hidden.push(HiddenClaim {
+                    payout_ref: c.payout_ref,
+                    claim: B256::from(*id),
+                    txid,
+                    height,
+                }),
+                _ => landed.unchecked += 1,
+            }
+        }
+        if claims.is_empty() {
+            continue;
+        }
+        let payouts = &mut landed.payouts;
         let priority = if claims.iter().any(|id| urgent.contains(&id.0)) {
             Priority::Dispute
         } else {
@@ -131,7 +181,7 @@ pub(crate) fn landed_payouts(
             }
         }
     }
-    payouts
+    landed
 }
 
 /// One background inclusion proof.
@@ -173,10 +223,57 @@ impl InclusionJob {
     }
 }
 
+/// W-1: one background F4 proof: payout `txid` of the vault (viewing key `ufvk`) names the claim of
+/// recipient `recipient` under a wrong reference. The witness carries the vault's tag key K and the
+/// recipient (its salt and receiver), never the viewing key, and reaches the prover through stdin.
+struct HiddenJob {
+    ufvk: String,
+    txid: TxId,
+    anchor: u32,
+    recipient: Recipient,
+    beneficiary: Address,
+    network: ZcashNetwork,
+    lwd: String,
+    settings: DepositProofs,
+    seal_path: PathBuf,
+}
+
+impl HiddenJob {
+    async fn run(self) -> Result<()> {
+        let (headers, network) = (self.settings.headers.clone(), self.network);
+        let last = tokio::task::spawn_blocking(move || p2p::extend_file(network, &headers, &p2p::seed_peers(network)))
+            .await??;
+        ensure!(last >= self.anchor, "the P2P peers are behind the relay");
+        let mut client = lwd::connect(&self.lwd).await?;
+        lwd::check_network(&mut client, network).await?;
+        let (witness, journal) = violation::wrong_claim_ref(
+            &mut client,
+            network,
+            &self.settings.headers,
+            &self.settings.summaries,
+            &self.ufvk,
+            self.txid,
+            self.recipient.salt,
+            self.recipient.receiver,
+            self.anchor,
+            self.beneficiary.0.0,
+        )
+        .await?;
+        let _ = journal; // checked against the statement natively by the builder
+        let witness = serde_json::to_vec(&witness)?;
+        prove_into(&self.settings, true, witness, &self.seal_path).await
+    }
+}
+
 impl Prover {
     /// Where the inclusion proof of the payout `payout_ref` is kept until it is submitted.
     fn inclusion_seal_path(&self, payout_ref: &B256) -> PathBuf {
         self.dir.join(format!("{}.inclusion.json", hex::encode(payout_ref)))
+    }
+
+    /// W-1: where the F4 proof of the claim `claim` that payout `payout_ref` hid is kept until submitted.
+    fn hidden_seal_path(&self, payout_ref: &B256, claim: &B256) -> PathBuf {
+        self.dir.join(format!("{}.{}.f4.json", hex::encode(payout_ref), hex::encode(claim)))
     }
 }
 
@@ -217,7 +314,28 @@ impl Coordinator {
         };
         let mut wanted = routine.clone();
         wanted.extend(urgent.iter().copied().filter(|c| !routine.contains(c)));
-        let mut payouts = landed_payouts(v, &spent, &wanted, &urgent);
+        // W-1: the claims' salts, by id (the recipients' file; never logged).
+        let salts: Vec<([u8; 32], [u8; 32])> = {
+            let store = self.store.lock().await;
+            v.claims.iter().filter_map(|c| Some((c.id, store.recipient(&c.commitment)?.salt))).collect()
+        };
+        let Landed {
+            mut payouts,
+            hidden,
+            unchecked,
+        } = landed_payouts(v, &spent, &wanted, &urgent, |id| salts.iter().find(|(c, _)| c == id).map(|(_, s)| *s));
+        if unchecked != 0 && self.dispute_warning_due(&v.vault_id) {
+            warn!(
+                vault = %short(&v.vault_id),
+                claims = unchecked,
+                "claims of a landed payout whose reference this coordinator cannot check (no salt or no record): not proven (W-1)"
+            );
+        }
+        for h in &hidden {
+            if let Err(e) = self.prove_hidden(v, prover, slasher, h).await {
+                log_failure(&v.vault_id, "proving a hidden claim (F4)", &e);
+            }
+        }
         // A disputed claim no recorded commitment covers: traced on Base.
         let covered: Vec<B256> = payouts.values().flat_map(|p| p.claims.iter().copied()).collect();
         let untraced: Vec<[u8; 32]> = urgent.iter().copied().filter(|c| !covered.contains(&B256::from(*c))).collect();
@@ -413,6 +531,112 @@ impl Coordinator {
     }
 }
 
+impl Coordinator {
+    /// W-1: a claim the landed payout's commitment hid: its F4 proof is submitted once made, or queued
+    /// at a dispute's priority once the relay has the slasher's work on top of the payout's block.
+    /// Nothing about the claim's recipient is logged.
+    async fn prove_hidden(&self, v: &CoordVault, prover: &Prover, slasher: Address, h: &HiddenClaim) -> Result<()> {
+        let provider = ProviderBuilder::new().connect_http(self.cfg.base_rpc_url.parse()?);
+        let s = IZecuredSlasher::new(slasher, &provider);
+        if s.claimCaseOpen(h.claim).call().await.context("slasher.claimCaseOpen")? {
+            return Ok(()); // proven already; its execution compensates the claim
+        }
+        let seal_path = prover.hidden_seal_path(&h.payout_ref, &h.claim);
+        if seal_path.exists() {
+            return self.submit_hidden(&v.vault_id, slasher, &seal_path).await;
+        }
+        let key = alloy::primitives::keccak256([h.payout_ref.0, h.claim.0].concat());
+        if prover.queue.contains(&key) {
+            return Ok(());
+        }
+        if self.dispute_warning_due(&v.vault_id) {
+            error!(
+                vault = %short(&v.vault_id),
+                "a landed payout's commitment hid a claim from its claimant (W-1): not proven paid; proving the violation (F4)"
+            );
+        }
+        let recipient = {
+            let store = self.store.lock().await;
+            let claim = v.claims.iter().find(|c| B256::from(c.id) == h.claim).context("a hidden claim is unknown")?;
+            store.recipient(&claim.commitment).context("a hidden claim has no recipient")?
+        };
+        let image = prover.image_id(true).await?;
+        let versions = s.versions().call().await.context("slasher.versions")?;
+        if !guest_active(&provider, versions, VERSION_VIOLATION, image).await? {
+            warn!("the configured violation guest is not an active verifier version on Base: no F4 proof (T-07a)");
+            return Ok(());
+        }
+        let Some(anchor) = slash_anchor(&provider, slasher, h.height).await? else {
+            return Ok(()); // the payout's block is not under the slasher's work yet
+        };
+        let job = HiddenJob {
+            ufvk: v.ufvk.clone(),
+            txid: h.txid,
+            anchor,
+            recipient,
+            beneficiary: self.gas.address(),
+            network: self.cfg.zcash(),
+            lwd: self.cfg.lightwalletd_url.clone(),
+            settings: prover.settings.clone(),
+            seal_path,
+        };
+        let vault_id = v.vault_id;
+        let _ = prover.queue.enqueue(key, Priority::Dispute, async move {
+            info!(vault = %short(&vault_id), "proving a hidden claim (F4)");
+            match job.run().await {
+                Ok(()) => info!(vault = %short(&vault_id), "F4 proof ready"),
+                Err(e) => {
+                    warn!(vault = %short(&vault_id), "F4 proof failed");
+                    debug!(vault = %short(&vault_id), error = %scrubbed(&e), "F4 proof failed");
+                }
+            }
+        });
+        Ok(())
+    }
+
+    /// W-1: `proveViolation(F4, ...)` with a finished proof, once its anchor is still on the relay's best
+    /// chain under the slasher's work and its guest an active violation version.
+    async fn submit_hidden(&self, vault_id: &B256, slasher: Address, seal_path: &std::path::Path) -> Result<()> {
+        let s: SealFile = serde_json::from_slice(&fs::read(seal_path)?)?;
+        ensure!(s.journal.len() == JOURNAL_LENGTH, "an F4 journal is {JOURNAL_LENGTH} bytes");
+        let provider = ProviderBuilder::new()
+            .wallet(EthereumWallet::from(self.gas.clone()))
+            .connect_http(self.cfg.base_rpc_url.parse()?);
+        let slasher = IZecuredSlasher::new(slasher, &provider);
+        let anchor = B256::from_slice(&s.journal[32..64]);
+        let relay = IZcashHeaderRelay::new(slasher.relay().call().await.context("slasher.relay")?, &provider);
+        let min = slasher.slashConfirmationWork().call().await.context("slasher.slashConfirmationWork")?;
+        if !relay.isInBestChain(anchor).call().await.context("relay.isInBestChain")?
+            || relay.confirmationWork(anchor).call().await.context("relay.confirmationWork")? < min
+        {
+            let _ = fs::remove_file(seal_path);
+            warn!(vault = %short(vault_id), "an F4 proof's anchor left the relay's best chain: proving again");
+            return Ok(());
+        }
+        let call = slasher.proveViolation(VIOLATION_WRONG_CLAIM_REF, s.journal.clone(), s.seal.clone(), s.image_id);
+        if let Err(e) = call.call().await {
+            // Proven by someone else first (the case is open), or no longer a violation.
+            let _ = fs::remove_file(seal_path);
+            debug!(vault = %short(vault_id), error = %scrubbed(&anyhow::anyhow!(e)), "the F4 proof is not taken");
+            return Ok(());
+        }
+        let gas = zecured_base::gas_with_headroom(call.estimate_gas().await.context("estimate proveViolation")?);
+        let receipt = call
+            .gas(gas)
+            .send()
+            .await
+            .context("send proveViolation")?
+            .with_timeout(Some(RECEIPT_TIMEOUT))
+            .get_receipt()
+            .await
+            .context("proveViolation receipt")?;
+        ensure!(receipt.status(), "proveViolation reverted");
+        info!(vault = %short(vault_id), "an F4 case is open on Base: its execution compensates the hidden claim (W-1)");
+        let _ = fs::remove_file(seal_path);
+        Ok(())
+    }
+}
+
 /// Whether Base still takes an inclusion proof for a claim of [`CoordVault::to_uphold`]: disputed,
 /// or pending again after a reopening (D57).
 fn upholdable(status: u8) -> bool {
@@ -490,29 +714,36 @@ mod tests {
         let tx = |b: u8| TxId::from_bytes([b; 32]);
         let reference = |b: u8| B256::from(payout_ref(&v.ufvk, &[b; 32]));
         let (input_a, input_b, input_c) = (B256::repeat_byte(0xa), B256::repeat_byte(0xb), B256::repeat_byte(0xc));
+        // W-1: each claim's salt is [id; 32]; an honest commitment names it under keccak256(salt || txid).
+        let honest =
+            |claims: &[u8], tx: u8| claims.iter().map(|c| B256::from(claim_ref(&[*c; 32], &[tx; 32]))).collect();
         v.commitments = vec![
             // Landed (tx 1 spent input a): claims 1 and 2.
             CommittedPayout {
                 payout_ref: reference(1),
                 input_tag: input_a,
                 claims: vec![[1; 32], [2; 32]],
+                claim_refs: honest(&[1, 2], 1),
             },
             // Its input b is unspent: claim 3 waits.
             CommittedPayout {
                 payout_ref: reference(3),
                 input_tag: input_b,
                 claims: vec![[3; 32]],
+                claim_refs: honest(&[3], 3),
             },
             // A first commitment of input c that expired unmined; the rebuild (tx 5) landed.
             CommittedPayout {
                 payout_ref: reference(4),
                 input_tag: input_c,
                 claims: vec![[4; 32]],
+                claim_refs: honest(&[4], 4),
             },
             CommittedPayout {
                 payout_ref: reference(5),
                 input_tag: input_c,
                 claims: vec![[4; 32]],
+                claim_refs: honest(&[4], 5),
             },
         ];
         v.claims = vec![
@@ -526,7 +757,10 @@ mod tests {
         ];
         assert_eq!(v.to_prove(), vec![[1; 32], [3; 32], [4; 32]], "never a final claim");
         let spent = vec![(input_a.0, tx(1), 100), (input_c.0, tx(5), 120)];
-        let payouts = landed_payouts(&v, &spent, &v.to_prove(), &v.to_uphold());
+        let salt = |id: &[u8; 32]| Some([id[0]; 32]);
+        let landed = landed_payouts(&v, &spent, &v.to_prove(), &v.to_uphold(), salt);
+        assert!(landed.hidden.is_empty() && landed.unchecked == 0);
+        let payouts = landed.payouts;
         assert_eq!(payouts.len(), 2);
         let first = &payouts[&reference(1)];
         assert_eq!((first.txid, first.height, first.priority), (tx(1), 100, Priority::RoutineInclusion));
@@ -535,5 +769,45 @@ mod tests {
         assert_eq!((rebuilt.claims.clone(), rebuilt.priority), (vec![B256::repeat_byte(4)], Priority::Dispute));
         assert!(!payouts.contains_key(&reference(4)), "the expired first commitment never landed");
         assert!(!payouts.contains_key(&reference(3)), "its input is unspent");
+    }
+
+    /// W-1: a claim the landed payout's commitment named under a reference its claimant never
+    /// computes is not proven paid: it is reported hidden (to be proven an F4); a claim whose salt
+    /// this coordinator lacks is neither proven nor reported.
+    #[test]
+    fn w1_a_claim_under_a_wrong_reference_is_never_proven_paid() {
+        let mut v = vault(1);
+        v.ufvk = "uviewtest1vault".into();
+        let input = B256::repeat_byte(0xa);
+        let x = B256::from(payout_ref(&v.ufvk, &[7; 32]));
+        v.commitments = vec![CommittedPayout {
+            payout_ref: x,
+            input_tag: input,
+            claims: vec![[1; 32], [2; 32], [3; 32]],
+            claim_refs: vec![
+                B256::from(claim_ref(&[1; 32], &[7; 32])),
+                B256::repeat_byte(0xee), // not keccak256(salt || txid): its claimant never finds X
+                B256::from(claim_ref(&[3; 32], &[7; 32])),
+            ],
+        }];
+        v.claims = vec![
+            claim(1, ClaimState::Unpaid),
+            claim(2, ClaimState::Unpaid),
+            claim(3, ClaimState::Unpaid),
+        ];
+        let spent = vec![(input.0, TxId::from_bytes([7; 32]), 300)];
+        let salt = |id: &[u8; 32]| (id[0] != 3).then_some([id[0]; 32]);
+        let landed = landed_payouts(&v, &spent, &v.to_prove(), &v.to_uphold(), salt);
+        assert_eq!(landed.payouts[&x].claims, vec![B256::repeat_byte(1)], "only the honest claim");
+        assert_eq!(
+            landed.hidden,
+            vec![HiddenClaim {
+                payout_ref: x,
+                claim: B256::repeat_byte(2),
+                txid: TxId::from_bytes([7; 32]),
+                height: 300
+            }]
+        );
+        assert_eq!(landed.unchecked, 1, "claim 3: no salt here");
     }
 }

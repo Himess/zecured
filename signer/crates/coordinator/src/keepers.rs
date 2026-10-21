@@ -10,9 +10,15 @@
 //!   and none waits for a proof.
 //! - R-2 (`proveInclusionByCase`): an executed F2 or F4 case proved its committed payout is in a
 //!   block; its journal makes that payout's claims final, without a proof of the coordinator's.
-//! - R-19 (`burnCollateral`): a compromised vault's collateral is burned down to the LLTV inside
-//!   `executeSlash`, within a fixed gas budget; when that burn did not happen (no
-//!   `CollateralBurned`), it is run again with the gas it needs.
+//! - R-19, W-12 (`burnCollateral`): a compromised vault's collateral is burned down to the LLTV
+//!   inside `executeSlash`, within a fixed gas budget and at that moment's price. While the vault is
+//!   active the keeper simulates the burn again every [`KEEPER_RETRY`] and runs it whenever it would
+//!   retire something (a failed burn, or a price that rose and freed collateral above the LLTV).
+//! - W-4 (`armLiveness`): every claim the bonds may pay is armed with its earliest receipt as soon
+//!   as a node gives one, so that no claim is armed late (a late arming protects in full the
+//!   commitments made before it, so its claimant gains nothing by waiting).
+//! - W-2 (`followNote`): an F1 case about a note whose tag a deposit took over from this vault's
+//!   (false) change record moves to the deposit's vault at once.
 
 use std::time::{Duration, Instant};
 
@@ -23,11 +29,15 @@ use alloy::{
 };
 use anyhow::{Context, Result, anyhow, ensure};
 use tracing::{debug, info, warn};
+use zcash_protocol::TxId;
 use zecured_base::{
-    events::{IZecuredCompensator, IZecuredRegistry, IZecuredSlasher, RegistryEvent, VaultEvent},
+    events::{ISignerBond, IZecuredCompensator, IZecuredRegistry, IZecuredSlasher, RegistryEvent, VaultEvent},
     gas_with_headroom,
 };
-use zecured_policy::ledger::ClaimState;
+use zecured_policy::{
+    derive::payout_ref,
+    ledger::{ClaimState, claim_ref},
+};
 
 use crate::{
     Coordinator, RECEIPT_TIMEOUT,
@@ -49,6 +59,8 @@ pub(crate) enum Keeper {
     Expiry,
     Cases,
     Burn,
+    Arm,
+    Follow,
 }
 
 /// R-3: the vault's confirmations by signatures (paid, not final) whose dispute window of `window`
@@ -67,24 +79,56 @@ pub(crate) fn expirable(v: &CoordVault, window: u64, now: u64) -> Vec<B256> {
 }
 
 /// R-2: the claims an executed case's journal may make final: those of its payout that are not
-/// final yet (from the payout's commitment as this coordinator recorded it), or, for a payout it
-/// has no record of, every claim of the vault not final yet (the slasher skips the others).
-pub(crate) fn case_claims(v: &CoordVault, case: &InclusionCase) -> Vec<B256> {
+/// final yet, from the payout's commitment as this coordinator recorded it, once the vault's scan
+/// shows the payout's transaction (`spent`). W-1: only the claims committed under the reference
+/// their claimant computes (`keccak256(salt || txid)`, `salt_of` by claim id): a hidden claim is the
+/// compensator's. A payout without a record here proves nothing yet (never every claim of the vault).
+pub(crate) fn case_claims(
+    v: &CoordVault,
+    case: &InclusionCase,
+    spent: &[([u8; 32], TxId, u32)],
+    salt_of: impl Fn(&[u8; 32]) -> Option<[u8; 32]>,
+) -> Vec<B256> {
     let open = |id: &[u8; 32]| {
         v.claims.iter().any(|c| {
             c.id == *id && !c.proven && matches!(c.state, ClaimState::Unpaid | ClaimState::Paid | ClaimState::Disputed)
         })
     };
-    match v.commitments.iter().find(|c| c.payout_ref == case.payout_ref) {
-        Some(c) => c.claims.iter().filter(|id| open(id)).map(|id| B256::from(*id)).collect(),
-        None => v.claims.iter().filter(|c| open(&c.id)).map(|c| B256::from(c.id)).collect(),
+    let Some(c) = v.commitments.iter().find(|c| c.payout_ref == case.payout_ref) else {
+        return vec![];
+    };
+    let Some(&(_, txid, _)) = spent.iter().find(|(tag, ..)| B256::from(*tag) == c.input_tag) else {
+        return vec![];
+    };
+    if B256::from(payout_ref(&v.ufvk, txid.as_ref())) != c.payout_ref {
+        return vec![];
     }
+    c.claims
+        .iter()
+        .enumerate()
+        .filter(|(_, id)| open(id))
+        .filter(|(i, id)| match (c.claim_refs.get(*i), salt_of(id)) {
+            (Some(committed), Some(salt)) => *committed == B256::from(claim_ref(&salt, txid.as_ref())),
+            _ => false,
+        })
+        .map(|(_, id)| B256::from(*id))
+        .collect()
 }
 
-/// R-19: whether the compromised vault's burn should be run again: compromised, still active, and
-/// no `CollateralBurned` seen.
+/// R-19, W-12: whether the compromised vault's burn should be simulated again: compromised and still
+/// active (the simulation tells whether it would retire anything now).
 pub(crate) fn burn_due(v: &CoordVault) -> bool {
-    v.compromised && !v.collateral_burned && v.status == VaultStatus::Active
+    v.compromised && v.status == VaultStatus::Active
+}
+
+/// W-4: the vault's claims the bonds may pay that no receipt armed for their current destination.
+pub(crate) fn unarmed(v: &CoordVault) -> Vec<B256> {
+    v.claims
+        .iter()
+        .filter(|c| c.payable() && c.kind.liveness_covered() && !c.bond_paid)
+        .filter(|c| !v.armed.iter().any(|a| a.claim_id == c.id && a.commitment == c.commitment))
+        .map(|c| B256::from(c.id))
+        .collect()
 }
 
 /// R-2: an executed case's event names neither its vault nor its kind: they are read from the
@@ -128,6 +172,12 @@ impl Coordinator {
         }
         if let Err(e) = self.burn_again(v).await {
             log_failure(&v.vault_id, "burning a compromised vault's collateral", &e);
+        }
+        if let Err(e) = self.arm_claims(v).await {
+            log_failure(&v.vault_id, "arming a claim's liveness", &e);
+        }
+        if let Err(e) = self.follow_notes(v).await {
+            log_failure(&v.vault_id, "moving an F1 case with its note", &e);
         }
     }
 
@@ -205,6 +255,27 @@ impl Coordinator {
         if v.inclusion_cases.is_empty() || !self.keeper_due(&v.vault_id, Keeper::Cases) {
             return Ok(());
         }
+        // W-1: the payouts' transactions from the vault's scan (none yet: no claim is proven by a
+        // case), and the claims' salts (never logged).
+        let spent = {
+            let zcash = self.zcash.lock().await;
+            zcash
+                .scan(&v.vault_id)
+                .map(|scan| crate::delivery::spent_notes(&v.ufvk, &scan.notes))
+                .unwrap_or_default()
+        };
+        let salts: Vec<([u8; 32], [u8; 32])> = {
+            let store = self.store.lock().await;
+            v.claims.iter().filter_map(|c| Some((c.id, store.recipient(&c.commitment)?.salt))).collect()
+        };
+        let salt_of = |id: &[u8; 32]| salts.iter().find(|(c, _)| c == id).map(|(_, s)| *s);
+        let todo = v.inclusion_cases.iter().map(|case| (case.case_id, case_claims(v, case, &spent, salt_of))).collect();
+        self.prove_cases(v, todo).await
+    }
+
+    /// R-2: `proveInclusionByCase` for each executed case and the claims it may make final; a case
+    /// with none, or whose claims are all final already, is used up; one Base refuses now is kept.
+    pub(crate) async fn prove_cases(&self, v: &CoordVault, todo: Vec<(B256, Vec<B256>)>) -> Result<()> {
         let slasher = self.v3().await?.slasher;
         ensure!(slasher != Address::ZERO, "an executed case without a slasher");
         let provider = ProviderBuilder::new()
@@ -212,13 +283,12 @@ impl Coordinator {
             .connect_http(self.cfg.base_rpc_url.parse()?);
         let s = IZecuredSlasher::new(slasher, &provider);
         let mut used = vec![];
-        for case in &v.inclusion_cases {
-            let claims = case_claims(v, case);
+        for (case_id, claims) in todo {
             if claims.is_empty() {
-                used.push(case.case_id);
+                used.push(case_id);
                 continue;
             }
-            let call = s.proveInclusionByCase(case.case_id, claims.clone());
+            let call = s.proveInclusionByCase(case_id, claims.clone());
             let upheld = match call.call().await {
                 Ok(upheld) => upheld,
                 Err(e) => {
@@ -227,7 +297,7 @@ impl Coordinator {
                 }
             };
             if upheld.is_zero() {
-                used.push(case.case_id); // its claims are final already, or none is of its payout
+                used.push(case_id); // its claims are final already, or none is of its payout
                 continue;
             }
             let gas = gas_with_headroom(call.estimate_gas().await.context("estimate proveInclusionByCase")?);
@@ -242,7 +312,7 @@ impl Coordinator {
                 .context("proveInclusionByCase receipt")?;
             ensure!(receipt.status(), "proveInclusionByCase reverted");
             info!(vault = %short(&v.vault_id), claims = claims.len(), "an executed case proved a payout's delivery: its claims are final (R-2)");
-            used.push(case.case_id);
+            used.push(case_id);
         }
         if !used.is_empty() {
             self.update_vault(&v.vault_id, |cur| cur.inclusion_cases.retain(|c| !used.contains(&c.case_id)))
@@ -289,7 +359,102 @@ impl Coordinator {
             .await
             .context("burnCollateral receipt")?;
         ensure!(receipt.status(), "burnCollateral reverted");
-        info!(vault = %short(&v.vault_id), "the compromised vault's collateral was burned down to the LLTV (R-19)");
+        info!(vault = %short(&v.vault_id), "the compromised vault's collateral was burned down to the LLTV (R-19, W-12)");
+        Ok(())
+    }
+
+    /// W-4: arms the vault's unarmed claims with their earliest receipt; a claim no node has the
+    /// destination of yet waits for the next pass.
+    pub(crate) async fn arm_claims(&self, v: &CoordVault) -> Result<()> {
+        let claims = unarmed(v);
+        if claims.is_empty() || !self.keeper_due(&v.vault_id, Keeper::Arm) {
+            return Ok(());
+        }
+        let bond = self.v3().await?.bond;
+        if bond == Address::ZERO {
+            return Ok(());
+        }
+        let provider = ProviderBuilder::new()
+            .wallet(EthereumWallet::from(self.gas.clone()))
+            .connect_http(self.cfg.base_rpc_url.parse()?);
+        let contract = ISignerBond::new(bond, &provider);
+        for id in claims {
+            let Ok(r) = self.claim_receipt(id).await else {
+                continue; // no node holds the claim's destination yet
+            };
+            let call = contract.armLiveness(id, r.received_at, r.signature.clone());
+            if let Err(e) = call.call().await {
+                debug!(vault = %short(&v.vault_id), error = %scrubbed(&anyhow!(e)), "a claim cannot be armed now");
+                continue;
+            }
+            let gas = gas_with_headroom(call.estimate_gas().await.context("estimate armLiveness")?);
+            let receipt = call
+                .gas(gas)
+                .send()
+                .await
+                .context("send armLiveness")?
+                .with_timeout(Some(RECEIPT_TIMEOUT))
+                .get_receipt()
+                .await
+                .context("armLiveness receipt")?;
+            ensure!(receipt.status(), "armLiveness reverted");
+            info!(vault = %short(&v.vault_id), "a claim's liveness is armed with its earliest receipt (W-4)");
+        }
+        Ok(())
+    }
+
+    /// W-2: moves the vault's F1 cases about a note whose tag a deposit took over to the deposit's
+    /// vault (`followNote`): an open one at once, rather than at the end of its window; an executed one
+    /// too (the victim's vault gets its own case). A case that cannot move (moved already, dismissed,
+    /// its anchor gone) is forgotten.
+    pub(crate) async fn follow_notes(&self, v: &CoordVault) -> Result<()> {
+        if v.overridden_tags.is_empty() || v.f1_cases.is_empty() || !self.keeper_due(&v.vault_id, Keeper::Follow) {
+            return Ok(());
+        }
+        let slasher = self.v3().await?.slasher;
+        if slasher == Address::ZERO {
+            return Ok(());
+        }
+        let provider = ProviderBuilder::new()
+            .wallet(EthereumWallet::from(self.gas.clone()))
+            .connect_http(self.cfg.base_rpc_url.parse()?);
+        let s = IZecuredSlasher::new(slasher, &provider);
+        let mut done = vec![];
+        for case_id in &v.f1_cases {
+            let case = s.caseOf(*case_id).call().await.context("slasher.caseOf")?;
+            if !v.overridden_tags.contains(&case.noteTag) {
+                continue;
+            }
+            let call = s.followNote(*case_id);
+            let moved = match call.call().await {
+                Ok(moved) => moved,
+                Err(e) => {
+                    debug!(vault = %short(&v.vault_id), error = %scrubbed(&anyhow!(e)), "an F1 case does not follow its note");
+                    done.push(*case_id);
+                    continue;
+                }
+            };
+            if moved == B256::ZERO && case.executed {
+                done.push(*case_id); // followed already
+                continue;
+            }
+            let gas = gas_with_headroom(call.estimate_gas().await.context("estimate followNote")?);
+            let receipt = call
+                .gas(gas)
+                .send()
+                .await
+                .context("send followNote")?
+                .with_timeout(Some(RECEIPT_TIMEOUT))
+                .get_receipt()
+                .await
+                .context("followNote receipt")?;
+            ensure!(receipt.status(), "followNote reverted");
+            warn!(vault = %short(&v.vault_id), "an F1 case followed its note to the vault that owns its tag now (W-2)");
+            done.push(*case_id);
+        }
+        if !done.is_empty() {
+            self.update_vault(&v.vault_id, |cur| cur.f1_cases.retain(|c| !done.contains(c))).await?;
+        }
         Ok(())
     }
 }
@@ -352,33 +517,72 @@ mod tests {
             claim(5, ClaimState::Unpaid, false, 0),
             claim(6, ClaimState::WrittenOff, false, 0),
         ];
+        v.ufvk = "uviewtest1vault".into();
+        let tx = [9u8; 32];
+        let x = B256::from(payout_ref(&v.ufvk, &tx));
+        let honest = |id: u8| B256::from(claim_ref(&[id; 32], &tx));
         v.commitments = vec![CommittedPayout {
-            payout_ref: B256::repeat_byte(0xaa),
+            payout_ref: x,
             input_tag: B256::repeat_byte(0x7a),
             claims: vec![[1; 32], [2; 32], [3; 32], [4; 32]],
+            // W-1: claim 4 is named under a reference its claimant never computes.
+            claim_refs: vec![honest(1), honest(2), honest(3), B256::repeat_byte(0xee)],
         }];
-        let case = |payout: u8| InclusionCase {
+        let case = |payout: B256| InclusionCase {
             case_id: B256::repeat_byte(0xca),
-            payout_ref: B256::repeat_byte(payout),
+            payout_ref: payout,
         };
+        let spent = vec![([0x7a; 32], TxId::from_bytes(tx), 50)];
+        let salt = |id: &[u8; 32]| Some([id[0]; 32]);
         let ids = |ids: &[u8]| ids.iter().map(|i| B256::repeat_byte(*i)).collect::<Vec<_>>();
-        assert_eq!(case_claims(&v, &case(0xaa)), ids(&[1, 2, 4]));
-        assert_eq!(case_claims(&v, &case(0xbb)), ids(&[1, 2, 4, 5]), "a payout without a record");
+        assert_eq!(case_claims(&v, &case(x), &spent, salt), ids(&[1, 2]), "open and honest: not 3 (final), not 4");
+        assert!(case_claims(&v, &case(B256::repeat_byte(0xbb)), &spent, salt).is_empty(), "no record: nothing");
+        assert!(case_claims(&v, &case(x), &[], salt).is_empty(), "its transaction not seen yet: nothing");
     }
 
-    /// R-19: a compromised, active vault without a burn seen.
+    /// R-19, W-12: a compromised vault is burned again while it is active, also after a first burn
+    /// (a higher price frees collateral above the LLTV); the simulation decides whether to send.
     #[test]
-    fn a_missing_burn_is_due() {
+    fn a_compromised_active_vault_is_burned_again() {
         let mut v = vault(1);
         v.status = VaultStatus::Active;
         assert!(!burn_due(&v));
         v.compromised = true;
         assert!(burn_due(&v));
         v.collateral_burned = true;
-        assert!(!burn_due(&v));
-        v.collateral_burned = false;
+        assert!(burn_due(&v), "W-12: after a first burn too");
         v.status = VaultStatus::Closed;
         assert!(!burn_due(&v), "retired already");
+    }
+
+    /// W-4: the claims to arm are the payable ones the bonds cover that no receipt armed for their
+    /// current destination.
+    #[test]
+    fn w4_unarmed_claims_are_armed() {
+        let mut v = vault(1);
+        v.claims = vec![
+            claim(1, ClaimState::Unpaid, false, 0),
+            claim(2, ClaimState::Unpaid, false, 0),
+            claim(3, ClaimState::Paid, false, 50),
+            Claim {
+                bond_paid: true,
+                ..claim(4, ClaimState::Unpaid, false, 0)
+            },
+            claim(5, ClaimState::Unpaid, false, 0),
+        ];
+        v.armed = vec![
+            crate::store::Armed {
+                claim_id: [2; 32],
+                commitment: [2; 32],
+                payable_at: 10,
+            },
+            crate::store::Armed {
+                claim_id: [5; 32],
+                commitment: [0x55; 32], // an earlier destination
+                payable_at: 10,
+            },
+        ];
+        assert_eq!(unarmed(&v), vec![B256::repeat_byte(1), B256::repeat_byte(5)]);
     }
 
     /// R-2: an executed case's vault, kind and payout come from the slasher's record of the case;

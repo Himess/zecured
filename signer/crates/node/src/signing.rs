@@ -178,6 +178,22 @@ pub struct ShareResponse {
     pub shares: Vec<serde_json::Value>,
 }
 
+/// W-4: a claim of a payout as round 1 planned it: the destination its recipient opens, and whether the bonds had
+/// paid it (a bond-paid claim with a reimbursement destination is paid to the treasury).
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct ClaimSeen {
+    pub id: [u8; 32],
+    pub commitment: [u8; 32],
+    pub bond_paid: bool,
+}
+
+impl ClaimSeen {
+    /// W-4, round 2: whether the claim on Base (`bond_paid`, `commitment`) is still as round 1 planned it.
+    pub fn unchanged(&self, bond_paid: bool, commitment: B256) -> bool {
+        self.bond_paid == bond_paid && B256::from(self.commitment) == commitment
+    }
+}
+
 /// A session between the two rounds.
 pub struct Session {
     pub vault_id: B256,
@@ -196,6 +212,8 @@ pub struct Session {
     pub prior_inflight: Option<[u8; 32]>,
     /// DEMO: started without any policy check; never recorded as in flight.
     pub unchecked: bool,
+    /// W-4: the payout's claims as round 1 planned them; round 2 reads them on Base again.
+    pub claims_seen: Vec<ClaimSeen>,
     /// When round 1 ran (sessions expire, L-7).
     pub created: Instant,
 }
@@ -435,6 +453,7 @@ fn start_session(
             change,
             prior_inflight,
             unchecked,
+            claims_seen: vec![],
             created: Instant::now(),
         },
         commitments,
@@ -463,6 +482,27 @@ pub fn share(index: u16, vault: &VaultRecord, session: &Session, req: &ShareRequ
 
 #[cfg(test)]
 mod tests {
+
+    /// W-4: round 2 signs only a claim Base still shows as round 1 planned it: one the bonds paid
+    /// meanwhile, or given another destination, is refused; a bond-paid claim planned with its
+    /// reimbursement destination passes.
+    #[test]
+    fn w4_round_two_refuses_a_claim_that_changed() {
+        let planned = ClaimSeen {
+            id: [1; 32],
+            commitment: [0xd1; 32],
+            bond_paid: false,
+        };
+        assert!(planned.unchanged(false, B256::repeat_byte(0xd1)));
+        assert!(!planned.unchanged(true, B256::ZERO), "the bonds paid it since round 1");
+        assert!(!planned.unchanged(false, B256::repeat_byte(0xd2)), "another destination");
+        let reimbursed = ClaimSeen {
+            id: [2; 32],
+            commitment: [0x7e; 32],
+            bond_paid: true,
+        };
+        assert!(reimbursed.unchanged(true, B256::repeat_byte(0x7e)), "a reimbursement to the treasury is signed");
+    }
     use super::*;
 
     const A: [u8; 32] = [1; 32];

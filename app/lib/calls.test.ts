@@ -359,12 +359,13 @@ describe("v4 calls: arming a claim's liveness (R-5) and pre-liquidation terms (s
             { name: "account", type: "address" },
             { name: "repaidShares", type: "uint256" },
             { name: "mmCommitment", type: "bytes32" },
+            { name: "minSeizedZat", type: "uint64" },
           ],
           outputs: [],
         },
       ],
       functionName: "preLiquidate",
-      args: [STRANGER, 1n, COMMITMENT],
+      args: [STRANGER, 1n, COMMITMENT, 0n],
     });
     expect(() => assertAllowlisted([{ to: config.adapter, data: preLiquidate }], ACCOUNT, config)).toThrow(/unknown Adapter function/);
   });

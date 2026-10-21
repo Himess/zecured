@@ -51,7 +51,7 @@ use crate::{
     chain::{VaultNotes, ZcashView, owns_receiver, vault_fvk},
     config::{Identity, NetworkConfig},
     signing::{
-        CommitRequest, CommitResponse, Session, ShareRequest, ShareResponse, SignKind, SignedSpendCommit,
+        ClaimSeen, CommitRequest, CommitResponse, Session, ShareRequest, ShareResponse, SignKind, SignedSpendCommit,
         SpendCommitRecord,
     },
     store::{ConfirmedPayout, RefundRecord, Store, VaultRecord},
@@ -681,6 +681,17 @@ impl Node {
         let input_cmx = orchard::note::ExtractedNoteCommitment::from(input.note.commitment()).to_bytes();
         let record = signing::spend_commit(v.vault_id, &v.ufvk, &input_cmx, &claims, &session.verified, plan.change)?;
         self.check_commit_preconditions(&v, &record).await?;
+        // W-4: what round 2 checks on Base again before any share leaves this node.
+        session.claims_seen = plan
+            .claims
+            .iter()
+            .filter_map(|id| planning.claims.iter().find(|c| c.id == *id))
+            .map(|c| ClaimSeen {
+                id: c.id,
+                commitment: c.commitment,
+                bond_paid: c.bond_paid,
+            })
+            .collect();
         let signature = sign_typed(&self.id.eth, &self.domain(), &record.message())?;
         session.spend_commit = Some(record.clone());
         let spend_commit = Some(SignedSpendCommit { record, signature });
@@ -694,7 +705,7 @@ impl Node {
     ///   the vault count unpaid again ([`ledger::revert_unlanded`]); then the lineage is restricted
     ///   to the planned change of that book value (H-2);
     /// - rules 1 and 2 (R-10): a claim the bonds may pay within one payout lifetime is not committed
-    ///   ([`ledger::defer_near_due`], with the bond's `livenessDue`).
+    ///   ([`ledger::defer_near_due`], with the bond's `livenessDeadline`, W-4).
     async fn planning(&self, v: &VaultRecord, notes: &mut VaultNotes, now: u64) -> Result<Planning> {
         let tag_of = |n: &zecured_zcash_ops::scan::ReceivedNote| B256::from(deposit_tag(&v.ufvk, &chain::note_cmx(n)));
         let candidates: Vec<B256> = notes.lineage.iter().map(tag_of).collect();
@@ -771,9 +782,10 @@ impl Node {
         Ok(agreed.unwrap_or_default())
     }
 
-    /// R-10: when the bonds may pay each payable claim (`livenessDue`; 0: never, or unreadable, as
-    /// every node and the coordinator count it), on every Base provider, which must agree. Nothing
-    /// without bonds.
+    /// R-10: when the bonds may pay each payable claim by its arming alone (`livenessDeadline`, W-4: a
+    /// stale price, a freeze or an open claim case only delays that payment; 0: never armed, not
+    /// covered, or unreadable, as every node and the coordinator count it), on every Base provider,
+    /// which must agree. Nothing without bonds.
     async fn liveness_dues(&self, claims: &[ledger::Claim]) -> Result<Vec<(ClaimId, u64)>> {
         let bond = self.bond().await?;
         let payable: Vec<ClaimId> =
@@ -786,9 +798,7 @@ impl Node {
             let bond = ISignerBond::new(bond, &provider);
             let mut dues = Vec::with_capacity(payable.len());
             for id in &payable {
-                // A claim the bond cannot price now (a stale feed, R-9) cannot be paid from the bonds
-                // either: 0, as everywhere.
-                let due = bond.livenessDue(B256::from(*id)).call().await.map(|d| d.dueAt).unwrap_or(0);
+                let due = bond.livenessDeadline(B256::from(*id)).call().await.unwrap_or(0);
                 dues.push((*id, due));
             }
             match &agreed {
@@ -911,6 +921,24 @@ impl Node {
         Ok(())
     }
 
+    /// W-4, round 2: every claim of the payout still is on Base as round 1 planned it, on every provider: not paid
+    /// from the bonds since (its claimant would then be paid twice) and with the same destination (the planned
+    /// recipient must still open it). A bond-paid claim planned with its reimbursement destination passes: it is
+    /// paid to the treasury, and refusing every payout that holds one would freeze its input again (RT-4).
+    async fn check_claims_unchanged(&self, seen: &[ClaimSeen]) -> Result<()> {
+        for provider in self.base_providers()? {
+            let registry = IZecuredRegistry::new(self.cfg.registry, &provider);
+            for c in seen {
+                let now = registry.claimDetails(B256::from(c.id)).call().await.context("Registry.claimDetails")?;
+                ensure!(
+                    c.unchanged(now.bondPaid, now.commitment),
+                    "a claim of this payout changed on Base since round 1 (paid from the bonds, or given another destination): not signed (W-4)"
+                );
+            }
+        }
+        Ok(())
+    }
+
     fn base_providers(&self) -> Result<Vec<impl Provider + use<>>> {
         let mut providers = vec![chain::base_provider(&self.cfg.base_rpc_url)?];
         if let Some(w) = self.base_rpc_witness.as_deref() {
@@ -946,6 +974,7 @@ impl Node {
             // Tier 3 (T3-4), before the store lock: Base calls must never hold it (M-7).
             let record = session.spend_commit.as_ref().context("payout without a signed commitment")?;
             self.check_commitment_on_base(record, &req.spend_commit_sigs).await?;
+            self.check_claims_unchanged(&session.claims_seen).await?;
             if let Some(next) = inflight.as_mut() {
                 next.spend_commit = Some(CommittedSpend {
                     record: record.clone(),

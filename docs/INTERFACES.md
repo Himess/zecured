@@ -433,8 +433,8 @@ function minSeize(uint64 outstanding) external view returns (uint256);   // max(
 struct PreLiquidationTerms { uint256 preLltv; uint256 preLcf1; uint256 preLcf2; uint256 preLif1; uint256 preLif2; uint64 expiry; }
 function setPreLiquidation(PreLiquidationTerms calldata t) external;     // msg.sender = the account of an Active vault
 function clearPreLiquidation() external;                                 // msg.sender = account; never reverts
-function preLiquidate(address account, uint256 repaidShares, bytes32 mmCommitment)
-    external returns (uint256 repaidAssets, uint64 seized);
+function preLiquidate(address account, uint256 repaidShares, bytes32 mmCommitment, uint64 minSeizedZat)
+    external returns (uint256 repaidAssets, uint64 seized);                // v4.1 (W-17): minSeizedZat
 function preLiquidationTerms(address account) external view returns (PreLiquidationTerms memory);
 
 function onMorphoLiquidate(uint256 repaidAssets, bytes calldata data) external;   // Morpho only
@@ -472,7 +472,9 @@ event PreLiquidated(bytes32 indexed vaultId, address indexed account, address in
   is never pre-liquidated); `q = (ltv - preLltv) / (LLTV - preLltv)` with `ltv` rounded up and `q`
   down; the close factor and the incentive linear in `q`; `repaidShares <= borrowShares * preLcf`;
   `seized = assets(repaidShares, rounded down) * preLif / price`, rounded down, at least
-  `minSeize(outstanding)` taken and left; the caller's USDC repays through `onMorphoRepay`, the
+  `minSeize(outstanding)` taken and left, and at least the caller's `minSeizedZat` (v4.1, W-17:
+  `PreLiquidationSlippage` otherwise, so that a price or debt move before the transaction lands
+  never makes the caller repay for less); the caller's USDC repays through `onMorphoRepay`, the
   collateral comes to the Adapter and `Registry.recordLiquidation` names the caller as claimant.
 
 ### 3.5 Tier 3: `SignerBondV2`, `ZecuredSlasher`, `ZecuredCompensator`

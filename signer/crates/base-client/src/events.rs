@@ -250,6 +250,7 @@ sol! {
             uint64 value;
         }
 
+        event ViolationProven(bytes32 indexed caseId, uint8 kind, bytes32 indexed vaultId, uint8 signerBitmap, address beneficiary, uint64 executableAt);
         event ViolationExecuted(bytes32 indexed caseId, uint256 slashed);
         event VaultCompromised(bytes32 indexed vaultId, bytes32 indexed caseId);
 
@@ -261,6 +262,13 @@ sol! {
         function proveInclusion(bytes journal, bytes seal, bytes32 imageId, bytes32 claimId) external;
         function proveInclusionBatch(bytes journal, bytes seal, bytes32 imageId, bytes32[] claimIds) external returns (uint256 upheld);
         function proveInclusionByCase(bytes32 caseId, bytes32[] claimIds) external returns (uint256 upheld);
+        function proveViolation(uint8 kind, bytes journal, bytes seal, bytes32 imageId) external returns (bytes32 caseId);
+        /// v4.1 (W-2): an F1 case follows its note to the vault that owns its tag now.
+        function followNote(bytes32 caseId) external returns (bytes32 newCaseId);
+        /// v4.1 (W-5): an F3 or F4 case about the claim is open.
+        function claimCaseOpen(bytes32 claimId) external view returns (bool);
+        /// v4.1 (W-2): open F1 cases about the note with this tag.
+        function openF1CasesOf(bytes32 noteTag) external view returns (uint256);
         function slashConfirmationWork() external view returns (uint256);
         function relay() external view returns (address);
         function versions() external view returns (address);
@@ -268,6 +276,8 @@ sol! {
     }
 }
 
+/// The slasher's `ViolationKind`: F1, a lineage note spent without a commitment.
+pub const VIOLATION_UNCOMMITTED: u8 = 1;
 /// The slasher's `ViolationKind`: F2, a withheld change (the payout committed, its change missing).
 pub const VIOLATION_WITHHELD_CHANGE: u8 = 2;
 /// The slasher's `ViolationKind`: F4, a payout whose claim reference is wrong.
@@ -295,6 +305,9 @@ sol! {
         function armLiveness(bytes32 claimId, uint64 receivedAt, bytes signature) external;
         function hashDestinationReceived(bytes32 claimId, bytes32 commitment, uint64 receivedAt) external view returns (bytes32);
         function livenessDue(bytes32 claimId) external view returns (uint64 dueAt, uint256 amount);
+        /// v4.1 (W-4): the due time from the arming alone (no price, freeze or claim case): what the
+        /// planners defer by (R-10).
+        function livenessDeadline(bytes32 claimId) external view returns (uint64);
         function livenessArming(bytes32 claimId) external view returns (bytes32 commitment, uint64 payableAt);
         function domainSeparator() external view returns (bytes32);
         function livenessPeriod() external view returns (uint64);
@@ -463,6 +476,8 @@ pub enum RegistryEvent {
         payout_ref: B256,
         input_tag: B256,
         claims: Vec<B256>,
+        /// W-1: each claim's reference as committed (`keccak256(salt || txid)` if honest).
+        claim_refs: Vec<B256>,
     },
     /// The Intake (R-12): a refund proof is pending until the relay has moved on.
     RefundPending {
@@ -489,6 +504,10 @@ pub enum RegistryEvent {
     /// the coordinator reads the case (`caseOf`) to fill them in. An executed F2 or F4 case proves
     /// its committed payout `payout_ref` is in a block (R-2: `proveInclusionByCase`).
     CaseExecuted { case_id: B256, kind: u8, payout_ref: B256 },
+    /// The slasher (v4.1, W-2): case `case_id` of kind `kind` was opened on the event's vault (proven,
+    /// or moved there with its note). The coordinator keeps its F1 cases, to move them with their
+    /// note when a deposit takes the note's tag over (`followNote`).
+    CaseProven { case_id: B256, kind: u8 },
     /// The slasher: an executed F1 or F2 case compromised the vault (T-04): the compensator settles
     /// its claims, and burns its collateral down to the LLTV (R-19).
     VaultCompromised { case_id: B256 },
@@ -513,6 +532,7 @@ impl RegistryEvent {
                 | RegistryEvent::LivenessArmed { .. }
                 | RegistryEvent::PreLiquidated { .. }
                 | RegistryEvent::CaseExecuted { .. }
+                | RegistryEvent::CaseProven { .. }
                 | RegistryEvent::VaultCompromised { .. }
                 | RegistryEvent::CollateralBurned { .. }
                 | RegistryEvent::VaultCompensated { .. }
@@ -931,9 +951,9 @@ pub fn decode_adapter(log: &Log, created_at: u64) -> Result<Option<VaultEvent>> 
     vault_event(log, created_at, e.vaultId, event)
 }
 
-/// Decodes one slasher log: an executed case (vault, kind and payout left for the coordinator to
-/// read, see [`RegistryEvent::CaseExecuted`]) or a compromised vault; other slasher events are
-/// ignored.
+/// Decodes one slasher log: a case opened on a vault (W-2), an executed case (vault, kind and payout
+/// left for the coordinator to read, see [`RegistryEvent::CaseExecuted`]) or a compromised vault;
+/// other slasher events are ignored.
 pub fn decode_slasher(log: &Log, created_at: u64) -> Result<Option<VaultEvent>> {
     use IZecuredSlasher::IZecuredSlasherEvents as E;
     let Ok(decoded) = E::decode_log(&log.inner) else {
@@ -949,6 +969,13 @@ pub fn decode_slasher(log: &Log, created_at: u64) -> Result<Option<VaultEvent>> 
             },
         ),
         E::VaultCompromised(e) => (e.vaultId, RegistryEvent::VaultCompromised { case_id: e.caseId }),
+        E::ViolationProven(e) => (
+            e.vaultId,
+            RegistryEvent::CaseProven {
+                case_id: e.caseId,
+                kind: e.kind,
+            },
+        ),
     };
     vault_event(log, created_at, vault_id, event)
 }
@@ -1093,6 +1120,7 @@ pub fn decode(log: &Log, created_at: u64) -> Result<Option<VaultEvent>> {
                 payout_ref: e.payoutRef,
                 input_tag: e.inputTag,
                 claims: e.claimIds,
+                claim_refs: e.claimRefs,
             },
         ),
     };
@@ -1480,7 +1508,8 @@ mod tests {
             RegistryEvent::SpendCommitted {
                 payout_ref: payout,
                 input_tag: B256::repeat_byte(0x66),
-                claims: ids
+                claims: ids,
+                claim_refs: vec![B256::repeat_byte(1), B256::repeat_byte(2)],
             }
         );
         assert!(!got.event.for_signers(), "the coordinator's only");
