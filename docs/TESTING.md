@@ -210,10 +210,29 @@ Found and fixed: `signer-network.sh init` gave a node without a key in `.env` an
 a network of fresh keys (the theft demo's) could not be initialized. In the browser run, the app warned that a correct
 deposit "cannot back the loan" and kept asking for the payment until its proof was on Base (V-10).
 
-Not in these runs: closing and deleveraging from the app. On the second fork the swap refund test had moved the
-fork's clock 7,300 s ahead, so a request the browser dated by its own clock had already expired there
-(`RequestExpired`), and the coordinator's R-3 keeper, which reads its own clock, saw confirmations as disputable for
-longer than Base did.
+Closing and deleveraging from the app could not run on the second fork: its swap refund test had moved the fork's
+clock 7,300 s ahead, so a request the browser dated by its own clock had already expired there (`RequestExpired`), and
+the coordinator's R-3 keeper, which reads its own clock, saw confirmations as disputable for longer than Base did.
+
+**A third fork (2026-10-20 23:30 to 21 00:20 UTC).** A fresh fork (block 48,385,520), its clock in step with real
+time, with the V-10 fix, ran what the second could not, the app in a browser and the theft demo again:
+
+| Flow | What happened | Evidence |
+|---|---|---|
+| Deposit in the browser (V-10) | No warning while the deposit waited. The signers saw it with its confirmations 2 min 50 s after the broadcast, and the page said "Deposit received on Zcash" and stopped asking for the payment; proof on Base after 4 min 25 s, active after 7 min 56 s | deposit `9ede7868` 23:42:32, activated 23:50:28 |
+| Borrow with protection | The first UserOp deployed the account, authorized Morpho, borrowed 4 USDC and set pre-liquidation terms (the standard band, from 55 % LTV) | `0x503ff334`, 729,131 gas |
+| Deleverage | The market maker's quote: 2 USDC of debt for 0.00159684 TAZ (margin 1 %; 1 USDC was refused, its collateral below the 0.001 ZEC minimum); signed in the browser (the Safe's ERC-1271) and executed: LTV 31.6 % → 18.8 % | `0xb42ab487` 23:53:19, 372,438 gas; its payout confirmed 00:01:45 |
+| Close from collateral | Quote: the market maker repays the last 2 USDC and receives 0.00159684 TAZ, the borrower's remainder 0.00680632 TAZ; signed in the browser and executed | `0xfcf84e1a` 23:55:22 |
+| Liveness from the browser | The deleverage's payout was confirmed only after 5 min 49 s (slow Testnet blocks), and by then the fork's 10-minute liveness period was too close: R-10 kept both close claims uncommitted. The app had armed the borrower's claim with a signer's receipt at 23:55; once it was due (00:05:24) the page offered "Claim from the bonds", and a sponsored UserOp paid 9.040494 USDC, the claim's value at $1,265 plus 5 % | `0x2835db42`, 257,048 gas |
+| Theft demo with compensation | Its own deployment again; the victim borrowed 3 USDC first, which authorized the Registry on Morpho. Sweep by nodes 3, 4 and 5; F1 detected two minutes later; witness in 64 s; `proveViolation` 00:04:40; `executeSlash` 00:06:47 (600,002 gas: with debt, the collateral is burned down to the LLTV, R-19); then `tallyVault`, `finalizeIncident` once the 10-minute incident window was over (00:16:53), `settleVault` (the debt repaid from the slashed bonds, the vault's zZEC retired) and `withdrawEquity` | sweep `43ea5e91` (block 4,523,730); the victim's account 3 → 12.65 USDC, the full value of its 0.01 ZEC at $1,265; 32.35 USDC left with the compensator |
+
+The leak scan of both deployments (the lending one with the browser's vault and two wallets: 225 identifiers, 63
+events, 38 transactions' calldata, 140 storage words; the theft demo's: 240 identifiers, 63 events, 30 calldata, 139
+storage words) found **0 matches**.
+
+Found and fixed: after the deleverage, the position page said "Part of the collateral was liquidated": a deleverage and a
+pre-liquidation pay through a Liquidation claim like a liquidation, which the page cannot tell apart, so it now says
+that part of the collateral went to whoever repaid part of the debt.
 
 ## 2b. Tier 2 deposit proofs (docs/TIER2.md)
 

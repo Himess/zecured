@@ -42,7 +42,9 @@ Setup, once:
 3. `THEFT_DEMO=1 scripts/signer-network.sh init` again (the network config now names the
    deployment), `THEFT_DEMO=1 scripts/bond-signers.sh`, `THEFT_DEMO=1 scripts/signer-network.sh start`.
 4. Open a vault on the theft demo's backend (port 8180) and deposit until it is active; keep its
-   viewing key (`loan viewing-key`).
+   viewing key (`loan viewing-key`). Borrow once from it (the app's first transaction, or `loan borrow`): that
+   authorizes the Registry on Morpho, without which the compensator cannot retire the vault's zZEC and pays the
+   victim nothing.
 
 | Scene | Command | On screen |
 |---|---|---|
@@ -51,6 +53,7 @@ Setup, once:
 | Detect | `zecured-wallet watch --ufvk-file vault.ufvk --from <birthday> --tier3` | `VIOLATION F1` and the command that builds the witness |
 | Prove | `build-violation uncommitted ... --out f1.json`, then `zecured-tier2-host violation prove f1.json f1.receipt` and `... violation groth16 f1.receipt f1.seal.json` | The journal: an anchor header, a tag, a reference; no Zcash transaction, note or address |
 | Slash | `cast send <ZecuredSlasher> "proveViolation(uint8,bytes,bytes,bytes32)" 1 <journal> <seal> <violation image id>`; two minutes later `cast send <ZecuredSlasher> "executeSlash(bytes32)" <caseId>` | All five bonds slashed, the bounty owed to the prover, `halted()` true: no new vault can be activated |
+| Compensate | `cast send <ZecuredCompensator> "tallyVault(bytes32)" <vault id>`; once the incident window is over (10 minutes here), `finalizeIncident(uint256)` with `currentIncident()`, then `settleVault(bytes32)` and `withdrawEquity(bytes32)` | The slashed bonds repay the vault's debt, its unbacked zZEC is retired, and the rest of its value goes to its account in USDC: the victim is made whole up to the bonds |
 
 ## Try with demo TAZ (P-1, DEMO)
 
