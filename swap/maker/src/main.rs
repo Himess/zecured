@@ -6,10 +6,11 @@
 //! It quotes (`GET /swap/quote`: the oracle price plus or minus the spread, within its inventory,
 //! its caps and ZecuredSwap's, only while it follows both chains and the relay keeps up), follows
 //! its orders on Base, takes a Buy taker's destination (`POST /swap/orders/{id}/destination`),
-//! pays one Ironwood note with the memo "ZSWP" || orderId and `ovk = None` after a random privacy
-//! delay, proves the payment once the relay has the order's tier of work on top (after a random
-//! number of extra blocks), submits the proof and finalizes; on Sell it refunds itself an order its
-//! taker did not prove in time. It never logs a receiver, a salt, a key, a txid or an IP.
+//! fixes the height of the proof's anchor, pays one Ironwood note with the memo "ZSWP" || orderId
+//! and `ovk = None` after a random privacy delay, proves the payment under the header at exactly
+//! that height once the relay has the order's tier of work on top of it (W-10), submits the proof
+//! and finalizes; on Sell it refunds itself an order its taker did not prove in time. It never logs
+//! a receiver, a salt, a key, a txid or an IP, nor a payment's block next to its order.
 
 mod api;
 mod config;

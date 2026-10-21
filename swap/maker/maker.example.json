@@ -21,7 +21,6 @@
   "max_order_usdc": 200000000,
   "max_open_orders": 10,
   "pay_delay_max_blocks": 8,
-  "prove_delay_max_blocks": 4,
   "block_secs": 75,
   "confirm_estimate_secs": 1200,
   "proving_estimate_secs": 3000,
