@@ -966,18 +966,19 @@ mod tests {
         let mut r = rec(Side::Buy, MakerStatus::AwaitingDestination);
         assert_eq!(decide(&cfg, &r, &facts(1_000_000), 3, 2), Step::Wait, "no destination yet");
         r.status = MakerStatus::DestinationReceived;
-        // The tip is 4,500,000: block c = 4,500,001 is being mined. The anchor first (c + 8 + 1 + r),
-        // then the payment's delay of 3 blocks: broadcast at 4,500,003, mined from 4,500,004 on.
+        // The tip is 4,500,000: block c = 4,500,001 is being mined. The anchor first (c + 8 + 1 + 2 +
+        // r: two blocks of headroom, N-4), then the payment's delay of 3 blocks: broadcast at
+        // 4,500,003, mined from 4,500,004 on.
         assert_eq!(
             decide(&cfg, &r, &facts(1_000_000), 3, 2),
             Step::SchedulePayment {
                 pay_after: 4_500_003,
-                planned_anchor: 4_500_012,
+                planned_anchor: 4_500_014,
                 draw: 2
             }
         );
         r.pay_after_height = Some(4_500_003);
-        r.planned_anchor_height = Some(4_500_012);
+        r.planned_anchor_height = Some(4_500_014);
         r.anchor_draw = Some(2);
         assert_eq!(decide(&cfg, &r, &facts(1_000_000), 3, 2), Step::Wait, "the privacy delay");
         let mut f = facts(1_000_100);
@@ -1002,11 +1003,11 @@ mod tests {
             decide(&cfg, &r, &f, 3, 2),
             Step::ScheduleAnchor {
                 mined: 4_500_005,
-                anchor: 4_500_012
+                anchor: 4_500_014
             }
         );
         r.mined_height = Some(4_500_005);
-        r.anchor_height = Some(4_500_012);
+        r.anchor_height = Some(4_500_014);
         assert_eq!(decide(&cfg, &r, &f, 3, 2), Step::Prove);
         r.status = MakerStatus::Proven;
         f.pending = Some(Pending {
@@ -1077,8 +1078,8 @@ mod tests {
         let cfg = judge_like();
         let mut r = rec(Side::Buy, MakerStatus::Paid);
         r.expiry_height = Some(4_500_123);
-        // Scheduled at tip 4,500,000 (c = 4,500,001) with r = 5: the anchor is c + 8 + 1 + 5.
-        r.planned_anchor_height = Some(4_500_015);
+        // Scheduled at tip 4,500,000 (c = 4,500,001) with r = 5: the anchor is c + 8 + 1 + 2 + 5.
+        r.planned_anchor_height = Some(4_500_017);
         r.anchor_draw = Some(5);
         let anchor_for = |mined: u32| {
             let mut f = facts(1_000_200);
@@ -1089,11 +1090,11 @@ mod tests {
                 s => panic!("{s:?}"),
             }
         };
-        let anchors: Vec<u32> = (4_500_002..4_500_015).map(anchor_for).collect();
-        assert!(anchors.iter().all(|a| *a == 4_500_015), "the anchor follows the payment: {anchors:?}");
-        assert_eq!(anchor_for(4_500_014), 4_500_015, "h + 1 only for the window's last block");
-        assert_eq!(anchor_for(4_500_015), 4_500_021, "late: h + 1 + r, with the order's r");
-        assert_eq!(anchor_for(4_500_020), 4_500_026);
+        let anchors: Vec<u32> = (4_500_002..4_500_017).map(anchor_for).collect();
+        assert!(anchors.iter().all(|a| *a == 4_500_017), "the anchor follows the payment: {anchors:?}");
+        assert_eq!(anchor_for(4_500_016), 4_500_017, "h + 1 only for the window's last block");
+        assert_eq!(anchor_for(4_500_017), 4_500_023, "late: h + 1 + r, with the order's r");
+        assert_eq!(anchor_for(4_500_022), 4_500_028);
     }
 
     /// W-10: a payment that could no longer land below its planned anchor (held by another unmined
@@ -1104,20 +1105,20 @@ mod tests {
         let cfg = judge_like();
         let mut r = rec(Side::Buy, MakerStatus::DestinationReceived);
         r.pay_after_height = Some(4_500_003);
-        r.planned_anchor_height = Some(4_500_012);
+        r.planned_anchor_height = Some(4_500_014);
         r.anchor_draw = Some(2);
         let mut f = facts(1_000_100);
-        f.zcash_tip = 4_500_010;
+        f.zcash_tip = 4_500_012;
         assert_eq!(decide(&cfg, &r, &f, 4, 7), Step::Pay, "still lands below the anchor");
-        f.zcash_tip = 4_500_011;
+        f.zcash_tip = 4_500_013;
         assert_eq!(
             decide(&cfg, &r, &f, 4, 7),
             Step::SchedulePayment {
-                pay_after: 4_500_015,
-                planned_anchor: 4_500_023,
+                pay_after: 4_500_017,
+                planned_anchor: 4_500_027,
                 draw: 2
             },
-            "planned again from c = 4,500,012, the order's r kept"
+            "planned again from c = 4,500,014, the order's r kept"
         );
         let fresh = rec(Side::Buy, MakerStatus::DestinationReceived);
         assert!(matches!(decide(&cfg, &fresh, &f, 4, 7), Step::SchedulePayment { draw: 7, .. }));
@@ -1152,16 +1153,17 @@ mod tests {
     #[test]
     fn w20_no_payment_near_a_known_activation() {
         let cfg = judge_like();
-        // From the tip: 18 blocks of anchor window, 16 of work (1,200 s in 75-s blocks).
-        assert_eq!(cfg.anchor_pipeline_blocks(), 18 + 16);
+        // From the tip: 20 blocks of anchor window (two of headroom), 16 of work (1,200 s in 75-s
+        // blocks).
+        assert_eq!(cfg.anchor_pipeline_blocks(), 20 + 16);
         let mut r = rec(Side::Buy, MakerStatus::DestinationReceived);
         let mut f = facts(1_000_000);
-        f.tip_epoch_last = Some(4_500_000 + 34 - 1);
+        f.tip_epoch_last = Some(4_500_000 + 36 - 1);
         assert_eq!(decide(&cfg, &r, &f, 3, 2), Step::Wait, "the activation is too close");
-        f.tip_epoch_last = Some(4_500_000 + 34);
+        f.tip_epoch_last = Some(4_500_000 + 36);
         assert!(matches!(decide(&cfg, &r, &f, 3, 2), Step::SchedulePayment { .. }));
         r.pay_after_height = Some(4_500_003);
-        r.planned_anchor_height = Some(4_500_012);
+        r.planned_anchor_height = Some(4_500_014);
         r.anchor_draw = Some(2);
         f.zcash_tip = 4_500_003;
         assert_eq!(decide(&cfg, &r, &f, 3, 2), Step::Wait, "scheduled, but the activation came closer");
@@ -1440,7 +1442,7 @@ mod tests {
         let cfg = judge_like();
         let mut r = rec(Side::Buy, MakerStatus::DestinationReceived);
         r.pay_after_height = Some(4_500_003);
-        r.planned_anchor_height = Some(4_500_012);
+        r.planned_anchor_height = Some(4_500_014);
         r.anchor_draw = Some(2);
         let mut f = facts(1_000_100);
         f.zcash_tip = 4_500_003;
@@ -1455,7 +1457,7 @@ mod tests {
         r.status = MakerStatus::Paid;
         r.expiry_height = Some(4_500_123);
         r.mined_height = Some(4_500_005);
-        r.anchor_height = Some(4_500_012);
+        r.anchor_height = Some(4_500_014);
         let mut f = facts(1_000_200);
         f.payment = Some(Seen::Mined(4_500_005));
         assert_eq!(decide(&cfg, &r, &f, 3, 2), Step::Prove);

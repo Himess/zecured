@@ -56,6 +56,8 @@ use crate::{load_wallet, lwd_connect, read_json, read_secret_json, scan, write_j
 
 /// Relay headers whose average work estimates how many blocks the order's tier of work takes (W-20).
 const WORK_SAMPLE: u32 = 24;
+/// Seconds per Zcash block (the target spacing on Testnet and Mainnet).
+const BLOCK_SECS: u64 = 75;
 
 #[derive(Subcommand)]
 pub enum SwapCmd {
@@ -112,8 +114,9 @@ pub struct SwapOpts {
     #[arg(long, default_value = "data/tier2/summaries.json")]
     summaries: PathBuf,
     /// Refuse a quote whose pay window is shorter (seconds): this wallet waits its privacy delays
-    /// (up to 2 × `--pay-delay-max-blocks` + 2 blocks from the order to its proof's anchor), pays,
-    /// waits for the order's tier of work on the relay and proves before the deadline.
+    /// (up to 2 × `--pay-delay-max-blocks` + 4 blocks from the order to its proof's anchor, two of
+    /// them headroom for building the payment), pays, waits for the order's tier of work on the
+    /// relay and proves before the deadline.
     #[arg(long, default_value_t = 10_800)]
     min_window: u32,
     /// The time this wallet needs from its payment to its proof on Base, seconds (the anchor, the
@@ -238,9 +241,11 @@ fn check_opts(opts: &SwapOpts) -> Result<()> {
         opts.mock || opts.pay_delay_max_blocks >= MIN_PAY_DELAY_MAX_BLOCKS,
         "--pay-delay-max-blocks is at least {MIN_PAY_DELAY_MAX_BLOCKS} outside a local fork (W-10)"
     );
+    // The anchor window, its two blocks of headroom included (N-4), on top of proving.
+    let window = u64::from(anchor::anchor_window(opts.pay_delay_max_blocks)) * BLOCK_SECS;
     ensure!(
-        u64::from(opts.min_window) > opts.prove_secs,
-        "--min-window must leave room for the privacy delays on top of --prove-secs"
+        u64::from(opts.min_window) > window + opts.prove_secs,
+        "--min-window must hold the anchor window ({window} s: 2 × --pay-delay-max-blocks + 4 blocks) on top of --prove-secs"
     );
     Ok(())
 }
@@ -1096,11 +1101,11 @@ mod tests {
     }
 
     /// An opened order scheduled at tip 4,500,000: broadcast once the tip reaches 4,500,003, the
-    /// anchor at 4,500,001 + 8 + 1 + 2.
+    /// anchor at 4,500,001 + 8 + 1 + 2 + 2 (two blocks of headroom, then `r` = 2).
     fn scheduled() -> SwapFile {
         let mut f = file();
         f.pay_after_height = Some(4_500_003);
-        f.planned_anchor_height = Some(4_500_012);
+        f.planned_anchor_height = Some(4_500_014);
         f.anchor_draw = Some(2);
         f
     }
@@ -1117,7 +1122,11 @@ mod tests {
             (f.pay_after_height.unwrap(), f.planned_anchor_height.unwrap(), f.anchor_draw.unwrap());
         assert!((4_500_001..=4_500_008).contains(&after), "1 to 8 blocks: {after}");
         assert!(r <= 8);
-        assert_eq!(planned, 4_500_001 + 8 + 1 + r, "c + pay_delay_max_blocks + 1 + r, c the block being mined");
+        assert_eq!(
+            planned,
+            4_500_001 + 8 + 1 + 2 + r,
+            "c + pay_delay_max_blocks + 1 + 2 + r: c the block being mined, two blocks of headroom (N-4)"
+        );
         assert_eq!(pay_move(&f, &facts(after - 1), &o), PayMove::Wait("the payment's random privacy delay"));
         assert_eq!(pay_move(&f, &facts(after), &o), PayMove::Pay);
         // Held until a payment could no longer land below the planned anchor: planned again.
@@ -1125,7 +1134,7 @@ mod tests {
         assert_eq!(pay_move(&f, &facts(planned - 1), &o), PayMove::Schedule);
         schedule(&mut f, planned - 1, 8);
         assert_eq!(f.anchor_draw, Some(r), "one draw per order");
-        assert_eq!(f.planned_anchor_height, Some(planned + 8 + 1 + r));
+        assert_eq!(f.planned_anchor_height, Some(planned + 8 + 1 + 2 + r));
         let back: SwapFile = serde_json::from_value(serde_json::to_value(&f).unwrap()).unwrap();
         assert_eq!(
             (back.pay_after_height, back.planned_anchor_height, back.anchor_draw),
@@ -1204,6 +1213,12 @@ mod tests {
         check_opts(&o).unwrap();
         o.min_window = 7_200;
         assert!(check_opts(&o).is_err(), "no room for the delays");
+        // N-4: the anchor window counts its two blocks of headroom: 2 × 8 + 4 blocks of 75 s.
+        o.pay_delay_max_blocks = 8;
+        o.min_window = 20 * 75 + 7_200;
+        assert!(check_opts(&o).is_err(), "no room for the headroom");
+        o.min_window += 1;
+        check_opts(&o).unwrap();
     }
 
     /// N-12: the pinned deployment record has no default (a path relative to the working directory

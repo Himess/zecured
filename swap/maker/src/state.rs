@@ -64,7 +64,7 @@ pub struct OrderRecord {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub pay_after_height: Option<u32>,
     /// W-10: the anchor height of the payment's proof, fixed when the payment was scheduled, before
-    /// the payment existed: `c + pay_delay_max_blocks + 1 + r` (`zecured_swap::anchor`).
+    /// the payment existed: `c + pay_delay_max_blocks + 1 + 2 + r` (`zecured_swap::anchor`).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub planned_anchor_height: Option<u32>,
     /// W-10: `r`, the anchor's random draw, drawn once for the order and kept across restarts.

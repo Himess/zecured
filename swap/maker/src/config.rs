@@ -74,9 +74,9 @@ pub struct MakerConfig {
     /// H-05 (L23), W-10: a random 1 to `pay_delay_max_blocks` Zcash blocks between receiving a
     /// destination and broadcasting the payment, so the payment does not sit in the block right
     /// after the order opened on Base; and the proof's anchor, fixed before the payment, at
-    /// `c + pay_delay_max_blocks + 1 + r` with `r` drawn in `0..=pay_delay_max_blocks`
-    /// (`zecured_swap::anchor`), so the public anchor says nothing of the payment's block. (There
-    /// is no separate proving delay any more: `r` does that work.)
+    /// `c + pay_delay_max_blocks + 1 + 2 + r` (two blocks of headroom, N-4) with `r` drawn in
+    /// `0..=pay_delay_max_blocks` (`zecured_swap::anchor`), so the public anchor says nothing of the
+    /// payment's block. (There is no separate proving delay any more: `r` does that work.)
     pub pay_delay_max_blocks: u32,
     /// Seconds per Zcash block (75 on Testnet and Mainnet).
     #[serde(default = "default_block_secs")]
@@ -144,9 +144,9 @@ impl MakerConfig {
     }
 
     /// Seconds an order needs from its destination to its proof on Base, at most: the anchor window
-    /// (W-10: the latest planned anchor is `2 × pay_delay_max_blocks + 2` blocks above the tip the
-    /// payment is scheduled at, the payment's own delay included), the tier's work on top of the
-    /// anchor, proving, and the margin.
+    /// (W-10: the latest planned anchor is `2 × pay_delay_max_blocks + 4` blocks above the tip the
+    /// payment is scheduled at, the payment's own delay and the two blocks of headroom (N-4)
+    /// included), the tier's work on top of the anchor, proving, and the margin.
     pub fn required_secs(&self) -> u64 {
         u64::from(anchor::anchor_window(self.pay_delay_max_blocks)) * self.block_secs
             + self.confirm_estimate_secs
@@ -279,9 +279,9 @@ pub mod tests {
     fn the_judge_config_passes() {
         let c = judge_like();
         c.check().unwrap();
-        // W-10: an anchor window of 2 × 8 + 2 blocks of 75 s, 1,200 s of work on top of the anchor,
-        // 3,000 s of proving, 900 s of margin.
-        assert_eq!(c.required_secs(), 18 * 75 + 1_200 + 3_000 + 900);
+        // W-10: an anchor window of 2 × 8 + 4 blocks of 75 s (two of them the headroom, N-4), 1,200 s
+        // of work on top of the anchor, 3,000 s of proving, 900 s of margin.
+        assert_eq!(c.required_secs(), 20 * 75 + 1_200 + 3_000 + 900);
     }
 
     #[test]
