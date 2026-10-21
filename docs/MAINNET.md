@@ -187,8 +187,8 @@ only by the work it demands; and someone must build each witness and run the pro
 ## 7. Known limitations and their designs
 
 What the independent v4 review (2026-10-21) found that v4.1 does not close, with the design that
-would. Each has a row in docs/DECISIONS.md (D94 to D103). The last two items come from the review of
-the v4.1 diff.
+would. Each has a row in docs/DECISIONS.md (D94 to D103). The last three items come from the review
+of the v4.1 diff.
 
 - **W-22: compensation for claims paid on Zcash (medium).** F3 does not check that the payout X it
   judges spent the committed input (a claimant cannot compute the input's tag), F4 does not either,
@@ -256,4 +256,10 @@ the v4.1 diff.
 - **N-12: the Ironwood index file.** `zecured_zcash_ops::txindex` rewrites its whole file after each
   range it reads. Testnet's Ironwood history is small; Mainnet's only grows, so there the index
   appends to its file (or keeps a database) and never rewrites what it kept (D107).
+- **Swap: a refused destination leaves the taker's USDC in escrow.** The maker keeps a Buy order's
+  place and ZEC for its destination only for `reservation_secs` (10 minutes) after it reads the
+  order, and only within the cap of the order's taker on Base (N-10, D108). A destination given
+  later, or for an order beyond the cap, may be refused (`busy`, `no_inventory`), and the taker's
+  USDC then waits in `ZecuredSwap` until the pay window ends. Design: a cancel path for an order the
+  maker declines (a release the maker signs), or a destination deadline shorter than the pay window.
 

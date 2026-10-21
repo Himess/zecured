@@ -148,6 +148,10 @@ nodes' stores freezes the affected vaults; three leaked stores are enough to ste
   name a Zcash height; debug lines say more (heights, server and provider answers). Turn debug on
   only to diagnose, on the machine itself, and never send debug logs off it: no log shipping, no
   pasting them into a ticket.
+- **Zecured Swap (N-10, N-12).** The maker's config has `reservation_secs` (600 by default, more than
+  0 and less than `pay_window_secs`): how long a Buy order read from Base holds one of the maker's
+  places and its ZEC while it waits for its destination. `zecured-wallet swap` needs the ZecuredSwap
+  deployment record, `--swap-deployment <record>` or `ZECURED_SWAP_DEPLOYMENT` (docs/SWAP.md).
 - **The coordinator's Ironwood index (W-11).** To resolve commitments its scan does not show, the
   coordinator keeps the txids of the network's Ironwood transactions in its data directory
   (`ironwood-txids.<network>.bin`, public chain data), read once over the whole Ironwood history and
