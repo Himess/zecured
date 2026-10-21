@@ -187,7 +187,8 @@ only by the work it demands; and someone must build each witness and run the pro
 ## 7. Known limitations and their designs
 
 What the independent v4 review (2026-10-21) found that v4.1 does not close, with the design that
-would. Each has a row in docs/DECISIONS.md (D94 to D103).
+would. Each has a row in docs/DECISIONS.md (D94 to D103). The last two items come from the review of
+the v4.1 diff.
 
 - **W-22: compensation for claims paid on Zcash (medium).** F3 does not check that the payout X it
   judges spent the committed input (a claimant cannot compute the input's tag), F4 does not either,
@@ -247,4 +248,12 @@ would. Each has a row in docs/DECISIONS.md (D94 to D103).
   it compromises the colluders' vault, whose owner is counted as the victim; the case then follows
   the note to the deposit's vault once the tag is the deposit's (W-2). The false record is the
   signers' own violation, provable as F2 if its payout lands; that is the remedy for now.
+- **W-3 and the invariant campaigns.** The campaigns have no version governance: no action adds or
+  removes a verifier version, so W-3 (a compromised vault's refunds past a removed version) is
+  covered by fork tests (`contracts/test/fork/V41Regressions.t.sol`), not by the invariants. Left for
+  the mainnet audit: campaign actions that add and remove versions while vaults are open,
+  compromised and refunding.
+- **N-12: the Ironwood index file.** `zecured_zcash_ops::txindex` rewrites its whole file after each
+  range it reads. Testnet's Ironwood history is small; Mainnet's only grows, so there the index
+  appends to its file (or keeps a database) and never rewrites what it kept (D107).
 

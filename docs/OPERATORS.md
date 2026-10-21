@@ -123,7 +123,13 @@ nodes' stores freezes the affected vaults; three leaked stores are enough to ste
   claim's own destination from its id; `sign` refuses any other commitment. The coordinator, given the same file
   (`--treasury`, `ZECURED_TREASURY_KEYS`), registers the derived recipient with the nodes once Base
   holds the commitment, so the reimbursement is paid like any claim; it never registers a
-  destination that is not the derived one.
+  destination that is not the derived one. The treasury is the signers' fee treasury, the one the
+  fees go to, and who may spend from it does not change. Its incoming viewing key and the salt key
+  are held by the five operators and the coordinator, and each operator checks the derivation itself
+  before it signs (`sign` derives the destination again). The file must be its holder's alone (mode
+  0600, as `zecured-ops` writes it): on Unix the coordinator and `zecured-ops` refuse it while its
+  group or anyone else may read it (N-12). W-23's per-signer reimbursement will replace this
+  (docs/MAINNET.md § 7).
 - **The prover's budget (W-28).** If three colluding signers withhold a payout's confirmation, the
   claim stays pending and the honest `Included` proof of its payout must be on Base before the bonds
   may pay its liveness: within `commitGrace` less the payout's lifetime and the slasher's confirmation
@@ -131,6 +137,17 @@ nodes' stores freezes the affected vaults; three leaked stores are enough to ste
   prover keeps a proof (queue, STARK, Groth16 wrap and submission) inside that budget: a GPU prover,
   or a larger `commitGrace` (the mainnet design, docs/MAINNET.md § 7). The coordinator drops a
   proof's privacy delay when the delayed anchor would miss such a deadline (W-10).
+- **Deadline estimates (W-10, N-1).** `network.json`'s `proof_timing` sets what the coordinator
+  counts with near a claim's deadline: `zcash_block_secs` (75), `proof_secs` (1,200: a proof on a
+  GPU prover, from its job to Base) and `deadline_margin_secs` (600). With a CPU prover a proof takes
+  hours: raise `proof_secs` to match, or the delay is dropped too late to beat the deadline. A
+  payout's confirmation by signatures also waits for its planned anchor (N-1: at most about 21
+  minutes on the judge deployment) and goes at once when a pending claim's liveness deadline is
+  within `deadline_margin_secs` of that.
+- **Logs.** The default level is `info` (`RUST_LOG` unset), and debug is off. Warnings and errors may
+  name a Zcash height; debug lines say more (heights, server and provider answers). Turn debug on
+  only to diagnose, on the machine itself, and never send debug logs off it: no log shipping, no
+  pasting them into a ticket.
 - **The coordinator's Ironwood index (W-11).** To resolve commitments its scan does not show, the
   coordinator keeps the txids of the network's Ironwood transactions in its data directory
   (`ironwood-txids.<network>.bin`, public chain data), read once over the whole Ironwood history and
