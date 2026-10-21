@@ -40,7 +40,7 @@ use zecured_swap::{
     OrderStatus, Side,
     abi::IZecuredSwap,
     chain::{finalize_settlement, payment_anchor, prove_settlement, relay_tip},
-    pay::{authorize, build_payment, check_payment_note, select_inputs},
+    pay::{Seen, authorize, build_payment, check_payment_note, payment_seen, select_inputs},
     seal::Prover,
 };
 use zecured_zcash_ops::{lwd, network::ZcashNetwork, scan::ScanState, spend};
@@ -64,8 +64,12 @@ pub struct Facts {
     pub status: OrderStatus,
     /// Its pending settlement, if any: whether it is stale (droppable) or ready (finalizable).
     pub pending: Option<Pending>,
-    /// Paid: the payment's block, once mined.
-    pub mined_height: Option<u32>,
+    /// Paid: what the light wallet server says of the payment (W-8: a transport error is no
+    /// answer, and skips the order for the pass).
+    pub payment: Option<Seen>,
+    /// W-8: the wallet's scan, past the payment's expiry height, shows every input note of the
+    /// payment unspent: the payment never happened.
+    pub inputs_unspent: bool,
     /// Another payment of the maker is broadcast and not mined yet (one at a time: its inputs are
     /// not marked spent before it is mined).
     pub other_payment_unmined: bool,
@@ -86,7 +90,8 @@ pub enum Step {
     Pay,
     /// The payment is broadcast and unmined: send it again (a server may have dropped it).
     Rebroadcast,
-    /// The payment expired unmined: it never happened; pay again if there is time.
+    /// The payment expired unmined, its inputs unspent: it never happened; pay again if there is
+    /// time (W-8).
     PaymentExpired,
     /// Record the payment's block and the least anchor height of its proof.
     ScheduleAnchor {
@@ -155,19 +160,28 @@ pub fn decide(cfg: &MakerConfig, rec: &OrderRecord, f: &Facts, pay_delay: u32, p
             if past_deadline {
                 return Step::Abandon("paid, but not proven before the deadline");
             }
-            match (f.mined_height, rec.mined_height, rec.anchor_after_height) {
-                (None, _, _) => {
-                    if rec.expiry_height.is_some_and(|e| f.zcash_tip > e) {
+            match f.payment {
+                Some(Seen::Mined(mined)) => match rec.anchor_after_height {
+                    // The block seen when the anchor was scheduled (a reorganization may move it).
+                    Some(_) if rec.mined_height == Some(mined) => Step::Prove,
+                    _ => Step::ScheduleAnchor {
+                        mined,
+                        anchor_after: mined.saturating_add(prove_delay),
+                    },
+                },
+                // W-8: not mined as far as the server says, which proves nothing (a reorganization, a
+                // server behind or another one): before its expiry height the payment is sent again;
+                // after it, it never happened only if the wallet shows its inputs unspent. Otherwise
+                // the maker waits, and never pays the order twice.
+                _ => {
+                    if !rec.expiry_height.is_some_and(|e| f.zcash_tip > e) {
+                        Step::Rebroadcast
+                    } else if f.inputs_unspent {
                         Step::PaymentExpired
                     } else {
-                        Step::Rebroadcast
+                        Step::Wait
                     }
                 }
-                (Some(mined), _, None) => Step::ScheduleAnchor {
-                    mined,
-                    anchor_after: mined.saturating_add(prove_delay),
-                },
-                (Some(_), _, Some(_)) => Step::Prove,
             }
         }
         (Side::Buy, MakerStatus::Proven) => {
@@ -179,6 +193,24 @@ pub fn decide(cfg: &MakerConfig, rec: &OrderRecord, f: &Facts, pay_delay: u32, p
         }
         (Side::Buy, MakerStatus::TakerPays) => Step::Wait,
     }
+}
+
+/// W-8: whether a wallet scan that covers blocks up to `scanned_to` shows every input of a payment
+/// with expiry height `expiry` unspent: `inputs` are the payment's input nullifiers (hex) and
+/// `notes` the wallet's notes (nullifier, spent). Then the payment was never mined, and never will
+/// be: no block above its expiry height may hold it. A payment without recorded inputs shows
+/// nothing.
+pub fn inputs_unspent(
+    scanned_to: u32,
+    expiry: u32,
+    inputs: &[String],
+    notes: impl IntoIterator<Item = ([u8; 32], bool)>,
+) -> bool {
+    if scanned_to <= expiry || inputs.is_empty() {
+        return false;
+    }
+    let notes: Vec<(String, bool)> = notes.into_iter().map(|(nf, spent)| (hex::encode(nf), spent)).collect();
+    inputs.iter().all(|input| notes.iter().any(|(nf, spent)| nf == input && !spent))
 }
 
 /// `POST /swap/orders/:id/destination`: whether the maker takes the taker's destination for `rec`
@@ -295,6 +327,7 @@ pub fn new_record(
         opening: None,
         raw_tx: None,
         expiry_height: None,
+        input_nullifiers: vec![],
         mined_height: None,
         anchor_after_height: None,
         note: None,
@@ -493,15 +526,23 @@ impl Maker {
                 ready: zecured_swap::chain::settlement_ready(&p, relay_height, now),
             })
         };
-        let mined_height = match (rec.status, rec.txid.as_deref()) {
+        // W-8: a transport error is no answer: `?` skips the order for this pass, so a payment is
+        // never taken for unmined because the server could not be reached.
+        let payment = match (rec.status, rec.txid.as_deref()) {
             (MakerStatus::Paid, Some(txid)) => {
-                let txid = TxId::from_hex(txid).context("stored txid")?;
-                match lwd::raw_transaction(client, &txid).await {
-                    Ok((_, h)) if h > 0 => Some(u32::try_from(h)?),
-                    _ => None,
-                }
+                Some(payment_seen(client, &TxId::from_hex(txid).context("stored txid")?).await?)
             }
             _ => None,
+        };
+        let inputs_unspent = match (rec.status, rec.expiry_height) {
+            (MakerStatus::Paid, Some(expiry)) => {
+                let w = self.wallet.lock().await;
+                w.scan.as_ref().is_some_and(|s| {
+                    let notes = s.notes.iter().map(|n| (n.nullifier.to_bytes(), n.spent_at.is_some()));
+                    inputs_unspent(s.scanned_to, expiry, &rec.input_nullifiers, notes)
+                })
+            }
+            _ => false,
         };
         let other_payment_unmined = {
             let book = self.book.lock().await;
@@ -513,7 +554,8 @@ impl Maker {
             zcash_tip,
             status,
             pending,
-            mined_height,
+            payment,
+            inputs_unspent,
             other_payment_unmined,
         })
     }
@@ -546,13 +588,16 @@ impl Maker {
                 return Ok(());
             }
             Step::PaymentExpired => {
-                info!(order = %id, "the payment expired unmined; paying again if there is time");
+                info!(order = %id, "the payment expired unmined, its inputs unspent; paying again if there is time");
                 rec.status = MakerStatus::DestinationReceived;
                 rec.pay_after_height = None;
                 rec.txid = None;
                 rec.opening = None;
                 rec.raw_tx = None;
                 rec.expiry_height = None;
+                rec.input_nullifiers.clear();
+                rec.mined_height = None;
+                rec.anchor_after_height = None;
             }
             Step::ScheduleAnchor { mined, anchor_after } => {
                 rec.mined_height = Some(mined);
@@ -625,11 +670,12 @@ impl Maker {
         let recipient = Option::<orchard::Address>::from(orchard::Address::from_raw_address_bytes(&receiver))
             .context("receiver")?;
         let pk = self.proving_key().await?;
-        let (tx, opening, target) = {
+        let (tx, opening, target, nullifiers) = {
             let w = self.wallet.lock().await;
             let state = w.scan.as_ref().context("the wallet is not scanned yet")?;
             let unspent = state.unspent();
             let inputs = select_inputs(&unspent, rec.zatoshi)?;
+            let nullifiers: Vec<String> = inputs.iter().map(|n| hex::encode(n.nullifier.to_bytes())).collect();
             let target = state.scanned_to + 1;
             let unsigned = build_payment(
                 &self.network,
@@ -645,7 +691,7 @@ impl Maker {
             let opening = unsigned.opening.clone();
             let sk = w.sk.clone();
             let tx = tokio::task::block_in_place(|| authorize(unsigned, &sk, &pk))?;
-            (tx, opening, target)
+            (tx, opening, target, nullifiers)
         };
         check_payment_note(&tx, &opening, rec.order_id)?;
         let raw = spend::serialize(&tx)?;
@@ -653,6 +699,7 @@ impl Maker {
         rec.opening = Some(opening);
         rec.raw_tx = Some(hex::encode(&raw));
         rec.expiry_height = Some(target + spend::PAYOUT_EXPIRY_DELTA);
+        rec.input_nullifiers = nullifiers;
         rec.status = MakerStatus::Paid;
         // Recorded before the broadcast: a crash right after it cannot lose the opening.
         {
@@ -724,6 +771,7 @@ mod tests {
             opening: None,
             raw_tx: None,
             expiry_height: None,
+            input_nullifiers: vec![],
             mined_height: None,
             anchor_after_height: None,
             note: None,
@@ -736,7 +784,8 @@ mod tests {
             zcash_tip: 4_500_000,
             status: OrderStatus::Open,
             pending: None,
-            mined_height: None,
+            payment: None,
+            inputs_unspent: false,
             other_payment_unmined: false,
         }
     }
@@ -757,12 +806,17 @@ mod tests {
         assert_eq!(decide(&cfg, &r, &f, 3, 2), Step::Wait, "one unmined payment at a time");
         r.status = MakerStatus::Paid;
         r.expiry_height = Some(4_500_123);
+        r.input_nullifiers = vec!["ab".repeat(32)];
         let mut f = facts(1_000_200);
+        f.payment = Some(Seen::NotMined);
         assert_eq!(decide(&cfg, &r, &f, 3, 2), Step::Rebroadcast);
         f.zcash_tip = 4_500_124;
+        assert_eq!(decide(&cfg, &r, &f, 3, 2), Step::Wait, "expired, its inputs not shown unspent");
+        f.inputs_unspent = true;
         assert_eq!(decide(&cfg, &r, &f, 3, 2), Step::PaymentExpired);
+        f.inputs_unspent = false;
         f.zcash_tip = 4_500_010;
-        f.mined_height = Some(4_500_005);
+        f.payment = Some(Seen::Mined(4_500_005));
         assert_eq!(
             decide(&cfg, &r, &f, 3, 2),
             Step::ScheduleAnchor {
@@ -793,6 +847,49 @@ mod tests {
         assert_eq!(decide(&cfg, &r, &f, 3, 2), Step::Reprove, "someone dropped it");
         f.status = OrderStatus::Settled;
         assert_eq!(decide(&cfg, &r, &f, 3, 2), Step::Finish(MakerStatus::Settled));
+    }
+
+    /// W-8: one transport error of the light wallet server after the payment was mined never makes
+    /// the maker forget the payment and pay a second time. The error itself skips the order for the
+    /// pass (`payment_seen` returns it); whatever the server says afterwards ("not mined": a
+    /// reorganization, a server behind), a payment seen mined expires only when the wallet's scan,
+    /// past its expiry height, shows its inputs unspent.
+    #[test]
+    fn w8_a_transport_error_after_the_payment_was_mined_never_expires_it() {
+        let cfg = judge_like();
+        let mut r = rec(Side::Buy, MakerStatus::Paid);
+        r.expiry_height = Some(4_500_123);
+        r.mined_height = Some(4_500_005);
+        r.anchor_after_height = Some(4_500_007);
+        r.input_nullifiers = vec!["ab".repeat(32)];
+        let mut f = facts(1_000_200);
+        f.zcash_tip = 4_500_124;
+        f.payment = Some(Seen::NotMined);
+        assert_ne!(decide(&cfg, &r, &f, 3, 2), Step::PaymentExpired, "a payment seen mined never expires");
+        assert_eq!(decide(&cfg, &r, &f, 3, 2), Step::Wait);
+        f.inputs_unspent = true;
+        assert_eq!(decide(&cfg, &r, &f, 3, 2), Step::PaymentExpired, "its inputs unspent past its expiry: never mined");
+        f.zcash_tip = 4_500_123;
+        assert_eq!(decide(&cfg, &r, &f, 3, 2), Step::Rebroadcast, "not expired yet: sent again");
+        // Seen mined again: proven as scheduled.
+        f.payment = Some(Seen::Mined(4_500_005));
+        assert_eq!(decide(&cfg, &r, &f, 3, 2), Step::Prove);
+        // Moved by a reorganization: its anchor is scheduled again.
+        f.payment = Some(Seen::Mined(4_500_006));
+        assert!(matches!(decide(&cfg, &r, &f, 3, 2), Step::ScheduleAnchor { mined: 4_500_006, .. }));
+    }
+
+    /// W-8: what the wallet's scan shows of an expired payment's inputs.
+    #[test]
+    fn w8_the_inputs_of_an_expired_payment() {
+        let (a, b) = ([0xab; 32], [0xcd; 32]);
+        let inputs = vec![hex::encode(a), hex::encode(b)];
+        let notes = |a_spent, b_spent| vec![(a, a_spent), (b, b_spent), ([0xee; 32], true)];
+        assert!(inputs_unspent(124, 123, &inputs, notes(false, false)));
+        assert!(!inputs_unspent(123, 123, &inputs, notes(false, false)), "the scan must pass the expiry height");
+        assert!(!inputs_unspent(124, 123, &inputs, notes(false, true)), "an input spent: by the payment or another");
+        assert!(!inputs_unspent(124, 123, &inputs, vec![(a, false)]), "an input the wallet does not know");
+        assert!(!inputs_unspent(124, 123, &[], notes(false, false)), "no recorded inputs: nothing shown");
     }
 
     /// The maker never pays when the pipeline would not fit before the deadline (docs/SWAP.md "The market maker").

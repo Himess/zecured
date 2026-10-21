@@ -74,6 +74,10 @@ pub struct OrderRecord {
     /// The payment's expiry height (unmined after it, the payment never happened).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub expiry_height: Option<u32>,
+    /// W-8: the nullifiers (hex) of the payment's input notes: still unspent in the wallet's scan
+    /// past the expiry height, they show that the payment never happened. Private; erased when done.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub input_nullifiers: Vec<String>,
     /// The payment's block, and the least anchor height its proof may use (H-05).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub mined_height: Option<u32>,
@@ -92,6 +96,7 @@ impl OrderRecord {
         self.txid = None;
         self.opening = None;
         self.raw_tx = None;
+        self.input_nullifiers.clear();
     }
 
     /// Marks the order done with `status`, erasing its private data.
@@ -187,6 +192,7 @@ mod tests {
             }),
             raw_tx: Some("00".into()),
             expiry_height: Some(130),
+            input_nullifiers: vec!["ab".repeat(32)],
             mined_height: Some(11),
             anchor_after_height: Some(13),
             note: None,
@@ -199,9 +205,10 @@ mod tests {
         r.finish(MakerStatus::Settled, None);
         assert!(r.status.is_done());
         assert!(r.receiver.is_none() && r.salt.is_none() && r.txid.is_none() && r.opening.is_none());
-        assert!(r.raw_tx.is_none());
+        assert!(r.raw_tx.is_none() && r.input_nullifiers.is_empty());
         let json = serde_json::to_string(&r).unwrap();
         assert!(!json.contains("receiver\"") && !json.contains("salt") && !json.contains("txid"));
+        assert!(!json.contains("input_nullifiers"));
     }
 
     #[test]
