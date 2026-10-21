@@ -20,6 +20,8 @@ mod gate;
 mod pricing;
 mod quoting;
 mod state;
+#[cfg(test)]
+mod testkit;
 
 use std::{io::Read, path::PathBuf, sync::Arc};
 
