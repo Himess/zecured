@@ -748,12 +748,12 @@ beta) quotes need the header `X-Zecured-Invite`; the maker stores only the codes
 
 | Method and path | Answer |
 |---|---|
-| `GET /swap/quote?side=buy\|sell&zatoshi=N` (or `usdc=N`) `[&taker=0x…]` | `{ quote, signature, swap, chainId, orderId, expiresAt }` (integers as strings; a Sell adds the maker's receiver and salt); errors `bad_request`, `invite_required`, `side_disabled`, `taker_required`, `too_small`, `too_large`, `no_inventory`, `busy`, `relay_behind`, `price_stale`, `unavailable` |
-| `POST /swap/orders/:orderId/destination` | body `{ receiver, salt }` (a unified address or 43 raw bytes, and 32 bytes); 202 `{ orderId, status: "destination_received" }`, idempotent; errors `unknown_order`, `not_buy`, `not_awaiting`, `too_late`, `bad_destination` (a receiver that does not match the order's commitment) |
+| `GET /swap/quote?side=buy\|sell&zatoshi=N` (or `usdc=N`) `[&taker=0x…]` | `{ quote, signature, swap, chainId, orderId, expiresAt }` (integers as strings; a Sell adds the maker's receiver and salt); errors `bad_request`, `invite_required`, `side_disabled`, `taker_required`, `too_small`, `too_large`, `no_inventory`, `busy` (also: the taker already holds `maxOpenOrdersPerTaker` open orders), `relay_behind`, `price_stale`, `unavailable` (also: the maker's payment guest is not a working Swap version, so no proof could land) |
+| `POST /swap/orders/:orderId/destination` | body `{ receiver, salt }` (a unified address or 43 raw bytes, and 32 bytes); 202 `{ orderId, status: "destination_received" }`, idempotent; errors `unknown_order`, `not_buy`, `not_awaiting`, `too_late`, `bad_destination` (a receiver that does not match the order's commitment), and for a first destination `no_inventory` (the maker could not pay it now), `busy` (the taker's other orders in payment reach `maxOpenOrdersPerTaker`), `relay_behind` and `unavailable` (no working Swap version, or the maker's view of the chains is stale); a refused destination may be given again while the window allows |
 | `GET /swap/orders/:orderId` | `{ orderId, side, status, zatoshi, usdc, payDeadline, note }`, status `awaiting_destination`, `destination_received`, `paid`, `proven`, `taker_pays`, `abandoned`, `settled` or `refunded` |
-| `GET /swap/status` | what the maker quotes now: `{ maker, swap, chainId, sides, payWindow, minOrderZat, maxOrderZat, maxOrderUsdc, spreadBps, inviteOnly, openOrders, maxOpenOrders }` |
+| `GET /swap/status` | what the maker quotes now: `{ maker, swap, chainId, sides, payWindow, minOrderZat, maxOrderZat, maxOrderUsdc, spreadBps, inviteOnly, openOrders, maxOpenOrders, maxOpenOrdersPerTaker }` |
 
 Operators only: with `status_bind` set (a loopback address other than `bind`, never added to the backend's
 proxy), the maker serves `GET /inventory` → `{ "zecFreeZat", "usdcFree" }` (decimal strings: the last scan's
-spendable ZEC less what open Buy orders reserved, and the USDC it can lock, capped at its allowance to
-`ZecuredSwap`), for the watchdog.
+spendable ZEC less what open Buy orders with a destination reserved, and the USDC it can lock, capped at
+its allowance to `ZecuredSwap`), for the watchdog.
