@@ -57,6 +57,11 @@ contract BondPeersForHalmos {
         return false;
     }
 
+    /// W-5: no F3 or F4 case about the claim.
+    function claimCaseOpen(bytes32) external pure returns (bool) {
+        return false;
+    }
+
     function entitlement(bytes32) external pure returns (Entitlement memory e) {}
 
     function price() external pure returns (uint256) {
@@ -73,8 +78,10 @@ contract SignerBondV2HalmosHarness is SignerBondV2 {
         return _sumAndCheapestThree(bonds);
     }
 
+    /// W-4: `armedAt` is the arming's time, never before its receipt: the earliest, `payableAt`. The rules below are about
+    ///      claims bound to no input, whose due time does not depend on it.
     function setArming(bytes32 claimId, bytes32 commitment, uint64 payableAt) external {
-        _armings[claimId] = Arming({commitment: commitment, payableAt: payableAt});
+        _armings[claimId] = Arming({commitment: commitment, payableAt: payableAt, armedAt: payableAt});
     }
 }
 

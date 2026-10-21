@@ -125,7 +125,11 @@ contract ZecuredRegistry is IZecuredRegistry, IZecuredSpendCommits, ZecuredRegis
             c.feeBps > MAX_FEE_BPS || (c.feeBps == 0) != (c.feeCommitment == bytes32(0))
                 || (c.feeBps != 0 && (c.minFeeZat <= DUST_LIMIT || c.minFeeZat <= ZIP317_MARGINAL_FEE))
                 || c.refundAbandonPeriod == 0
-        ) revert InvalidFeeConfig();
+                // W-18: a refund without a destination goes dormant (R-11) before its account may abandon it.
+                || c.refundAbandonPeriod < ZecuredSpendLogic(c.spendLogic).refundDormancy()
+        ) {
+            revert InvalidFeeConfig();
+        }
 
         morpho = c.morpho;
         zzec = c.zzec;
@@ -435,9 +439,11 @@ contract ZecuredRegistry is IZecuredRegistry, IZecuredSpendCommits, ZecuredRegis
         if (!c.bondPaid || c.status != ClaimStatus.Pending) revert NotBondPaid(claimId);
         if (c.commitment != bytes32(0)) revert DestinationAlreadySet(claimId);
         if (commitment == bytes32(0)) revert ZeroCommitment();
-        // R-6: all five bonds paid the claimant, so all five say where the claim's ZEC reimburses them.
+        // W-6: three signers, as every other claim-level message. R-6 asked all five, which let one missing signer keep
+        // the claim's input from ever being committed again (RT-4: its claim set includes this claim) and with it the
+        // rest of the vault's collateral; each claim's treasury destination is derived from its id (OPERATORS).
         _verifySignerSignatures(
-            _hashTypedDataV4(ZecuredEIP712.hashReimburseDestination(claimId, commitment, deadline)), sigs, SIGNER_COUNT
+            _hashTypedDataV4(ZecuredEIP712.hashReimburseDestination(claimId, commitment, deadline)), sigs, THRESHOLD
         );
         c.commitment = commitment;
         emit ReimburseDestinationSet(c.vaultId, claimId, commitment);

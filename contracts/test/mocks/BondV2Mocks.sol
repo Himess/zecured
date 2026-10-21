@@ -122,9 +122,15 @@ contract MockBondRegistry is MockReentryProbe {
 contract MockBondSlasher {
     uint256 public openCaseCount;
     mapping(bytes32 vaultId => bool) public vaultFrozen;
+    /// @notice v4.1 (W-5): an F3 or F4 case about the claim is open.
+    mapping(bytes32 claimId => bool) public claimCaseOpen;
 
     function setOpenCaseCount(uint256 count) external {
         openCaseCount = count;
+    }
+
+    function setClaimCaseOpen(bytes32 claimId, bool open) external {
+        claimCaseOpen[claimId] = open;
     }
 
     function setVaultFrozen(bytes32 vaultId, bool frozen) external {
@@ -136,9 +142,15 @@ contract MockBondSlasher {
 ///         `requiredBond`. Moving the threshold by one unit shows the exact value the bond asks about.
 contract MockBondIntake {
     uint256 public requiredBond;
+    /// @notice v4.1 (W-14): zatoshi of proven refunds waiting on the Intake.
+    uint64 public pendingRefundTotal;
 
     function setRequiredBond(uint256 bond) external {
         requiredBond = bond;
+    }
+
+    function setPendingRefundTotal(uint64 total) external {
+        pendingRefundTotal = total;
     }
 
     function coverageHoldsWith(uint256 effectiveBond) external view returns (bool) {

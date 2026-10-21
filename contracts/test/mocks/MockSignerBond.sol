@@ -16,6 +16,9 @@ contract MockSignerBond {
     mapping(bytes32 vaultId => uint64) public frozenSince;
     /// @notice v4 (R-2): when the vault was compromised, as `ZecuredSlasher.compromisedAt`.
     mapping(bytes32 vaultId => uint64) public compromisedAt;
+    /// @notice v4.1 (W-2): open F1 cases about a note, and notes proven spent, as the slasher's views.
+    mapping(bytes32 noteTag => uint256) public openF1CasesOf;
+    mapping(bytes32 noteTag => bool) public noteSpendProven;
 
     function slasher() external view returns (address) {
         return address(this);
@@ -23,6 +26,14 @@ contract MockSignerBond {
 
     function setOpenCases(bytes32 vaultId, uint256 cases) external {
         openCasesOf[vaultId] = cases;
+    }
+
+    function setOpenF1Cases(bytes32 noteTag, uint256 cases) external {
+        openF1CasesOf[noteTag] = cases;
+    }
+
+    function setNoteSpendProven(bytes32 noteTag, bool proven) external {
+        noteSpendProven[noteTag] = proven;
     }
 
     function setHalted(bool halted_) external {

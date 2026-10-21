@@ -192,16 +192,10 @@ contract ZecuredVersions is IZecuredVersions, EIP712 {
     }
 
     /// @inheritdoc IZecuredVersions
+    /// @dev W-15: no violation version is working, whether the router stopped the active ones or they were removed
+    ///      once stopped (which R-22 lets three signers do): a new one then comes in after the estop delay.
     function violationStopped() public view returns (bool) {
-        bytes32[] storage ids = _ids[VersionKind.Violation];
-        bool any;
-        for (uint256 i; i < ids.length; ++i) {
-            Version storage v = _versions[ids[i]];
-            if (!_isActive(v)) continue;
-            if (!_stopped(router, v.selector)) return false;
-            any = true;
-        }
-        return any;
+        return !_anyWorking(VersionKind.Violation);
     }
 
     /// @inheritdoc IZecuredVersions

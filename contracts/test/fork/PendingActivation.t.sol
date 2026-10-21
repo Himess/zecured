@@ -609,7 +609,8 @@ contract PendingActivationTest is ZecuredFixture {
         _ready();
         _removeVersion(oldVersion);
 
-        vm.expectRevert(abi.encodeWithSelector(IZecuredIntake.VersionNotActive.selector, oldVersion));
+        // W-13: finalizing asks for a working version (active, its verifier running); a removed one is neither.
+        vm.expectRevert(abi.encodeWithSelector(IZecuredIntake.VersionNotWorking.selector, oldVersion));
         intake.finalizeActivation(VAULT);
         mockBond.setHalted(true);
         vm.expectRevert(abi.encodeWithSelector(IZecuredIntake.VersionNotActive.selector, oldVersion));

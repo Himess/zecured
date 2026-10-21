@@ -23,7 +23,7 @@ import {IZcashHeaderRelay} from "./relay/IZcashHeaderRelay.sol";
 ///         upgrade path.
 /// @dev The guest proves facts about one Zcash transaction X in a relay-anchored block; this contract compares them with
 ///      the Registry's records. Every journal field a kind does not use must be zero, so a violation has exactly one
-///      journal shape and one case id.
+///      journal shape and one case id (per vault, for F1: W-2).
 contract ZecuredSlasher is IZecuredSlasher {
     /// @inheritdoc IZecuredSlasher
     uint256 public constant JOURNAL_LENGTH = 8 * 32;
@@ -36,6 +36,22 @@ contract ZecuredSlasher is IZecuredSlasher {
     ///      zZEC: at most about 245,000 gas from cold storage in the R-19 tests on a Base Sepolia fork (which check it
     ///      stays below this), so this leaves about twice that.
     uint256 public constant BURN_GAS = 500_000;
+
+    /// @dev W-1, W-5: the claim an F3 or F4 case is about, and what its claimant lost (F3: `expected - value`; F4: the
+    ///      hidden claim's `expected`), read once the proof is checked.
+    struct CaseClaim {
+        bytes32 claimId;
+        uint64 loss;
+    }
+
+    /// @dev What a violation's condition found in the Registry's records: the vault, whose bonds answer for it, and for
+    ///      F3 and F4 the claim and its loss.
+    struct Found {
+        bytes32 vaultId;
+        uint8 signerBitmap;
+        bytes32 claimId;
+        uint64 loss;
+    }
 
     /// @inheritdoc IZecuredSlasher
     address public immutable registry;
@@ -69,6 +85,14 @@ contract ZecuredSlasher is IZecuredSlasher {
     mapping(bytes32 vaultId => uint64) public compromisedAt;
     /// @inheritdoc IZecuredSlasher
     mapping(bytes32 vaultId => uint64) public frozenSince;
+    /// @dev W-1, W-5: an F3 or F4 case's claim.
+    mapping(bytes32 caseId => CaseClaim) private _caseClaims;
+    /// @dev W-5: open F3 and F4 cases per claim.
+    mapping(bytes32 claimId => uint256) private _claimCases;
+    /// @inheritdoc IZecuredSlasher
+    mapping(bytes32 noteTag => uint256) public openF1CasesOf;
+    /// @inheritdoc IZecuredSlasher
+    mapping(bytes32 noteTag => bool) public noteSpendProven;
 
     /// @param registry_ The Registry (v3) whose records the violations are checked against.
     /// @param signerBond_ The SignerBond whose `slasher` is this contract and whose `registry` is `registry_`.
@@ -130,33 +154,11 @@ contract ZecuredSlasher is IZecuredSlasher {
             revert InvalidBeneficiary(j.beneficiary); // never a vault's smart account
         }
         _checkAnchor(j.anchor);
-        (bytes32 vaultId, uint8 signerBitmap) = _violation(j);
-        caseId = caseIdOf(kind, j.ref, j.noteTag);
+        Found memory f = _violation(j);
+        caseId = caseIdOf(kind, j.ref, j.noteTag, f.vaultId);
         if (_cases[caseId].kind != ViolationKind.None) revert CaseAlreadyOpen(caseId);
         IRiscZeroVerifier(verifier).verify(seal, imageId, sha256(journal));
-
-        uint64 executableAt = uint64(block.timestamp) + challengeWindow;
-        _cases[caseId] = ViolationCase({
-            kind: kind,
-            anchor: j.anchor,
-            beneficiary: j.beneficiary,
-            ref: j.ref,
-            noteTag: j.noteTag,
-            vaultId: vaultId,
-            signerBitmap: signerBitmap,
-            executableAt: executableAt,
-            executed: false,
-            value: j.value
-        });
-        openCaseCount += 1;
-        openCasesOf[vaultId] += 1;
-        if (_isTheft(kind)) {
-            openTheftCaseCount += 1;
-            // R-3: the vault's freeze begins with its first open theft case.
-            if (theftCasesOf[vaultId] == 0 && !isCompromised[vaultId]) frozenSince[vaultId] = uint64(block.timestamp);
-            theftCasesOf[vaultId] += 1;
-        }
-        emit ViolationProven(caseId, kind, vaultId, signerBitmap, j.beneficiary, executableAt);
+        _record(caseId, j, f);
     }
 
     /// @inheritdoc IZecuredSlasher
@@ -165,29 +167,35 @@ contract ZecuredSlasher is IZecuredSlasher {
         if (c.kind == ViolationKind.None) revert UnknownCase(caseId);
         if (c.executed) revert CaseAlreadyExecuted(caseId);
         if (block.timestamp < c.executableAt) revert ChallengeWindowOpen(caseId, c.executableAt);
-        openCaseCount -= 1;
-        openCasesOf[c.vaultId] -= 1;
-        bool theft = _isTheft(c.kind);
-        if (theft) {
-            openTheftCaseCount -= 1;
-            theftCasesOf[c.vaultId] -= 1;
+        _countClosed(c);
+        CaseClaim memory cc = _caseClaims[caseId];
+        if (cc.claimId != bytes32(0)) {
+            _claimCases[cc.claimId] -= 1;
+            delete _caseClaims[caseId];
         }
 
         bool anchorHolds = IZcashHeaderRelay(relay).isInBestChain(c.anchor)
             && IZcashHeaderRelay(relay).confirmationWork(c.anchor) >= slashConfirmationWork;
+        if (anchorHolds && c.kind == ViolationKind.Uncommitted) {
+            // W-2: a proven deposit took the note's tag over since the proof: the case is that vault's now.
+            bytes32 owner = IZecuredSpendCommits(registry).lineageOf(c.noteTag).vaultId;
+            if (owner != bytes32(0) && owner != c.vaultId) {
+                _dismiss(caseId, c);
+                _follow(caseId, c, owner);
+                return;
+            }
+        }
         // F2, F3 and F4 rest on records that never change; F1 is dismissed if the commitment appeared meanwhile (an
         // honest resubmission after a Base reorg) or if the note stopped being a lineage note (its activation was
         // dropped).
         bool stillHolds = c.kind != ViolationKind.Uncommitted || _uncommitted(c.ref, c.noteTag);
         if (!anchorHolds || !stillHolds) {
-            delete _cases[caseId];
-            // R-3: the freeze ends with the vault's last open theft case, unless an executed one compromised it.
-            if (theft && theftCasesOf[c.vaultId] == 0 && !isCompromised[c.vaultId]) delete frozenSince[c.vaultId];
-            emit ViolationDismissed(caseId);
+            _dismiss(caseId, c);
             return;
         }
         _cases[caseId].executed = true;
-        bool compromises = theft && !isCompromised[c.vaultId];
+        if (c.kind == ViolationKind.Uncommitted) noteSpendProven[c.noteTag] = true;
+        bool compromises = _isTheft(c.kind) && !isCompromised[c.vaultId];
         if (compromises) {
             isCompromised[c.vaultId] = true;
             compromisedAt[c.vaultId] = uint64(block.timestamp);
@@ -197,21 +205,28 @@ contract ZecuredSlasher is IZecuredSlasher {
         emit ViolationExecuted(caseId, slashed);
 
         if (compensator == address(0)) return;
-        bytes32 claimId;
-        uint64 shortfall;
-        if (c.kind == ViolationKind.Misdirected) {
-            // F3: the claim the payout named, and what its claimant did not receive.
-            ClaimPayment memory p = IZecuredSpendCommits(registry).claimPayment(c.ref);
-            claimId = p.claimId;
-            shortfall = p.expected - c.value; // value < expected was checked when the case opened
-        }
-        IZecuredCompensator(compensator).onCase(caseId, c.kind, c.vaultId, claimId, shortfall);
+        // F3: the claim the payout named and its shortfall; F4 (W-1): the claim the commitment hid, in full.
+        IZecuredCompensator(compensator).onCase(caseId, c.kind, c.vaultId, cc.claimId, cc.loss);
         // R-19: nothing more is borrowed against the vault's unbacked zZEC from now on. The burn may fail (an account
         // that revoked the Registry's authorization, a pending vault): the slash stands, and anyone retries it.
         if (compromises) {
             if (gasleft() < BURN_GAS + BURN_GAS / 63 + 10_000) revert InsufficientGasForBurn();
             try IZecuredCompensator(compensator).burnCollateral{gas: BURN_GAS}(c.vaultId) {} catch {}
         }
+    }
+
+    /// @inheritdoc IZecuredSlasher
+    function followNote(bytes32 caseId) external returns (bytes32 newCaseId) {
+        ViolationCase memory c = _cases[caseId];
+        if (c.kind != ViolationKind.Uncommitted) revert NotMovable(caseId);
+        bytes32 owner = IZecuredSpendCommits(registry).lineageOf(c.noteTag).vaultId;
+        if (owner == bytes32(0) || owner == c.vaultId) revert NotMovable(caseId);
+        _checkAnchor(c.anchor);
+        if (!c.executed) {
+            _countClosed(c);
+            _dismiss(caseId, c);
+        }
+        return _follow(caseId, c, owner);
     }
 
     /// @inheritdoc IZecuredSlasher
@@ -255,8 +270,14 @@ contract ZecuredSlasher is IZecuredSlasher {
     }
 
     /// @inheritdoc IZecuredSlasher
-    function caseIdOf(ViolationKind kind, bytes32 ref, bytes32 noteTag) public pure returns (bytes32) {
+    function caseIdOf(ViolationKind kind, bytes32 ref, bytes32 noteTag, bytes32 vaultId) public pure returns (bytes32) {
+        if (kind == ViolationKind.Uncommitted) return keccak256(abi.encode(kind, ref, noteTag, vaultId));
         return keccak256(abi.encode(kind, ref, noteTag));
+    }
+
+    /// @inheritdoc IZecuredSlasher
+    function claimCaseOpen(bytes32 claimId) external view returns (bool) {
+        return _claimCases[claimId] != 0;
     }
 
     // ------------------------------------------------------------------ internal
@@ -264,6 +285,89 @@ contract ZecuredSlasher is IZecuredSlasher {
     /// @dev F1 and F2 take a vault's lineage; F3 and F4 are about one claim.
     function _isTheft(ViolationKind kind) internal pure returns (bool) {
         return kind == ViolationKind.Uncommitted || kind == ViolationKind.WithheldChange;
+    }
+
+    /// @dev A proven violation's case, with its claim (W-1, W-5).
+    function _record(bytes32 caseId, ViolationJournal memory j, Found memory f) internal {
+        if (f.claimId != bytes32(0)) {
+            _caseClaims[caseId] = CaseClaim({claimId: f.claimId, loss: f.loss});
+            _claimCases[f.claimId] += 1;
+        }
+        _open(
+            caseId,
+            ViolationCase({
+                kind: j.kind,
+                anchor: j.anchor,
+                beneficiary: j.beneficiary,
+                ref: j.ref,
+                noteTag: j.noteTag,
+                vaultId: f.vaultId,
+                signerBitmap: f.signerBitmap,
+                executableAt: uint64(block.timestamp) + challengeWindow,
+                executed: false,
+                value: j.value
+            })
+        );
+    }
+
+    /// @dev Records an open case and counts it: the vault's open cases, a theft's freeze (R-3: from the vault's first
+    ///      open theft case), and an F1's note (W-2).
+    function _open(bytes32 caseId, ViolationCase memory c) internal {
+        _cases[caseId] = c;
+        bytes32 vaultId = c.vaultId;
+        openCaseCount += 1;
+        openCasesOf[vaultId] += 1;
+        if (_isTheft(c.kind)) {
+            openTheftCaseCount += 1;
+            if (theftCasesOf[vaultId] == 0 && !isCompromised[vaultId]) frozenSince[vaultId] = uint64(block.timestamp);
+            theftCasesOf[vaultId] += 1;
+            if (c.kind == ViolationKind.Uncommitted) openF1CasesOf[c.noteTag] += 1;
+        }
+        emit ViolationProven(caseId, c.kind, vaultId, c.signerBitmap, c.beneficiary, c.executableAt);
+    }
+
+    /// @dev An open case is no longer counted open (it is executed or dismissed next).
+    function _countClosed(ViolationCase memory c) internal {
+        openCaseCount -= 1;
+        openCasesOf[c.vaultId] -= 1;
+        if (_isTheft(c.kind)) {
+            openTheftCaseCount -= 1;
+            theftCasesOf[c.vaultId] -= 1;
+            if (c.kind == ViolationKind.Uncommitted) openF1CasesOf[c.noteTag] -= 1;
+        }
+    }
+
+    /// @dev Deletes a case already counted closed; R-3: the vault's freeze ends with its last open theft case, unless an
+    ///      executed one compromised it.
+    function _dismiss(bytes32 caseId, ViolationCase memory c) internal {
+        delete _cases[caseId];
+        if (_isTheft(c.kind) && theftCasesOf[c.vaultId] == 0 && !isCompromised[c.vaultId]) {
+            delete frozenSince[c.vaultId];
+        }
+        emit ViolationDismissed(caseId);
+    }
+
+    /// @dev W-2: F1 case `c` (`caseId`) for the note's new owner `owner`, from its own checked fields with a new window,
+    ///      unless that case exists already or no longer holds (the owner's commitment covers the spend now).
+    function _follow(bytes32 caseId, ViolationCase memory c, bytes32 owner) internal returns (bytes32 newCaseId) {
+        newCaseId = caseIdOf(ViolationKind.Uncommitted, c.ref, c.noteTag, owner);
+        if (_cases[newCaseId].kind != ViolationKind.None || !_uncommitted(c.ref, c.noteTag)) return bytes32(0);
+        _open(
+            newCaseId,
+            ViolationCase({
+                kind: ViolationKind.Uncommitted,
+                anchor: c.anchor,
+                beneficiary: c.beneficiary,
+                ref: c.ref,
+                noteTag: c.noteTag,
+                vaultId: owner,
+                signerBitmap: ALL_SIGNERS,
+                executableAt: uint64(block.timestamp) + challengeWindow,
+                executed: false,
+                value: 0
+            })
+        );
+        emit ViolationMoved(caseId, newCaseId, owner);
     }
 
     /// @dev Y1, T-07a: the seal's router selector and `imageId` are an active Violation version.
@@ -321,14 +425,15 @@ contract ZecuredSlasher is IZecuredSlasher {
         }
     }
 
-    /// @dev The kind's condition against the Registry's records; returns the vault and whose bonds answer for it.
-    function _violation(ViolationJournal memory j) internal view returns (bytes32 vaultId, uint8 signerBitmap) {
+    /// @dev The kind's condition against the Registry's records; returns the vault, whose bonds answer for it and, for F3
+    ///      and F4, the claim the case is about and what its claimant lost.
+    function _violation(ViolationJournal memory j) internal view returns (Found memory) {
         IZecuredSpendCommits r = IZecuredSpendCommits(registry);
         if (j.kind == ViolationKind.Uncommitted) {
             // X spends lineage note `noteTag`, and no commitment of X names it as its input.
             if (j.value == 0 && j.destCommitment == bytes32(0) && j.outputIndex == 0 && _uncommitted(j.ref, j.noteTag))
             {
-                return (r.lineageOf(j.noteTag).vaultId, ALL_SIGNERS);
+                return Found(r.lineageOf(j.noteTag).vaultId, ALL_SIGNERS, bytes32(0), 0);
             }
         } else if (j.kind == ViolationKind.WithheldChange) {
             // X is committed with change (`noteTag`, `value`), and none of X's outputs is that note.
@@ -336,27 +441,32 @@ contract ZecuredSlasher is IZecuredSlasher {
             if (
                 j.destCommitment == bytes32(0) && j.outputIndex == 0 && s.vaultId != bytes32(0) && s.changeValue != 0
                     && s.changeTag == j.noteTag && s.changeValue == j.value
-            ) return (s.vaultId, s.signerBitmap);
+            ) return Found(s.vaultId, s.signerBitmap, bytes32(0), 0);
         } else if (j.kind == ViolationKind.Misdirected) {
-            // X is committed to pay the claim behind `ref`, whose recipient is `destCommitment`, at least `expected` in its
-            // output `outputIndex`; that output pays the recipient `value` (E1).
+            // X is committed to pay the claim behind `ref` at least `expected` in its output `outputIndex`, to the
+            // recipient `destCommitment` its payout recorded for that claim (W-5: the record, not the claim's current
+            // commitment, which a liveness payment clears); that output pays the recipient `value` (E1).
             ClaimPayment memory p = r.claimPayment(j.ref);
             if (
                 j.noteTag == bytes32(0) && p.claimId != bytes32(0) && j.outputIndex == p.outputIndex
-                    && j.value < p.expected
+                    && j.value < p.expected && r.claimRefOf(p.payoutRef, j.destCommitment) == j.ref
             ) {
-                (bytes32 claimVault,,, bytes32 commitment,) = IZecuredRegistry(registry).claim(p.claimId);
-                if (commitment == j.destCommitment) return (claimVault, r.spendRecord(p.payoutRef).signerBitmap);
+                (bytes32 claimVault,,,,) = IZecuredRegistry(registry).claim(p.claimId);
+                return Found(claimVault, r.spendRecord(p.payoutRef).signerBitmap, p.claimId, p.expected - j.value);
             }
         } else if (j.kind == ViolationKind.WrongClaimRef) {
             // X is committed (`ref`) with a claim of recipient `destCommitment` under a reference other than the one its
-            // claimant computes, keccak256(salt || txid_X) = `noteTag`, so the claimant can never find X (RT-1).
+            // claimant computes, keccak256(salt || txid_X) = `noteTag`, so the claimant can never find X (RT-1). W-1:
+            // the claim so hidden is compensated in full.
             SpendRecord memory s = r.spendRecord(j.ref);
             bytes32 committed = r.claimRefOf(j.ref, j.destCommitment);
             if (
                 j.value == 0 && j.outputIndex == 0 && j.noteTag != bytes32(0) && s.vaultId != bytes32(0)
                     && committed != bytes32(0) && committed != j.noteTag
-            ) return (s.vaultId, s.signerBitmap);
+            ) {
+                ClaimPayment memory p = r.claimPayment(committed);
+                return Found(s.vaultId, s.signerBitmap, p.claimId, p.expected);
+            }
         } else {
             revert UnknownKind();
         }

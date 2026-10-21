@@ -1750,7 +1750,7 @@ contract ZecuredHandler is Test {
             && r.seized + floor <= outstandingBefore && !frozen;
         uint64 claimsBefore = registry.claimCount(vaultId);
         vm.prank(liquidator);
-        try adapter.preLiquidate(account, repaidShares, keccak256("zecured.inv.preLiquidator")) returns (
+        try adapter.preLiquidate(account, repaidShares, keccak256("zecured.inv.preLiquidator"), 0) returns (
             uint256, uint64 seized
         ) {
             if (!allowed) _flag("a pre-liquidation outside the terms, the floors or a freeze went through");
@@ -1803,7 +1803,7 @@ contract ZecuredHandler is Test {
         uint256 shares = bound(seed, 1, morpho.position(marketId, account).borrowShares);
         _fund(stranger, address(adapter), 100 * 1e6);
         vm.prank(stranger);
-        try adapter.preLiquidate(account, shares, keccak256("zecured.inv.x")) {
+        try adapter.preLiquidate(account, shares, keccak256("zecured.inv.x"), 0) {
             attackSucceeded = true;
         } catch {}
         calls["attack: pre-liquidation"]++;

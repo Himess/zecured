@@ -165,8 +165,9 @@ contract RegistryV3HooksTest is ZecuredFixture {
         registry.markBondPaid(unknown);
     }
 
-    /// R-6: the bonds of all five signers paid the claimant, so all five name where the claim's ZEC reimburses them.
-    function test_bondPaidClaim_isReimbursedThroughAllFiveSigners() public {
+    /// W-6: three signers name where the claim's ZEC reimburses the bonds (R-6's five let one missing signer freeze the
+    /// claim's input for good); two never do (I6).
+    function test_bondPaidClaim_isReimbursedThroughThreeSigners() public {
         (bytes32 vaultId, bytes32 releaseId) = _released(VAULT_001);
         vm.prank(address(gates));
         registry.markBondPaid(releaseId);
@@ -180,17 +181,11 @@ contract RegistryV3HooksTest is ZecuredFixture {
         bytes32 dest = keccak256("zecured.hooks.reimburse");
         uint64 deadline = uint64(block.timestamp + 1 hours);
         bytes32 digest = registry.hashReimburseDestination(releaseId, dest, deadline);
-        // Three signers, or four, are not enough any more (R-6: they could point the bonds' money at themselves).
-        bytes[] memory three = _threeSigs(digest);
-        vm.expectRevert(abi.encodeWithSelector(IZecuredSignerErrors.InsufficientSignatures.selector, 3));
-        registry.setReimburseDestination(releaseId, dest, deadline, three);
-        uint256[] memory four = new uint256[](4);
-        (four[0], four[1], four[2], four[3]) = (0, 1, 3, 4);
-        bytes[] memory fourSigs = _signerSigs(digest, four);
-        vm.expectRevert(abi.encodeWithSelector(IZecuredSignerErrors.InsufficientSignatures.selector, 4));
-        registry.setReimburseDestination(releaseId, dest, deadline, fourSigs);
+        bytes[] memory two = _signerSigs(digest, _idx(1, 3));
+        vm.expectRevert(abi.encodeWithSelector(IZecuredSignerErrors.InsufficientSignatures.selector, 2));
+        registry.setReimburseDestination(releaseId, dest, deadline, two);
 
-        bytes[] memory sigs = _fiveSigs(digest);
+        bytes[] memory sigs = _threeSigs(digest);
         vm.expectEmit(address(registry));
         emit IZecuredRegistry.ReimburseDestinationSet(vaultId, releaseId, dest);
         vm.prank(stranger); // anyone relays

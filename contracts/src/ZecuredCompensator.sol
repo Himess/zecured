@@ -91,10 +91,10 @@ contract ZecuredCompensator is IZecuredCompensator, ReentrancyGuardTransient {
     /// @notice Most victims one `finalizeIncident` call prices: about 8,500 gas each from cold storage, so a full batch
     ///         takes about 2.2 million gas, far below EIP-7825's 2^24 per transaction.
     uint256 public constant FINALIZE_BATCH = 256;
-    /// @notice Gas an F3 case's execution must leave `onCase` (R-7): the registration of the shortfall reads the claim
-    ///         under a `try`, and the claim is then closed in the Registry, also under a `try` (about 175,000 gas in
-    ///         all from cold storage); an executor who starved them could leave the claimant without its shortfall, or
-    ///         the claim open to the bonds as well, so a starved execution reverts instead.
+    /// @notice Gas an F3 or F4 case's execution must leave `onCase` (R-7, W-1): the registration of the shortfall reads
+    ///         the claim under a `try`, and the claim is then closed in the Registry, also under a `try` (about 175,000
+    ///         gas in all from cold storage); an executor who starved them could leave the claimant without its
+    ///         shortfall, or the claim open to the bonds as well, so a starved execution reverts instead.
     uint256 public constant F3_GAS = 300_000;
 
     /// @inheritdoc IZecuredCompensator
@@ -215,10 +215,14 @@ contract ZecuredCompensator is IZecuredCompensator, ReentrancyGuardTransient {
 
     /// @inheritdoc IZecuredCompensator
     /// @dev Called inside `executeSlash`, so it never reverts on what it is told: F1 and F2 register the vault in the
-    ///      current incident (once: a vault already registered, in any incident, is left as it is), F3 registers the
+    ///      current incident (once: a vault already registered, in any incident, is left as it is); F3 registers the
     ///      claim's shortfall in the claim's layer (nothing for a Fee, Retired or bond-paid claim, or one without a
     ///      claimant) and closes the claim in the Registry (R-7: its payout landed, short; the shortfall is owed here
-    ///      and nowhere else), F4 registers nothing.
+    ///      and nowhere else); F4 does the same for the claim its commitment hid, at the claim's whole `expected`
+    ///      (W-1: hiding the payout is the violation; the part it may have paid the right recipient cannot be told
+    ///      without the claimant's viewing key), also when a proof made the claim final first (the colluders can always
+    ///      prove before the case executes): `_registerShortfall` takes any claim that exists, and closing a final
+    ///      claim does nothing.
     function onCase(bytes32 caseId, ViolationKind kind, bytes32 vaultId, bytes32 claimId, uint64 shortfallZat)
         external
         nonReentrant
@@ -233,7 +237,7 @@ contract ZecuredCompensator is IZecuredCompensator, ReentrancyGuardTransient {
             _victimAt[id][index] = vaultId;
             inc.victims = index + 1;
             emit VictimRegistered(id, vaultId, caseId);
-        } else if (kind == ViolationKind.Misdirected) {
+        } else if (kind == ViolationKind.Misdirected || kind == ViolationKind.WrongClaimRef) {
             if (gasleft() < F3_GAS) revert InsufficientGasForCase();
             _registerShortfall(claimId, shortfallZat);
             try IZecuredPayouts(registry).closeMisdirectedClaim(claimId) {} catch {}
@@ -294,6 +298,9 @@ contract ZecuredCompensator is IZecuredCompensator, ReentrancyGuardTransient {
         if (unproven != 0) revert ConfirmationsUnsettled(vaultId, unproven);
 
         (uint256 debt, bool authorized) = _snapshot(d.account);
+        // W-16: a vault no longer active (retired at its compromise, R-19, or never activated) has no collateral left to
+        // withdraw: its account's authorization does not matter, and revoking it must not cost the owner its equity.
+        authorized = authorized || d.status != VaultStatus.Active;
         uint64 outstanding = d.outstanding + _burnedBeforeTally[vaultId];
         v.tallied = true;
         v.authorized = authorized;

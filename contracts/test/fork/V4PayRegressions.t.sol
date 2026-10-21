@@ -9,7 +9,6 @@ import {IZecuredDisputes, IZecuredDisputesEvents} from "../../src/interfaces/v3/
 import {IZecuredPayoutsEvents} from "../../src/interfaces/v3/IZecuredPayouts.sol";
 import {IZecuredRefunds} from "../../src/interfaces/v3/IZecuredRefunds.sol";
 import {IZecuredSlasher, ViolationKind} from "../../src/interfaces/v3/IZecuredSlasher.sol";
-import {IZecuredSignerErrors} from "../../src/interfaces/v3/IZecuredSignerErrors.sol";
 import {IZecuredSpendCommitsEvents} from "../../src/interfaces/v3/IZecuredSpendCommits.sol";
 import {IZecuredCompensator} from "../../src/interfaces/v3/IZecuredCompensator.sol";
 import {ISignerBond} from "../../src/interfaces/v3/ISignerBond.sol";
@@ -64,7 +63,8 @@ abstract contract V4PayBase is DisputesBase {
 }
 
 /// @notice The v4 review's findings on the payout, dispute and compensation paths, each reproduced as it was found
-///         (every test here failed on the v3 code) and now refused: R-1, R-2, R-3, R-6, R-7, R-16, R-19, R-20, R-21;
+///         (every test here failed on the v3 code) and now refused: R-1, R-2, R-3, R-7, R-16, R-19, R-20, R-21 (R-6's
+///         five-signer reimbursement was reverted by W-6: test/fork/V41Regressions.t.sol);
 ///         and how the compensation settles a dormant refund (R-11, which v3 did not have).
 ///         Real Registry, spend logic, slasher, bond and compensator, MOCK verifier and relay, real Morpho Blue.
 contract V4PayRegressionsTest is V4PayBase {
@@ -271,7 +271,7 @@ contract V4PayRegressionsTest is V4PayBase {
         _proveTheft(c.changeTag); // same block
         assertEq(slasher.frozenSince(vaultId), _paidAt(claimId));
         vm.warp(block.timestamp + WINDOW);
-        slasher.executeSlash(slasher.caseIdOf(ViolationKind.Uncommitted, keccak256("v4.theft"), c.changeTag));
+        slasher.executeSlash(slasher.caseIdOf(ViolationKind.Uncommitted, keccak256("v4.theft"), c.changeTag, vaultId));
         vm.warp(block.timestamp + INCLUSION_WINDOW);
         compensator.tallyClaim(claimId);
         assertEq(compensator.entitlement(claimId).zat, 1_000_000, "counted unpaid");
@@ -336,28 +336,6 @@ contract V4PayRegressionsTest is V4PayBase {
         vm.prank(account);
         vm.expectRevert(abi.encodeWithSelector(ISignerBond.NotLivenessEligible.selector, claimId));
         bond.slashLiveness(claimId);
-    }
-
-    // ================================================================== R-6: the Reimburse destination
-
-    /// Three colluders pointed a bond-paid claim's reimbursement at themselves although all five bonds paid it.
-    function test_R6_reimburseDestinationNeedsAllFive() public {
-        bytes32 vaultId = _attest(account, VAULT_001);
-        _authorizeBoth(account);
-        vm.prank(account);
-        bytes32 claimId = registry.requestRelease(vaultId, RELEASE_COMMITMENT);
-        vm.prank(address(bond));
-        registry.markBondPaid(claimId);
-        bytes32 dest = keccak256("v4.reimburse");
-        uint64 deadline = uint64(block.timestamp + 1 hours);
-        bytes32 digest = registry.hashReimburseDestination(claimId, dest, deadline);
-        bytes[] memory three = _threeSigs(digest);
-        vm.expectRevert(abi.encodeWithSelector(IZecuredSignerErrors.InsufficientSignatures.selector, 3));
-        registry.setReimburseDestination(claimId, dest, deadline, three);
-        registry.setReimburseDestination(claimId, dest, deadline, _fiveSigs(digest));
-        (,,, bytes32 commitment,) = registry.claim(claimId);
-        assertEq(commitment, dest);
-        vaultId;
     }
 
     // ================================================================== R-7: F3 and liveness
@@ -814,11 +792,13 @@ contract V4PayRegressionsTest is V4PayBase {
         vm.expectRevert(abi.encodeWithSelector(IZecuredCompensator.RefundsReserved.selector, vaultId, 2));
         compensator.tallyVault(vaultId);
 
-        // A reorganisation takes one proof's anchor off the best chain: that refund is dropped, its note freed.
+        // A reorganisation takes one proof's anchor off the best chain: that refund is dropped. Its tag is free, but a
+        // compromised vault takes no new proof (`reserveRefund` refuses it): a deposit a reorganization erases after the
+        // compromise is lost (DECISIONS, W-3).
         MockHeaderRelay(address(headerRelay)).setBlock(droppedAnchor, false, 0);
         intake.dropPendingRefund(dropped);
         assertEq(refunds.reservedRefundCount(vaultId), 1);
-        assertFalse(registry.depositTagUsed(dropped), "its note may be proven again");
+        assertFalse(registry.depositTagUsed(dropped), "its tag is free again");
         vm.expectRevert(abi.encodeWithSelector(IZecuredCompensator.RefundsReserved.selector, vaultId, 1));
         compensator.tallyVault(vaultId);
 

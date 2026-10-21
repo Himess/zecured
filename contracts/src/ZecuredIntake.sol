@@ -39,6 +39,11 @@ import {ZecuredEIP712} from "./libraries/ZecuredEIP712.sol";
 ///      `pendingRefundDelay` after it was ready, whatever gate holds it (R-13); both kinds of pending proof remember
 ///      their deposit version, which must still be active when they finalize or convert, and anyone may drop them once
 ///      it is not (R-14); nothing pending is dropped while a violation case is open on its vault (R-17).
+///      v4.1: a pending activation mints only with a working version (W-13: active and its verifier not stopped), and
+///      never while an F1 case about its note is open or once one was executed (W-2: the note may be another vault's
+///      false change record's theft, and a stolen note backs no zZEC); such an item, or any item of a compromised
+///      vault (W-3), is dropped only once its proof's anchor left the best chain, and a compromised vault's items are
+///      converted or opened as refunds without their version (the claims are the compensator's).
 ///      The Registry trusts this contract for its deposit hooks and re-checks its own invariants in each (I4, I5,
 ///      unique lineage tags). No owner, no upgrade path. Signer-attested minting (Tier 1) does not exist here: tests
 ///      use a harness that calls the hooks directly.
@@ -54,6 +59,8 @@ contract ZecuredIntake is IZecuredIntake, EIP712 {
     uint256 public constant MAX_TIERS = 4;
     uint8 private constant MODE_ACTIVATE = 0;
     uint8 private constant MODE_REFUND = 1;
+    /// @notice W-18: the longest pause the constructor accepts (every deployment uses exactly this).
+    uint64 public constant MAX_PAUSE = 30 days;
 
     IZecuredRegistry internal immutable _registry;
     /// @inheritdoc IZecuredIntake
@@ -121,7 +128,8 @@ contract ZecuredIntake is IZecuredIntake, EIP712 {
         // R-18: a pending proof always waits for the relay and for time (K3), and a converted one for its delay.
         if (
             c.finalizeDepth == 0 || c.finalizeDelay == 0 || c.pendingRefundDelay == 0 || c.maxPause == 0
-                || c.minRefundZat <= registry_.DUST_LIMIT() || c.workTiers.length == 0 || c.workTiers.length > MAX_TIERS
+                || c.maxPause > MAX_PAUSE || c.coverageBps > BPS || c.minRefundZat <= registry_.DUST_LIMIT()
+                || c.workTiers.length == 0 || c.workTiers.length > MAX_TIERS
         ) revert InvalidConfig();
         // The coverage cap needs bonds and a price; without bonds (tests) it is off.
         if (
@@ -208,10 +216,13 @@ contract ZecuredIntake is IZecuredIntake, EIP712 {
         if (!_isReady(p.readyHeight, p.readyTime)) revert ActivationNotReady(vaultId, p.readyHeight, p.readyTime);
         // Still on the best chain, and confirmation work only grows while it stays there.
         _checkAnchor(p.anchor, minConfirmationWorkFor(p.amount));
-        // R-14: a version removed meanwhile (a broken guest) proves nothing any more.
-        _checkVersionActive(p.versionId);
+        // R-14: a version removed meanwhile (a broken guest) proves nothing any more; W-13: nor one whose verifier the
+        // router stopped.
+        if (!IZecuredVersions(versions).isWorking(p.versionId)) revert VersionNotWorking(p.versionId);
         // E2: not while a violation case about this vault (its deposit spent during the wait) is open.
         if (_caseOpen(vaultId)) revert ViolationCaseOpen(vaultId);
+        // W-2: nor while an F1 case about its note is open on any vault, or once one was executed.
+        if (_noteContested(p.depositTag)) revert NoteSpendCase(p.depositTag);
         if (_halted()) revert MintingHalted();
         if (signerBond != address(0) && !ISignerBond(signerBond).fullyBonded()) revert SignersNotBonded();
         if (mintingPaused()) revert MintingIsPaused();
@@ -227,7 +238,9 @@ contract ZecuredIntake is IZecuredIntake, EIP712 {
         // R-17: a case may be about this very note (spent while pending): dropping it would make the note no lineage
         // note and dismiss the case.
         if (_caseOpen(vaultId)) revert ViolationCaseOpen(vaultId);
-        if (relay.isInBestChain(p.anchor) && _versionActive(p.versionId)) revert AnchorStillOnBestChain(vaultId);
+        if (relay.isInBestChain(p.anchor) && (_versionActive(p.versionId) || _heldToItsProof(vaultId, p.depositTag))) {
+            revert AnchorStillOnBestChain(vaultId);
+        }
         delete _pending[vaultId];
         pendingTotal -= p.amount;
         // Nothing was minted: the note may be proven again against the chain that won, or with a working version.
@@ -242,7 +255,8 @@ contract ZecuredIntake is IZecuredIntake, EIP712 {
         // R-12: K3 holds in both branches: a deposit a reorganisation may still remove is dropped, not refunded.
         if (!_isReady(p.readyHeight, p.readyTime)) revert ActivationNotReady(vaultId, p.readyHeight, p.readyTime);
         _checkAnchor(p.anchor, minConfirmationWorkFor(p.amount));
-        _checkVersionActive(p.versionId);
+        // W-3: a compromised vault's deposit is refunded without its version: the claim is the compensator's.
+        if (!_compromised(vaultId)) _checkVersionActive(p.versionId);
         if (!_halted()) {
             // R-13: only the vault's account, once the activation has waited `pendingRefundDelay` past its ready time,
             // whatever holds it (a pause, a missing bond, an open case): no gate can keep a deposit for good.
@@ -261,7 +275,8 @@ contract ZecuredIntake is IZecuredIntake, EIP712 {
         if (p.account == address(0)) revert NoPendingRefund(depositTag);
         if (!_isReady(p.readyHeight, p.readyTime)) revert RefundNotReady(depositTag, p.readyHeight, p.readyTime);
         _checkAnchor(p.anchor, minConfirmationWorkFor(p.amount));
-        _checkVersionActive(p.versionId);
+        // W-3: as `refundPending`.
+        if (!_compromised(p.vaultId)) _checkVersionActive(p.versionId);
         delete _pendingRefunds[depositTag];
         pendingRefundTotal -= p.amount;
         // The Registry refuses a pending vault (R-8: the refund waits for it) and a compromised one.
@@ -274,7 +289,9 @@ contract ZecuredIntake is IZecuredIntake, EIP712 {
         PendingRefund memory p = _pendingRefunds[depositTag];
         if (p.account == address(0)) revert NoPendingRefund(depositTag);
         if (_caseOpen(p.vaultId)) revert ViolationCaseOpen(p.vaultId); // as R-17
-        if (relay.isInBestChain(p.anchor) && _versionActive(p.versionId)) revert RefundStillValid(depositTag);
+        if (relay.isInBestChain(p.anchor) && (_versionActive(p.versionId) || _heldToItsProof(p.vaultId, depositTag))) {
+            revert RefundStillValid(depositTag);
+        }
         delete _pendingRefunds[depositTag];
         pendingRefundTotal -= p.amount;
         IZecuredRefunds(address(_registry)).releaseRefund(p.vaultId, depositTag);
@@ -463,6 +480,26 @@ contract ZecuredIntake is IZecuredIntake, EIP712 {
     /// @dev An open violation case about the vault (E2, R-17).
     function _caseOpen(bytes32 vaultId) internal view returns (bool) {
         return slasher != address(0) && IZecuredSlasher(slasher).openCasesOf(vaultId) != 0;
+    }
+
+    /// @dev W-2: an F1 case about the note `depositTag` is open (on whichever vault the tag belonged to then), or one
+    ///      was executed.
+    function _noteContested(bytes32 depositTag) internal view returns (bool) {
+        if (slasher == address(0)) return false;
+        IZecuredSlasher s = IZecuredSlasher(slasher);
+        return s.openF1CasesOf(depositTag) != 0 || s.noteSpendProven(depositTag);
+    }
+
+    /// @dev W-3: the slasher compromised the vault (an executed F1 or F2 case).
+    function _compromised(bytes32 vaultId) internal view returns (bool) {
+        return slasher != address(0) && IZecuredSlasher(slasher).isCompromised(vaultId);
+    }
+
+    /// @dev W-2, W-3: a pending item that only its proof's anchor leaving the best chain drops (not a removed version):
+    ///      one whose note an F1 case is about, or one of a compromised vault. Dropping either would free the note and
+    ///      leave the theft without its victim.
+    function _heldToItsProof(bytes32 vaultId, bytes32 depositTag) internal view returns (bool) {
+        return _noteContested(depositTag) || _compromised(vaultId);
     }
 
     /// @dev K3: reserves the vault, its tag and its account until `finalizeActivation`, `dropPendingActivation` or

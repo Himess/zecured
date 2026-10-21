@@ -448,8 +448,11 @@ contract BondHandler is Test {
             totalWithdrawn += unbonding;
             calls["withdraw"]++;
         } catch {
-            if (ready) _flag("a ready unbonding could not be withdrawn");
-            calls["withdraw (not ready)"]++;
+            // W-14: a full exit (no bond left) waits while a vault is open or a refund is pending on the Intake.
+            bool fullExitWaits =
+                bond.bondOf(i) == 0 && (registry.openVaultCount() != 0 || intake.pendingRefundTotal() != 0);
+            if (ready && !fullExitWaits) _flag("a ready unbonding could not be withdrawn");
+            calls[fullExitWaits ? "withdraw (full exit waits)" : "withdraw (not ready)"]++;
         }
     }
 

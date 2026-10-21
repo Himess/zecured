@@ -164,7 +164,7 @@ contract Tier3SlashingTest is ZecuredFixture {
 
     function test_F1_slashesAllFiveAfterTheWindow_andHaltsMinting() public {
         bytes memory journal = _journal(ViolationKind.Uncommitted, THEFT_REF, depositTag, 0, bytes32(0));
-        bytes32 caseId = slasher.caseIdOf(ViolationKind.Uncommitted, THEFT_REF, depositTag);
+        bytes32 caseId = slasher.caseIdOf(ViolationKind.Uncommitted, THEFT_REF, depositTag, vaultId);
         vm.expectEmit(address(slasher));
         emit IZecuredSlasher.ViolationProven(
             caseId, ViolationKind.Uncommitted, vaultId, 0x1f, watcher, uint64(block.timestamp) + WINDOW
@@ -515,6 +515,13 @@ contract Tier3SlashingTest is ZecuredFixture {
         vm.expectRevert(abi.encodeWithSelector(ISignerBond.UnbondingNotReady.selector, readyAt));
         bond.withdrawUnbonded(signerSet[2]);
         vm.warp(readyAt);
+        // W-14: the pending vault arrived during the unbonding: the full exit waits for it.
+        vm.expectRevert(abi.encodeWithSelector(ISignerBond.FullExitLocked.selector, 1, 0, 0));
+        bond.withdrawUnbonded(signerSet[2]);
+        vm.stopPrank();
+        relay.setBlock(keccak256("zecured.tier3.nextAnchor"), false, 0); // its proof fell off the best chain
+        intake.dropPendingActivation(_vaultIdFor(next));
+        vm.startPrank(signerSet[2]);
         bond.withdrawUnbonded(signerSet[2]);
         assertEq(usdc.balanceOf(signerSet[2]), MIN_BOND);
         vm.expectRevert(abi.encodeWithSelector(ISignerBond.NothingUnbonding.selector, uint8(2)));

@@ -363,14 +363,26 @@ contract ZecuredRegistryTest is ZecuredFixture {
         vm.expectRevert(IZecuredRegistry.InvalidFeeConfig.selector);
         new ZecuredRegistry(c);
 
-        // The bounds themselves are fine.
+        // The bounds themselves are fine (W-18: the abandon period is at least the spend logic's dormancy).
         c = _nextRegistry();
-        (c.feeBps, c.minFeeZat, c.feeCommitment, c.refundAbandonPeriod) = (1_000, 10_001, treasury, 1);
+        (c.feeBps, c.minFeeZat, c.feeCommitment, c.refundAbandonPeriod) = (1_000, 10_001, treasury, REFUND_DORMANCY);
         ZecuredRegistry r = new ZecuredRegistry(c);
         assertEq(r.feeBps(), 1_000);
         assertEq(r.minFeeZat(), 10_001);
         assertEq(r.feeCommitment(), treasury);
-        assertEq(r.refundAbandonPeriod(), 1);
+        assertEq(r.refundAbandonPeriod(), REFUND_DORMANCY);
+    }
+
+    /// W-18: a refund without a destination goes dormant (R-11) before its account may abandon it; a Registry whose
+    /// abandon period was shorter than its spend logic's dormancy was accepted.
+    function test_W18_aRefundGoesDormantBeforeItCanBeAbandoned() public {
+        RegistryConfig memory c = _nextRegistry();
+        c.refundAbandonPeriod = REFUND_DORMANCY - 1;
+        vm.expectRevert(IZecuredRegistry.InvalidFeeConfig.selector);
+        new ZecuredRegistry(c);
+        c = _nextRegistry();
+        c.refundAbandonPeriod = REFUND_DORMANCY;
+        assertEq(new ZecuredRegistry(c).refundAbandonPeriod(), REFUND_DORMANCY);
     }
 
     function test_constructor_revertsOnInvalidSignerSet() public {
