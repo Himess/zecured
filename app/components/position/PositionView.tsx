@@ -148,7 +148,7 @@ export function PositionView() {
         <h2 id="summary" className="sr-only">
           Summary
         </h2>
-        <dl className="grid grid-cols-2 gap-3 md:grid-cols-3">
+        <dl className="grid grid-cols-2 gap-x-6 gap-y-5 md:grid-cols-3">
           <Stat
             label="Collateral"
             value={collateral !== undefined ? formatTaz(collateral) : "—"}
@@ -213,7 +213,7 @@ export function PositionView() {
               ["USDC in the account", p ? `${formatUsdc(p.usdcBalance)} USDC` : "—"],
               [
                 "Morpho authorizations",
-                p ? `Registry ${p.registryAuthorized ? "✓" : "✗"} · Settlement Adapter ${p.adapterAuthorized ? "✓" : "✗"}` : "—",
+                p ? `Registry ${p.registryAuthorized ? "✓" : "✗"}, Settlement Adapter ${p.adapterAuthorized ? "✓" : "✗"}` : "—",
               ],
             ]}
           />

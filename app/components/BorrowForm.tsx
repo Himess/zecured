@@ -134,7 +134,7 @@ export function BorrowForm({
             onChange={(e) => setAmount(e.target.value)}
             placeholder="0.00"
             aria-invalid={amountError ? true : undefined}
-            className="w-full rounded-lg border border-border bg-bg px-3 py-2 tabular-nums text-text focus:border-accent"
+            className="w-full rounded-lg border border-border bg-bg px-3 py-2 tabular-nums text-text focus:border-muted"
           />
           <Button variant="secondary" onClick={() => setAmount(formatUsdc(available))} disabled={available === 0n}>
             Max
@@ -164,7 +164,7 @@ export function BorrowForm({
               placeholder="0x…"
               spellCheck={false}
               autoComplete="off"
-              className="w-full rounded-lg border border-border bg-bg px-3 py-2 font-mono text-sm text-text focus:border-accent"
+              className="w-full rounded-lg border border-border bg-bg px-3 py-2 font-mono text-sm text-text focus:border-muted"
             />
             {receiverError ? <p className="text-sm text-danger">{receiverError}</p> : null}
             <Notice tone="warn" title="Think before you send">
@@ -186,7 +186,7 @@ export function BorrowForm({
       ) : null}
 
       {canProtect ? (
-        <div className="space-y-3 rounded-lg border border-border p-3">
+        <div className="space-y-3 rounded-2xl bg-bg p-4">
           <label htmlFor={protectId} className="flex items-start gap-3 text-sm">
             <input id={protectId} type="checkbox" checked={protect} onChange={(e) => setProtect(e.target.checked)} className="mt-1" />
             <span>

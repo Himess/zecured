@@ -43,8 +43,8 @@ export function CopyButton({
         }
       }}
       className={cx(
-        "inline-flex items-center border border-border text-muted hover:border-faint hover:text-text",
-        size === "md" ? "min-h-11 rounded-lg bg-surface-2 px-4 text-sm" : "min-h-9 rounded-md px-3 text-xs",
+        "inline-flex items-center rounded-full border border-line font-semibold text-soft transition-colors hover:bg-bg hover:text-text",
+        size === "md" ? "min-h-11 px-5 text-sm" : "min-h-9 px-3.5 text-xs",
         className,
       )}
     >
@@ -126,11 +126,12 @@ const NAV = [
   { href: "/world", label: "What the world sees" },
 ] as const;
 
+/** The design's navigation pills: the current page on a surface with a line ring. */
 export function Nav() {
   const pathname = usePathname();
   return (
     <nav aria-label="Main">
-      <ul className="flex flex-wrap items-center gap-1 text-sm">
+      <ul className="flex flex-wrap items-center gap-1">
         {NAV.map((n) => {
           const active = pathname === n.href || pathname.startsWith(`${n.href}/`);
           return (
@@ -139,8 +140,10 @@ export function Nav() {
                 href={n.href}
                 aria-current={active ? "page" : undefined}
                 className={cx(
-                  "inline-flex min-h-9 items-center rounded-md px-3 no-underline",
-                  active ? "bg-surface-2 text-text" : "text-muted hover:bg-surface-2 hover:text-text",
+                  "inline-flex min-h-10 items-center rounded-full px-2.5 text-[14.5px] font-medium no-underline transition-colors min-[561px]:px-3.5",
+                  active
+                    ? "bg-surface text-text shadow-[inset_0_0_0_1px_var(--color-line)]"
+                    : "text-muted hover:bg-surface hover:text-text",
                 )}
               >
                 {n.label}
@@ -170,7 +173,7 @@ export function LoanTokenName() {
 export function RealAndMockList() {
   const { real, mock } = realAndMock();
   return (
-    <ul className="list-disc space-y-2 pl-5 text-sm text-muted">
+    <ul className="list-disc space-y-2 pl-5 text-sm text-soft">
       {real.map((r) => (
         <li key={r}>
           <span className="text-ok">Real: </span>

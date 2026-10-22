@@ -6,6 +6,7 @@ import type { Hex } from "viem";
 import { CopyButton } from "@/components/client";
 import { DestinationStep } from "@/components/DestinationForm";
 import { PayoutNotice } from "@/components/PayoutNotice";
+import { ProofSeal, StepMark, type MarkState } from "@/components/seam";
 import { TxResult } from "@/components/TxResult";
 import { Badge, Button, Card, cx, KeyValue, Mono, Notice } from "@/components/ui";
 import { loanAccount, type SentUserOp } from "@/lib/account";
@@ -183,7 +184,7 @@ export function PendingRefundsCard({ ledger }: { ledger: VaultLedger }) {
       </p>
       <ul className="space-y-3">
         {list.map((r) => (
-          <li key={r.depositTag} className="rounded-lg border border-border p-4">
+          <li key={r.depositTag} className="rounded-2xl bg-bg p-4">
             <KeyValue
               rows={[
                 ["Deposit", formatTaz(r.amount)],
@@ -262,10 +263,11 @@ function RefundItem({
     return r;
   });
   return (
-    <li className="rounded-lg border border-border p-4">
+    <li className="rounded-2xl bg-bg p-4">
       <div className="mb-2 flex flex-wrap items-center justify-between gap-2">
         <span className="font-medium">
-          {formatTaz(claim.amount)} <span className="text-sm text-muted">· claim {short(claim.claimId, 10, 6)}</span>
+          {formatTaz(claim.amount)}
+          <span className="text-sm text-muted">, claim {short(claim.claimId, 10, 6)}</span>
         </span>
         <Badge tone={view.badge.tone}>{view.badge.text}</Badge>
       </div>
@@ -415,6 +417,7 @@ function ClaimRow({
           <Badge tone={view.badge.tone}>{view.badge.text}</Badge>
         </span>
       </div>
+      <PayoutTrack claim={claim} />
       {view.detail ? <p className="text-xs text-muted">{view.detail}</p> : null}
       <LivenessGuarantee ledger={ledger} claim={claim} loan={mine ? loan : null} onChanged={onChanged} />
       {mine && d.canDispute ? (
@@ -508,6 +511,49 @@ function ClaimRow({
       ) : null}
       {fromBonds.result ? <TxResult result={fromBonds.result} what="Claim paid from the bonds" /> : null}
     </li>
+  );
+}
+
+/** Payouts to a committed recipient: their way on Base is committed, then confirmed, then final. */
+const TRACKED_KINDS: ReadonlySet<LedgerClaim["kind"]> = new Set(["Release", "CloseUser", "CloseMarketMaker", "Liquidation", "Refund"]);
+
+/**
+ * A payout's record on Base in the seam's language: a light strip with square marks, and the π seal
+ * once it is final (its delivery proven, or its confirmation undisputed through the window: Base
+ * keeps no trace of which). Display only, from the fields `claimView` reads; none for a claim
+ * without a destination, one the bonds paid, or one disputed, written off or compensated.
+ */
+function PayoutTrack({ claim }: { claim: LedgerClaim }) {
+  if (!TRACKED_KINDS.has(claim.kind) || claim.bondPaid) return null;
+  if (claim.status !== "Pending" && claim.status !== "Paid") return null;
+  if (claim.status === "Pending" && /^0x0{64}$/i.test(claim.commitment)) return null;
+  const paid = claim.status === "Paid";
+  const committed = paid || claim.committed === true;
+  const final = paid && claim.paidAt === 0;
+  const steps: { label: string; state: MarkState; seal?: boolean }[] = [
+    { label: "Committed on Base", state: committed ? "done" : "now" },
+    { label: "Confirmed by the signers", state: paid ? "done" : committed ? "now" : "todo" },
+    { label: "Final on Base", state: final ? "done" : paid ? "now" : "todo", seal: final },
+  ];
+  return (
+    <ol
+      aria-label="Its record on Base"
+      className="paper flex w-fit max-w-full flex-wrap items-center gap-x-5 gap-y-2 rounded-[3px] px-3 py-2 text-xs"
+    >
+      {steps.map((s) => (
+        <li
+          key={s.label}
+          aria-current={s.state === "now" ? "step" : undefined}
+          className={cx("flex items-center gap-2", s.state === "now" ? "font-semibold text-ink" : "text-ink-muted")}
+        >
+          {s.seal ? <ProofSeal size="sm" /> : <StepMark chain="base" state={s.state} size="sm" />}
+          <span>
+            {s.label}
+            {s.state === "done" ? <span className="sr-only"> (done)</span> : null}
+          </span>
+        </li>
+      ))}
+    </ol>
   );
 }
 
@@ -667,7 +713,7 @@ function CompromisedCard({ ledger }: { ledger: VaultLedger }) {
                   data.incident === 0n
                     ? "Not registered yet"
                     : inc
-                      ? `#${data.incident} · ${inc.finalized ? "finalized" : `open until ${formatUtc(inc.closesAt)}`}`
+                      ? `#${data.incident}, ${inc.finalized ? "finalized" : `open until ${formatUtc(inc.closesAt)}`}`
                       : `#${data.incident}`,
                 ],
                 [
@@ -684,12 +730,11 @@ function CompromisedCard({ ledger }: { ledger: VaultLedger }) {
                 {data.entitlements.map((e) => (
                   <li key={e.claimId} className="flex flex-wrap items-center justify-between gap-2 py-2">
                     <span>
-                      Claim <Mono>{short(e.claimId, 10, 6)}</Mono> · {e.layer === 2 ? "third party" : "yours"} ·{" "}
-                      {formatTaz(e.zat)}
+                      Claim <Mono>{short(e.claimId, 10, 6)}</Mono> ({e.layer === 2 ? "third party" : "yours"}): {formatTaz(e.zat)}
                     </span>
                     <span className="tabular-nums">
                       {e.usdc === null ? "USDC amount fixed when the incident is finalized" : `${formatUsdc(e.usdc)} USDC`}
-                      {e.paid ? " · paid" : ""}
+                      {e.paid ? ", paid" : ""}
                     </span>
                   </li>
                 ))}

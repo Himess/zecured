@@ -209,7 +209,7 @@ export function BuyZec() {
                   }}
                   placeholder="25.00"
                   aria-invalid={inputError ? true : undefined}
-                  className="w-full max-w-xs rounded-lg border border-border bg-bg px-3 py-2 tabular-nums text-text focus:border-accent"
+                  className="w-full max-w-xs rounded-lg border border-border bg-bg px-3 py-2 tabular-nums text-text focus:border-muted"
                 />
                 <Button variant="secondary" onClick={() => usdc && void getQuote.run(usdc)} busy={getQuote.busy} disabled={!usdc || Boolean(inputError)}>
                   {quote ? "Refresh quote" : "Get a quote"}
@@ -231,7 +231,7 @@ export function BuyZec() {
                     setInvite(e.target.value);
                     setQuote(null);
                   }}
-                  className="w-full max-w-xs rounded-lg border border-border bg-bg px-3 py-2 font-mono text-text focus:border-accent"
+                  className="w-full max-w-xs rounded-lg border border-border bg-bg px-3 py-2 text-text focus:border-muted"
                 />
                 <p className="text-xs text-muted">The mainnet beta&apos;s maker quotes invitees only, and binds each quote to your wallet: connect it first.</p>
               </div>

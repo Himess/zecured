@@ -71,7 +71,7 @@ export function Exits({
             key={o.kind}
             className={cx(
               "flex cursor-pointer items-start gap-3 rounded-lg border p-3",
-              kind === o.kind ? "border-accent bg-surface-2" : "border-border hover:border-faint",
+              kind === o.kind ? "border-soft bg-surface-2" : "border-border hover:border-faint",
             )}
           >
             <input
@@ -450,7 +450,7 @@ export function SendUsdcForm({ loan, snapshot, onChanged }: { loan: StoredLoan; 
             placeholder="0x…"
             spellCheck={false}
             autoComplete="off"
-            className="w-full rounded-lg border border-border bg-bg px-3 py-2 font-mono text-sm text-text focus:border-accent"
+            className="w-full rounded-lg border border-border bg-bg px-3 py-2 font-mono text-sm text-text focus:border-muted"
           />
         </div>
         <div className="space-y-1">
@@ -463,7 +463,7 @@ export function SendUsdcForm({ loan, snapshot, onChanged }: { loan: StoredLoan; 
             inputMode="decimal"
             onChange={(e) => setAmount(e.target.value)}
             placeholder={formatUsdc(snapshot.usdcBalance)}
-            className="w-full rounded-lg border border-border bg-bg px-3 py-2 tabular-nums text-text focus:border-accent"
+            className="w-full rounded-lg border border-border bg-bg px-3 py-2 tabular-nums text-text focus:border-muted"
           />
         </div>
       </div>

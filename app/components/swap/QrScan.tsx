@@ -86,7 +86,7 @@ export function QrScan({ onAddress }: { onAddress: (address: string) => void }) 
                 setError("That picture could not be read.");
               }
             }}
-            className="text-xs file:mr-2 file:rounded-md file:border file:border-border file:bg-surface-2 file:px-2 file:py-1 file:text-text"
+            className="text-xs file:mr-2 file:rounded-full file:border file:border-line file:bg-transparent file:font-semibold file:px-2 file:py-1 file:text-text"
           />
         </label>
       </div>

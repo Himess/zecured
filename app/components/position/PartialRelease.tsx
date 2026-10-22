@@ -133,7 +133,7 @@ export function PartialRelease({
                 placeholder={formatZec(max)}
                 aria-invalid={amountError ? true : undefined}
                 aria-describedby={`${amountId}-hint`}
-                className="w-full rounded-lg border border-border bg-bg px-3 py-2 tabular-nums text-text focus:border-accent"
+                className="w-full rounded-lg border border-border bg-bg px-3 py-2 tabular-nums text-text focus:border-muted"
               />
               <Button variant="secondary" onClick={() => setInput(formatZec(max))}>
                 Max

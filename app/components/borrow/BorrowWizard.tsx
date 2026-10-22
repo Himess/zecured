@@ -5,6 +5,7 @@ import { useEffect, useId, useState } from "react";
 import { BorrowForm } from "@/components/BorrowForm";
 import { CopyButton, Qr, useMounted } from "@/components/client";
 import { KeyBackup } from "@/components/KeyBackup";
+import { ChainLabel, ProofSeal, StepMark, type Chain, type MarkState } from "@/components/seam";
 import { Badge, Button, buttonClass, Card, cx, KeyValue, Mono, Notice, Steps } from "@/components/ui";
 import { apiErrorCode, type Vault } from "@/lib/api";
 import { config } from "@/lib/config";
@@ -130,7 +131,7 @@ export function BorrowWizard() {
             {inProgress.map((l) => (
               <li key={l.id} className="flex flex-wrap items-center justify-between gap-3 py-3 text-sm">
                 <span>
-                  {formatTaz(BigInt(l.amount))} · account <Mono>{short(l.account)}</Mono>
+                  {formatTaz(BigInt(l.amount))}, account <Mono>{short(l.account)}</Mono>
                   {l.vaultId ? null : <span className="ml-2"><Badge tone="warn">vault not opened</Badge></span>}
                 </span>
                 <span className="flex gap-2">
@@ -218,8 +219,8 @@ function AmountStep({
             <label
               key={d.toString()}
               className={cx(
-                "flex cursor-pointer items-start gap-3 rounded-lg border p-4",
-                amount === d ? "border-accent bg-surface-2" : "border-border hover:border-faint",
+                "flex cursor-pointer items-start gap-3 rounded-2xl border p-4",
+                amount === d ? "border-soft bg-surface-2" : "border-border hover:border-faint",
               )}
             >
               <input type="radio" name={groupId} checked={amount === d} onChange={() => setAmount(d)} className="mt-1.5" />
@@ -290,7 +291,7 @@ function AmountStep({
             onChange={(e) => setInvite(e.target.value)}
             autoComplete="off"
             spellCheck={false}
-            className="w-full max-w-sm rounded-lg border border-border bg-bg px-3 py-2 font-mono text-sm text-text focus:border-accent"
+            className="w-full max-w-sm rounded-lg border border-border bg-bg px-3 py-2 text-sm text-text focus:border-muted"
           />
           <p className="text-xs text-muted">The mainnet beta opens vaults by invitation only; each code opens one vault.</p>
         </div>
@@ -387,9 +388,15 @@ function statusStep(vault: Vault | null, basePending: boolean, baseActive: boole
 
 /** What the address label says about the signers' signatures (C-4). */
 const VOUCHED: Record<VaultCheck, string> = {
-  pinned: "Vault address · Ironwood-only · signed by all 5 signers, checked in this browser",
-  backend: "Vault address · Ironwood-only · signed by the 5 signers the backend lists (development build: not pinned)",
-  unchecked: "Vault address · Ironwood-only · NOT checked against any signer set (development build)",
+  pinned: "Vault address: Ironwood-only, signed by all 5 signers and checked in this browser",
+  backend: "Vault address: Ironwood-only, signed by the 5 signers the backend lists (development build: not pinned)",
+  unchecked: "Vault address: Ironwood-only, NOT checked against any signer set (development build)",
+};
+
+/** The status rows' text, by chain and state: dim once done, bright while current. */
+const STATUS_TEXT: Record<Chain, Record<MarkState, string>> = {
+  zcash: { done: "text-muted", now: "text-text", todo: "text-faint" },
+  base: { done: "text-ink-muted", now: "text-ink", todo: "text-ink-muted" },
 };
 
 function DepositStep({ loan, vault, vaultError }: { loan: StoredLoan; vault: Vault | null; vaultError: string | null }) {
@@ -436,237 +443,271 @@ function DepositStep({ loan, vault, vaultError }: { loan: StoredLoan; vault: Vau
   });
   // P-8: typical durations measured on the deployment (the evidence file), when published.
   const durations = useTypicalDurations();
+  const statusId = useId();
+  // The seal pulses, and says so, while the deposit's proof is being made (not while the coverage cap holds it back).
+  const proving = statusIndex === 1 && cap === "none";
+  const statusRow = (s: (typeof STATUS_STEPS)[number], i: number, chain: Chain) => {
+    const state: MarkState = i < statusIndex ? "done" : i === statusIndex ? "now" : "todo";
+    return (
+      <li key={s.status} aria-current={state === "now" ? "step" : undefined} className="grid grid-cols-[22px_minmax(0,1fr)] items-start gap-3">
+        <StepMark chain={chain} state={state} className="mt-[3px]" />
+        <span className={cx("text-[15px] leading-[1.45]", STATUS_TEXT[chain][state])}>
+          {s.label}
+          {state === "done" ? <span className="sr-only"> (done)</span> : null}
+          {s.duration && durations.get(s.duration) !== undefined ? (
+            <span className={cx("mt-1 block text-[13px]", chain === "zcash" ? "text-muted" : "text-ink-muted")}>
+              Typically {formatPeriod(durations.get(s.duration)!)} (measured)
+            </span>
+          ) : null}
+        </span>
+      </li>
+    );
+  };
 
   return (
-    <div className="grid gap-6 lg:grid-cols-[minmax(0,1fr)_18rem] [&>*]:min-w-0">
+    <div className="grid items-start gap-6 min-[900px]:grid-cols-[minmax(0,1fr)_minmax(0,25rem)] [&>*]:min-w-0">
       <Card title={awaiting ? `Pay ${formatTaz(amount)} from Ironwood` : "Your deposit"}>
-        {check && !check.ok ? (
-          <Notice tone="danger" title="Do not pay this address">
-            {check.problems.map((p) => (
-              <p key={p}>{p}</p>
-            ))}
-          </Notice>
-        ) : null}
-        {awaiting && proof.state === "refused" ? (
-          <Notice tone="danger" title="Do not pay this vault" live>
-            <p>{proof.message}</p>
-            <p>The signers do not vouch for this address. Discard this loan and start a new one.</p>
-          </Notice>
-        ) : null}
-        {awaiting && proof.state === "legacy" ? (
-          <Notice tone="danger" title="This vault's address cannot be checked">
-            <p>
-              It was opened by an earlier version of Zecured, whose vault signatures this app does not check, so nothing
-              shows that the signers control it. Do not pay it: let it expire and start a new loan.
-            </p>
-          </Notice>
-        ) : null}
-        {awaiting && proof.state === "checking" ? (
-          <p className="text-sm text-muted" aria-live="polite">
-            Checking the signers&apos; signatures on this vault…
-          </p>
-        ) : null}
-        {!awaiting && (vault?.status === "deposit_seen" || vault?.depositSeen) && !l?.pending && cap === "none" ? (
-          <Notice tone="ok" title="Deposit received on Zcash" live>
-            <p>
-              A zero-knowledge proof that your deposit is in a Zcash block is being made and sent to Base; nothing is
-              minted on anyone&apos;s word. Do not pay again: a second payment does not back the loan (it can only come back
-              as a refund).
-            </p>
-          </Notice>
-        ) : null}
-        {cap !== "none" ? (
-          <Notice
-            tone="warn"
-            title={cap === "confirmed" ? "Your deposit waits for room under the coverage cap" : "The coverage cap is full right now"}
-            live
-          >
-            <p>
-              {cap === "confirmed" ? "Your deposit is on Zcash, but the" : "If you already paid this vault, your deposit is on Zcash, but the"}{" "}
-              signers&apos; bonds cover no more collateral right now, so its proof cannot land yet. Nothing is lost and the vault
-              stays yours: the proof is sent again once there is room, and zZEC is minted then.
-            </p>
-            {cap === "possible" ? <p>If you have not paid yet, wait until there is room before you pay.</p> : null}
-            {refundInstead.result ? (
+        <div className="space-y-4">
+          {check && !check.ok ? (
+            <Notice tone="danger" title="Do not pay this address">
+              {check.problems.map((p) => (
+                <p key={p}>{p}</p>
+              ))}
+            </Notice>
+          ) : null}
+          {awaiting && proof.state === "refused" ? (
+            <Notice tone="danger" title="Do not pay this vault" live>
+              <p>{proof.message}</p>
+              <p>The signers do not vouch for this address. Discard this loan and start a new one.</p>
+            </Notice>
+          ) : null}
+          {awaiting && proof.state === "legacy" ? (
+            <Notice tone="danger" title="This vault's address cannot be checked">
               <p>
-                Refund requested: the coordinator proves your deposit as a refund instead. It then appears on the{" "}
+                It was opened by an earlier version of Zecured, whose vault signatures this app does not check, so nothing
+                shows that the signers control it. Do not pay it: let it expire and start a new loan.
+              </p>
+            </Notice>
+          ) : null}
+          {awaiting && proof.state === "checking" ? (
+            <p className="text-sm text-muted" aria-live="polite">
+              Checking the signers&apos; signatures on this vault…
+            </p>
+          ) : null}
+          {!awaiting && (vault?.status === "deposit_seen" || vault?.depositSeen) && !l?.pending && cap === "none" ? (
+            <Notice tone="ok" title="Deposit received on Zcash" live>
+              <p>
+                A zero-knowledge proof that your deposit is in a Zcash block is being made and sent to Base; nothing is
+                minted on anyone&apos;s word. Do not pay again: a second payment does not back the loan (it can only come back
+                as a refund).
+              </p>
+            </Notice>
+          ) : null}
+          {cap !== "none" ? (
+            <Notice
+              tone="warn"
+              title={cap === "confirmed" ? "Your deposit waits for room under the coverage cap" : "The coverage cap is full right now"}
+              live
+            >
+              <p>
+                {cap === "confirmed" ? "Your deposit is on Zcash, but the" : "If you already paid this vault, your deposit is on Zcash, but the"}{" "}
+                signers&apos; bonds cover no more collateral right now, so its proof cannot land yet. Nothing is lost and the vault
+                stays yours: the proof is sent again once there is room, and zZEC is minted then.
+              </p>
+              {cap === "possible" ? <p>If you have not paid yet, wait until there is room before you pay.</p> : null}
+              {refundInstead.result ? (
+                <p>
+                  Refund requested: the coordinator proves your deposit as a refund instead. It then appears on the{" "}
+                  <Link href={vaultHref("refund", loan.vaultId!)} prefetch={false}>
+                    refunds page
+                  </Link>
+                  , pending for a few Zcash blocks until its claim opens; you then give it an Ironwood destination there (the
+                  payout&apos;s network fee is deducted).
+                </p>
+              ) : (
+                <>
+                  <p>If you would rather not wait, have it proven as a refund: it then comes back to an Ironwood address you give.</p>
+                  <Button variant="secondary" onClick={() => void refundInstead.run()} busy={refundInstead.busy}>
+                    Refund my deposit instead
+                  </Button>
+                </>
+              )}
+              {refundInstead.error ? <p className="text-danger">{refundInstead.error}</p> : null}
+            </Notice>
+          ) : null}
+          {l?.pending ? (
+            <Notice tone="ok" title="Deposit proven on Base" live>
+              <p>
+                It waits a few Zcash blocks before anyone can activate it; the backend&apos;s keeper does, and zZEC is minted
+                into your position.{" "}
+                <Link href={vaultHref("position", loan.vaultId!)} prefetch={false}>
+                  See when
+                </Link>
+                .
+              </p>
+            </Notice>
+          ) : null}
+          {refundPending && !refunded ? (
+            <Notice tone="info" title="Your deposit was proven as a refund" live>
+              <p>
+                Its proof is on Base and waits a few Zcash blocks, like an activation, before its refund opens (pending until
+                then). The backend&apos;s keeper opens it; you then give it an Ironwood destination on the{" "}
                 <Link href={vaultHref("refund", loan.vaultId!)} prefetch={false}>
                   refunds page
                 </Link>
-                , pending for a few Zcash blocks until its claim opens; you then give it an Ironwood destination there (the
-                payout&apos;s network fee is deducted).
+                .
               </p>
-            ) : (
-              <>
-                <p>If you would rather not wait, have it proven as a refund: it then comes back to an Ironwood address you give.</p>
-                <Button variant="secondary" onClick={() => void refundInstead.run()} busy={refundInstead.busy}>
-                  Refund my deposit instead
-                </Button>
-              </>
-            )}
-            {refundInstead.error ? <p className="text-danger">{refundInstead.error}</p> : null}
-          </Notice>
-        ) : null}
-        {l?.pending ? (
-          <Notice tone="ok" title="Deposit proven on Base" live>
-            <p>
-              It waits a few Zcash blocks before anyone can activate it; the backend&apos;s keeper does, and zZEC is minted
-              into your position.{" "}
-              <Link href={vaultHref("position", loan.vaultId!)} prefetch={false}>
-                See when
-              </Link>
-              .
-            </p>
-          </Notice>
-        ) : null}
-        {refundPending && !refunded ? (
-          <Notice tone="info" title="Your deposit was proven as a refund" live>
-            <p>
-              Its proof is on Base and waits a few Zcash blocks, like an activation, before its refund opens (pending until
-              then). The backend&apos;s keeper opens it; you then give it an Ironwood destination on the{" "}
-              <Link href={vaultHref("refund", loan.vaultId!)} prefetch={false}>
-                refunds page
-              </Link>
-              .
-            </p>
-          </Notice>
-        ) : null}
-        {refunded ? (
-          <Notice tone="warn" title="A deposit came back as a refund" live>
-            <p>
-              A deposit to this vault could not back the loan and was proven on Base as a refund.{" "}
-              <Link href={vaultHref("refund", loan.vaultId!)} prefetch={false}>
-                Give it a destination
-              </Link>{" "}
-              to get it back.
-            </p>
-          </Notice>
-        ) : null}
-        {!awaiting && vault?.status === "expired" ? (
-          <Notice tone="warn" title="This vault no longer accepts deposits">
-            <p>Its deposit deadline passed. Do not pay this address; start a new loan instead.</p>
-          </Notice>
-        ) : null}
-        {awaiting && vouched && check?.ok && check.uri ? (
-          <div className="space-y-4">
-            <DemoPayment loan={loan} />
-            {vouched !== "pinned" ? (
-              <Notice tone="warn" title="Development build: the signer set is not pinned">
+            </Notice>
+          ) : null}
+          {refunded ? (
+            <Notice tone="warn" title="A deposit came back as a refund" live>
+              <p>
+                A deposit to this vault could not back the loan and was proven on Base as a refund.{" "}
+                <Link href={vaultHref("refund", loan.vaultId!)} prefetch={false}>
+                  Give it a destination
+                </Link>{" "}
+                to get it back.
+              </p>
+            </Notice>
+          ) : null}
+          {!awaiting && vault?.status === "expired" ? (
+            <Notice tone="warn" title="This vault no longer accepts deposits">
+              <p>Its deposit deadline passed. Do not pay this address; start a new loan instead.</p>
+            </Notice>
+          ) : null}
+          {awaiting && vouched && check?.ok && check.uri ? (
+            <div className="space-y-4">
+              <DemoPayment loan={loan} />
+              {vouched !== "pinned" ? (
+                <Notice tone="warn" title="Development build: the signer set is not pinned">
+                  <p>
+                    {vouched === "backend"
+                      ? "The vault's signatures were checked against the signer set the backend reports, which does not protect against a compromised backend."
+                      : "The vault's signatures were not checked: neither this build nor the backend names the signer set."}{" "}
+                    A production build pins NEXT_PUBLIC_SIGNERS and refuses vaults it cannot check.
+                  </p>
+                </Notice>
+              ) : null}
+              <div className="flex flex-col items-center gap-4 sm:flex-row sm:items-start">
+                <Qr value={check.uri} label={`ZIP 321 payment request for ${formatTaz(amount)} to the vault`} size={220} />
+                <div className="min-w-0 space-y-3 text-sm">
+                  <p className="text-muted">Scan with an Ironwood-capable wallet, or copy the address and amount.</p>
+                  <div>
+                    <p className={cx("text-sm", vouched === "pinned" ? "text-muted" : "text-warn")}>{VOUCHED[vouched]}</p>
+                    <Mono className="block">{loan.vaultAddress}</Mono>
+                    <div className="mt-2 flex flex-wrap gap-2">
+                      <CopyButton value={loan.vaultAddress!} label="Copy address" />
+                      <CopyButton value={check.uri} label="Copy payment URI" />
+                    </div>
+                  </div>
+                  <p>
+                    Amount: <strong>{formatTaz(amount)}</strong> exactly, in a single payment.
+                  </p>
+                </div>
+              </div>
+              <KeyValue
+                rows={[
+                  [
+                    "Deposit deadline",
+                    expiry !== undefined ? (
+                      <span>
+                        Zcash block <strong>#{expiry.toLocaleString("en-US")}</strong>
+                        {blocksLeft !== null ? (
+                          <span className="text-muted">
+                            , {blocksLeft > 0 ? `${blocksLeft} blocks left (${blocksToDuration(blocksLeft)})` : "already passed"}
+                          </span>
+                        ) : null}
+                      </span>
+                    ) : (
+                      "—"
+                    ),
+                  ],
+                  ["Vault id", <Mono key="v">{loan.vaultId}</Mono>],
+                  ["Confirmations", confirmationsText(vault?.confirmations)],
+                ]}
+              />
+              <Notice tone="warn" title="Pay from notes that have waited in Ironwood">
                 <p>
-                  {vouched === "backend"
-                    ? "The vault's signatures were checked against the signer set the backend reports, which does not protect against a compromised backend."
-                    : "The vault's signatures were not checked: neither this build nor the backend names the signer set."}{" "}
-                  A production build pins NEXT_PUBLIC_SIGNERS and refuses vaults it cannot check.
+                  Paying right after moving exactly {formatTaz(amount)} into Ironwood links that public move to this loan. If
+                  your ZEC is not in Ironwood yet, let this vault expire and start a new loan later.
                 </p>
               </Notice>
-            ) : null}
-            <div className="flex flex-col items-center gap-4 sm:flex-row sm:items-start">
-              <Qr value={check.uri} label={`ZIP 321 payment request for ${formatTaz(amount)} to the vault`} size={220} />
-              <div className="min-w-0 space-y-3 text-sm">
-                <p className="text-muted">Scan with an Ironwood-capable wallet, or copy the address and amount.</p>
-                <div>
-                  <p className={cx("text-xs uppercase tracking-wide", vouched === "pinned" ? "text-faint" : "text-warn")}>
-                    {VOUCHED[vouched]}
-                  </p>
-                  <Mono className="block">{loan.vaultAddress}</Mono>
-                  <div className="mt-2 flex flex-wrap gap-2">
-                    <CopyButton value={loan.vaultAddress!} label="Copy address" />
-                    <CopyButton value={check.uri} label="Copy payment URI" />
-                  </div>
-                </div>
+              <Notice tone="warn" title="Only an exact Ironwood → Ironwood payment counts">
                 <p>
-                  Amount: <strong>{formatTaz(amount)}</strong> exactly, in a single payment.
+                  Paying from transparent, Sapling or Orchard funds, a different amount, or after the deadline does not back the
+                  loan: such a payment comes back only as a refund proven on Base, minus the payout&apos;s network fee.
                 </p>
-              </div>
+              </Notice>
             </div>
-            <KeyValue
-              rows={[
-                [
-                  "Deposit deadline",
-                  expiry !== undefined ? (
-                    <span>
-                      Zcash block <strong>#{expiry.toLocaleString("en-US")}</strong>
-                      {blocksLeft !== null ? (
-                        <span className="text-muted">
-                          {" "}
-                          · {blocksLeft > 0 ? `${blocksLeft} blocks left (${blocksToDuration(blocksLeft)})` : "passed"}
-                        </span>
-                      ) : null}
-                    </span>
-                  ) : (
-                    "—"
-                  ),
-                ],
-                ["Vault id", <Mono key="v">{loan.vaultId}</Mono>],
-                ["Confirmations", confirmationsText(vault?.confirmations)],
-              ]}
-            />
-            <Notice tone="warn" title="Pay from notes that have waited in Ironwood">
-              <p>
-                Paying right after moving exactly {formatTaz(amount)} into Ironwood links that public move to this loan. If
-                your ZEC is not in Ironwood yet, let this vault expire and start a new loan later.
-              </p>
-            </Notice>
-            <Notice tone="warn" title="Only an exact Ironwood → Ironwood payment counts">
-              <p>
-                Paying from transparent, Sapling or Orchard funds, a different amount, or after the deadline does not back the
-                loan: such a payment comes back only as a refund proven on Base, minus the payout&apos;s network fee.
-              </p>
-            </Notice>
-          </div>
-        ) : null}
+          ) : null}
+        </div>
       </Card>
 
-      <Card title="Status">
-        <ol className="space-y-3 text-sm" aria-live="polite">
-          {STATUS_STEPS.map((s, i) => (
-            <li key={s.status} className="flex items-start gap-2">
-              <span aria-hidden="true" className={i < statusIndex ? "text-ok" : i === statusIndex ? "text-accent" : "text-faint"}>
-                {i < statusIndex ? "●" : i === statusIndex ? "◐" : "○"}
-              </span>
-              <span className={i <= statusIndex ? "text-text" : "text-faint"}>
-                {s.label}
-                {s.duration && durations.get(s.duration) !== undefined ? (
-                  <span className="block text-xs text-muted">Typically {formatPeriod(durations.get(s.duration)!)} (measured)</span>
-                ) : null}
-              </span>
-            </li>
-          ))}
-        </ol>
-        {vault?.status === "expired" ? (
-          <div className="mt-4">
-            <Notice tone="warn" title="This vault expired without a valid deposit">
-              <p>
-                Start a new loan. Anything you sent comes back only as a refund proven on Base: see the vault&apos;s{" "}
-                <Link href={vaultHref("refund", loan.vaultId!)} prefetch={false}>
-                  refunds
-                </Link>
-                .
+      {/* The seam: the deposit's way from Zcash (dark, round marks) through its proof (the π seal) to Base (light, square marks). */}
+      <div className="space-y-3">
+        <aside aria-labelledby={statusId} className="overflow-hidden rounded-[22px] shadow-[0_0_0_1px_var(--color-border)]">
+          <h2 id={statusId} className="sr-only">
+            Status
+          </h2>
+          <div className="bg-bg px-[26px] pt-[26px] pb-11">
+            <ChainLabel chain="zcash">On Zcash</ChainLabel>
+            <ol className="mt-[18px] flex flex-col gap-4" aria-live="polite">
+              {STATUS_STEPS.slice(0, 2).map((s, i) => statusRow(s, i, "zcash"))}
+            </ol>
+            {vault?.status === "expired" ? (
+              <div className="mt-5">
+                <Notice tone="warn" title="This vault expired without a valid deposit">
+                  <p>
+                    Start a new loan. Anything you sent comes back only as a refund proven on Base: see the vault&apos;s{" "}
+                    <Link href={vaultHref("refund", loan.vaultId!)} prefetch={false}>
+                      refunds
+                    </Link>
+                    .
+                  </p>
+                </Notice>
+              </div>
+            ) : null}
+            {vault && vault.nonConforming.length > 0 ? (
+              <div className="mt-5">
+                <Notice tone="warn" title="A payment did not follow the rules">
+                  <p>
+                    {vault.nonConforming.length} payment(s) to this vault cannot back the loan. They come back only as refunds
+                    proven on Base:{" "}
+                    <Link href={vaultHref("refund", loan.vaultId!)} prefetch={false}>
+                      see the refunds
+                    </Link>
+                    .
+                  </p>
+                </Notice>
+              </div>
+            ) : null}
+            {vaultError ? (
+              <p className="mt-5 text-sm text-danger" role="status">
+                Status unavailable: {vaultError}
               </p>
-            </Notice>
+            ) : null}
           </div>
-        ) : null}
-        {vault && vault.nonConforming.length > 0 ? (
-          <div className="mt-4">
-            <Notice tone="warn" title="A payment did not follow the rules">
-              <p>
-                {vault.nonConforming.length} payment(s) to this vault cannot back the loan. They come back only as refunds
-                proven on Base:{" "}
-                <Link href={vaultHref("refund", loan.vaultId!)} prefetch={false}>
-                  see the refunds
-                </Link>
-                .
-              </p>
-            </Notice>
+          <div aria-hidden="true" className="relative z-[2] h-0">
+            <ProofSeal pulse={proving} className="absolute top-[-30px] left-[22px]" />
+            {proving ? (
+              <span className="absolute top-[-13px] left-24 inline-flex min-h-[26px] items-center rounded-full bg-accent px-3 text-[12.5px] font-bold whitespace-nowrap text-on-accent">
+                Proving your deposit
+              </span>
+            ) : null}
           </div>
-        ) : null}
-        {vaultError ? (
-          <p className="mt-4 text-sm text-danger" role="status">
-            Status unavailable: {vaultError}
-          </p>
-        ) : null}
-        <p className="mt-4 text-xs text-muted">Updates every 10 seconds. You can close this page and come back from My loans.</p>
-      </Card>
+          <div className="paper px-[26px] pt-11 pb-[26px]">
+            <ChainLabel chain="base">On Base</ChainLabel>
+            <ol start={3} className="mt-[18px] flex flex-col gap-4" aria-live="polite">
+              {STATUS_STEPS.slice(2).map((s, i) => statusRow(s, i + 2, "base"))}
+            </ol>
+            <p className="mt-5 border-t border-rule pt-4 text-[13.5px] leading-[1.55] text-ink-muted">
+              Base will see your vault id, the amount, a keyed tag and a later Zcash header. Never your deposit&apos;s block,
+              transaction or address.
+            </p>
+          </div>
+        </aside>
+        <p className="text-xs text-muted">Updates every 10 seconds. You can close this page and come back from My loans.</p>
+      </div>
     </div>
   );
 }

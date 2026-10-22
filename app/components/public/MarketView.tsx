@@ -204,7 +204,7 @@ export function MarketView() {
         action={labels?.loanTokenIsMock ? <Badge tone="warn">MOCK loan token</Badge> : <Badge tone="neutral">Morpho Blue</Badge>}
       >
         {n ? (
-          <dl className="grid gap-3 sm:grid-cols-3">
+          <dl className="grid gap-x-6 gap-y-5 sm:grid-cols-3">
             <Stat label="Supplied" value={`${formatUsdc(n.suppliedUsdc)} USDC`} hint="by lenders" />
             <Stat label="Borrowed" value={`${formatUsdc(n.borrowedUsdc)} USDC`} hint="against shielded ZEC" />
             <Stat label="Utilization" value={formatWadPercent(n.utilizationWad)} hint={`${formatUsdc(n.availableUsdc)} USDC available`} />
@@ -240,7 +240,7 @@ export function MarketView() {
         <div className="space-y-4">
           <p className="text-sm">{COMPENSATION_SENTENCE}</p>
           {bonds ? (
-            <dl className="grid gap-3 sm:grid-cols-3">
+            <dl className="grid gap-x-6 gap-y-5 sm:grid-cols-3">
               <Stat label="Signers' bonds (ΣB)" value={`${formatUsdc(bonds.sum)} USDC`} hint={`${bonds.bonded} of ${SIGNERS} signers at the minimum`} />
               <Stat label="Counted for coverage (B_eff)" value={`${formatUsdc(bonds.effective)} USDC`} hint="min(ΣB, 5/3 × the three smallest)" />
               <Stat
