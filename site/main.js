@@ -73,14 +73,17 @@ function setUpLoan() {
   }
   keys.forEach((key) => key.addEventListener("click", () => setKey(key.getAttribute("aria-pressed") !== "true")));
 
-  // A link to one step (#loan-step-3) opens it.
-  function fromHash() {
+  // A link to one step (#loan-step-3) opens it. Followed from inside the page, the browser could not scroll to
+  // a step that was still hidden, so the script does; on load the browser scrolls once the step shows.
+  function fromHash(scroll) {
     const match = /^#loan-step-([1-5])$/.exec(window.location.hash);
-    if (match) show(Number(match[1]) - 1, false);
+    if (!match) return;
+    show(Number(match[1]) - 1, false);
+    if (scroll) steps[current].scrollIntoView();
   }
-  window.addEventListener("hashchange", fromHash);
+  window.addEventListener("hashchange", () => fromHash(true));
   show(0, false);
-  fromHash();
+  fromHash(false);
 }
 
 function setUpSees() {

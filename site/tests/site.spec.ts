@@ -135,10 +135,22 @@ test("the comparison switches by keyboard", async ({ page }) => {
   await expect(page.locator("#sees-bridge .leak").first()).toBeVisible();
 });
 
-test("a link to a step opens it", async ({ page }) => {
+test("a link to a step opens it and scrolls to it", async ({ page }) => {
+  await page.emulateMedia({ reducedMotion: "reduce" });
   await page.goto("/#loan-step-3");
   await expect(page.locator("#loan-step-3")).toBeVisible();
   await expect(page.locator(".rail button").nth(2)).toHaveAttribute("aria-pressed", "true");
+  await expect(page.locator("#loan-step-3")).toBeInViewport();
+  // Followed from inside the page, once it has loaded and settled, to a step that was hidden: the browser does
+  // not scroll to it by itself.
+  await page.waitForLoadState("networkidle");
+  await page.evaluate(() => window.scrollTo(0, 0));
+  await page.waitForTimeout(250);
+  await page.evaluate(() => {
+    window.location.hash = "#loan-step-5";
+  });
+  await expect(page.locator("#loan-step-5")).toBeVisible();
+  await expect(page.locator("#loan-step-5")).toBeInViewport();
 });
 
 test("no motion when the reader asks for none", async ({ page }) => {
