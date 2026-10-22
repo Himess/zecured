@@ -1,7 +1,6 @@
 import type { Metadata, Viewport } from "next";
+import localFont from "next/font/local";
 import Link from "next/link";
-import { GeistMono } from "geist/font/mono";
-import { GeistSans } from "geist/font/sans";
 import type { ReactNode } from "react";
 import { BackendStatus, Nav } from "@/components/client";
 import { ConfigGate } from "@/components/ConfigGate";
@@ -9,6 +8,29 @@ import { DEPLOYMENT } from "@/lib/deployment";
 import "./globals.css";
 
 const TESTNET = DEPLOYMENT.kind === "testnet";
+
+/*
+ * Archivo for text and Martian Mono for chain data, both variable in weight and width and
+ * self-hosted from app/fonts (OFL, fonts/OFL.txt): the build reads them from disk, the browser
+ * fetches them from this app only. The width ranges are declared so `font-stretch` reaches them.
+ */
+const archivo = localFont({
+  src: "./fonts/archivo.woff2",
+  weight: "100 900",
+  display: "swap",
+  variable: "--font-archivo",
+  declarations: [{ prop: "font-stretch", value: "62% 125%" }],
+});
+
+const martianMono = localFont({
+  src: "./fonts/martian-mono.woff2",
+  weight: "100 800",
+  display: "swap",
+  variable: "--font-martian-mono",
+  // An Arial-metric fallback would set chain data in a proportional face: ui-monospace follows instead.
+  adjustFontFallback: false,
+  declarations: [{ prop: "font-stretch", value: "75% 112.5%" }],
+});
 
 export const metadata: Metadata = {
   title: { default: "Zecured: borrow against shielded ZEC", template: "%s · Zecured" },
@@ -28,7 +50,7 @@ export const viewport: Viewport = {
 
 export default function RootLayout({ children }: { children: ReactNode }) {
   return (
-    <html lang="en" className={`${GeistSans.variable} ${GeistMono.variable}`}>
+    <html lang="en" className={`${archivo.variable} ${martianMono.variable}`}>
       <body className="min-h-dvh antialiased">
         <a
           href="#main"

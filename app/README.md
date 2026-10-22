@@ -171,7 +171,8 @@ v3 (contracts/src/interfaces/v3, docs/DECISIONS.md D40 to D54):
 
 - **Only our backend.** A Content Security Policy (next.config.ts) limits `connect-src` to the
   app and the backend origin, so the page cannot reach an RPC, bundler, paymaster or any third
-  party even by mistake. Fonts are self-hosted (`geist`), the QR code is drawn locally, there
+  party even by mistake. Fonts are self-hosted (Archivo and Martian Mono, OFL, from `app/fonts/`
+  through `next/font/local`), the QR code is drawn locally, there
   are no analytics, and the app links to no block explorer (opening one would tell it which
   account you care about).
 - **Keys stay local.** The owner key lives in `localStorage` (every access wrapped in

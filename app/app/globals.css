@@ -17,8 +17,9 @@
   --color-danger: #f06b70;
   --color-info: #7cb2fa;
 
-  --font-sans: var(--font-geist-sans), ui-sans-serif, system-ui, -apple-system, "Segoe UI", sans-serif;
-  --font-mono: var(--font-geist-mono), ui-monospace, "SFMono-Regular", Menlo, Consolas, monospace;
+  --font-sans:
+    var(--font-archivo), ui-sans-serif, system-ui, -apple-system, "Segoe UI", Roboto, "Helvetica Neue", Arial, sans-serif;
+  --font-mono: var(--font-martian-mono), ui-monospace, "SFMono-Regular", Menlo, Consolas, monospace;
 }
 
 @layer base {
