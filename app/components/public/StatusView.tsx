@@ -37,7 +37,7 @@ function VersionTable({ kind, list }: { kind: string; list: VersionView[] }) {
       ) : (
         <ul className="space-y-2 text-sm">
           {list.map((v) => (
-            <li key={v.versionId} className="rounded-lg border border-border p-3">
+            <li key={v.versionId} className="rounded-2xl bg-bg p-3">
               <div className="flex flex-wrap items-center justify-between gap-2">
                 <Mono>{short(v.imageId, 12, 8)}</Mono>
                 <Badge tone={v.removed ? "neutral" : v.active ? "ok" : "warn"}>
@@ -169,7 +169,7 @@ export function StatusView() {
             <p className="text-sm text-muted">The backend reports no minting gates.</p>
           )}
           {cap ? (
-            <dl className="grid gap-3 sm:grid-cols-4">
+            <dl className="grid gap-x-6 gap-y-5 sm:grid-cols-4">
               <Stat label="Locked" value={formatTaz(cap.lockedZat)} hint={`${s!.openVaults.toString()} open vault(s)`} />
               <Stat label="Pending" value={formatTaz(cap.pendingZat)} hint="activations and refunds" />
               <Stat label="Room" value={cap.roomZat === null ? "—" : formatTaz(cap.roomZat)} hint={cap.roomZat === null ? "the cap's price is stale" : undefined} />
@@ -186,7 +186,7 @@ export function StatusView() {
       <Card title="The signers' bonds">
         {bonds ? (
           <div className="space-y-4">
-            <dl className="grid gap-3 sm:grid-cols-3">
+            <dl className="grid gap-x-6 gap-y-5 sm:grid-cols-3">
               <Stat label="ΣB (sum of the bonds)" value={`${formatUsdc(bonds.sum)} USDC`} hint={`${bonds.bonded} of ${SIGNERS} at the ${formatUsdc(bonds.minBond)} USDC minimum`} />
               <Stat label="B_eff (what the cap counts)" value={`${formatUsdc(bonds.effective)} USDC`} hint="min(ΣB, 5/3 × the three smallest)" />
               <Stat
@@ -195,10 +195,10 @@ export function StatusView() {
                 hint="B_eff over the locked collateral at the market price"
               />
             </dl>
-            <ul className="grid gap-2 text-sm sm:grid-cols-5">
+            <ul className="grid grid-cols-2 gap-x-6 gap-y-4 text-sm sm:grid-cols-5">
               {s!.bonds!.each.map((b, i) => (
-                <li key={i} className="rounded-lg border border-border p-2">
-                  <span className="block text-xs text-faint">Signer {i + 1}</span>
+                <li key={i} className="border-t border-border pt-2.5">
+                  <span className="block text-xs text-muted">Signer {i + 1}</span>
                   <span className="tabular-nums">{formatUsdc(b)} USDC</span>
                 </li>
               ))}
@@ -219,11 +219,11 @@ export function StatusView() {
       <Card title="Anonymity sets">
         {sets ? (
           <div className="space-y-3">
-            <ul className="grid gap-2 sm:grid-cols-3">
+            <ul className="grid gap-x-6 gap-y-4 sm:grid-cols-3">
               {sets.map((x) => (
-                <li key={x.amount.toString()} className="rounded-lg border border-border p-3">
-                  <span className="block text-xs text-faint">{formatTaz(x.amount)} vaults open</span>
-                  <span className="text-lg font-semibold tabular-nums">{x.open}</span>
+                <li key={x.amount.toString()} className="border-t border-border pt-3">
+                  <span className="block text-sm text-muted">{formatTaz(x.amount)} vaults open</span>
+                  <span className="text-xl font-bold tabular-nums">{x.open}</span>
                 </li>
               ))}
             </ul>

@@ -183,7 +183,7 @@ export function PendingRefundsCard({ ledger }: { ledger: VaultLedger }) {
       </p>
       <ul className="space-y-3">
         {list.map((r) => (
-          <li key={r.depositTag} className="rounded-lg border border-border p-4">
+          <li key={r.depositTag} className="rounded-2xl bg-bg p-4">
             <KeyValue
               rows={[
                 ["Deposit", formatTaz(r.amount)],
@@ -262,7 +262,7 @@ function RefundItem({
     return r;
   });
   return (
-    <li className="rounded-lg border border-border p-4">
+    <li className="rounded-2xl bg-bg p-4">
       <div className="mb-2 flex flex-wrap items-center justify-between gap-2">
         <span className="font-medium">
           {formatTaz(claim.amount)}

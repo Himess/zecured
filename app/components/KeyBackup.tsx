@@ -87,7 +87,7 @@ export function KeyBackup({ loan, onConfirmed }: { loan: StoredLoan; onConfirmed
             if (f) check(await f.text());
             e.target.value = "";
           }}
-          className="block text-sm text-muted file:mr-3 file:rounded-md file:border file:border-border file:bg-surface-2 file:px-3 file:py-2 file:text-text"
+          className="block text-sm text-muted file:mr-3 file:rounded-full file:border file:border-line file:bg-transparent file:font-semibold file:px-3 file:py-2 file:text-text"
         />
         <label htmlFor={pasteId} className="block text-sm font-medium">
           Or paste it
@@ -99,7 +99,7 @@ export function KeyBackup({ loan, onConfirmed }: { loan: StoredLoan; onConfirmed
           rows={3}
           spellCheck={false}
           autoComplete="off"
-          className="w-full rounded-lg border border-border bg-bg px-3 py-2 font-mono text-xs text-text focus:border-accent"
+          className="w-full rounded-lg border border-border bg-bg px-3 py-2 font-mono text-xs text-text focus:border-muted"
         />
         <Button variant="ghost" onClick={() => check(paste)} disabled={!paste.trim()}>
           Check the pasted backup

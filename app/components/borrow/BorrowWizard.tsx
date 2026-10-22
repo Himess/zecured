@@ -219,8 +219,8 @@ function AmountStep({
             <label
               key={d.toString()}
               className={cx(
-                "flex cursor-pointer items-start gap-3 rounded-lg border p-4",
-                amount === d ? "border-accent bg-surface-2" : "border-border hover:border-faint",
+                "flex cursor-pointer items-start gap-3 rounded-2xl border p-4",
+                amount === d ? "border-soft bg-surface-2" : "border-border hover:border-faint",
               )}
             >
               <input type="radio" name={groupId} checked={amount === d} onChange={() => setAmount(d)} className="mt-1.5" />
@@ -291,7 +291,7 @@ function AmountStep({
             onChange={(e) => setInvite(e.target.value)}
             autoComplete="off"
             spellCheck={false}
-            className="w-full max-w-sm rounded-lg border border-border bg-bg px-3 py-2 font-mono text-sm text-text focus:border-accent"
+            className="w-full max-w-sm rounded-lg border border-border bg-bg px-3 py-2 text-sm text-text focus:border-muted"
           />
           <p className="text-xs text-muted">The mainnet beta opens vaults by invitation only; each code opens one vault.</p>
         </div>

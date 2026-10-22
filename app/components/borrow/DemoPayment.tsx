@@ -48,7 +48,7 @@ export function DemoPayment({ loan }: { loan: StoredLoan }) {
 
   if (!config.demoPath || !demo.data?.enabled) return null;
   return (
-    <div className="space-y-3 rounded-lg border border-dashed border-warn/60 p-4">
+    <div className="space-y-3 rounded-2xl border border-dashed border-warn/60 p-4">
       <p className="flex flex-wrap items-center gap-2 text-sm font-medium">
         <Badge tone="warn">DEMO</Badge> No testnet ZEC at hand?
       </p>

@@ -79,7 +79,7 @@ function LoanRow({ loan }: { loan: StoredLoan }) {
   const [confirmForget, setConfirmForget] = useState(false);
   const status = vault.data ? STATUS_LABEL[vault.data.status] : null;
   return (
-    <li className="rounded-xl border border-border bg-surface p-4 sm:p-5">
+    <li className="rounded-[18px] bg-surface p-5 sm:p-6">
       <div className="flex flex-wrap items-start justify-between gap-3">
         <div className="space-y-1 text-sm">
           <p className="text-base font-semibold">
@@ -187,7 +187,7 @@ function ImportCard() {
             if (f) doImport(await f.text());
             e.target.value = "";
           }}
-          className="block text-sm text-muted file:mr-3 file:rounded-md file:border file:border-border file:bg-surface-2 file:px-3 file:py-2 file:text-text"
+          className="block text-sm text-muted file:mr-3 file:rounded-full file:border file:border-line file:bg-transparent file:font-semibold file:px-3 file:py-2 file:text-text"
         />
         <label htmlFor={textId} className="block text-sm font-medium">
           Or paste it
@@ -199,7 +199,7 @@ function ImportCard() {
           rows={4}
           spellCheck={false}
           autoComplete="off"
-          className="w-full rounded-lg border border-border bg-bg px-3 py-2 font-mono text-xs text-text focus:border-accent"
+          className="w-full rounded-lg border border-border bg-bg px-3 py-2 font-mono text-xs text-text focus:border-muted"
         />
         <Button variant="secondary" onClick={() => doImport(text)} disabled={!text.trim()}>
           Import
