@@ -1,6 +1,10 @@
 # Zecured
 
+![Zecured: the shielded pool on the left, Base on the right, and a gold proof crossing the seam between them](docs/assets/hero.png)
+
 > **Use shielded ZEC on Base: borrow against it, or swap into it. It never leaves the shielded pool.**
+
+See [the site](https://himess.github.io/zecured/), [the demo video](https://himess.github.io/zecured/#demo) or [how to run it on a local fork](#local-base-fork).
 
 Using ZEC in DeFi today usually means taking it out of the shielded pool. Zecured doesn't.
 
@@ -18,10 +22,14 @@ Two products, one Zcash light client on Base:
   shielded payment for that very order is in the Zcash chain. Any Ironwood address can receive.
   Selling ZEC for USDC works the same way, from the CLI ([docs/SWAP.md](docs/SWAP.md)).
 
+![One loan seen from both chains: the five steps, then the borrower's viewing key, which reads its own payout but never the market maker's](docs/assets/loan.gif)
+
 The shared core is a Zcash light client on Base: `ZcashHeaderRelay` verifies Zcash headers
 (Equihash) on-chain, ZIP 221 history commitments keep a proven block hidden among its epoch's, RISC
 Zero guests prove deposits, payments, payouts and violations, and `ZecuredVersions` lists the
 verifiers each proof is checked with.
+
+![What crosses from Zcash to Base: four zero-knowledge proofs (deposit, inclusion, violation, payment) and salted commitments; never a Zcash transaction, note or address](docs/assets/seam.svg)
 
 **Who you have to trust.** Base never takes the signers' word: deposits are proven, payouts are
 proven, misbehaviour is proven — and the same Zcash light client lets anyone swap USDC into shielded
@@ -80,7 +88,7 @@ Verified end to end on **Zcash testnet (NU7)** with five independent signer proc
 | Real seals of the pinned guests | Real Groth16 seals of deposit-test, violation-test (F1 and `Included`) and payment-test pass RISC Zero's router on Base Sepolia and Base mainnet forks; the STARKs take 4 to 37 s on an RTX 4090 |
 | Proven delivery | A disputed confirmation made final by the payout's inclusion proof 2 min 51 s after the dispute; routine proofs inside the dispute window |
 | Zecured Swap | Buy and Sell orders settled on payment proofs (payment memo `"ZSWP" ‖ orderId`, ovk none); an unpaid order refunded after its pay window |
-| Theft demonstration | Three compromised signers sweep a vault; the borrower's viewing key detects F1 a block later; all five bonds slashed; the victim's debt repaid and the rest of its ZEC's value paid in USDC |
+| Theft demonstration | Three compromised signers sweep a vault; the borrower's viewing key detects F1 two minutes later; all five bonds slashed; the victim's debt repaid and the rest of its ZEC's value paid in USDC ([the timeline](docs/assets/theft.png)) |
 | The app in a browser | Gasless: open, deposit, borrow with pre-liquidation terms, deleverage and close from collateral (Safe signatures), repay and release, a claim paid from the bonds |
 
 The Base side has been run on local forks of Base Sepolia (the real Morpho Blue deployment and
@@ -113,7 +121,7 @@ repository are published test vectors (such as ZIP 2005's) and anvil's well-know
 
 | Path | What |
 |---|---|
-| `contracts/` | Solidity + Foundry: `ZZEC`, `ZecuredRegistry` (vaults, claims, exits, Tier 3 lineage) with `ZecuredSpendLogic` (spend commitments, disputes), `ZecuredIntake` (deposit proofs and the gates of minting), `SettlementAdapter`, `SignerBondV2`, `ZecuredSlasher`, `ZecuredCompensator`, `ZecuredVersions`, `ZecuredSwap`, `ZecuredPriceFeed` (mainnet), mocks, and the Zcash header relay (`src/relay/`); 772 tests (6 skipped without a Base mainnet RPC), four invariant campaigns (35 invariants) and 22 symbolic checks (Halmos) ([docs/INVARIANTS.md](docs/INVARIANTS.md)) |
+| `contracts/` | Solidity + Foundry: `ZZEC`, `ZecuredRegistry` (vaults, claims, exits, Tier 3 lineage) with `ZecuredSpendLogic` (spend commitments, disputes), `ZecuredIntake` (deposit proofs and the gates of minting), `SettlementAdapter`, `SignerBondV2`, `ZecuredSlasher`, `ZecuredCompensator`, `ZecuredVersions`, `ZecuredSwap`, `ZecuredPriceFeed` (mainnet), mocks, and the Zcash header relay (`src/relay/`); 804 tests (6 skipped without a Base mainnet RPC), four invariant campaigns (35 invariants) and 22 symbolic checks (Halmos) ([docs/INVARIANTS.md](docs/INVARIANTS.md)) |
 | `signer/crates/zcash-ops` | Ironwood scanning, PCZT build/prove/sign/extract, ZIP 2005 vault keys |
 | `signer/crates/threshold` | FROST DKG and re-randomized signing |
 | `signer/crates/policy` | P1 classification, payout ledger (I10), PCZT verification against the plan |
@@ -130,6 +138,7 @@ repository are published test vectors (such as ZIP 2005's) and anvil's well-know
 | `bots/` | Liquidator and market maker |
 | `cli/` | `zecured-wallet`: Ironwood CLI wallet and borrower actions |
 | `app/` | Next.js app (in progress) |
+| `site/` | The showcase page: static, no build step, its own fonts and no request to anyone else ([docs/SITE.md](docs/SITE.md)) |
 | `docs/` | [Architecture](docs/ARCHITECTURE.md), [Interfaces](docs/INTERFACES.md), [Threat model](docs/THREAT_MODEL.md), [Decisions](docs/DECISIONS.md), [Invariants](docs/INVARIANTS.md), [Economics](docs/ECONOMICS.md), [Mainnet](docs/MAINNET.md), [Swap](docs/SWAP.md), [Testing and evidence](docs/TESTING.md), [Security review](docs/SECURITY_REVIEW.md), [Tier 2 design](docs/TIER2.md), [Tier 3 design](docs/TIER3.md), [Operators](docs/OPERATORS.md), [Jury FAQ](docs/JURY_FAQ.md), spikes |
 
 ## Running it

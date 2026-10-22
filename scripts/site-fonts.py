@@ -14,7 +14,8 @@ from pathlib import Path
 
 from fontTools import subset
 
-# Latin, Latin-1, general punctuation (‘ ’ “ ” ‖ … and the dashes), arrows, a few math signs.
+# Latin, Latin-1, general punctuation (‘ ’ “ ” … and the dashes), arrows, a few math signs. Neither
+# source draws ‖, so the pages write || for a concatenation.
 UNICODES = (
     "U+0000-00FF,U+0131,U+0152-0153,U+02BB-02BC,U+02C6,U+02DA,U+02DC,U+0304,U+0308,U+0329,"
     "U+03C0,U+2000-206F,U+20AC,U+2122,U+2190-2199,U+2212,U+2215,U+2248,U+2260,U+2264-2265,"
