@@ -126,11 +126,12 @@ const NAV = [
   { href: "/world", label: "What the world sees" },
 ] as const;
 
+/** The design's navigation pills: the current page on a surface with a line ring. */
 export function Nav() {
   const pathname = usePathname();
   return (
     <nav aria-label="Main">
-      <ul className="flex flex-wrap items-center gap-1 text-sm">
+      <ul className="flex flex-wrap items-center gap-1">
         {NAV.map((n) => {
           const active = pathname === n.href || pathname.startsWith(`${n.href}/`);
           return (
@@ -139,8 +140,10 @@ export function Nav() {
                 href={n.href}
                 aria-current={active ? "page" : undefined}
                 className={cx(
-                  "inline-flex min-h-9 items-center rounded-md px-3 no-underline",
-                  active ? "bg-surface-2 text-text" : "text-muted hover:bg-surface-2 hover:text-text",
+                  "inline-flex min-h-10 items-center rounded-full px-2.5 text-[14.5px] font-medium no-underline transition-colors min-[561px]:px-3.5",
+                  active
+                    ? "bg-surface text-text shadow-[inset_0_0_0_1px_var(--color-line)]"
+                    : "text-muted hover:bg-surface hover:text-text",
                 )}
               >
                 {n.label}

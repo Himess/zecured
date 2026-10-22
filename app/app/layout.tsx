@@ -4,6 +4,8 @@ import Link from "next/link";
 import type { ReactNode } from "react";
 import { BackendStatus, Nav } from "@/components/client";
 import { ConfigGate } from "@/components/ConfigGate";
+import { SeamMark } from "@/components/seam";
+import { Badge } from "@/components/ui";
 import { DEPLOYMENT } from "@/lib/deployment";
 import "./globals.css";
 
@@ -54,7 +56,7 @@ export default function RootLayout({ children }: { children: ReactNode }) {
       <body className="min-h-dvh antialiased">
         <a
           href="#main"
-          className="sr-only focus:not-sr-only focus:fixed focus:left-4 focus:top-4 focus:z-50 focus:rounded-md focus:bg-surface-2 focus:px-3 focus:py-2"
+          className="sr-only focus:not-sr-only focus:fixed focus:left-4 focus:top-4 focus:z-50 focus:rounded-full focus:bg-surface-2 focus:px-4 focus:py-2"
         >
           Skip to content
         </a>
@@ -63,48 +65,46 @@ export default function RootLayout({ children }: { children: ReactNode }) {
             {DEPLOYMENT.band}
           </div>
         ) : null}
-        <header className="border-b border-border">
-          <div className="mx-auto flex max-w-5xl flex-wrap items-center justify-between gap-3 px-4 py-3">
-            <Link href="/" className="flex items-center gap-2 text-text no-underline hover:text-text">
-              <span aria-hidden="true" className="flex h-7 w-7 items-center justify-center rounded-md bg-accent font-mono text-sm font-bold text-on-accent">
-                Z
-              </span>
-              <span className="font-semibold tracking-tight">Zecured</span>
-              <span className="rounded border border-warn/50 px-1.5 text-[10px] font-medium uppercase tracking-wider text-warn">
-                {TESTNET ? "testnet" : "mainnet beta"}
-              </span>
-            </Link>
+        <header className="border-b border-hairline">
+          <div className="wrap flex min-h-[72px] flex-wrap items-center justify-between gap-x-7 gap-y-3 py-3">
+            <div className="flex items-center gap-3.5">
+              <Link href="/" className="inline-flex items-center gap-[11px] text-text no-underline">
+                <SeamMark />
+                <span className="text-[19px] font-extrabold font-stretch-125%">Zecured</span>
+              </Link>
+              <Badge tone="neutral">{TESTNET ? "Testnet" : "Mainnet beta"}</Badge>
+            </div>
             <Nav />
           </div>
         </header>
-        <main id="main" className="mx-auto w-full max-w-5xl px-4 py-8 sm:py-12">
+        <main id="main" className="wrap pt-8 pb-[72px] sm:pt-10">
           <ConfigGate>{children}</ConfigGate>
         </main>
-        <footer className="border-t border-border">
-          <div className="mx-auto flex max-w-5xl flex-col gap-3 px-4 py-6 text-xs text-faint sm:flex-row sm:items-center sm:justify-between">
-            <p>
+        <footer className="border-t border-hairline">
+          <div className="wrap flex flex-col gap-x-10 gap-y-3 py-6 text-[13.5px] text-faint sm:flex-row sm:items-center sm:justify-between">
+            <p className="max-w-2xl">
               {TESTNET ? (
                 <>
-                  Zecured is a ZECATHON 2026 testnet experiment, <strong className="text-muted">not a financial product</strong>.
+                  Zecured is a ZECATHON 2026 testnet experiment, <strong className="font-semibold text-soft">not a financial product</strong>.
                   Testnet funds only: TAZ on Zcash testnet and test USDC on Base Sepolia.
                 </>
               ) : (
                 <>
-                  Zecured mainnet beta: <strong className="text-muted">unaudited, invite only, small caps</strong>. Use only what
-                  you can afford to lose.
+                  Zecured mainnet beta: <strong className="font-semibold text-soft">unaudited, invite only, small caps</strong>. Use only
+                  what you can afford to lose.
                 </>
               )}
             </p>
-            <div className="flex flex-wrap items-center gap-4">
+            <div className="flex flex-wrap items-center gap-x-6 gap-y-2 sm:shrink-0">
               <BackendStatus />
-              <Link href="/status" className="text-faint hover:text-muted">
+              <Link href="/status" className="text-soft no-underline hover:text-text hover:underline">
                 Status
               </Link>
-              <Link href="/evidence" className="text-faint hover:text-muted">
+              <Link href="/evidence" className="text-soft no-underline hover:text-text hover:underline">
                 Evidence
               </Link>
               {TESTNET ? (
-                <Link href="/demo" className="text-faint hover:text-muted">
+                <Link href="/demo" className="text-soft no-underline hover:text-text hover:underline">
                   Demo panel
                 </Link>
               ) : null}
