@@ -43,8 +43,8 @@ export function CopyButton({
         }
       }}
       className={cx(
-        "inline-flex items-center border border-border text-muted hover:border-faint hover:text-text",
-        size === "md" ? "min-h-11 rounded-lg bg-surface-2 px-4 text-sm" : "min-h-9 rounded-md px-3 text-xs",
+        "inline-flex items-center rounded-full border border-line font-semibold text-soft transition-colors hover:bg-bg hover:text-text",
+        size === "md" ? "min-h-11 px-5 text-sm" : "min-h-9 px-3.5 text-xs",
         className,
       )}
     >
@@ -170,7 +170,7 @@ export function LoanTokenName() {
 export function RealAndMockList() {
   const { real, mock } = realAndMock();
   return (
-    <ul className="list-disc space-y-2 pl-5 text-sm text-muted">
+    <ul className="list-disc space-y-2 pl-5 text-sm text-soft">
       {real.map((r) => (
         <li key={r}>
           <span className="text-ok">Real: </span>
