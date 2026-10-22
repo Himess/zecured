@@ -2,6 +2,7 @@
 
 import type { ReactNode } from "react";
 import { CopyButton } from "@/components/client";
+import { ChainChip } from "@/components/seam";
 import { Badge, Card, KeyValue, Mono, Notice } from "@/components/ui";
 import { DEPLOYMENT } from "@/lib/deployment";
 import { explorerLink, orderedSections, type Evidence, type EvidenceSection } from "@/lib/evidence";
@@ -75,7 +76,7 @@ function Section({ e, s, own }: { e: Evidence; s: EvidenceSection; own: boolean 
           ) : (
             <ul className="space-y-4">
               {s.flows.map((f) => (
-                <li key={f.id} className="rounded-lg border border-border p-4">
+                <li key={f.id} className="rounded-2xl bg-bg p-4">
                   <div className="flex flex-wrap items-baseline justify-between gap-2">
                     <span className="font-medium">{f.title}</span>
                     {f.durationSeconds !== null ? <span className="text-xs text-muted">took {formatPeriod(f.durationSeconds)}</span> : null}
@@ -86,7 +87,7 @@ function Section({ e, s, own }: { e: Evidence; s: EvidenceSection; own: boolean 
                       const link = explorerLink(e, s, st);
                       return (
                         <li key={`${st.tx}-${i}`} className="flex flex-wrap items-baseline gap-2">
-                          <Badge tone={st.chain === "base" ? "info" : "ok"}>{st.chain === "base" ? "Base" : "Zcash"}</Badge>
+                          <ChainChip chain={st.chain} />
                           <span>{st.label}</span>
                           {link ? (
                             <a href={link} target="_blank" rel="noopener noreferrer" referrerPolicy="no-referrer">
