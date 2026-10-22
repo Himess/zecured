@@ -265,7 +265,8 @@ function RefundItem({
     <li className="rounded-lg border border-border p-4">
       <div className="mb-2 flex flex-wrap items-center justify-between gap-2">
         <span className="font-medium">
-          {formatTaz(claim.amount)} <span className="text-sm text-muted">· claim {short(claim.claimId, 10, 6)}</span>
+          {formatTaz(claim.amount)}
+          <span className="text-sm text-muted">, claim {short(claim.claimId, 10, 6)}</span>
         </span>
         <Badge tone={view.badge.tone}>{view.badge.text}</Badge>
       </div>
@@ -667,7 +668,7 @@ function CompromisedCard({ ledger }: { ledger: VaultLedger }) {
                   data.incident === 0n
                     ? "Not registered yet"
                     : inc
-                      ? `#${data.incident} · ${inc.finalized ? "finalized" : `open until ${formatUtc(inc.closesAt)}`}`
+                      ? `#${data.incident}, ${inc.finalized ? "finalized" : `open until ${formatUtc(inc.closesAt)}`}`
                       : `#${data.incident}`,
                 ],
                 [
@@ -684,12 +685,11 @@ function CompromisedCard({ ledger }: { ledger: VaultLedger }) {
                 {data.entitlements.map((e) => (
                   <li key={e.claimId} className="flex flex-wrap items-center justify-between gap-2 py-2">
                     <span>
-                      Claim <Mono>{short(e.claimId, 10, 6)}</Mono> · {e.layer === 2 ? "third party" : "yours"} ·{" "}
-                      {formatTaz(e.zat)}
+                      Claim <Mono>{short(e.claimId, 10, 6)}</Mono> ({e.layer === 2 ? "third party" : "yours"}): {formatTaz(e.zat)}
                     </span>
                     <span className="tabular-nums">
                       {e.usdc === null ? "USDC amount fixed when the incident is finalized" : `${formatUsdc(e.usdc)} USDC`}
-                      {e.paid ? " · paid" : ""}
+                      {e.paid ? ", paid" : ""}
                     </span>
                   </li>
                 ))}

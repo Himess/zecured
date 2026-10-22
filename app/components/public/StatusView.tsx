@@ -46,7 +46,7 @@ function VersionTable({ kind, list }: { kind: string; list: VersionView[] }) {
               </div>
               <p className="mt-1 text-xs text-muted">
                 Router selector <Mono>{v.selector}</Mono>
-                {v.branches.length > 0 ? ` · branch ids ${v.branches.map((b) => `0x${b.toString(16)}`).join(", ")}` : ""}
+                {v.branches.length > 0 ? `, for branch ids ${v.branches.map((b) => `0x${b.toString(16)}`).join(", ")}` : ""}
               </p>
             </li>
           ))}

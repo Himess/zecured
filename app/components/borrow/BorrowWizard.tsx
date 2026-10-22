@@ -131,7 +131,7 @@ export function BorrowWizard() {
             {inProgress.map((l) => (
               <li key={l.id} className="flex flex-wrap items-center justify-between gap-3 py-3 text-sm">
                 <span>
-                  {formatTaz(BigInt(l.amount))} · account <Mono>{short(l.account)}</Mono>
+                  {formatTaz(BigInt(l.amount))}, account <Mono>{short(l.account)}</Mono>
                   {l.vaultId ? null : <span className="ml-2"><Badge tone="warn">vault not opened</Badge></span>}
                 </span>
                 <span className="flex gap-2">
@@ -388,9 +388,9 @@ function statusStep(vault: Vault | null, basePending: boolean, baseActive: boole
 
 /** What the address label says about the signers' signatures (C-4). */
 const VOUCHED: Record<VaultCheck, string> = {
-  pinned: "Vault address · Ironwood-only · signed by all 5 signers, checked in this browser",
-  backend: "Vault address · Ironwood-only · signed by the 5 signers the backend lists (development build: not pinned)",
-  unchecked: "Vault address · Ironwood-only · NOT checked against any signer set (development build)",
+  pinned: "Vault address: Ironwood-only, signed by all 5 signers and checked in this browser",
+  backend: "Vault address: Ironwood-only, signed by the 5 signers the backend lists (development build: not pinned)",
+  unchecked: "Vault address: Ironwood-only, NOT checked against any signer set (development build)",
 };
 
 /** The status rows' text, by chain and state: dim once done, bright while current. */
@@ -593,9 +593,7 @@ function DepositStep({ loan, vault, vaultError }: { loan: StoredLoan; vault: Vau
                 <div className="min-w-0 space-y-3 text-sm">
                   <p className="text-muted">Scan with an Ironwood-capable wallet, or copy the address and amount.</p>
                   <div>
-                    <p className={cx("text-xs uppercase tracking-wide", vouched === "pinned" ? "text-faint" : "text-warn")}>
-                      {VOUCHED[vouched]}
-                    </p>
+                    <p className={cx("text-sm", vouched === "pinned" ? "text-muted" : "text-warn")}>{VOUCHED[vouched]}</p>
                     <Mono className="block">{loan.vaultAddress}</Mono>
                     <div className="mt-2 flex flex-wrap gap-2">
                       <CopyButton value={loan.vaultAddress!} label="Copy address" />
@@ -616,8 +614,7 @@ function DepositStep({ loan, vault, vaultError }: { loan: StoredLoan; vault: Vau
                         Zcash block <strong>#{expiry.toLocaleString("en-US")}</strong>
                         {blocksLeft !== null ? (
                           <span className="text-muted">
-                            {" "}
-                            · {blocksLeft > 0 ? `${blocksLeft} blocks left (${blocksToDuration(blocksLeft)})` : "passed"}
+                            , {blocksLeft > 0 ? `${blocksLeft} blocks left (${blocksToDuration(blocksLeft)})` : "already passed"}
                           </span>
                         ) : null}
                       </span>

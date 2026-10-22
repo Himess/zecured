@@ -90,21 +90,20 @@ function LoanRow({ loan }: { loan: StoredLoan }) {
             Account <Mono>{short(loan.account)}</Mono>
             {loan.vaultId ? (
               <>
-                {" "}
-                · vault <Mono>{short(loan.vaultId, 10, 6)}</Mono>
+                , vault <Mono>{short(loan.vaultId, 10, 6)}</Mono>
               </>
             ) : null}
           </p>
           <p className="text-xs text-faint">
-            Created {new Date(loan.createdAt).toLocaleString()} ·{" "}
+            Created {new Date(loan.createdAt).toLocaleString()}.{" "}
             {loan.backupVerified ? (
-              "backup verified"
+              "Backup verified."
             ) : loan.backedUp ? (
-              <span className="text-warn">backed up, not verified by a restore</span>
+              <span className="text-warn">Backed up, not verified by a restore.</span>
             ) : (
-              <span className="text-warn">not backed up</span>
+              <span className="text-warn">Not backed up.</span>
             )}
-            {loan.demo ? " · DEMO (paid by the demo wallet)" : null}
+            {loan.demo ? " DEMO: paid by the demo wallet." : null}
           </p>
           {vault.error && loan.vaultId ? <p className="text-xs text-warn">Status unavailable: {vault.error}</p> : null}
         </div>

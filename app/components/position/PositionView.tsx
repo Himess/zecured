@@ -213,7 +213,7 @@ export function PositionView() {
               ["USDC in the account", p ? `${formatUsdc(p.usdcBalance)} USDC` : "—"],
               [
                 "Morpho authorizations",
-                p ? `Registry ${p.registryAuthorized ? "✓" : "✗"} · Settlement Adapter ${p.adapterAuthorized ? "✓" : "✗"}` : "—",
+                p ? `Registry ${p.registryAuthorized ? "✓" : "✗"}, Settlement Adapter ${p.adapterAuthorized ? "✓" : "✗"}` : "—",
               ],
             ]}
           />
