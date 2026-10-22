@@ -193,10 +193,20 @@ export function Stat({ label, value, hint }: { label: ReactNode; value: ReactNod
   );
 }
 
-/** Long hex / addresses: monospace (chain data only), wrap anywhere; in the ground's strongest text colour. */
+/**
+ * Chain data in monospace, in the ground's strongest text colour. Long hex and addresses wrap anywhere; a short
+ * value (a shortened id such as 0x1563…5508) stays on one line rather than leave a character on the next.
+ */
 export function Mono({ children, className }: { children: ReactNode; className?: string }) {
+  const short = typeof children === "string" && children.length <= 24;
   return (
-    <code className={cx("font-mono text-[0.85em] break-all text-[color:var(--strong-color,var(--color-text))]", className)}>
+    <code
+      className={cx(
+        "font-mono text-[0.85em] text-[color:var(--strong-color,var(--color-text))]",
+        short ? "whitespace-nowrap" : "break-all",
+        className,
+      )}
+    >
       {children}
     </code>
   );
