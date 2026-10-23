@@ -32,10 +32,11 @@ test("every request stays on the site's own origin, and nothing fails or breaks 
   page.on("requestfailed", (r) => problems.push(`failed: ${r.url()}`));
   for (const width of WIDTHS) await open(page, "/", width);
   await page.waitForFunction(() => document.documentElement.classList.contains("scene-on"));
-  // Through every chapter, so the scene and the page load whatever they would.
+  // Through every chapter, so the scene and the page load whatever they would. A direct scroll: Playwright's own
+  // waits for the page to hold still, which a software renderer's few frames a second make slow.
   for (const id of ["how", "swap", "privacy", "trust", "demo"]) {
-    await page.locator(`#${id}`).scrollIntoViewIfNeeded();
-    await page.waitForTimeout(150);
+    await page.evaluate((target) => document.getElementById(target)!.scrollIntoView({ block: "start", behavior: "instant" }), id);
+    await page.waitForTimeout(300);
   }
   await open(page, "/docs/");
   await page.getByRole("button", { name: "Read with your viewing key" }).first().click();
