@@ -38,17 +38,25 @@
 }
 
 /* A soft darkening where text sits, so it reads over the scene. */
+/* The text's side of the screen stays dark; past the chapters, where the text runs across, all of it dims. */
 .veil {
   position: absolute;
   inset: 0;
-  background: linear-gradient(90deg, rgba(4, 9, 7, 0.72) 0%, rgba(4, 9, 7, 0.28) 38%, rgba(4, 9, 7, 0) 60%),
+  background: linear-gradient(90deg, rgba(4, 9, 7, 0.8) 0%, rgba(4, 9, 7, 0.62) 30%, rgba(4, 9, 7, 0.22) 46%, rgba(4, 9, 7, 0) 58%),
     linear-gradient(180deg, rgba(4, 9, 7, 0.5) 0%, rgba(4, 9, 7, 0) 18%, rgba(4, 9, 7, 0) 78%, rgba(4, 9, 7, 0.6) 100%);
+}
+
+.veil::after {
+  content: "";
+  position: absolute;
+  inset: 0;
+  background: rgba(4, 9, 7, 0.55);
+  opacity: 0;
   transition: opacity 0.8s ease;
 }
 
-.veil-right .veil {
-  background: linear-gradient(270deg, rgba(4, 9, 7, 0.72) 0%, rgba(4, 9, 7, 0.28) 38%, rgba(4, 9, 7, 0) 60%),
-    linear-gradient(180deg, rgba(4, 9, 7, 0.5) 0%, rgba(4, 9, 7, 0) 18%, rgba(4, 9, 7, 0) 78%, rgba(4, 9, 7, 0.6) 100%);
+.veil-wide .veil::after {
+  opacity: 1;
 }
 
 main {
@@ -173,8 +181,16 @@ main {
   transition: transform 1.3s cubic-bezier(0.16, 0.84, 0.24, 1);
 }
 
-.js .display .line + .line > span {
-  transition-delay: 0.14s;
+.js .display .line:nth-child(2) > span {
+  transition-delay: 0.08s;
+}
+
+.js .display .line:nth-child(3) > span {
+  transition-delay: 0.16s;
+}
+
+.js .display .line:nth-child(4) > span {
+  transition-delay: 0.24s;
 }
 
 .js .display.in .line > span {
@@ -224,7 +240,7 @@ main {
 
 .display {
   max-width: 13em;
-  font-size: clamp(42px, 6.3vw, 104px);
+  font-size: clamp(42px, 5.4vw, 92px);
   line-height: 0.94;
   font-weight: 800;
   font-stretch: 116%;
@@ -315,12 +331,19 @@ main {
   max-width: 33rem;
 }
 
-.chapter.right .panel > * {
-  margin-left: auto;
+/* A halo of the night behind the chapters' words, for the moments the scene's white half passes under them; not
+   on what has a ground of its own. */
+.chapter .panel {
+  text-shadow: 0 0 24px rgba(4, 9, 7, 0.85), 0 1px 3px rgba(4, 9, 7, 0.55);
+}
+
+.chapter .panel .chip,
+.chapter .panel .side {
+  text-shadow: none;
 }
 
 .chapter.wide .panel > * {
-  max-width: 62rem;
+  max-width: 40rem;
 }
 
 .kicker {
@@ -410,12 +433,12 @@ main {
 .versus {
   display: grid;
   grid-template-columns: repeat(2, minmax(0, 1fr));
-  gap: 18px;
-  margin-top: 36px;
+  gap: 14px;
+  margin-top: 30px;
 }
 
 .side {
-  padding: 26px 28px;
+  padding: 22px;
   border-radius: 22px;
   -webkit-backdrop-filter: blur(10px);
   backdrop-filter: blur(10px);
@@ -429,8 +452,9 @@ main {
 
 .side ul {
   display: grid;
-  gap: 10px;
-  font-size: 16px;
+  gap: 9px;
+  font-size: 15px;
+  line-height: 1.45;
 }
 
 .side li {
@@ -669,16 +693,31 @@ main {
 }
 
 @media (max-width: 760px) {
-  .veil,
-  .veil-right .veil {
-    background: linear-gradient(180deg, rgba(4, 9, 7, 0.35) 0%, rgba(4, 9, 7, 0) 30%, rgba(4, 9, 7, 0.55) 62%, rgba(4, 9, 7, 0.88) 100%);
+  .veil {
+    background: linear-gradient(180deg, rgba(4, 9, 7, 0.45) 0%, rgba(4, 9, 7, 0.08) 30%, rgba(4, 9, 7, 0.55) 62%, rgba(4, 9, 7, 0.88) 100%);
   }
 
   .hero {
     padding-bottom: 96px;
   }
 
+  .ctas {
+    gap: 10px;
+    margin-top: 30px;
+  }
+
+  .ctas .btn {
+    min-height: 48px;
+    padding: 0 18px;
+    font-size: 15px;
+  }
+
   .cue {
+    display: none;
+  }
+
+  /* Above a phone's headline there is room to name the two halves, not the seam. */
+  .tag3d[data-tag="core"] {
     display: none;
   }
 
@@ -689,10 +728,6 @@ main {
   .chapter .panel {
     justify-content: flex-end;
     padding: 96px 0 48px;
-  }
-
-  .chapter.right .panel > * {
-    margin-left: 0;
   }
 
   .versus {
@@ -707,13 +742,6 @@ main {
 
   .doors {
     grid-template-columns: minmax(0, 1fr);
-  }
-
-  /* The hero's own tags crowd a phone's headline. */
-  .tag3d[data-tag="pool"],
-  .tag3d[data-tag="ledger"],
-  .tag3d[data-tag="proofIdle"] {
-    display: none;
   }
 }
 

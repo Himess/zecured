@@ -91,6 +91,24 @@ document.documentElement.classList.add("js");
     let scene = null;
     let queued = false;
 
+    // Where a section's text ends, as a share of the screen: its right edge on a wide screen, its top on a tall one
+    // (from the top of its own screen, so neither the scroll nor a reveal's transform moves it). The scene stands its
+    // story in the space left over; 0 when the text runs across the screen.
+    const TEXT = ".panel > *, .hero-in > .eyebrow, .hero-in > .lead, .display .line > span, .ctas > *";
+    const edges = new Map();
+    function edgeOf(section) {
+      if (!edges.has(section)) {
+        const tall = window.innerWidth / window.innerHeight < 0.9;
+        let edge = tall ? 1 : 0;
+        section.querySelectorAll(TEXT).forEach((el) => {
+          if (tall) edge = Math.min(edge, el.offsetTop / window.innerHeight);
+          else edge = Math.max(edge, el.getBoundingClientRect().right / window.innerWidth);
+        });
+        edges.set(section, edge === 1 ? 0 : edge);
+      }
+      return edges.get(section);
+    }
+
     function place() {
       queued = false;
       const middle = window.innerHeight * 0.5;
@@ -98,9 +116,8 @@ document.documentElement.classList.add("js");
         const box = sections[i].getBoundingClientRect();
         if (box.top <= middle && box.bottom > middle) {
           const p = (middle - box.top) / box.height;
-          const next = sections[i + 1] || sections[i];
-          root.classList.toggle("veil-right", sections[i].classList.contains("right"));
-          if (scene) scene.setScroll(sections[i].dataset.scene, p, next.dataset.scene);
+          root.classList.toggle("veil-wide", sections[i].dataset.veil === "wide");
+          if (scene) scene.setScroll(sections[i].dataset.scene, p, edgeOf(sections[i]));
           return;
         }
       }
@@ -113,14 +130,20 @@ document.documentElement.classList.add("js");
       }
     };
     window.addEventListener("scroll", onScroll, { passive: true });
-    window.addEventListener("resize", onScroll, { passive: true });
+    window.addEventListener("resize", () => {
+      edges.clear();
+      onScroll();
+    }, { passive: true });
     place();
 
     if (reduced || !webgl2()) {
       root.classList.add("no-scene");
       return;
     }
-    import("./scene.js")
+    // The scene writes on its things with the page's fonts: it waits for them.
+    const fonts = document.fonts ? document.fonts.ready : Promise.resolve();
+    fonts
+      .then(() => import("./scene.js"))
       .then(({ startScene }) => {
         scene = startScene(canvas, {
           tags: document.querySelector(".stage .tags"),

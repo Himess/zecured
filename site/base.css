@@ -209,6 +209,7 @@ mark {
   align-items: center;
   min-height: 40px;
   padding: 0 12px;
+  white-space: nowrap;
   border-radius: 999px;
   color: var(--soft);
   font-size: 15px;
@@ -363,6 +364,12 @@ mark {
 
   .links a {
     padding: 0 10px;
+  }
+}
+
+@media (max-width: 900px) {
+  .links .wide {
+    display: none;
   }
 }
 

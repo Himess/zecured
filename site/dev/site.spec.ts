@@ -91,12 +91,14 @@ test("the scene draws, and the page's tags follow it", async ({ page }) => {
   // A frame of the scene is no flat colour: a flat frame would compress to a few kilobytes.
   const shot = await page.locator("#scene").screenshot();
   expect(shot.length).toBeGreaterThan(60_000);
-  // In the deposit chapter, the vault's tag comes in where the vault is.
+  // Late in the deposit chapter, once the coin is sealed in, the vault's tag comes in where the vault is.
   await page.evaluate(() => {
     const el = document.getElementById("how")!;
-    window.scrollTo({ top: el.offsetTop + el.offsetHeight * 0.55 - window.innerHeight / 2, behavior: "instant" });
+    window.scrollTo({ top: el.offsetTop + el.offsetHeight * 0.85 - window.innerHeight / 2, behavior: "instant" });
   });
-  await expect.poll(async () => Number(await page.locator('[data-tag="vault"]').evaluate((el) => getComputedStyle(el).opacity))).toBeGreaterThan(0.6);
+  await expect
+    .poll(async () => Number(await page.locator('[data-tag="vault"]').evaluate((el) => getComputedStyle(el).opacity)), { timeout: 30_000 })
+    .toBeGreaterThan(0.6);
 });
 
 test("without WebGL the page keeps its still image and says nothing is wrong", async ({ browser }) => {

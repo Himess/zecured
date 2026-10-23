@@ -2,15 +2,18 @@
 
 `site/` is Zecured's public site, two static pages with no server behind them:
 
-- **The landing page** (`index.html`): a short story told by a 3D scene. Zcash’s shielded pool is a dark field of
-  notes below, Base is a ledger of light above, and gold proofs are the only thing that crosses between them. As
-  the reader scrolls, the camera follows one loan (deposit, prove, borrow, close), the swap, what a bridge would
-  leak, and the theft demonstration. The text stays short: a line and a sentence a chapter.
+- **The landing page** (`index.html`): a short story told by a 3D scene. The scene is Zecured’s mark made solid:
+  a disc split by a seam, its dark half Zcash’s shielded pool (notes of ciphertext), its white half Base’s public
+  ledger, and a gold core in the seam, the only place anything crosses. As the reader scrolls, the story plays out
+  on the mark: a coin paid into a vault its five signers ring, a proof crossing to the ledger, a fresh account
+  borrowing from the market, the close, the swap, what a bridge would leak, and the theft and its slashing. The
+  text stays short: a line and a sentence a chapter.
 - **The docs page** (`docs/index.html`): the details. One loan step by step on both chains (with the borrower’s
   viewing key), what Base sees next to a typical bridge, the swap, who you have to trust and the theft timeline,
   the evidence, the way to mainnet, and how to run it all.
 
-The first design of the site, a single long page, is kept on the branch `site-v1`.
+The first design of the site, a single long page, is kept on the branch `site-v1`; the second, whose scene was
+an abstract field of light, on `site-v2`.
 
 The site is not a deployment of the system (DECISIONS D82): it holds no keys, calls no backend and reads no chain.
 It loads nothing from anyone else: no analytics, no third-party fonts, scripts, images or embeds. Its
@@ -28,20 +31,28 @@ then open http://localhost:8090 and http://localhost:8090/docs/.
 
 ## The scene
 
-The scene is written with [three.js](https://threejs.org) 0.186.1 (MIT) in `site/dev/scene/` (`index.js`, the
-chapters and the animation; `shaders.js`, its GLSL). esbuild bundles it with the parts of three.js it uses into one
-minified module, `site/scene.js` (`pnpm build` in `site/dev`); a test checks that the committed file is what the
-source builds to.
+The scene is written with [three.js](https://threejs.org) 0.186.1 (MIT) in `site/dev/scene/`: `world.js` builds
+the mark and its lights, `props.js` the things of the story (notes, coins, signers, ledger rows, the market, the
+escrow, the bonds), `labels.js` draws the text on them, `story.js` gives each thing its state, `camera.js` the
+camera’s, and `index.js` runs it all. esbuild bundles it with the parts of three.js it uses into one minified
+module, `site/scene.js` (`pnpm build` in `site/dev`); a test checks that the committed file is what the source
+builds to.
 
 - `main.js` loads `scene.js` once the page is up, and only where WebGL 2 is available and the reader has not asked
   for reduced motion. Otherwise, and until the scene draws its first frame, the page shows `img/still.jpg`, one
   frame of the scene.
-- Each section of the page names its chapter (`data-scene`). The scene eases the camera and the story toward the
-  chapter in the middle of the screen, and blends into the next one as its section ends. On a tall screen the
-  chapters have cameras of their own, so the story sits above the text.
+- The scroll is the story’s clock. Each section of the page names its chapter (`data-scene`); story time is the
+  chapter’s number plus how far through it the reader is, and every object’s state is a function of that time
+  alone, so the story plays backwards as well as forwards. Each chapter’s events happen while its text is on
+  screen.
+- The camera follows a track of keyframes in story time, each an orbit around what is being told and the place on
+  screen where it should stand. `main.js` measures where each section’s text ends (its right edge, or its top on a
+  tall screen), and the scene stands the story in the space the text leaves, stepping back where that space is
+  narrow. Once, as the page opens, the camera swings in toward the mark.
 - The small tags on the scene (`.tags [data-tag]`, in the page’s HTML) follow the things they name: the scene
   places them each frame and fades them with its story. They are decorative (`aria-hidden`); the text says the same.
-- It keeps its frame rate by lowering the pixel ratio while frames run slow, and stops while the tab is hidden.
+- It keeps its frame rate by lowering the pixel ratio while frames run slow, then turning off the glow, then the
+  shadows, and it stops while the tab is hidden.
 
 ## The design
 

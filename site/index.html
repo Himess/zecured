@@ -18,7 +18,7 @@
 <meta property="og:image" content="https://himess.github.io/zecured/og.png">
 <meta property="og:image:width" content="1200">
 <meta property="og:image:height" content="630">
-<meta property="og:image:alt" content="Zecured: a dark field of shielded notes below, Base's ledger of light above, and gold proofs crossing between them.">
+<meta property="og:image:alt" content="Zecured’s mark as a 3D disc: a dark half of shielded notes, a white half that is Base’s ledger, and a gold core in the seam between them, the only place anything crosses.">
 <meta name="twitter:card" content="summary_large_image">
 <meta name="twitter:title" content="Zecured: your ZEC stays shielded, only the proof crosses">
 <meta name="twitter:description" content="Borrow USDC on Base against shielded ZEC, or swap USDC into shielded ZEC with no custodian.">
@@ -38,25 +38,32 @@
   <canvas id="scene"></canvas>
   <div class="veil"></div>
   <div class="tags">
-    <div class="tag3d t-z" data-tag="pool"><span>Zcash, the shielded pool</span></div>
-    <div class="tag3d t-b" data-tag="ledger"><span>Base, the public ledger</span></div>
-    <div class="tag3d t-gold" data-tag="proofIdle"><span>a zero-knowledge proof</span></div>
-    <div class="tag3d t-z" data-tag="payment"><span>your deposit, encrypted</span></div>
-    <div class="tag3d t-z" data-tag="vault"><span>your vault, 3 of 5 signers</span></div>
-    <div class="tag3d t-gold" data-tag="proof"><span>proof of the deposit</span></div>
-    <div class="tag3d t-b" data-tag="minted"><span>zZEC minted on the proof</span></div>
+    <div class="tag3d t-z" data-tag="pool"><span>Zcash: the shielded pool</span></div>
+    <div class="tag3d t-b" data-tag="ledger"><span>Base: the public ledger</span></div>
+    <div class="tag3d t-gold" data-tag="core"><span>the seam: only proofs cross</span></div>
+    <div class="tag3d t-gold" data-tag="coin"><span>your ZEC</span></div>
+    <div class="tag3d t-b" data-tag="keys"><span>five signers, any three to spend</span></div>
+    <div class="tag3d t-z" data-tag="vault"><span>your vault: one encrypted note</span></div>
+    <div class="tag3d t-gold" data-tag="proof"><span>a zero-knowledge proof of the deposit</span></div>
+    <div class="tag3d t-gold" data-tag="minted"><span>zZEC, minted on the proof alone</span></div>
     <div class="tag3d t-b" data-tag="market"><span>Morpho market</span></div>
     <div class="tag3d t-b" data-tag="account"><span>a fresh account, no ETH</span></div>
-    <div class="tag3d t-b" data-tag="committed"><span>payout committed first</span></div>
-    <div class="tag3d t-z" data-tag="to-you"><span>to a new address of yours</span></div>
-    <div class="tag3d t-z" data-tag="to-maker"><span>to the market maker</span></div>
+    <div class="tag3d t-b" data-tag="repaid"><span>the debt, repaid from the collateral</span></div>
+    <div class="tag3d t-z" data-tag="to-you"><span>the rest, to a new note of yours</span></div>
+    <div class="tag3d t-z" data-tag="to-maker"><span>the market maker’s share</span></div>
+    <div class="tag3d t-gold" data-tag="inclusion"><span>a proof the payout landed</span></div>
     <div class="tag3d t-b" data-tag="escrow"><span>your USDC, in escrow</span></div>
     <div class="tag3d t-z" data-tag="payee"><span>paid to your shielded address</span></div>
-    <div class="tag3d t-gold" data-tag="paymentProof"><span>proof of the payment</span></div>
-    <div class="tag3d t-b" data-tag="released"><span>released to the maker</span></div>
-    <div class="tag3d t-red" data-tag="compromised"><span>3 of 5 signers compromised</span></div>
-    <div class="tag3d t-gold" data-tag="violation"><span>proof of the theft</span></div>
-    <div class="tag3d t-b" data-tag="slashed"><span>all five bonds slashed</span></div>
+    <div class="tag3d t-gold" data-tag="payment"><span>a proof of that payment</span></div>
+    <div class="tag3d t-red" data-tag="bridge"><span>a bridge: your ZEC leaves the pool</span></div>
+    <div class="tag3d t-red" data-tag="links"><span>four links back to you</span></div>
+    <div class="tag3d t-gold" data-tag="only"><span>Zecured: only a proof crosses</span></div>
+    <div class="tag3d t-red" data-tag="compromised"><span>three of five signers turned</span></div>
+    <div class="tag3d t-red" data-tag="swept"><span>the vault, swept</span></div>
+    <div class="tag3d t-gold" data-tag="violation"><span>a proof of the theft</span></div>
+    <div class="tag3d t-b" data-tag="bonds"><span>the signers’ bonds</span></div>
+    <div class="tag3d t-red" data-tag="slashed"><span>all five bonds, slashed</span></div>
+    <div class="tag3d t-b" data-tag="victim"><span>the victim, made whole</span></div>
   </div>
 </div>
 
@@ -84,8 +91,10 @@
   <div class="hero-in">
     <p class="eyebrow reveal">Built for ZECATHON 2026 <span class="dot" aria-hidden="true"></span> on testnets</p>
     <h1 id="hero-h" class="display">
-      <span class="line"><span>Your ZEC stays shielded.</span></span>
-      <span class="line"><span>Only the <em>proof</em> crosses.</span></span>
+      <span class="line"><span>Your ZEC stays</span></span>
+      <span class="line"><span>shielded.</span></span>
+      <span class="line"><span>Only the <em>proof</em></span></span>
+      <span class="line"><span>crosses.</span></span>
     </h1>
     <p class="lead reveal">Borrow USDC on Base against ZEC that never leaves Zcash’s Ironwood pool, or swap USDC into shielded ZEC. No bridge, no wrapped token, no custodian.</p>
     <div class="ctas reveal">
@@ -108,7 +117,7 @@
   </div>
 </section>
 
-<section class="chapter right" data-scene="prove" aria-labelledby="c-prove">
+<section class="chapter" data-scene="prove" aria-labelledby="c-prove">
   <div class="panel">
     <p class="kicker reveal"><span class="kicker-n">02</span>Prove</p>
     <h2 id="c-prove" class="title reveal">Only a proof crosses.</h2>
@@ -128,7 +137,7 @@
   </div>
 </section>
 
-<section class="chapter right" data-scene="close" aria-labelledby="c-close">
+<section class="chapter" data-scene="close" aria-labelledby="c-close">
   <div class="panel">
     <p class="kicker reveal"><span class="kicker-n">04</span>Close</p>
     <h2 id="c-close" class="title reveal">Leave without unshielding.</h2>
@@ -176,7 +185,7 @@
   </div>
 </section>
 
-<section class="chapter right" id="trust" data-scene="trust" aria-labelledby="c-trust">
+<section class="chapter" id="trust" data-scene="trust" aria-labelledby="c-trust">
   <div class="panel">
     <p class="kicker reveal"><span class="kicker-n">07</span>Trust</p>
     <h2 id="c-trust" class="title reveal">We let three signers steal.</h2>
@@ -186,7 +195,7 @@
   </div>
 </section>
 
-<section class="numbers" data-scene="numbers" aria-labelledby="n-h">
+<section class="numbers" data-scene="numbers" data-veil="wide" aria-labelledby="n-h">
   <h2 id="n-h" class="title reveal">Every number is a run you can repeat.</h2>
   <ul class="stats">
     <li class="stat reveal"><span class="stat-n" data-count="804">804</span><span class="stat-l">contract tests pass</span></li>
@@ -197,7 +206,7 @@
   <p class="note reveal">All of it on Zcash testnet and Base Sepolia forks. <a href="docs/#evidence">The evidence</a></p>
 </section>
 
-<section class="demo" id="demo" data-scene="demo" aria-labelledby="demo-h">
+<section class="demo" id="demo" data-scene="demo" data-veil="wide" aria-labelledby="demo-h">
   <div class="demo-copy">
     <h2 id="demo-h" class="title reveal">See it run.</h2>
     <p class="body reveal">Three minutes, narrated: a loan opened in the browser, its deposit proven, USDC borrowed, a close from collateral, a swap, and the theft demonstration.</p>
@@ -208,7 +217,7 @@
   </div>
 </section>
 
-<section class="more" data-scene="end" aria-labelledby="more-h">
+<section class="more" data-scene="end" data-veil="wide" aria-labelledby="more-h">
   <h2 id="more-h" class="title reveal">Everything, in detail.</h2>
   <ul class="doors">
     <li class="reveal"><a href="docs/#loan"><span class="door-t">How a loan works</span><span class="door-d">Five steps, seen from both chains</span></a></li>

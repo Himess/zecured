@@ -18,7 +18,8 @@ export default defineConfig({
     env: { PORT: "8091" },
   },
   projects: [
-    { name: "site", testMatch: /site\.spec\.ts/ },
+    // A software renderer draws the scene a few frames a second: the page answers slowly while it runs.
+    { name: "site", testMatch: /site\.spec\.ts/, timeout: 90_000 },
     { name: "shots", testMatch: /shots\.spec\.ts/, timeout: 120_000, fullyParallel: false },
   ],
 });

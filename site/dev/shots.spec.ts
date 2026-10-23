@@ -34,7 +34,12 @@ async function freezeScene(page: Page) {
     stage.insertBefore(canvas, stage.querySelector(".veil"));
     const { startScene } = await import(new URL("scene.js", document.baseURI).href);
     const scene = startScene(canvas, { tags: document.querySelector(".stage .tags") });
-    scene.still(3.1);
+    // Where the hero's text ends, measured as main.js measures it, so the mark stands where the page puts it.
+    let edge = 0;
+    document.querySelectorAll(".hero-in > .eyebrow, .hero-in > .lead, .display .line > span, .ctas > *").forEach((el) => {
+      edge = Math.max(edge, el.getBoundingClientRect().right / window.innerWidth);
+    });
+    scene.still(3.1, "hero", 0, edge);
     document.documentElement.classList.add("scene-on");
   });
   await page.waitForTimeout(1600);
