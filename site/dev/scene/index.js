@@ -21,6 +21,8 @@ export function startScene(canvas, { tags: tagLayer = null, onReady } = {}) {
     return null;
   }
   if (!renderer.getContext()) return null;
+  // Shader logs are for development: on Windows, Direct3D's compiler warns about constants in three's own shaders.
+  renderer.debug.checkShaderErrors = false;
   renderer.toneMapping = NeutralToneMapping;
   renderer.toneMappingExposure = 1.05;
   renderer.shadowMap.enabled = true;
