@@ -89,8 +89,8 @@ export function startScene(canvas, { tags: tagLayer = null, onReady } = {}) {
   }
 
   function resize() {
-    width = window.innerWidth;
-    height = window.innerHeight;
+    width = Math.max(1, window.innerWidth);
+    height = Math.max(1, window.innerHeight);
     tall = width / height < 0.9;
     renderer.setSize(width, height, false);
     composer.setPixelRatio(pixelRatio);
@@ -184,7 +184,8 @@ export function startScene(canvas, { tags: tagLayer = null, onReady } = {}) {
     const dt = Math.min(0.1, last ? (ms - last) / 1000 : 0.016);
     last = ms;
     update((ms - start) / 1000, dt);
-    composer.render(dt);
+    // A window with no size (one being prerendered, or hidden) has nothing to draw into.
+    if (width > 16 && height > 16) composer.render(dt);
     // Keep the frame rate: while frames run slow, drop the pixel ratio, then the glow, then the shadows.
     frames.push(dt);
     if (frames.length >= 45) {
@@ -217,7 +218,7 @@ export function startScene(canvas, { tags: tagLayer = null, onReady } = {}) {
     start = performance.now() - at * 1000;
     setScroll(name, p, textEdge);
     update(at, 0.016, true);
-    composer.render(0.016);
+    if (width > 16 && height > 16) composer.render(0.016);
   }
 
   window.addEventListener("resize", resize);
