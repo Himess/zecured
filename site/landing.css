@@ -105,6 +105,12 @@ main {
   opacity: 0.6;
 }
 
+.tag3d.below::after {
+  top: 6px;
+  bottom: auto;
+  background: linear-gradient(180deg, currentColor, rgba(255, 255, 255, 0));
+}
+
 .tag3d span {
   position: absolute;
   left: 0;
@@ -121,6 +127,11 @@ main {
   white-space: nowrap;
   -webkit-backdrop-filter: blur(6px);
   backdrop-filter: blur(6px);
+}
+
+.tag3d.below span {
+  top: 34px;
+  bottom: auto;
 }
 
 .t-gold {

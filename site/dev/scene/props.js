@@ -27,7 +27,7 @@ import {
 } from "three";
 import { RoundedBoxGeometry } from "three/addons/geometries/RoundedBoxGeometry.js";
 import { COLORS } from "./world.js";
-import { canvasTexture, drawCard, drawChip, drawCipher, drawCoin, drawEvent, drawGlyph, drawMarket } from "./labels.js";
+import { canvasTexture, drawCard, drawChip, drawCipher, drawCoin, drawEvent, drawGlyph, drawLock, drawMarket } from "./labels.js";
 
 const geometries = new Map();
 function rounded(w, h, d, r) {
@@ -231,15 +231,14 @@ export function buildProps(renderer, world, rand) {
   chips.frustumCulled = false;
   world.add(chips);
 
-  function card() {
+  /** An account on Base: a white card with its name and three lines. */
+  function card(title, lines) {
     const group = new Group();
     const material = white();
     const body = new Mesh(rounded(1.22, 0.12, 0.9, 0.06), material);
     body.castShadow = true;
     body.receiveShadow = true;
-    const label = canvasTexture(renderer, 512, 384, (ctx, w, h) =>
-      drawCard(ctx, w, h, "A fresh Safe", ["deployed by its first", "UserOp, gas sponsored", "ETH ever received: 0"]),
-    );
+    const label = canvasTexture(renderer, 512, 384, (ctx, w, h) => drawCard(ctx, w, h, title, lines));
     const top = face(1.12, 0.82, label.texture, 0.063);
     group.add(body, top);
     world.add(group);
@@ -262,12 +261,31 @@ export function buildProps(renderer, world, rand) {
     box.position.y = 0.31;
     const edges = new LineSegments(new EdgesGeometry(rounded(0.96, 0.62, 0.96, 0.06), 30), new LineBasicMaterial({ color: 0xe8f0ff, transparent: true, opacity: 0.85 }));
     edges.position.y = 0.31;
-    const lid = new Mesh(rounded(1.02, 0.08, 1.02, 0.03), white());
+    // Its lid says what it is locked to.
+    const lidMaterial = white();
+    const lid = new Mesh(rounded(1.02, 0.08, 1.02, 0.03), lidMaterial);
     lid.position.y = 0.66;
     lid.castShadow = true;
+    const lidFace = face(0.92, 0.92, canvasTexture(renderer, 256, 256, drawLock).texture, 0.042);
+    lid.add(lidFace);
     group.add(box, edges, lid);
     world.add(group);
-    return { group, material, edges, lid };
+    return { group, material, edges, lid, lidMaterial, lidFace };
+  }
+
+  /** Where a note will be: the outline of one, faintly lit, before anything is paid to it. */
+  function ghost() {
+    const group = new Group();
+    const material = new LineBasicMaterial({ color: new Color(0.55, 1.6, 1.15), transparent: true, opacity: 0.9 });
+    group.add(new LineSegments(new EdgesGeometry(rounded(0.92, 0.16, 0.62, 0.06), 30), material));
+    const fill = new Mesh(
+      new PlaneGeometry(0.86, 0.56).rotateX(-Math.PI / 2),
+      new MeshBasicMaterial({ color: 0x5ed3a8, transparent: true, opacity: 0.14, depthWrite: false }),
+    );
+    fill.position.y = 0.081;
+    group.add(fill);
+    world.add(group);
+    return { group, material, fill: fill.material };
   }
 
   // ------------------------------------------------------------------------------ the bonds and a theft
@@ -350,7 +368,9 @@ export function buildProps(renderer, world, rand) {
   const proof = proofToken();
   const events = Array.from({ length: 7 }, () => eventTile());
   const morpho = market();
-  const account = card();
+  const account = card("A fresh Safe", ["deployed by its first", "UserOp, gas sponsored", "ETH ever received: 0"]);
+  const maker = card("Market maker", ["pays ZEC on Zcash,", "is paid USDC here,", "on a proof alone"]);
+  const address = ghost();
   const box = escrow();
   const bonds = Array.from({ length: 5 }, () => bond());
   const ring = lines(5, 0xdbe8ff, 0.5);
@@ -382,6 +402,8 @@ export function buildProps(renderer, world, rand) {
     morpho,
     chips,
     account,
+    maker,
+    address,
     box,
     bonds,
     shards,

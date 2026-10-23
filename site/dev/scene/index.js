@@ -47,7 +47,7 @@ export function startScene(canvas, { tags: tagLayer = null, onReady } = {}) {
   // The page's tags that follow things in the scene.
   const tagEls = new Map();
   tagLayer?.querySelectorAll("[data-tag]").forEach((el) =>
-    tagEls.set(el.dataset.tag, { el, label: el.firstElementChild, width: 0, on: 0, shown: false }),
+    tagEls.set(el.dataset.tag, { el, label: el.firstElementChild, width: 0, on: 0, shown: false, below: false }),
   );
 
   // ----------------------------------------------------------------------------------------- the state
@@ -157,6 +157,12 @@ export function startScene(canvas, { tags: tagLayer = null, onReady } = {}) {
           const x = (scratch.x * 0.5 + 0.5) * width;
           const y = (-scratch.y * 0.5 + 0.5) * height;
           entry.el.style.transform = `translate3d(${x.toFixed(1)}px, ${y.toFixed(1)}px, 0)`;
+          // Near the top of the screen a name hangs below its thing, clear of the page's header.
+          const below = y < 130;
+          if (below !== entry.below) {
+            entry.below = below;
+            entry.el.classList.toggle("below", below);
+          }
           if (entry.label) {
             if (!entry.width) entry.width = entry.label.offsetWidth;
             const half = entry.width / 2;

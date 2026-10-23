@@ -101,6 +101,29 @@ export function drawCard(ctx, w, h, title, lines, color = "#0f1b2a") {
   lines.forEach((line, i) => ctx.fillText(line, w * 0.1, h * (0.42 + i * 0.12)));
 }
 
+/** The escrow's lid: a padlock, the order, and the salted hash of the buyer's address it is locked to. */
+export function drawLock(ctx, w, h) {
+  const ink = "#0f1b2a";
+  ctx.strokeStyle = ink;
+  ctx.fillStyle = ink;
+  ctx.lineWidth = w * 0.024;
+  ctx.beginPath();
+  ctx.arc(w / 2, h * 0.21, w * 0.055, Math.PI, 0);
+  ctx.stroke();
+  ctx.beginPath();
+  ctx.roundRect(w / 2 - w * 0.085, h * 0.2, w * 0.17, h * 0.13, w * 0.02);
+  ctx.fill();
+  ctx.textAlign = "center";
+  ctx.textBaseline = "middle";
+  ctx.fillStyle = "#4c5d70";
+  ctx.font = `600 ${Math.round(h * 0.07)}px ${MONO}`;
+  ctx.fillText("ORDER 0x21660b10", w / 2, h * 0.47);
+  ctx.fillStyle = ink;
+  ctx.font = `700 ${Math.round(h * 0.074)}px ${MONO}`;
+  ctx.fillText("keccak256(salt ||", w / 2, h * 0.63);
+  ctx.fillText("your address)", w / 2, h * 0.75);
+}
+
 /** A USDC chip's face: a ring and a dollar sign. */
 export function drawChip(ctx, w, h) {
   ctx.fillStyle = "#2f6bff";
