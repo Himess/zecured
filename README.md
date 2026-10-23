@@ -138,7 +138,7 @@ repository are published test vectors (such as ZIP 2005's) and anvil's well-know
 | `bots/` | Liquidator and market maker |
 | `cli/` | `zecured-wallet`: Ironwood CLI wallet and borrower actions |
 | `app/` | Next.js app (in progress) |
-| `site/` | The showcase page: static, no build step, its own fonts and no request to anyone else ([docs/SITE.md](docs/SITE.md)) |
+| `site/` | The site: a landing page told by a 3D scene (three.js) and a docs page; static, its own fonts, no request to anyone else ([docs/SITE.md](docs/SITE.md)) |
 | `docs/` | [Architecture](docs/ARCHITECTURE.md), [Interfaces](docs/INTERFACES.md), [Threat model](docs/THREAT_MODEL.md), [Decisions](docs/DECISIONS.md), [Invariants](docs/INVARIANTS.md), [Economics](docs/ECONOMICS.md), [Mainnet](docs/MAINNET.md), [Swap](docs/SWAP.md), [Testing and evidence](docs/TESTING.md), [Security review](docs/SECURITY_REVIEW.md), [Tier 2 design](docs/TIER2.md), [Tier 3 design](docs/TIER3.md), [Operators](docs/OPERATORS.md), [Jury FAQ](docs/JURY_FAQ.md), spikes |
 
 ## Running it

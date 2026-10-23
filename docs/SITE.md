@@ -1,13 +1,22 @@
-# The showcase page
+# The site
 
-`site/` is Zecured's showcase page: `index.html`, `styles.css`, `main.js`, `fonts/`, `favicon.svg` and `og.png`.
-It has no build step and loads nothing from anyone else: no analytics, no third-party fonts, scripts, images or
-embeds. Its Content-Security-Policy (a meta tag, since GitHub Pages sets no headers) allows only the page's own
-origin: `default-src 'none'; style-src 'self'; script-src 'self'; font-src 'self'; img-src 'self'; media-src 'self';
+`site/` is Zecured's public site, two static pages with no server behind them:
+
+- **The landing page** (`index.html`): a short story told by a 3D scene. Zcash’s shielded pool is a dark field of
+  notes below, Base is a ledger of light above, and gold proofs are the only thing that crosses between them. As
+  the reader scrolls, the camera follows one loan (deposit, prove, borrow, close), the swap, what a bridge would
+  leak, and the theft demonstration. The text stays short: a line and a sentence a chapter.
+- **The docs page** (`docs/index.html`): the details. One loan step by step on both chains (with the borrower’s
+  viewing key), what Base sees next to a typical bridge, the swap, who you have to trust and the theft timeline,
+  the evidence, the way to mainnet, and how to run it all.
+
+The first design of the site, a single long page, is kept on the branch `site-v1`.
+
+The site is not a deployment of the system (DECISIONS D82): it holds no keys, calls no backend and reads no chain.
+It loads nothing from anyone else: no analytics, no third-party fonts, scripts, images or embeds. Its
+Content-Security-Policy (a meta tag, since GitHub Pages sets no headers) allows only its own origin:
+`default-src 'none'; style-src 'self'; script-src 'self'; font-src 'self'; img-src 'self'; media-src 'self';
 base-uri 'none'; form-action 'none'`, so no inline style or script either.
-
-The page is not a deployment of the system (DECISIONS D82): it holds no keys, calls no backend and reads no chain.
-It can be opened at any time, without anything else running.
 
 ## Look at it
 
@@ -15,50 +24,43 @@ It can be opened at any time, without anything else running.
 python3 -m http.server 8090 --directory site
 ```
 
-then open http://localhost:8090. Without JavaScript the page is complete: the five steps of "Follow one loan" and
-both comparisons show one after the other, and the controls that need the script are not offered.
+then open http://localhost:8090 and http://localhost:8090/docs/.
+
+## The scene
+
+The scene is written with [three.js](https://threejs.org) 0.186.1 (MIT) in `site/dev/scene/` (`index.js`, the
+chapters and the animation; `shaders.js`, its GLSL). esbuild bundles it with the parts of three.js it uses into one
+minified module, `site/scene.js` (`pnpm build` in `site/dev`); a test checks that the committed file is what the
+source builds to.
+
+- `main.js` loads `scene.js` once the page is up, and only where WebGL 2 is available and the reader has not asked
+  for reduced motion. Otherwise, and until the scene draws its first frame, the page shows `img/still.jpg`, one
+  frame of the scene.
+- Each section of the page names its chapter (`data-scene`). The scene eases the camera and the story toward the
+  chapter in the middle of the screen, and blends into the next one as its section ends. On a tall screen the
+  chapters have cameras of their own, so the story sits above the text.
+- The small tags on the scene (`.tags [data-tag]`, in the page’s HTML) follow the things they name: the scene
+  places them each frame and fades them with its story. They are decorative (`aria-hidden`); the text says the same.
+- It keeps its frame rate by lowering the pixel ratio while frames run slow, and stops while the tab is hidden.
 
 ## The design
 
-The page is the seam between two chains.
-
-- **The seam.** Zcash is on the left: dark, soft corners, encrypted values blurred, no rules. Base is on the right:
-  light, sharp corners, ruled ledger rows. On a desktop the seam is vertical; at 760 px and below it is horizontal.
-- **Gold** `#F4B728` marks only the π seal (a proof crossing) and the primary button.
-- **Red** marks only what leaks: text `#9A1F15` on `#FBE1DC`, underline `#B42318`.
-- **Martian Mono** is only for chain data: hashes, heights, amounts, commands. Never for labels.
-- **Not used:** uppercase labels, meta text joined with " · ", link texts ending in "→", grids of identical
-  shadowed cards.
-- **Motion.** The hero has one moment on load: the seal leaves the pool, crosses the seam, the stamp ring opens and
-  the ledger rows appear. Everything else moves only in answer to the reader (the steps, the viewing key, the
-  comparison). `prefers-reduced-motion` stops all of it.
-
-| Token | Value | Use |
-|---|---|---|
-| iron | `#0D1611` | Zcash's ground |
-| iron-2 | `#142019` | a soft surface on the dark |
-| iron-line | `#24352B` | a thin division on the dark |
-| iron-edge | `#3E5146` | a button's edge on the dark |
-| pool-text | `#E4ECE6` | text on the dark (15.3:1) |
-| pool-soft | `#C9D6CC` | body text on the dark (12.3:1) |
-| pool-muted | `#93A89A` | secondary text on the dark (7.3:1) |
-| ledger | `#EEF2F6` | Base's ground |
-| ledger-line | `#CFD8E2` | a ledger row's rule |
-| ink | `#0F1B2A` | text on the light (15.4:1) |
-| ink-soft | `#33455A` | body text on the light |
-| ink-muted | `#4C5D70` | secondary text on the light (6.0:1) |
-| seal | `#F4B728` | proofs and the primary button; its text is ink (9.6:1) |
-| bad | `#F26B5E` | a compromised signer's dot (6.2:1 on the dark) |
-
-Archivo (variable: width 62 to 125 %, weight 100 to 900) sets the text: body 17/1.55 (16 at 760 px and below),
-lead 18 to 21 px, h3 24 px at 118 % width, h2 `clamp(34px, 4vw, 58px)` at 125 % and weight 800, h1
-`clamp(40px, 6.4vw, 100px)` at 125 %, weight 800, line height 0.94. Martian Mono sets chain data at 12.5 to 13 px.
+- **Ground:** near black with a hint of green (`#040907`), the pool’s teal (`#38a684`), the ledger’s ice
+  (`#cfe0f2`, `#eef2f6` for light panels).
+- **Gold** (`#f4b728`) marks proofs and the primary button.
+- **Red** (`#ff5a4e`, and `#9a1f15` on `#fbe1dc` for a leak in text) marks only what leaks or is compromised.
+- **Archivo** (variable: width 62 to 125 %, weight 100 to 900) sets the text, headlines wide and heavy. **Martian
+  Mono** is for chain data only: hashes, heights, amounts, commands.
+- **Motion:** the scene and the reveals of the landing page answer the scroll. `prefers-reduced-motion` stops all
+  of it: no scene, no transitions, the still image.
+- **Panels in the docs:** where a step happens on both chains, the shielded pool is a dark rounded panel with
+  encrypted values blurred, and Base a light, square, ruled one.
 
 ## Its content
 
-Every number on the page comes from a recorded run, and each has its source:
+Every number on the site comes from a recorded run, and each has its source:
 
-| On the page | Source |
+| On the site | Source |
 |---|---|
 | 804 contract tests, 6 skipped | TESTING § 1 |
 | 4 invariant campaigns, 35 invariants, 12,800 calls each, no reverts | TESTING § 1, INVARIANTS |
@@ -69,59 +71,62 @@ Every number on the page comes from a recorded run, and each has its source:
 | GPU: a deposit in 28.1 s, an F1 in 36.9 s | TESTING § 2, 2026-10-21 |
 | Leak scan: 302 identifiers, 77 events, 55 calldata, 177 storage words, 0 matches | TESTING § 2, v4.1 |
 | The browser run: 2 min 50 s, 4 min 25 s, 7 min 56 s; 729,131 gas | TESTING § 2 |
-| Close from collateral: block 4,488,453; 337,500 and 252,500 zat | TESTING § 2, the app's run |
+| Close from collateral: block 4,488,453; 337,500 and 252,500 zat | TESTING § 2, the app’s run |
 | The swap: order `0x21660b10` and its times | TESTING § 2, v4 |
 | The theft demonstration: `43ea5e91`, block 4,523,730; 64 s; 00:04:40, 00:06:47, 00:16:53; 3 → 12.65 USDC | TESTING § 2 |
 | Vault `0x59d5e63e`, tag `0xe43d283f`, payoutRef `0xcdf694fd`, blocks 4,490,621 and 4,490,655 | TESTING § 2, 2026-10-12 |
-| The mainnet parameters and NU7's date | MAINNET § 1, 2 and 5 |
+| The mainnet parameters and NU7’s date | MAINNET § 1, 2 and 5 |
 
-When a run changes a number, change it on the page too. The page's "Real" and "Mock, or run by us" lists say what
-the README's "What is real and what is a mock" says; when one changes, so does the other.
+When a run changes a number, change it on the site too. The docs’ “Real” and “Mock, or run by us” lists say what
+the README’s “What is real and what is a mock” says; when one changes, so does the other.
 
 ## The two placeholders
 
-- **`[DEMO VIDEO]`** becomes the video, self-hosted in `site/media/`: `demo.mp4` (H.264, 1080p, CRF about 26, at
-  most 60 MB; GitHub Pages allows 100 MB a file) with `preload="none"` and a poster, `demo-poster.jpg`, and English
-  captions, `<track kind="captions" srclang="en" src="media/demo.en.vtt" default>`. Next to it, a plain link to the
-  same video on YouTube (a link, not an embed). The policy's `media-src 'self'` and `img-src 'self'` already allow
-  them.
-- **`[LIVE RUN]`** becomes the judge deployment's run: Basescan links for the Base Sepolia transactions, short
-  txids and blocks for the Zcash side. The app's evidence file (`/evidence`) takes the same run.
+- **`[DEMO VIDEO]`** (the landing page’s demo section) becomes the video, self-hosted in `site/media/`: `demo.mp4`
+  (H.264, 1080p, CRF about 26, at most 60 MB; GitHub Pages allows 100 MB a file) with `preload="none"` and a
+  poster, `demo-poster.jpg`, and English captions, `<track kind="captions" srclang="en" src="media/demo.en.vtt"
+  default>`. Next to it, a plain link to the same video on YouTube (a link, not an embed). The policy’s
+  `media-src 'self'` and `img-src 'self'` already allow them.
+- **`[LIVE RUN]`** (the docs’ evidence) becomes the judge deployment’s run: Basescan links for the Base Sepolia
+  transactions, short txids and blocks for the Zcash side. The app’s evidence file (`/evidence`) takes the same run.
 
 ## Tests
 
 ```bash
-cd site/tests
+cd site/dev
 pnpm install
 pnpm exec playwright install chromium
 pnpm test
 ```
 
-They run in CI (the `site` job). They check that every request goes to the page's own origin and nothing fails or
-breaks the policy; no accessibility violation (axe-core), also with the viewing key on, the last step and the other
-comparison shown; everything readable without the script; the steps, the viewing key and the comparison by keyboard
-(arrows, Home and End on the step rail); that the viewing key never clears the market maker's output; a link to a
-step (`#loan-step-3`) opening it; no animation under `prefers-reduced-motion`; no horizontal scroll at 390, 768,
-1024 and 1440 px; and a target for every link inside the page.
+They run in CI (the `site` job), in Chromium, on both pages. They check that every request goes to the site’s own
+origin and nothing fails or breaks the policy; no accessibility violation (axe-core), also with the viewing key
+on, the last step and the other comparison shown; every word readable without the script; that the scene draws and
+its tags follow it; that without WebGL the page keeps its still image, loads no scene and logs no error; no motion
+and no scene under `prefers-reduced-motion`; the docs’ steps, viewing key and comparison by keyboard, and that the
+viewing key never clears the market maker’s output; a link to a step (`#loan-step-3`) opening it and scrolling to
+it; no horizontal scroll at 390, 768, 1024 and 1440 px; a target for every link inside the site; and that
+`site/scene.js` is what its source builds to.
 
-`pnpm shots` writes the README's images (`docs/assets/hero.png`, `docs/assets/theft.png`), the social card
-(`site/og.png`, 1200 by 630) and the frames of `docs/assets/loan.gif`, which `scripts/site-gif.sh` assembles (needs
-ffmpeg), plus full pages at the four widths for review (`site/tests/shots/`, not committed).
-`docs/assets/seam.svg` is drawn by hand.
+`pnpm shots` writes the site’s images: `site/img/still.jpg`, the social card `site/og.png` (1200 by 630), the
+README’s `docs/assets/hero.png` and `docs/assets/theft.png`, and the frames of `docs/assets/loan.gif`, which
+`scripts/site-gif.sh` assembles (needs ffmpeg). The scene is frozen on one frame of the hero for them. It also writes
+both pages in full at the four widths for review (`site/dev/shots/`, not committed). `docs/assets/seam.svg` (also
+`site/img/seam.svg`) is drawn by hand.
 
 ## Fonts
 
-`scripts/site-fonts.py` builds `site/fonts/archivo.woff2` and `site/fonts/martian-mono.woff2` (and the app's copies,
-`app/app/fonts/`) from Google Fonts' OFL sources, `ofl/archivo/Archivo[wdth,wght].ttf` and
+`scripts/site-fonts.py` builds `site/fonts/archivo.woff2` and `site/fonts/martian-mono.woff2` (and the app’s
+copies, `app/app/fonts/`) from Google Fonts’ OFL sources, `ofl/archivo/Archivo[wdth,wght].ttf` and
 `ofl/martianmono/MartianMono[wdth,wght].ttf`: variable, subset to Latin and the punctuation the pages use, without
 hinting. The licence is `site/fonts/OFL.txt`.
 
 ## Publishing
 
-`.github/workflows/pages.yml` publishes everything in `site/` except `tests/` to GitHub Pages, at
-https://himess.github.io/zecured/; the page's canonical and social-card URLs name that address. The tests' server
-(`site/tests/serve.mjs`) serves the same files, so a file the page needs and the tests find is a file Pages
-publishes. The workflow runs only by hand (`workflow_dispatch`). Pages on a private repository needs a paid plan, so the first publication waits for
-the repository to become public. Turning Pages on and running the workflow are the project owner's decision at
-the time. A custom domain (a `CNAME`) is optional, and so is serving the page as an onion service too
-(`infra/onion`).
+`.github/workflows/pages.yml` publishes everything in `site/` except its tooling, `site/dev`, to GitHub Pages, at
+https://himess.github.io/zecured/; the pages’ canonical and social-card URLs name that address. The tests’ server
+(`site/dev/serve.mjs`) serves the same files, so a file the site needs and the tests find is a file Pages
+publishes. The workflow runs only by hand (`workflow_dispatch`). Pages on a private repository needs a paid plan, so
+the first publication waits for the repository to become public. Turning Pages on and running the workflow are the
+project owner’s decision at the time. A custom domain (a `CNAME`) is optional, and so is serving the site as an
+onion service too (`infra/onion`).
