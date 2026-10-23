@@ -33,10 +33,10 @@ contracts/config/*.local.json
 
 # Node / Next.js
 node_modules/
-# The showcase page's test output (site/tests: Playwright results and review screenshots)
-site/tests/test-results/
-site/tests/playwright-report/
-site/tests/shots/
+# The site's tooling output (site/dev: Playwright results and review screenshots)
+site/dev/test-results/
+site/dev/playwright-report/
+site/dev/shots/
 .next/
 out/
 *.tsbuildinfo

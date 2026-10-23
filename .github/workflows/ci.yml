@@ -102,25 +102,26 @@ jobs:
       - run: pnpm test
       - run: pnpm typecheck
 
-  # The showcase page in a real browser: same origin only, axe, no-JS, keyboard, reduced motion, four widths.
+  # The site in a real browser: same origin only, axe, no-JS, keyboard, reduced motion, no WebGL, four widths,
+  # and the scene's bundle built from its source.
   site:
     runs-on: ubuntu-24.04
     timeout-minutes: 20
     defaults:
       run:
-        working-directory: site/tests
+        working-directory: site/dev
     steps:
       - uses: actions/checkout@v4
 
       - uses: pnpm/action-setup@v4
         with:
-          package_json_file: site/tests/package.json
+          package_json_file: site/dev/package.json
 
       - uses: actions/setup-node@v4
         with:
           node-version: 22
           cache: pnpm
-          cache-dependency-path: site/tests/pnpm-lock.yaml
+          cache-dependency-path: site/dev/pnpm-lock.yaml
 
       - run: pnpm install --frozen-lockfile
 

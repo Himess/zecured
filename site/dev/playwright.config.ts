@@ -1,7 +1,7 @@
 import { defineConfig, devices } from "@playwright/test";
 
-// The showcase page's checks (docs/SITE.md): `pnpm test`. The screenshots for the README and the social card:
-// `pnpm shots`, which writes docs/assets/*.png, site/og.png and site/tests/shots/ (not committed).
+// The site's checks (docs/SITE.md): `pnpm test`. Its images, the README's and the social card: `pnpm shots`,
+// which writes site/img/still.jpg, site/og.png, docs/assets/*.png and site/dev/shots/ (not committed).
 export default defineConfig({
   testDir: ".",
   fullyParallel: true,
@@ -19,6 +19,6 @@ export default defineConfig({
   },
   projects: [
     { name: "site", testMatch: /site\.spec\.ts/ },
-    { name: "shots", testMatch: /shots\.spec\.ts/ },
+    { name: "shots", testMatch: /shots\.spec\.ts/, timeout: 120_000, fullyParallel: false },
   ],
 });

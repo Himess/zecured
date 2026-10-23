@@ -1,4 +1,4 @@
-# Publishes the showcase page to GitHub Pages: everything in site/ except its tests (docs/SITE.md, "Publishing").
+# Publishes the site to GitHub Pages: everything in site/ except its tooling, site/dev (docs/SITE.md, "Publishing").
 # Only by hand, and only when the project owner decides to: Pages has to be turned on first in the repository's
 # settings, with GitHub Actions as its source, and on GitHub Free that needs a public repository.
 name: pages
@@ -20,11 +20,11 @@ jobs:
     steps:
       - uses: actions/checkout@v4
 
-      - name: The page's files, without its tests
+      - name: The site's files, without its tooling
         run: |
           mkdir _site
           cp -R site/. _site/
-          rm -rf _site/tests
+          rm -rf _site/dev
           find _site -type f | sort
 
       - uses: actions/configure-pages@v5

@@ -1,4 +1,4 @@
-// The tests' static server: the site's files as GitHub Pages serves them (site/ without tests/), nothing else.
+// The tests' static server: the site's files as GitHub Pages serves them (site/ without dev/), nothing else.
 import { createServer } from "node:http";
 import { readFile, stat } from "node:fs/promises";
 import { extname, resolve } from "node:path";
@@ -12,6 +12,7 @@ const types = {
   ".svg": "image/svg+xml",
   ".png": "image/png",
   ".jpg": "image/jpeg",
+  ".gif": "image/gif",
   ".webp": "image/webp",
   ".woff2": "font/woff2",
   ".mp4": "video/mp4",
@@ -23,7 +24,7 @@ createServer(async (req, res) => {
   try {
     const { pathname } = new URL(req.url ?? "/", "http://localhost");
     let file = resolve(root, `.${decodeURIComponent(pathname)}`);
-    if (!file.startsWith(root) || file.startsWith(resolve(root, "tests"))) throw new Error("outside the site");
+    if (!file.startsWith(root) || file.startsWith(resolve(root, "dev"))) throw new Error("outside the site");
     if ((await stat(file)).isDirectory()) file = resolve(file, "index.html");
     const body = await readFile(file);
     res.writeHead(200, { "content-type": types[extname(file)] ?? "application/octet-stream" });

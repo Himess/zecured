@@ -1,113 +1,141 @@
-// Zecured's showcase page: the loan's five steps, the viewing key and the bridge comparison. The page works
-// without this script: every step and both comparisons then show, one after the other (styles.css).
+// Zecured's landing page: the reveals, the counters, and the scene (scene.js, loaded once the page is up and only
+// where WebGL 2 is available and motion is welcome). Without this script every word of the page still shows.
 "use strict";
 
 document.documentElement.classList.add("js");
 
-document.addEventListener("DOMContentLoaded", () => {
-  setUpLoan();
-  setUpSees();
-});
+(function () {
+  const root = document.documentElement;
+  const reduced = window.matchMedia("(prefers-reduced-motion: reduce)").matches;
 
-// Arrow keys (and Home, End) move between the buttons of a group, as in a toolbar.
-function arrowTarget(key, index, count) {
-  const step = { ArrowRight: 1, ArrowDown: 1, ArrowLeft: -1, ArrowUp: -1 }[key];
-  if (step !== undefined) return index + step >= 0 && index + step < count ? index + step : null;
-  if (key === "Home") return 0;
-  if (key === "End") return count - 1;
-  return null;
-}
-
-function setUpLoan() {
-  const section = document.getElementById("loan");
-  const body = document.getElementById("loan-body");
-  if (!section || !body) return;
-  const buttons = Array.from(body.querySelectorAll(".stepbtn"));
-  const steps = Array.from(body.querySelectorAll(".loan-step"));
-  const live = document.getElementById("loan-live");
-  let current = 0;
-
-  function show(index, announce) {
-    current = Math.max(0, Math.min(steps.length - 1, index));
-    steps.forEach((step, i) => {
-      step.hidden = i !== current;
-    });
-    buttons.forEach((button, i) => button.setAttribute("aria-pressed", String(i === current)));
-    if (announce && live) {
-      const label = steps[current].querySelector(".step-lab");
-      live.textContent = label ? label.textContent : "";
+  function webgl2() {
+    try {
+      return !!document.createElement("canvas").getContext("webgl2");
+    } catch {
+      return false;
     }
   }
 
-  buttons.forEach((button, i) => {
-    button.addEventListener("click", () => show(i, true));
-    button.addEventListener("keydown", (event) => {
-      const to = arrowTarget(event.key, i, buttons.length);
-      if (to === null) return;
-      event.preventDefault();
-      buttons[to].focus();
-      show(to, true);
+  // Each element with .reveal (and the headline) comes in once it enters the view.
+  function setUpReveals() {
+    const items = document.querySelectorAll(".reveal, .display");
+    if (reduced || !("IntersectionObserver" in window)) {
+      items.forEach((el) => el.classList.add("in"));
+      return;
+    }
+    // Siblings that arrive together come in one after another.
+    document.querySelectorAll(".panel, .hero-in, .stats, .doors, .versus").forEach((group) => {
+      group.querySelectorAll(":scope > .reveal, :scope > li.reveal, :scope > div.reveal").forEach((el, i) => {
+        el.style.setProperty("--delay", `${Math.min(i, 6) * 0.08}s`);
+      });
     });
-  });
-
-  // Previous and next: the focus stays on the same button of the step now shown, or on the other one at an end.
-  body.addEventListener("click", (event) => {
-    const go = event.target.closest("[data-go]");
-    if (!go || go.disabled) return;
-    show(current + Number(go.dataset.go), true);
-    const same = steps[current].querySelector(`[data-go="${go.dataset.go}"]`);
-    const target = same && !same.disabled ? same : steps[current].querySelector("[data-go]:not([disabled])");
-    if (target) target.focus();
-  });
-
-  // The viewing key: one switch, shown in every step. It clears what the borrower can read; the market
-  // maker's output, sent with no outgoing viewing key, stays encrypted and says why.
-  const keys = Array.from(body.querySelectorAll(".vk"));
-  function setKey(on) {
-    section.classList.toggle("vk-on", on);
-    keys.forEach((key) => key.setAttribute("aria-pressed", String(on)));
-    body.querySelectorAll(".enc.readable").forEach((value) => value.setAttribute("aria-hidden", String(!on)));
-    body.querySelectorAll(".enc-sr").forEach((note) => {
-      note.hidden = on;
-    });
-  }
-  keys.forEach((key) => key.addEventListener("click", () => setKey(key.getAttribute("aria-pressed") !== "true")));
-
-  // A link to one step (#loan-step-3) opens it. Followed from inside the page, the browser could not scroll to
-  // a step that was still hidden, so the script does; on load the browser scrolls once the step shows.
-  function fromHash(scroll) {
-    const match = /^#loan-step-([1-5])$/.exec(window.location.hash);
-    if (!match) return;
-    show(Number(match[1]) - 1, false);
-    if (scroll) steps[current].scrollIntoView();
-  }
-  window.addEventListener("hashchange", () => fromHash(true));
-  show(0, false);
-  fromHash(false);
-}
-
-function setUpSees() {
-  const seg = document.querySelector("#sees .seg");
-  if (!seg) return;
-  const buttons = Array.from(seg.querySelectorAll("button"));
-  const views = Array.from(document.querySelectorAll("#sees .sees-view"));
-
-  function show(view) {
-    buttons.forEach((button) => button.setAttribute("aria-pressed", String(button.dataset.view === view)));
-    views.forEach((el) => {
-      el.hidden = el.id !== `sees-${view}`;
-    });
+    const seen = new IntersectionObserver(
+      (entries) => {
+        entries.forEach((entry) => {
+          if (!entry.isIntersecting) return;
+          entry.target.classList.add("in");
+          seen.unobserve(entry.target);
+        });
+      },
+      { rootMargin: "0px 0px -8% 0px", threshold: 0.12 },
+    );
+    items.forEach((el) => seen.observe(el));
   }
 
-  buttons.forEach((button, i) => {
-    button.addEventListener("click", () => show(button.dataset.view));
-    button.addEventListener("keydown", (event) => {
-      const to = arrowTarget(event.key, i, buttons.length);
-      if (to === null) return;
-      event.preventDefault();
-      buttons[to].focus();
-      show(buttons[to].dataset.view);
-    });
+  // The figures count up once, when they come into view.
+  function setUpCounters() {
+    const figures = Array.from(document.querySelectorAll(".stat-n[data-count]"));
+    if (reduced || !("IntersectionObserver" in window)) return;
+    const run = (el) => {
+      const end = Number(el.dataset.count);
+      const decimals = Number(el.dataset.decimals || 0);
+      const begin = performance.now();
+      const step = (now) => {
+        const t = Math.min(1, (now - begin) / 1600);
+        const eased = 1 - Math.pow(2, -10 * t);
+        el.textContent = (end * (t === 1 ? 1 : eased)).toLocaleString("en-US", {
+          minimumFractionDigits: decimals,
+          maximumFractionDigits: decimals,
+        });
+        if (t < 1) requestAnimationFrame(step);
+      };
+      requestAnimationFrame(step);
+    };
+    const seen = new IntersectionObserver(
+      (entries) => {
+        entries.forEach((entry) => {
+          if (!entry.isIntersecting) return;
+          run(entry.target);
+          seen.unobserve(entry.target);
+        });
+      },
+      { threshold: 0.6 },
+    );
+    figures.forEach((el) => seen.observe(el));
+  }
+
+  // The header gains a ground once the page moves.
+  function setUpHeader() {
+    const top = document.querySelector(".top");
+    if (!top) return;
+    const update = () => top.classList.toggle("scrolled", window.scrollY > 24);
+    update();
+    window.addEventListener("scroll", update, { passive: true });
+  }
+
+  // The scene follows the chapter in the middle of the screen.
+  function setUpScene() {
+    const canvas = document.getElementById("scene");
+    const sections = Array.from(document.querySelectorAll("[data-scene]"));
+    if (!canvas || sections.length === 0) return;
+    let scene = null;
+    let queued = false;
+
+    function place() {
+      queued = false;
+      const middle = window.innerHeight * 0.5;
+      for (let i = 0; i < sections.length; i += 1) {
+        const box = sections[i].getBoundingClientRect();
+        if (box.top <= middle && box.bottom > middle) {
+          const p = (middle - box.top) / box.height;
+          const next = sections[i + 1] || sections[i];
+          root.classList.toggle("veil-right", sections[i].classList.contains("right"));
+          if (scene) scene.setScroll(sections[i].dataset.scene, p, next.dataset.scene);
+          return;
+        }
+      }
+    }
+
+    const onScroll = () => {
+      if (!queued) {
+        queued = true;
+        requestAnimationFrame(place);
+      }
+    };
+    window.addEventListener("scroll", onScroll, { passive: true });
+    window.addEventListener("resize", onScroll, { passive: true });
+    place();
+
+    if (reduced || !webgl2()) {
+      root.classList.add("no-scene");
+      return;
+    }
+    import("./scene.js")
+      .then(({ startScene }) => {
+        scene = startScene(canvas, {
+          tags: document.querySelector(".stage .tags"),
+          onReady: () => requestAnimationFrame(() => root.classList.add("scene-on")),
+        });
+        if (!scene) root.classList.add("no-scene");
+        else place();
+      })
+      .catch(() => root.classList.add("no-scene"));
+  }
+
+  document.addEventListener("DOMContentLoaded", () => {
+    setUpReveals();
+    setUpCounters();
+    setUpHeader();
+    setUpScene();
   });
-  show("bridge");
-}
+})();
