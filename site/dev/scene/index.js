@@ -152,10 +152,12 @@ export function startScene(canvas, { tags: tagLayer = null, onReady } = {}) {
       entry.on = snap ? goalOn : entry.on + (goalOn - entry.on) * (1 - Math.exp(-dt * 8));
       if (spec) {
         scratch.copy(spec.at).applyMatrix4(parts.world.matrixWorld).project(camera);
-        const visible = scratch.z < 1 && Math.abs(scratch.x) < 1.05 && Math.abs(scratch.y) < 1.05;
+        const x = (scratch.x * 0.5 + 0.5) * width;
+        const y = (-scratch.y * 0.5 + 0.5) * height;
+        // A name never lies over the chapter's text: past its edge it waits until its thing is clear of it.
+        const covered = edgeShown > 0.02 && (tall ? y > edgeShown * height - 8 : x < edgeShown * width + 8);
+        const visible = scratch.z < 1 && Math.abs(scratch.x) < 1.05 && Math.abs(scratch.y) < 1.05 && !covered;
         if (visible) {
-          const x = (scratch.x * 0.5 + 0.5) * width;
-          const y = (-scratch.y * 0.5 + 0.5) * height;
           entry.el.style.transform = `translate3d(${x.toFixed(1)}px, ${y.toFixed(1)}px, 0)`;
           // Near the top of the screen a name hangs below its thing, clear of the page's header.
           const below = y < 130;

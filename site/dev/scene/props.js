@@ -27,7 +27,7 @@ import {
 } from "three";
 import { RoundedBoxGeometry } from "three/addons/geometries/RoundedBoxGeometry.js";
 import { COLORS } from "./world.js";
-import { canvasTexture, drawCard, drawChip, drawCipher, drawCoin, drawEvent, drawGlyph, drawLock, drawMarket } from "./labels.js";
+import { canvasTexture, drawCard, drawChip, drawCipher, drawCoin, drawEvent, drawGlyph, drawLock, drawMarket, drawZecCoin } from "./labels.js";
 
 const geometries = new Map();
 function rounded(w, h, d, r) {
@@ -132,6 +132,17 @@ export function buildProps(renderer, world, rand) {
     return { group, body, label, face: faceMesh, material };
   }
 
+  /** A ZEC coin: gold, with the Zcash brandmark on its face. */
+  function zecCoin(radius, thickness) {
+    const group = new Group();
+    const body = new Mesh(coinGeometry(radius, thickness), gold());
+    body.castShadow = true;
+    const label = canvasTexture(renderer, 256, 256, drawZecCoin);
+    group.add(body, roundFace(radius * 0.84, label.texture, thickness / 2 - thickness * 0.35 * 0.6 + 0.002));
+    world.add(group);
+    return { group, body };
+  }
+
   // ---------------------------------------------------------------------------------------- the ledger
 
   /** A ledger row: a white tile with an event written on it. */
@@ -210,7 +221,7 @@ export function buildProps(renderer, world, rand) {
 
   // USDC: blue chips, a dollar sign on each face (a cylinder's caps take the face, its side the rim).
   const chipRim = new MeshPhysicalMaterial({
-    color: new Color(0x2f6bff),
+    color: new Color(0x1f62dd),
     metalness: 0.35,
     roughness: 0.25,
     clearcoat: 1,
@@ -218,27 +229,27 @@ export function buildProps(renderer, world, rand) {
     emissiveIntensity: 0.3,
   });
   const chipFace = new MeshPhysicalMaterial({
-    map: canvasTexture(renderer, 128, 128, drawChip).texture,
+    map: canvasTexture(renderer, 256, 256, drawChip).texture,
     roughness: 0.3,
     clearcoat: 1,
     emissive: COLORS.usdc,
     emissiveIntensity: 0.15,
   });
   const CHIPS = 40;
-  const chips = new InstancedMesh(new CylinderGeometry(0.17, 0.17, 0.055, 40), [chipRim, chipFace, chipFace], CHIPS);
+  const chips = new InstancedMesh(new CylinderGeometry(0.19, 0.19, 0.055, 48), [chipRim, chipFace, chipFace], CHIPS);
   chips.instanceMatrix.setUsage(DynamicDrawUsage);
   chips.castShadow = true;
   chips.frustumCulled = false;
   world.add(chips);
 
-  /** An account on Base: a white card with its name and three lines. */
-  function card(title, lines) {
+  /** An account on Base, or a quote: a card with its name and three lines. */
+  function card(title, lines, color, muted) {
     const group = new Group();
     const material = white();
     const body = new Mesh(rounded(1.22, 0.12, 0.9, 0.06), material);
     body.castShadow = true;
     body.receiveShadow = true;
-    const label = canvasTexture(renderer, 512, 384, (ctx, w, h) => drawCard(ctx, w, h, title, lines));
+    const label = canvasTexture(renderer, 512, 384, (ctx, w, h) => drawCard(ctx, w, h, title, lines, color, muted));
     const top = face(1.12, 0.82, label.texture, 0.063);
     group.add(body, top);
     world.add(group);
@@ -355,10 +366,12 @@ export function buildProps(renderer, world, rand) {
   const theftNote = note();
   for (const n of [vaultNote, yourNote, makerNote, swapNote, theftNote]) n.material.emissive = new Color(0x2a1e00);
 
-  const zec = coin(gold(), 0.46, 0.14, "0.01", "ZEC", "rgba(74, 46, 0, 0.92)");
-  const coinYou = coin(gold(), 0.36, 0.12, "you", "ZEC", "rgba(74, 46, 0, 0.92)");
-  const coinMaker = coin(gold(), 0.36, 0.12, "maker", "ZEC", "rgba(74, 46, 0, 0.92)");
-  const makerZec = coin(gold(), 0.4, 0.13, "0.01", "ZEC", "rgba(74, 46, 0, 0.92)");
+  const zec = zecCoin(0.46, 0.14);
+  const coinYou = zecCoin(0.36, 0.12);
+  const coinMaker = zecCoin(0.36, 0.12);
+  const makerZec = zecCoin(0.36, 0.12);
+  // The market maker's own ZEC, its liquidity on Zcash: the coin it pays with rides on top of these.
+  const makerStack = [zecCoin(0.36, 0.12), zecCoin(0.36, 0.12)];
   const zzecMaterial = white();
   const zzec = coin(zzecMaterial, 0.42, 0.13, "zZEC", "receipt", "rgba(122, 82, 0, 0.95)");
   const wzecMaterial = new MeshPhysicalMaterial({ color: new Color(0xffd1cc), roughness: 0.3, clearcoat: 1, emissive: COLORS.red, emissiveIntensity: 0.25 });
@@ -369,7 +382,14 @@ export function buildProps(renderer, world, rand) {
   const events = Array.from({ length: 7 }, () => eventTile());
   const morpho = market();
   const account = card("A fresh Safe", ["deployed by its first", "UserOp, gas sponsored", "ETH ever received: 0"]);
-  const maker = card("Market maker", ["pays ZEC on Zcash,", "is paid USDC here,", "on a proof alone"]);
+  const maker = card("Market maker", ["its own USDC here,", "its own ZEC on Zcash,", "paid on a proof alone"]);
+  // The maker's quote: a gold ticket, its price signed for one taker.
+  const quote = card("Quote", ["signed for you alone:", "0.01 ZEC for", "11.115555 USDC"], "#2e1f00", "#4a3300");
+  quote.material.color.set(COLORS.gold);
+  quote.material.metalness = 0.55;
+  quote.material.roughness = 0.28;
+  quote.material.emissive.set(COLORS.gold);
+  quote.material.emissiveIntensity = 0.12;
   const address = ghost();
   const box = escrow();
   const bonds = Array.from({ length: 5 }, () => bond());
@@ -390,6 +410,8 @@ export function buildProps(renderer, world, rand) {
     swapNote,
     theftNote,
     zec,
+    makerStack,
+    quote,
     coinYou,
     coinMaker,
     makerZec,

@@ -52,6 +52,8 @@
     <div class="tag3d t-z" data-tag="to-you"><span>the rest, to a new note of yours</span></div>
     <div class="tag3d t-z" data-tag="to-maker"><span>the market maker’s share</span></div>
     <div class="tag3d t-gold" data-tag="inclusion"><span>a proof the payout landed</span></div>
+    <div class="tag3d t-b" data-tag="liquidity"><span>liquidity: a market maker’s own USDC and ZEC</span></div>
+    <div class="tag3d t-gold" data-tag="quote"><span>its price, signed for you alone</span></div>
     <div class="tag3d t-b" data-tag="escrow"><span>your USDC, into escrow</span></div>
     <div class="tag3d t-b" data-tag="hash"><span>locked to a salted hash of your address</span></div>
     <div class="tag3d t-z" data-tag="address"><span>a new shielded address of yours</span></div>
@@ -152,11 +154,12 @@
   <div class="panel">
     <p class="kicker reveal"><span class="kicker-n">05</span>Swap</p>
     <h2 id="c-swap" class="title reveal">Buy shielded ZEC with USDC.</h2>
-    <p class="body reveal">Your USDC waits in escrow on Base. It is released only when a zero-knowledge proof shows a market maker paid your shielded address for that very order. No custodian, no signer.</p>
+    <p class="body reveal">A market maker fills your order from its own ZEC and USDC, at a price it signs for you alone. Your USDC waits in escrow on Base until a zero-knowledge proof shows the maker paid your shielded address for that very order.</p>
     <ul class="seen reveal" aria-label="What each chain records">
       <li><span class="chip chip-b">Base</span>the order and a salted commitment, never your address</li>
       <li><span class="chip chip-z">Zcash</span>a shielded payment to you</li>
     </ul>
+    <p class="note reveal">No liquidity pool, no bridge: anyone with ZEC and USDC can run a market maker. The demo’s is ours, its price set by hand (MOCK); on mainnet it quotes from Chainlink’s ZEC/USD, checked against API3’s.</p>
   </div>
 </section>
 

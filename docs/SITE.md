@@ -66,6 +66,11 @@ builds to.
   of it: no scene, no transitions, the still image.
 - **Panels in the docs:** where a step happens on both chains, the shielded pool is a dark rounded panel with
   encrypted values blurred, and Base a light, square, ruled one.
+- **Other projects' marks:** the scene names ZEC, USDC and Morpho with their owners' own marks, drawn unaltered
+  from their brand kits: the Zcash brandmark from the Zcash brand folder ZecHub keeps
+  (https://zechub.wiki/zcash-organizations/brand), the USDC token logo from Circle's press kit
+  (https://www.circle.com/en/pressroom) and Morpho's symbol from https://brand.morpho.org. They are their owners'
+  trademarks, used only to name the asset or the protocol (`site/dev/scene/labels.js`).
 
 ## Its content
 
@@ -83,7 +88,8 @@ Every number on the site comes from a recorded run, and each has its source:
 | Leak scan: 302 identifiers, 77 events, 55 calldata, 177 storage words, 0 matches | TESTING § 2, v4.1 |
 | The browser run: 2 min 50 s, 4 min 25 s, 7 min 56 s; 729,131 gas | TESTING § 2 |
 | Close from collateral: block 4,488,453; 337,500 and 252,500 zat | TESTING § 2, the app’s run |
-| The swap: order `0x21660b10` and its times | TESTING § 2, v4 |
+| The swap: order `0x21660b10` (0.01 ZEC for 11.115555 USDC) and its times | TESTING § 2, v4 |
+| The swap's liquidity: market makers' own inventory, quotes signed for one taker; at most 200 USDC an order on the judge deployment, 250 USDC (5 ZEC) in the mainnet beta | SWAP, "A Buy, step by step", "Parameters" and "The market maker" |
 | The theft demonstration: `43ea5e91`, block 4,523,730; 64 s; 00:04:40, 00:06:47, 00:16:53; 3 → 12.65 USDC | TESTING § 2 |
 | Vault `0x59d5e63e`, tag `0xe43d283f`, payoutRef `0xcdf694fd`, blocks 4,490,621 and 4,490,655 | TESTING § 2, 2026-10-12 |
 | The mainnet parameters and NU7’s date | MAINNET § 1, 2 and 5 |

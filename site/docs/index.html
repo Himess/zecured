@@ -330,6 +330,7 @@
     <section id="swap" class="doc-sec" aria-labelledby="swap-h">
       <h2 id="swap-h" class="doc-h2"><span class="doc-n">05</span>The swap</h2>
       <p>No custodian, no signer, no wrapped ZEC. Your USDC waits in escrow on Base and moves only on a zero-knowledge proof that a shielded payment for that very order is in the Zcash chain.</p>
+      <p><b>Where the liquidity comes from.</b> No liquidity pool and no bridge: a market maker fills each order from its own inventory, ZEC in its shielded wallet and USDC on Base. It quotes the ZEC/USD oracle price plus its spread and signs the quote under EIP-712 for one taker, so nobody else can take it. Anyone with ZEC and USDC can run one (<span class="mono">swap/maker</span>); on the judge deployment it is ours, and the price is set by hand (MOCK). On mainnet the price is Chainlink’s ZEC/USD, checked against API3’s. An order is at most 200 USDC on the judge deployment and 250 USDC (5 ZEC) in the mainnet beta.</p>
       <ol class="lanes">
         <li class="lane">
           <p class="lane-n"><span class="num">1</span>Lock</p>

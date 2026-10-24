@@ -45,8 +45,8 @@ const EVENTS = [
   { t: 3.5, name: "Borrow", fields: ["4 USDC", "to a fresh Safe"] },
   { t: 4.24, name: "SpendCommitted", fields: ["payoutRef 0xcdf694fd…", "before it is signed"] },
   { t: 4.88, name: "CloseRelease", fields: ["yours + the maker’s", "= the outstanding"], tone: "gold" },
-  { t: 5.24, name: "OrderOpened", fields: ["USDC in escrow,", "keccak256(salt || receiver)"] },
-  { t: 5.8, name: "OrderSettled", fields: ["on a payment proof:", "USDC to the maker"], tone: "gold" },
+  { t: 5.34, name: "OrderOpened", fields: ["USDC in escrow,", "keccak256(salt || receiver)"] },
+  { t: 5.84, name: "OrderSettled", fields: ["on a payment proof:", "USDC to the maker"], tone: "gold" },
   { t: 6.38, name: "wZEC minted", fields: ["0.125 wZEC to", "0x7a3e…41c2"], tone: "leak", until: 6.6 },
   { t: 7.6, name: "ViolationProven", fields: ["a spend no commitment", "names: F1"], tone: "gold" },
   { t: 7.78, name: "Slashed", fields: ["all five bonds", ""] },
@@ -92,7 +92,7 @@ function proofAt(s, a, b, from, to, out) {
 // --------------------------------------------------------------------------------------- the story
 
 export function createStory(world, props) {
-  const { notes, vaultNote, yourNote, makerNote, swapNote, theftNote, zec, coinYou, coinMaker, makerZec, zzec, wzec, gasWallet, keys, proof, events, morpho, chips, account, maker, address, box, bonds, shards, shardSeeds, ring, tethers, threads, plank, dummy } = props;
+  const { notes, vaultNote, yourNote, makerNote, swapNote, theftNote, zec, makerStack, quote, coinYou, coinMaker, makerZec, zzec, wzec, gasWallet, keys, proof, events, morpho, chips, account, maker, address, box, bonds, shards, shardSeeds, ring, tethers, threads, plank, dummy } = props;
   const red = new Color(COLORS.red);
   const goldCore = new Color(COLORS.gold);
   const keyWhite = new Color(0xcfe0f2);
@@ -232,7 +232,7 @@ export function createStory(world, props) {
     };
     showProof(2.24, 2.7, VAULT, v(LEDGER_X, 0.06, SLOTS[0]), "proof");
     showProof(4.7, 4.88, TO_YOU, v(LEDGER_X, 0.06, SLOTS[0]), "inclusion");
-    showProof(5.56, 5.74, YOUR_ADDRESS, v(ESCROW.x, 0.4, ESCROW.z), "payment");
+    showProof(5.62, 5.78, YOUR_ADDRESS, v(ESCROW.x, 0.4, ESCROW.z), "payment");
     showProof(6.7, 6.92, TO_YOU, v(LEDGER_X, 0.06, SLOTS[0]), "only");
     showProof(7.5, 7.62, VAULT, v(LEDGER_X, 0.06, SLOTS[0]), "violation");
     if (!proofShown) proof.group.visible = false;
@@ -278,13 +278,16 @@ export function createStory(world, props) {
       hideChips(6, 40);
       anchors.repaid = { at: v(MARKET.x, 0.5, MARKET.z), on: win(s, 4.08, 4.14, 4.22, 4.28) };
     } else if (s < 6.05) {
-      const makerTop = v(MAKER_DESK.x + 0.32, 0.12, MAKER_DESK.z);
-      const outOfBox = seg(s, 5.8, 5.9);
+      // Your USDC into escrow and, on the proof, to the maker, onto the maker's own USDC: its liquidity on Base.
+      const makerTop = v(MAKER_DESK.x + 0.42, 0.12, MAKER_DESK.z);
+      const sink = 1 - seg(s, 5.98, 6.04);
+      const outOfBox = seg(s, 5.86, 5.95);
       if (outOfBox <= 0) {
-        chipStream(0, 6, accountTop, inBox, seg(s, 5.12, 5.26), { startStack: accountTop, endStack: inBox, size: seg(s, 5.04, 5.1), time });
-      } else chipStream(0, 6, inBox, makerTop, outOfBox, { startStack: inBox, endStack: makerTop, size: 1 - seg(s, 5.98, 6.04), time });
-      hideChips(6, 40);
-      anchors.release = { at: v(MAKER_DESK.x, 0.5, MAKER_DESK.z), on: win(s, 5.84, 5.88, 5.98, 6.02) };
+        chipStream(0, 6, accountTop, inBox, seg(s, 5.22, 5.34), { startStack: accountTop, endStack: inBox, size: seg(s, 5.14, 5.2), time });
+      } else chipStream(0, 6, inBox, makerTop, outOfBox, { startStack: inBox, endStack: makerTop, size: sink, time, stackIndex: 6 });
+      chipStream(6, 6, makerTop, makerTop, 0, { startStack: makerTop, size: seg(s, 5.04, 5.1) * sink, time });
+      hideChips(12, 40);
+      anchors.release = { at: v(MAKER_DESK.x, 0.9, MAKER_DESK.z), on: win(s, 5.88, 5.92, 5.98, 6.02) };
     } else if (s > 7.8 && s < 8.36) {
       const pay = seg(s, 7.84, 7.96);
       for (let b = 0; b < 5; b += 1) {
@@ -313,36 +316,52 @@ export function createStory(world, props) {
     const bridgeOut = win(s, 6.14, 6.2, 6.58, 6.66);
     put(yourNote.group, tmp.set(TO_YOU.x, 0.08 + Math.sin(time * 0.8 + 3) * 0.025, TO_YOU.z), sealOut * (1 - bridgeOut));
     put(makerNote.group, tmp.set(TO_MAKER.x, 0.08 + Math.sin(time * 0.8 + 5) * 0.025, TO_MAKER.z), sealOut);
-    makerNote.material.emissiveIntensity = 1 + 4 * win(s, 5.28, 5.32, 5.34, 5.42);
+    makerNote.material.emissiveIntensity = 1 + 3 * win(s, 5.04, 5.08, 5.14, 5.2) + 4 * win(s, 5.38, 5.42, 5.44, 5.5);
 
-    // The swap, mirrored across the seam. On Base your USDC goes into escrow, locked to a salted hash of an address
-    // of yours; on Zcash the maker pays that address from its own note; the payment's proof crosses, matches the
-    // hash, and the escrow pays the maker. Neither coin leaves its chain.
-    const swapUp = win(s, 5.02, 5.12, 6.0, 6.06);
+    // The swap, mirrored across the seam. Its liquidity is a market maker's own: USDC on Base, ZEC on Zcash. The
+    // maker quotes you a price, signed for you alone; your USDC goes into escrow, locked to a salted hash of an
+    // address of yours; the maker pays that address from its own ZEC; the payment's proof crosses, matches the hash,
+    // and the escrow pays the maker. Neither coin leaves its chain.
+    const swapUp = win(s, 5.02, 5.1, 6.0, 6.06);
     put(maker.group, tmp.set(MAKER_DESK.x, mix(-0.3, 0.06, swapUp), MAKER_DESK.z), swapUp);
-    put(box.group, ESCROW, win(s, 5.04, 5.12, 6.0, 6.05));
+    anchors.liquidity = { at: v(MAKER_DESK.x - 0.3, 0.5, MAKER_DESK.z), on: win(s, 5.06, 5.1, 5.15, 5.19) };
+    const paid = seg(s, 5.42, 5.44);
+    makerStack.forEach((c, i) => {
+      put(c.group, tmp.set(TO_MAKER.x, 0.22 + i * 0.13, TO_MAKER.z), seg(s, 5.04, 5.1) * (1 - seg(s, 5.98, 6.04)), s > 5.03 && s < 6.05);
+      c.group.rotation.y = 0.4 * i;
+    });
+    const quoteOut = seg(s, 5.1, 5.2);
+    const quoteIn = seg(s, 5.26, 5.32);
+    const hover = v(ACCOUNT.x - 0.25, 1.1 + Math.sin(time * 1.3) * 0.04, ACCOUNT.z);
+    arc(v(MAKER_DESK.x, 0.3, MAKER_DESK.z), hover, quoteOut, 1.0, p2);
+    if (quoteIn > 0) p2.lerpVectors(hover, v(ESCROW.x, 0.45, ESCROW.z), quoteIn);
+    put(quote.group, p2, 0.78 * seg(s, 5.08, 5.12) * (1 - quoteIn), s > 5.07 && s < 5.33);
+    quote.group.rotation.set(0.75 * (1 - quoteIn), 0.15 * (1 - quoteIn), 0);
+    if (s > 5.08 && s < 5.33) anchors.quote = { at: quote.group.position, on: win(s, 5.14, 5.18, 5.24, 5.28) };
+    put(box.group, ESCROW, win(s, 5.14, 5.22, 6.0, 6.05));
     // The proof matches the hash on the lid: the lid lights up and opens.
-    const opened = seg(s, 5.76, 5.82);
-    const match = win(s, 5.71, 5.74, 5.84, 5.92);
-    box.lid.position.y = 0.66 + (1 - seg(s, 5.24, 5.3)) * 0.42 + opened * 0.55;
+    const opened = seg(s, 5.8, 5.86);
+    const match = win(s, 5.76, 5.79, 5.88, 5.94);
+    box.lid.position.y = 0.66 + (1 - seg(s, 5.32, 5.38)) * 0.42 + opened * 0.55;
     box.lid.rotation.z = opened * 0.5;
     box.lidMaterial.emissive.copy(goldCore);
     box.lidMaterial.emissiveIntensity = 0.9 * match;
     box.lidFace.material.color.setRGB(1 + 1.3 * match, 1 + 0.55 * match, 1 - 0.65 * match);
-    anchors.escrow = { at: v(ESCROW.x, 1.2, ESCROW.z), on: win(s, 5.12, 5.18, 5.24, 5.28) };
-    anchors.hash = { at: v(ESCROW.x, 0.8, ESCROW.z), on: win(s, 5.28, 5.32, 5.42, 5.46) };
-    const sealPay = seg(s, 5.48, 5.56);
-    put(address.group, tmp.set(YOUR_ADDRESS.x, 0.08, YOUR_ADDRESS.z), win(s, 5.04, 5.12, 5.5, 5.56));
+    anchors.escrow = { at: v(ESCROW.x, 1.2, ESCROW.z), on: win(s, 5.24, 5.28, 5.32, 5.36) };
+    anchors.hash = { at: v(ESCROW.x, 0.8, ESCROW.z), on: win(s, 5.36, 5.4, 5.46, 5.5) };
+    const sealPay = seg(s, 5.56, 5.62);
+    put(address.group, tmp.set(YOUR_ADDRESS.x, 0.08, YOUR_ADDRESS.z), win(s, 5.14, 5.22, 5.58, 5.62));
     address.material.opacity = 0.55 + 0.45 * Math.sin(time * 2.6) ** 2;
     address.fill.opacity = 0.08 + 0.1 * Math.sin(time * 2.6) ** 2;
-    if (s > 5.08 && s < 5.34) anchors.address = { at: v(YOUR_ADDRESS.x, 0.3, YOUR_ADDRESS.z), on: win(s, 5.1, 5.14, 5.28, 5.32) };
-    const pay = seg(s, 5.32, 5.48);
-    arc(v(TO_MAKER.x, 0.14, TO_MAKER.z), v(YOUR_ADDRESS.x, 0.14, YOUR_ADDRESS.z), pay, 1.1, p1);
-    put(makerZec.group, p1, seg(s, 5.3, 5.34) * (1 - sealPay), s > 5.29 && s < 5.58);
-    makerZec.group.rotation.y = time;
+    if (s > 5.18 && s < 5.42) anchors.address = { at: v(YOUR_ADDRESS.x, 0.3, YOUR_ADDRESS.z), on: win(s, 5.2, 5.24, 5.36, 5.4) };
+    // The maker pays from the top of its own ZEC.
+    const pay = seg(s, 5.42, 5.56);
+    arc(v(TO_MAKER.x, 0.48, TO_MAKER.z), v(YOUR_ADDRESS.x, 0.14, YOUR_ADDRESS.z), pay, 1.0, p1);
+    put(makerZec.group, p1, seg(s, 5.04, 5.1) * (1 - sealPay), s > 5.03 && s < 5.64);
+    makerZec.group.rotation.y = 0.8 + time * paid;
     put(swapNote.group, tmp.set(YOUR_ADDRESS.x, 0.08 + Math.sin(time * 0.8 + 7) * 0.025, YOUR_ADDRESS.z), sealPay);
-    swapNote.material.emissiveIntensity = 1 + 5 * win(s, 5.48, 5.54, 5.58, 5.72);
-    if (s > 5.3 && s < 5.6) anchors.payee = { at: makerZec.group.position, on: win(s, 5.34, 5.38, 5.48, 5.54) };
+    swapNote.material.emissiveIntensity = 1 + 5 * win(s, 5.56, 5.6, 5.64, 5.76);
+    if (s > 5.4 && s < 5.62) anchors.payee = { at: makerZec.group.position, on: win(s, 5.44, 5.48, 5.54, 5.58) };
 
     // A bridge, for comparison: the coin leaves the pool, crosses on a plank, becomes wZEC, and everything links.
     const plankUp = win(s, 6.1, 6.18, 6.56, 6.64);
