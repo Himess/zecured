@@ -117,7 +117,14 @@ document.documentElement.classList.add("js");
         if (box.top <= middle && box.bottom > middle) {
           const p = (middle - box.top) / box.height;
           root.classList.toggle("veil-wide", sections[i].dataset.veil === "wide");
-          if (scene) scene.setScroll(sections[i].dataset.scene, p, edgeOf(sections[i]));
+          if (scene) {
+            const edge = edgeOf(sections[i]);
+            scene.setScroll(sections[i].dataset.scene, p, edge);
+            // On a tall screen the veil darkens from where the text begins (landing.css).
+            const tall = window.innerWidth / window.innerHeight < 0.9;
+            root.classList.toggle("text-top", tall && edge > 0);
+            if (tall && edge > 0) root.style.setProperty("--text-top", edge.toFixed(3));
+          }
           return;
         }
       }

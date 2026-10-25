@@ -103,9 +103,9 @@ for (const [name, path] of [
   ["landing", "/"],
   ["docs", "/docs/"],
 ] as const) {
-  for (const width of [390, 768, 1024, 1440]) {
+  for (const width of [390, 768, 1024, 1440, 1920]) {
     test(`the ${name} page in full at ${width} px`, async ({ page }) => {
-      await open(page, path, width, 900);
+      await open(page, path, width, width === 1920 ? 1080 : 900);
       await page.screenshot({ path: resolve(shots, `${name}-${width}.png`), fullPage: true });
     });
   }

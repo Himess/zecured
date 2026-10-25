@@ -101,7 +101,7 @@
       <span class="line"><span>Only the <em>proof</em></span></span>
       <span class="line"><span>crosses.</span></span>
     </h1>
-    <p class="lead reveal">Borrow USDC on Base against ZEC that never leaves Zcash’s Ironwood pool, or swap USDC into shielded ZEC. No bridge, no wrapped token, no custodian.</p>
+    <p class="lead reveal">Borrow USDC on Base against ZEC that never leaves Zcash’s Ironwood pool, or swap USDC into shielded ZEC. No bridge, no wrapped token, no single custodian.</p>
     <div class="ctas reveal">
       <a class="btn btn-gold" href="#demo">Watch the demo</a>
       <a class="btn btn-line" href="#how">See how it works</a>
@@ -114,7 +114,7 @@
   <div class="panel">
     <p class="kicker reveal"><span class="kicker-n">01</span>Deposit</p>
     <h2 id="c-deposit" class="title reveal">Pay a vault no one holds alone.</h2>
-    <p class="body reveal">Five signers create a fresh 3-of-5 FROST vault for your loan. You pay it from Ironwood like any shielded payment: no amount and no address go public.</p>
+    <p class="body reveal">Five signers create a fresh <span class="nb">3-of-5</span> FROST vault for your loan. You pay it from Ironwood like any shielded payment: no amount and no address go public.</p>
     <ul class="seen reveal" aria-label="What each chain records">
       <li><span class="chip chip-z">Zcash</span>an encrypted payment</li>
       <li><span class="chip chip-b">Base</span>nothing at all</li>
@@ -131,14 +131,16 @@
       <li><span class="chip chip-z">Zcash</span>nothing new</li>
       <li><span class="chip chip-b">Base</span>a vault id, a standard amount, a keyed tag</li>
     </ul>
+    <p class="note reveal">The relay and the proofs form a Zcash light client on Base: other contracts can use them to check a shielded Zcash payment, with no bridge.</p>
   </div>
 </section>
 
 <section class="chapter" data-scene="borrow" aria-labelledby="c-borrow">
   <div class="panel">
     <p class="kicker reveal"><span class="kicker-n">03</span>Borrow</p>
-    <h2 id="c-borrow" class="title reveal">Borrow from a brand-new account.</h2>
+    <h2 id="c-borrow" class="title reveal">Borrow from a <span class="nb">brand-new</span> account.</h2>
     <p class="body reveal">A fresh smart account borrows USDC on Morpho Blue against your zZEC. Its gas is sponsored, so it never held ETH, and nothing on Base points back to your wallet.</p>
+    <p class="note reveal">The USDC comes from lenders on Morpho Blue, who earn its interest: a new market backed by Zcash collateral.</p>
   </div>
 </section>
 
@@ -147,6 +149,7 @@
     <p class="kicker reveal"><span class="kicker-n">04</span>Close</p>
     <h2 id="c-close" class="title reveal">Leave without unshielding.</h2>
     <p class="body reveal">Repay, or let a market maker close from your collateral. The rest returns to a new Ironwood address, and every payout is committed on Base before it is signed.</p>
+    <p class="note reveal">If ZEC falls too far, a liquidator repays part of the debt and is paid in shielded ZEC too, with no outgoing viewing key; the rest stays yours. Pre-liquidation is <span class="nb">opt-in</span>.</p>
   </div>
 </section>
 
@@ -231,7 +234,9 @@
     <li class="reveal"><a href="docs/#swap"><span class="door-t">The swap</span><span class="door-d">Escrow released by a proof</span></a></li>
     <li class="reveal"><a href="docs/#trust"><span class="door-t">Who you trust</span><span class="door-d">Signers, bonds and the theft demo</span></a></li>
     <li class="reveal"><a href="docs/#evidence"><span class="door-t">Evidence</span><span class="door-d">Tests and testnet transactions</span></a></li>
+    <li class="reveal"><a href="docs/#faq"><span class="door-t">A judge’s questions</span><span class="door-d">Multisig, bridge, interest, collusion</span></a></li>
     <li class="reveal"><a href="docs/#mainnet"><span class="door-t">Toward mainnet</span><span class="door-d">What changes, and what can’t be coded</span></a></li>
+    <li class="reveal"><a href="https://github.com/Himess/zecured/blob/main/docs/zip-draft-shielded-collateral-vaults.md"><span class="door-t">A draft ZIP</span><span class="door-d">Shielded Collateral Vaults, for any wallet or chain</span></a></li>
   </ul>
 </section>
 

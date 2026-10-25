@@ -110,6 +110,26 @@
   color: var(--text);
 }
 
+/* A judge's questions. */
+.faq {
+  max-width: 46rem;
+  margin-top: 8px;
+}
+
+.faq dt {
+  margin-top: 28px;
+  font-size: 19px;
+  line-height: 1.3;
+  font-weight: 700;
+  font-stretch: 108%;
+}
+
+.faq dd {
+  margin: 8px 0 0;
+  color: var(--soft);
+  line-height: 1.6;
+}
+
 .doc p .mono,
 .doc li .mono {
   font-size: 0.86em;

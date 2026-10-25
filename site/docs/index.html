@@ -54,6 +54,8 @@
       <li><a href="#trust">Who you trust</a>
         <ol><li><a href="#theft">The theft demonstration</a></li></ol>
       </li>
+      <li><a href="#faq">A judge’s questions</a>
+      </li>
       <li><a href="#evidence">Evidence</a>
         <ol><li><a href="#real">Real, and mock</a></li></ol>
       </li>
@@ -83,7 +85,7 @@
           <p>Your USDC waits in escrow on Base. A market maker pays your Ironwood address and proves the payment in zero knowledge before the USDC is released. No custodian and no signer; selling ZEC for USDC works the same way, from the command line.</p>
         </div>
       </div>
-      <p>The shared core is a Zcash light client on Base. <span class="mono">ZcashHeaderRelay</span> verifies Zcash headers, Equihash included, on-chain; ZIP 221 history commitments keep a proven block hidden among its epoch’s; RISC Zero guests prove deposits, payments, payouts and violations; and <span class="mono">ZecuredVersions</span> lists the verifiers each proof is checked with.</p>
+      <p>The shared core is a Zcash light client on Base. <span class="mono">ZcashHeaderRelay</span> verifies Zcash headers, Equihash included, on-chain; ZIP 221 history commitments keep a proven block hidden among its epoch’s; RISC Zero guests prove deposits, payments, payouts and violations; and <span class="mono">ZecuredVersions</span> lists the verifiers each proof is checked with. Other contracts can use the same light client to check a shielded Zcash payment, with no bridge.</p>
       <figure class="figure">
         <img src="../img/seam.svg" width="1000" height="600" alt="What crosses from Zcash to Base: four zero-knowledge proofs (a deposit proof mints zZEC, an inclusion proof makes a payout final, a violation proof slashes the signers' bonds, a payment proof releases a swap's USDC) and salted commitments; never a Zcash transaction, note or address.">
         <figcaption>What crosses from Zcash to Base, and what never does.</figcaption>
@@ -243,7 +245,7 @@
           <div class="bpanel">
             <p class="chain chain-b"><span class="cdot" aria-hidden="true"></span>On Base</p>
             <h3 class="panel-t">Borrow from a fresh account</h3>
-            <p>Your first UserOp deploys a fresh Safe, authorizes Zecured on Morpho Blue and borrows USDC. Our paymaster sponsors the gas, so the account never receives ETH and leaves no funding trail.</p>
+            <p>Your first UserOp deploys a fresh Safe, authorizes Zecured on Morpho Blue and borrows USDC. Our paymaster sponsors the gas, so the account never receives ETH and leaves no funding trail. The USDC comes from lenders on Morpho Blue, who earn its interest: a new market backed by Zcash collateral.</p>
             <ol class="ledger" aria-label="Base events in this step">
               <li><span class="ev">UserOperation</span><span class="fv"><span class="fld">deploy, authorize, borrow</span><span class="fld">gas <span class="mono">sponsored</span></span></span></li>
               <li><span class="ev">Borrow</span><span class="fv"><span class="fld">assets <span class="mono">4 USDC</span></span><span class="fld">market <span class="mono">zZEC/USDC, LLTV 62.5 %</span></span></span></li>
@@ -285,6 +287,9 @@
           </div>
         </div>
       </div>
+
+      <h3 class="doc-h3">If the price falls</h3>
+      <p>If ZEC falls too far, a liquidator repays part of the debt on Morpho and is paid in shielded ZEC from the vault, with no outgoing viewing key. The vault tracks what is still outstanding, and the rest stays yours, to take back by repaying or closing from collateral. Pre-liquidation is <span class="nb">opt-in</span>: your account can set gentler terms of its own, below the market’s liquidation threshold. A liquidation’s payout on Zcash testnet: <span class="mono">dc7c669a…</span>, block 4,518,234.</p>
     </section>
 
     <!-- What Base sees -->
@@ -404,9 +409,25 @@
       </div>
     </section>
 
+    <!-- The judge's questions -->
+    <section id="faq" class="doc-sec" aria-labelledby="faq-h">
+      <h2 id="faq-h" class="doc-h2"><span class="doc-n">07</span>A judge’s questions</h2>
+      <dl class="faq">
+        <dt>Isn’t this just a multisig?</dt>
+        <dd>It’s a FROST threshold vault: one shielded address whose signatures look like a single signer’s, and every signer enforces a written policy on every payout. Two compromised signers can’t move funds: in a live run two signers, switched to a compromised mode, signed a sweep; the other three refused, and nothing moved.</dd>
+        <dt>Is zZEC a wrapped ZEC? Is this a bridge?</dt>
+        <dd>No. zZEC is a non-transferable collateral receipt, minted only into Morpho, that no account ever holds; each position’s zZEC equals what its own vault holds. Neither product moves ZEC off Zcash: the swap pays real shielded ZEC and releases escrowed USDC on a proof of that payment.</dd>
+        <dt>How do I pay interest without linking my identity?</dt>
+        <dd>Close from collateral: a market maker repays the debt on Morpho and takes ZEC from the vault, and the rest returns to a new shielded address in the same transaction. No outside funds ever touch your account.</dd>
+        <dt>What if the signers stop paying, or three collude?</dt>
+        <dd>Every payout must be committed on Base before it is signed. Taking ZEC that backs loans without a commitment, or paying a claim to anyone but its owner, is provable on Base with a zero-knowledge proof and slashes the signers’ bonds, which compensate the victims. If they just stop paying, the claimant is paid from the bonds 24 hours (72 on mainnet) after a signer acknowledged its destination.</dd>
+      </dl>
+      <p class="note">More answers in the <a href="https://github.com/Himess/zecured/blob/main/docs/JURY_FAQ.md">Jury FAQ</a>.</p>
+    </section>
+
     <!-- Evidence -->
     <section id="evidence" class="doc-sec" aria-labelledby="evidence-h">
-      <h2 id="evidence-h" class="doc-h2"><span class="doc-n">07</span>Evidence</h2>
+      <h2 id="evidence-h" class="doc-h2"><span class="doc-n">08</span>Evidence</h2>
       <p>Every number on this page comes from a run you can repeat, on testnets and local forks.</p>
       <div class="table" role="table" aria-label="Test results">
         <div class="tr th" role="row"><span role="columnheader">What</span><span role="columnheader">Result</span><span role="columnheader">How to run it</span></div>
@@ -430,7 +451,6 @@
         <li><span>A swap’s shielded payment, sent from the command line</span><span class="mono">d5aaef42…</span><span class="run-b">block 4,523,265</span></li>
         <li><span>The theft demonstration’s sweep, slashed on Base</span><span class="mono">43ea5e91…</span><span class="run-b">block 4,523,730</span></li>
       </ul>
-      <p class="placeholder">[LIVE RUN: the judge deployment’s run of October 23, with its links]</p>
 
       <div class="rm" id="real">
         <div>
@@ -469,7 +489,7 @@
 
     <!-- Mainnet -->
     <section id="mainnet" class="doc-sec" aria-labelledby="mainnet-h">
-      <h2 id="mainnet-h" class="doc-h2"><span class="doc-n">08</span>Toward mainnet</h2>
+      <h2 id="mainnet-h" class="doc-h2"><span class="doc-n">09</span>Toward mainnet</h2>
       <p>A mainnet deployment changes configuration, not code. What code can’t bring is independent operators, real bonds and liquidity, and an audit.</p>
       <ol class="stages">
         <li class="stage done"><p class="stage-m">Done</p><h3 class="stage-t">Checked against mainnet</h3><p>The v3 suites’ 533 contract tests on mainnet’s Morpho Blue and RISC Zero router, the real seals verified there, the relay run on 1,600 real Mainnet headers, the price feed read from live Chainlink and API3.</p></li>
@@ -477,11 +497,12 @@
         <li class="stage"><p class="stage-m">Then</p><h3 class="stage-t">An invite-only beta</h3><p>Unaudited and labelled so: a 1 ZEC cap, vaults of 0.05 and 0.1 ZEC, five bonds of 300 USDC, and exits that never stop.</p></li>
         <li class="stage"><p class="stage-m">After an audit</p><h3 class="stage-t">Mainnet</h3><p>Five independent operators with bonds of 50,000 USDC each, a 100 ZEC cap and 72-hour windows, after an audit of the contracts, the guests and the signer policy.</p></li>
       </ol>
+      <p>The vault design is written up as a draft ZIP, <a href="https://github.com/Himess/zecured/blob/main/docs/zip-draft-shielded-collateral-vaults.md">Shielded Collateral Vaults</a>, for any wallet or chain to build on. What is still open, and how each gap would close, is in <a href="https://github.com/Himess/zecured/blob/main/docs/MAINNET.md#7-known-limitations-and-their-designs">Known limitations and their designs</a>.</p>
     </section>
 
     <!-- Run -->
     <section id="run" class="doc-sec" aria-labelledby="run-h">
-      <h2 id="run-h" class="doc-h2"><span class="doc-n">09</span>Run it yourself</h2>
+      <h2 id="run-h" class="doc-h2"><span class="doc-n">10</span>Run it yourself</h2>
       <p>No deployment is kept running through the judging period. Everything runs on your machine instead: five signer processes, the coordinator, the contracts on a local fork of Base Sepolia, and the app, paying real Zcash testnet notes. The README walks through it.</p>
       <p class="ctas"><a class="btn btn-gold" href="https://github.com/Himess/zecured#running-it">Run it on a local fork</a><a class="btn btn-line" href="https://github.com/Himess/zecured">Read the code</a></p>
       <ul class="refs">
@@ -492,6 +513,7 @@
         <li><a href="https://github.com/Himess/zecured/blob/main/docs/TIER3.md">Payouts, bonds and slashing</a></li>
         <li><a href="https://github.com/Himess/zecured/blob/main/docs/MAINNET.md">Mainnet plan</a></li>
         <li><a href="https://github.com/Himess/zecured/blob/main/docs/JURY_FAQ.md">Jury FAQ</a></li>
+        <li><a href="https://github.com/Himess/zecured/blob/main/docs/zip-draft-shielded-collateral-vaults.md">Draft ZIP: Shielded Collateral Vaults</a></li>
       </ul>
     </section>
   </main>

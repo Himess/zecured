@@ -5,6 +5,9 @@ what is real and what is a mock. To finalize with the video link. No deployment 
 through judging (DECISIONS D82): the evidence is in TESTING.md, and the README runs the whole system
 on a local fork.
 
+**Links.** The site: https://himess.github.io/zecured/ (the details: https://himess.github.io/zecured/docs/).
+The demo video: [VIDEO LINK, published October 26]. The code: https://github.com/Himess/zecured.
+
 ---
 
 ## What it does
@@ -41,6 +44,11 @@ and the same Zcash light client lets anyone swap USDC into shielded ZEC with no 
   hours (72 on mainnet) is paid to its claimant from the bonds. Three of five signers can pause new
   minting for up to 30 days at a time; withdrawals, repayments, liquidations and payouts never stop.
 - **Swap:** no signer and no bond take part in a trade; its USDC moves only on a payment proof.
+
+The relay and the proofs form a Zcash light client on Base: other contracts can use them to check a
+shielded Zcash payment, with no bridge. The vault design is written up as a draft ZIP, Shielded
+Collateral Vaults ([docs/zip-draft-shielded-collateral-vaults.md](zip-draft-shielded-collateral-vaults.md)),
+for any wallet or chain to build on.
 
 A deposit of another amount than the vault's, or paid after its expiry, is proven too, as a refund,
 and paid back like any claim. What remains outside: all five signers together

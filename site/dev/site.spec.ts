@@ -8,7 +8,7 @@ import { sceneBuild } from "./build.mjs";
 // The site's own rules: same origin only, every word readable without the script, the docs' steps and
 // comparison by keyboard, no motion when asked for none, a working fallback without WebGL, no horizontal scroll.
 
-const WIDTHS = [390, 768, 1024, 1440];
+const WIDTHS = [390, 768, 1024, 1440, 1920];
 const PAGES = ["/", "/docs/"];
 
 async function open(page: Page, path = "/", width = 1440) {

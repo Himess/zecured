@@ -204,6 +204,11 @@ mark {
   margin-left: auto;
 }
 
+/* A compound word that must not break at its hyphen. */
+.nb {
+  white-space: nowrap;
+}
+
 .links a {
   display: inline-flex;
   align-items: center;

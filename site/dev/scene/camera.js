@@ -5,6 +5,46 @@ import { MathUtils, Vector3 } from "three";
 
 const key = (s, at, az, el, dist, x, y) => ({ s, at, az, el, dist, x, y });
 
+// What each moment of the story must keep on screen, whatever its size: a box on the mark ([x0, z0, x1, z1] and
+// the height things rise to), eased from one keyframe to the next like the camera. Past the story, nothing.
+const box = (s, x0, z0, x1, z1, top) => ({ s, b: [x0, z0, x1, z1, top] });
+const BOXES = [
+  box(0.0, -5.2, -5.2, 5.2, 5.2, 0.6),
+  box(0.62, -5.2, -5.2, 5.2, 5.2, 0.6),
+  box(1.12, -3.9, -1.3, -1.4, 1.3, 1.9),
+  box(1.8, -3.9, -1.3, -1.4, 1.3, 1.2),
+  box(2.16, -3.9, -1.3, 2.75, 2.45, 1.4),
+  box(2.86, -3.9, -1.3, 2.75, 2.45, 1.4),
+  box(3.12, 1.2, -2.3, 4.7, 2.4, 1.2),
+  box(4.24, 1.2, -2.3, 4.7, 2.4, 1.2),
+  box(4.4, -3.9, -2.1, -0.4, 2.1, 1.2),
+  box(4.64, -3.9, -2.1, -0.4, 2.1, 1.2),
+  box(4.74, -3.3, -1.3, 2.75, 2.45, 1.4),
+  box(4.92, -3.3, -1.3, 2.75, 2.45, 1.4),
+  box(5.1, -1.75, -2.5, 4.6, 2.0, 1.4),
+  box(5.96, -1.75, -2.5, 4.6, 2.0, 1.4),
+  box(6.14, -3.2, -1.9, 4.6, 3.45, 1.4),
+  box(6.94, -3.2, -1.9, 4.6, 3.45, 1.4),
+  box(7.1, -5.2, -2.2, -1.4, 1.3, 1.2),
+  box(7.44, -5.2, -2.2, -1.4, 1.3, 1.2),
+  box(7.56, -3.6, -2.8, 4.2, 2.45, 1.2),
+  box(7.66, -3.6, -2.8, 4.2, 2.45, 1.2),
+  box(7.76, 1.2, -2.8, 4.6, 2.45, 1.4),
+  box(7.98, 1.2, -2.8, 4.6, 2.45, 1.4),
+];
+
+/** The box the story keeps on screen at story time s, or null past the story. */
+export function boxAt(s, out) {
+  if (s > BOXES[BOXES.length - 1].s + 0.25) return null;
+  let i = 0;
+  while (i < BOXES.length - 2 && s > BOXES[i + 1].s) i += 1;
+  const a = BOXES[i];
+  const b = BOXES[i + 1];
+  const t = ease(Math.min(1, Math.max(0, (s - a.s) / (b.s - a.s))));
+  for (let k = 0; k < 5; k += 1) out[k] = mix(a.b[k], b.b[k], t);
+  return out;
+}
+
 // Wide screens: the text on the left, the story on the right.
 const WIDE = [
   // The mark, whole: the logo made solid.

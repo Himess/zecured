@@ -47,10 +47,13 @@ builds to.
   screen.
 - The camera follows a track of keyframes in story time, each an orbit around what is being told and the place on
   screen where it should stand. `main.js` measures where each section’s text ends (its right edge, or its top on a
-  tall screen), and the scene stands the story in the space the text leaves, stepping back where that space is
-  narrow. Once, as the page opens, the camera swings in toward the mark.
+  tall screen), and the scene stands the story in the space the text leaves. Each moment also names the box of
+  what it tells (`camera.js`), and the camera centres that box in the free space and steps back until all of it
+  is on screen, clear of the header and of the text. On a tall screen the veil darkens the scene from where the
+  text begins. Once, as the page opens, the camera swings in toward the mark.
 - The small tags on the scene (`.tags [data-tag]`, in the page’s HTML) follow the things they name: the scene
-  places them each frame and fades them with its story. They are decorative (`aria-hidden`); the text says the same.
+  places them each frame, fades them with its story and never lays one over a chapter’s text. They are decorative
+  (`aria-hidden`); the text says the same.
 - It keeps its frame rate by lowering the pixel ratio while frames run slow, then turning off the glow, then the
   shadows, and it stops while the tab is hidden.
 
@@ -93,19 +96,27 @@ Every number on the site comes from a recorded run, and each has its source:
 | The theft demonstration: `43ea5e91`, block 4,523,730; 64 s; 00:04:40, 00:06:47, 00:16:53; 3 → 12.65 USDC | TESTING § 2 |
 | Vault `0x59d5e63e`, tag `0xe43d283f`, payoutRef `0xcdf694fd`, blocks 4,490,621 and 4,490,655 | TESTING § 2, 2026-10-12 |
 | The mainnet parameters and NU7’s date | MAINNET § 1, 2 and 5 |
+| The USDC comes from lenders on Morpho Blue, a new market backed by Zcash collateral | SUBMISSION, “What it does” |
+| A liquidation pays the liquidator in shielded ZEC with no outgoing viewing key; pre-liquidation is opt-in | README (Borrow), ARCHITECTURE (P3), ECONOMICS (“Pre-liquidation (opt-in)”), TESTING § 2 (`dc7c669a`) |
+| The relay and the proofs form a Zcash light client other contracts can use | SUBMISSION, SWAP (its first paragraph) |
+| The draft ZIP, Shielded Collateral Vaults | `docs/zip-draft-shielded-collateral-vaults.md` |
+| A judge’s questions | JURY_FAQ |
+| Known limitations and their designs | MAINNET § 7 |
 
 When a run changes a number, change it on the site too. The docs’ “Real” and “Mock, or run by us” lists say what
 the README’s “What is real and what is a mock” says; when one changes, so does the other.
 
-## The two placeholders
+## The placeholder
 
 - **`[DEMO VIDEO]`** (the landing page’s demo section) becomes the video, self-hosted in `site/media/`: `demo.mp4`
   (H.264, 1080p, CRF about 26, at most 60 MB; GitHub Pages allows 100 MB a file) with `preload="none"` and a
   poster, `demo-poster.jpg`, and English captions, `<track kind="captions" srclang="en" src="media/demo.en.vtt"
   default>`. Next to it, a plain link to the same video on YouTube (a link, not an embed). The policy’s
   `media-src 'self'` and `img-src 'self'` already allow them.
-- **`[LIVE RUN]`** (the docs’ evidence) becomes the judge deployment’s run: Basescan links for the Base Sepolia
-  transactions, short txids and blocks for the Zcash side. The app’s evidence file (`/evidence`) takes the same run.
+
+The docs’ evidence lists the recorded runs of TESTING § 2. A run of the judge deployment would be added there once
+TESTING records it, with Basescan links for the Base Sepolia transactions and short txids and blocks for the Zcash
+side.
 
 ## Tests
 
@@ -122,13 +133,13 @@ on, the last step and the other comparison shown; every word readable without th
 its tags follow it; that without WebGL the page keeps its still image, loads no scene and logs no error; no motion
 and no scene under `prefers-reduced-motion`; the docs’ steps, viewing key and comparison by keyboard, and that the
 viewing key never clears the market maker’s output; a link to a step (`#loan-step-3`) opening it and scrolling to
-it; no horizontal scroll at 390, 768, 1024 and 1440 px; a target for every link inside the site; and that
+it; no horizontal scroll at 390, 768, 1024, 1440 and 1920 px; a target for every link inside the site; and that
 `site/scene.js` is what its source builds to.
 
 `pnpm shots` writes the site’s images: `site/img/still.jpg`, the social card `site/og.png` (1200 by 630), the
 README’s `docs/assets/hero.png` and `docs/assets/theft.png`, and the frames of `docs/assets/loan.gif`, which
 `scripts/site-gif.sh` assembles (needs ffmpeg). The scene is frozen on one frame of the hero for them. It also writes
-both pages in full at the four widths for review (`site/dev/shots/`, not committed). `docs/assets/seam.svg` (also
+both pages in full at those five widths for review (`site/dev/shots/`, not committed). `docs/assets/seam.svg` (also
 `site/img/seam.svg`) is drawn by hand.
 
 ## Fonts

@@ -24,6 +24,16 @@ export function canvasTexture(renderer, width, height, draw) {
   return { texture, redraw };
 }
 
+/** Sets a font no larger than `size` at which `text` fits in `room` pixels. */
+function fitFont(ctx, text, weight, size, family, room) {
+  let px = size;
+  ctx.font = `${weight} ${px}px ${family}`;
+  while (px > 8 && ctx.measureText(text).width > room) {
+    px -= 1;
+    ctx.font = `${weight} ${px}px ${family}`;
+  }
+}
+
 export function hex(rand, n) {
   let s = "";
   for (let i = 0; i < n; i += 1) s += HEX[Math.floor(rand() * 16)];
@@ -57,11 +67,13 @@ export function drawEvent(ctx, w, h, name, fields = [], tone = "ink") {
   ctx.textAlign = "left";
   ctx.textBaseline = "alphabetic";
   ctx.fillStyle = ink;
-  ctx.font = `800 ${Math.round(h * 0.25)}px ${SANS}`;
+  fitFont(ctx, name, 800, Math.round(h * 0.25), SANS, w * 0.84);
   ctx.fillText(name, w * 0.11, h * 0.4);
   ctx.fillStyle = muted;
-  ctx.font = `500 ${Math.round(h * 0.135)}px ${MONO}`;
-  fields.slice(0, 2).forEach((line, i) => ctx.fillText(line, w * 0.11, h * (0.63 + i * 0.19)));
+  fields.slice(0, 2).forEach((line, i) => {
+    fitFont(ctx, line, 500, Math.round(h * 0.135), MONO, w * 0.84);
+    ctx.fillText(line, w * 0.11, h * (0.63 + i * 0.19));
+  });
 }
 
 /** A coin's face, engraved. */
@@ -94,11 +106,13 @@ export function drawCard(ctx, w, h, title, lines, color = "#0f1b2a", muted = "#4
   ctx.textAlign = "left";
   ctx.textBaseline = "alphabetic";
   ctx.fillStyle = color;
-  ctx.font = `800 ${Math.round(h * 0.13)}px ${SANS}`;
+  fitFont(ctx, title, 800, Math.round(h * 0.13), SANS, w * 0.82);
   ctx.fillText(title, w * 0.1, h * 0.24);
   ctx.fillStyle = muted;
-  ctx.font = `500 ${Math.round(h * 0.075)}px ${MONO}`;
-  lines.forEach((line, i) => ctx.fillText(line, w * 0.1, h * (0.42 + i * 0.12)));
+  lines.forEach((line, i) => {
+    fitFont(ctx, line, 500, Math.round(h * 0.075), MONO, w * 0.82);
+    ctx.fillText(line, w * 0.1, h * (0.42 + i * 0.12));
+  });
 }
 
 /** The escrow's lid: a padlock, the order, and the salted hash of the buyer's address it is locked to. */

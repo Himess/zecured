@@ -215,7 +215,9 @@ export function createStory(world, props) {
     ring.object.visible = keysUp > 0.05;
     ring.material.opacity = 0.45 * keysUp * (1 - slashed);
     ring.material.color.setHex(0xdbe8ff).lerp(red, compromised * 0.6);
-    if (keysUp > 0.5 && s < 2) anchors.keys = { at: keys[1].group.position, on: win(s, 1.16, 1.24, 1.5, 1.58) };
+    // The signers' name hangs on the one nearest the camera, below the coin and its name.
+    const front = keys.reduce((a, k) => (k.group.position.z > a.group.position.z ? k : a), keys[0]);
+    if (keysUp > 0.5 && s < 2) anchors.keys = { at: front.group.position, on: win(s, 1.16, 1.24, 1.5, 1.58) };
 
     // The core: a heartbeat, and a flash each time a proof passes through it.
     let through = 0;

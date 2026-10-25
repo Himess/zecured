@@ -574,14 +574,10 @@ main {
   line-height: 1.45;
 }
 
-.stat:first-child .stat-n {
-  color: var(--gold);
-  text-shadow: 0 0 40px rgba(244, 183, 40, 0.3);
-}
-
 /* ---------------------------------------------------------------------------------------- demo */
 
 .demo {
+  padding-bottom: clamp(48px, 7vh, 88px);
   display: grid;
   grid-template-columns: minmax(0, 0.8fr) minmax(0, 1.2fr);
   gap: clamp(32px, 5vw, 80px);
@@ -631,6 +627,10 @@ main {
 }
 
 /* ---------------------------------------------------------------------------------------- doors */
+
+.more {
+  padding-top: clamp(72px, 11vh, 128px);
+}
 
 .doors {
   display: grid;
@@ -686,6 +686,12 @@ main {
   font-size: 15px;
 }
 
+@media (min-width: 1200px) {
+  .doors {
+    grid-template-columns: repeat(4, minmax(0, 1fr));
+  }
+}
+
 /* ---------------------------------------------------------------------------------------- narrow */
 
 @media (max-width: 1000px) {
@@ -706,6 +712,17 @@ main {
 @media (max-width: 760px) {
   .veil {
     background: linear-gradient(180deg, rgba(4, 9, 7, 0.45) 0%, rgba(4, 9, 7, 0.08) 30%, rgba(4, 9, 7, 0.55) 62%, rgba(4, 9, 7, 0.88) 100%);
+  }
+
+  /* Where the chapter's text begins, the scene behind it goes dark. */
+  .text-top .veil {
+    background: linear-gradient(
+      180deg,
+      rgba(4, 9, 7, 0.45) 0%,
+      rgba(4, 9, 7, 0.06) calc(var(--text-top) * 100% - 14%),
+      rgba(4, 9, 7, 0.8) calc(var(--text-top) * 100%),
+      rgba(4, 9, 7, 0.92) 100%
+    );
   }
 
   .hero {

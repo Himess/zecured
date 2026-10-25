@@ -8,7 +8,7 @@ import { EffectComposer } from "three/addons/postprocessing/EffectComposer.js";
 import { OutputPass } from "three/addons/postprocessing/OutputPass.js";
 import { RenderPass } from "three/addons/postprocessing/RenderPass.js";
 import { UnrealBloomPass } from "three/addons/postprocessing/UnrealBloomPass.js";
-import { TRACK, follow, place, pose, poseAt } from "./camera.js";
+import { TRACK, boxAt, follow, place, pose, poseAt } from "./camera.js";
 import { buildProps } from "./props.js";
 import { CHAPTERS, createStory, seg } from "./story.js";
 import { buildWorld } from "./world.js";
@@ -63,6 +63,8 @@ export function startScene(canvas, { tags: tagLayer = null, onReady } = {}) {
   const view = pose();
   const pointer = { x: 0, y: 0, sx: 0, sy: 0 };
   const scratch = new Vector3();
+  const probe = new PerspectiveCamera(32, 1, 0.1, 300);
+  const box = [0, 0, 0, 0, 0];
 
   /**
    * Sets the page's place: the chapter on screen, how far into it the reader is, and where its text ends (a share of
@@ -85,6 +87,46 @@ export function startScene(canvas, { tags: tagLayer = null, onReady } = {}) {
     } else {
       p.x = edgeShown / 2;
       p.dist *= Math.min(1.4, Math.max(0.85, 0.933 / ((1 - edgeShown) * (width / height))));
+    }
+    keepInView(p);
+  }
+
+  /**
+   * Then the whole of what the story is telling must be on screen with room to spare, clear of the header and of
+   * the text: the camera centres it in the free space and steps back until it fits.
+   */
+  function keepInView(p) {
+    if (!boxAt(storyTime, box)) return;
+    const left = tall ? 0.04 : edgeShown + 0.03;
+    const right = 0.97;
+    const top = tall ? 0.1 : 0.13;
+    const bottom = tall ? edgeShown - 0.02 : 0.94;
+    // Where the text covers nearly all the screen, the veil does the work.
+    if (bottom - top < 0.22 || right - left < 0.3) return;
+    probe.fov = camera.fov;
+    probe.aspect = camera.aspect;
+    const matrix = parts.world.matrixWorld;
+    for (let i = 0; i < 8; i += 1) {
+      place(probe, p, width, height);
+      probe.updateMatrixWorld();
+      let x0 = 1;
+      let x1 = 0;
+      let y0 = 1;
+      let y1 = 0;
+      for (let c = 0; c < 8; c += 1) {
+        scratch.set(c & 1 ? box[2] : box[0], c & 2 ? box[4] : 0, c & 4 ? box[3] : box[1]).applyMatrix4(matrix).project(probe);
+        const sx = (scratch.x + 1) / 2;
+        const sy = (1 - scratch.y) / 2;
+        x0 = Math.min(x0, sx);
+        x1 = Math.max(x1, sx);
+        y0 = Math.min(y0, sy);
+        y1 = Math.max(y1, sy);
+      }
+      p.x += (left + right) / 2 - (x0 + x1) / 2;
+      p.y -= (top + bottom) / 2 - (y0 + y1) / 2;
+      const over = Math.max((x1 - x0) / (right - left), (y1 - y0) / (bottom - top));
+      if (over <= 1) break;
+      p.dist *= over * 1.02;
     }
   }
 
@@ -115,6 +157,11 @@ export function startScene(canvas, { tags: tagLayer = null, onReady } = {}) {
       if (Math.abs(target - storyTime) > 1.2) storyTime = target - Math.sign(target - storyTime) * 0.3;
       storyTime += (target - storyTime) * (1 - Math.exp(-dt * 4.5));
     }
+    // The mark turns gently while nothing is being told.
+    const idle = 1 - seg(storyTime, 0.4, 0.95) + seg(storyTime, 8.05, 8.6);
+    parts.world.rotation.y = Math.sin(time * 0.11) * 0.32 * idle;
+    parts.world.updateMatrixWorld();
+
     // The camera glides after the story's, and leans a little toward the pointer. Once, as the page opens, it swings
     // in toward the mark while the core lights up.
     edgeShown = snap ? edge : edgeShown + (edge - edgeShown) * (1 - Math.exp(-dt * 3));
@@ -126,11 +173,6 @@ export function startScene(canvas, { tags: tagLayer = null, onReady } = {}) {
     const opening = (1 - Math.min(1, time / 2.8)) ** 3;
     place(camera, view, width, height, pointer.sx * 2.5 - opening * 30, -pointer.sy * 1.5 + opening * 16, 1 + opening * 0.45);
     camera.updateMatrixWorld();
-
-    // The mark turns gently while nothing is being told.
-    const idle = 1 - seg(storyTime, 0.4, 0.95) + seg(storyTime, 8.05, 8.6);
-    parts.world.rotation.y = Math.sin(time * 0.11) * 0.32 * idle;
-    parts.world.updateMatrixWorld();
 
     // Ciphertext never sits still.
     parts.cipherField.texture.offset.y = (time * 0.006) % 1;

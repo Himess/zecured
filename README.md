@@ -27,7 +27,10 @@ Two products, one Zcash light client on Base:
 The shared core is a Zcash light client on Base: `ZcashHeaderRelay` verifies Zcash headers
 (Equihash) on-chain, ZIP 221 history commitments keep a proven block hidden among its epoch's, RISC
 Zero guests prove deposits, payments, payouts and violations, and `ZecuredVersions` lists the
-verifiers each proof is checked with.
+verifiers each proof is checked with. Other contracts can use the same light client to check a
+shielded Zcash payment, with no bridge. The vault design is written up as a draft ZIP,
+[Shielded Collateral Vaults](docs/zip-draft-shielded-collateral-vaults.md), for any wallet or chain
+to build on.
 
 ![What crosses from Zcash to Base: four zero-knowledge proofs (deposit, inclusion, violation, payment) and salted commitments; never a Zcash transaction, note or address](docs/assets/seam.svg)
 
@@ -139,7 +142,7 @@ repository are published test vectors (such as ZIP 2005's) and anvil's well-know
 | `cli/` | `zecured-wallet`: Ironwood CLI wallet and borrower actions |
 | `app/` | Next.js app (in progress) |
 | `site/` | The site: a landing page told by a 3D scene (three.js) and a docs page; static, its own fonts, no request to anyone else ([docs/SITE.md](docs/SITE.md)) |
-| `docs/` | [Architecture](docs/ARCHITECTURE.md), [Interfaces](docs/INTERFACES.md), [Threat model](docs/THREAT_MODEL.md), [Decisions](docs/DECISIONS.md), [Invariants](docs/INVARIANTS.md), [Economics](docs/ECONOMICS.md), [Mainnet](docs/MAINNET.md), [Swap](docs/SWAP.md), [Testing and evidence](docs/TESTING.md), [Security review](docs/SECURITY_REVIEW.md), [Tier 2 design](docs/TIER2.md), [Tier 3 design](docs/TIER3.md), [Operators](docs/OPERATORS.md), [Jury FAQ](docs/JURY_FAQ.md), spikes |
+| `docs/` | [Architecture](docs/ARCHITECTURE.md), [Interfaces](docs/INTERFACES.md), [Threat model](docs/THREAT_MODEL.md), [Decisions](docs/DECISIONS.md), [Invariants](docs/INVARIANTS.md), [Economics](docs/ECONOMICS.md), [Mainnet](docs/MAINNET.md), [Swap](docs/SWAP.md), [Testing and evidence](docs/TESTING.md), [Security review](docs/SECURITY_REVIEW.md), [Tier 2 design](docs/TIER2.md), [Tier 3 design](docs/TIER3.md), [Operators](docs/OPERATORS.md), [Jury FAQ](docs/JURY_FAQ.md), [Draft ZIP: Shielded Collateral Vaults](docs/zip-draft-shielded-collateral-vaults.md), spikes |
 
 ## Running it
 
