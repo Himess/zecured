@@ -157,7 +157,7 @@ allows no frames), and in the hero change the second button to “Watch the 2-mi
 
 The policy’s `media-src 'self'` and `img-src 'self'` already allow them, and `.frame video` takes the same frame
 as the picture (`landing.css`). If the narration does not say everything the video shows, add a transcript next to
-it. After a public run on Base Sepolia, the sentences that change are listed in the private notes of the live run.
+it.
 
 The docs’ evidence lists the recorded runs of TESTING § 2. A run on Base Sepolia would be added there once TESTING
 records it, with Basescan links for the Base Sepolia transactions and short txids and blocks for the Zcash side.
