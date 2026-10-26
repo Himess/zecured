@@ -44,6 +44,12 @@ export const WORLD_KEY = "zecured:replay:v1";
 export const REPLAY_STORAGE_PREFIX = "zecured:replay:";
 
 /** An action the recorded run did not take at this point: the app shows its message (code `replay_off_script`). */
+/** The recording's loan token as the app names it: "MockUSDC" when the market lends the deployer's MockUSDC. */
+export function loanTokenOf(r: ReplayRecording): string {
+  const mock = r.config.contracts.MockUSDC;
+  return mock !== undefined && mock.toLowerCase() === r.config.market.loanToken.toLowerCase() ? "MockUSDC" : "USDC";
+}
+
 export class OffScriptError extends Error {
   readonly code = "replay_off_script";
   constructor(message: string) {

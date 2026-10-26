@@ -258,7 +258,8 @@ const USD_CENT_PRICE = 10n ** 32n;
 /** Oracle price → "$40.00" (USD per ZEC, cents precision, rounded down). */
 export function formatUsdPrice(price: bigint): string {
   const cents = price / USD_CENT_PRICE;
-  return `$${trimDecimals(cents / 100n, cents % 100n, 2, 2)}`;
+  const whole = (cents / 100n).toString().replace(/\B(?=(\d{3})+(?!\d))/g, ",");
+  return `$${whole}.${(cents % 100n).toString().padStart(2, "0")}`;
 }
 
 /** USD cents per ZEC → MockZecOracle price (what `setPrice` stores). */

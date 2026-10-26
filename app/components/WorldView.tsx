@@ -7,7 +7,7 @@ import { useMounted } from "./client";
 import { IconGlobe, IconKey, IconSigners } from "./icons";
 import { BaseMark } from "./marks";
 import { ChainChip, Leaky, type Chain } from "./seam";
-import { STATUS_LABEL } from "./status";
+import { statusOf } from "./status";
 import { Badge, Mono, Notice } from "./ui";
 import { describeError } from "@/lib/api";
 import { readMarket, readPrice, readRecentRegistryEvents, type RegistryEvent } from "@/lib/chain";
@@ -296,7 +296,7 @@ function SignerView({ vaultId, staggered = false }: { vaultId: Hex; staggered?: 
       {v ? (
         <ul className="mt-2 space-y-1 text-soft">
           <li className="flex flex-wrap items-center gap-2">
-            Status <Badge tone={STATUS_LABEL[v.status].tone}>{STATUS_LABEL[v.status].text}</Badge>
+            Status <Badge tone={statusOf(v).tone}>{statusOf(v).text}</Badge>
           </li>
           <li>Amount {formatTaz(v.amount)}</li>
           {v.outstanding !== undefined ? <li>Outstanding {formatTaz(v.outstanding)}</li> : null}

@@ -90,17 +90,23 @@ export function Qr({ value, label, size = 240 }: { value: string; label: string;
 /** Whether our backend answers (`GET /health`): one poll for the whole page, however many indicators show it. */
 let backendUp: boolean | null = null;
 let backendTimer: ReturnType<typeof setTimeout> | undefined;
+let backendPolling = false;
 const backendListeners = new Set<() => void>();
 
 async function pollBackend() {
+  if (backendPolling) return;
+  backendPolling = true;
   let ok = false;
   try {
     ok = await api.health();
   } catch {
     ok = false;
+  } finally {
+    backendPolling = false;
   }
   backendUp = ok;
   backendListeners.forEach((l) => l());
+  clearTimeout(backendTimer);
   backendTimer = backendListeners.size ? setTimeout(pollBackend, ok ? 60_000 : 15_000) : undefined;
 }
 
@@ -111,7 +117,7 @@ function useBackendUp(): boolean | null {
     if (REPLAY) return;
     const listener = () => render((n) => n + 1);
     backendListeners.add(listener);
-    if (!backendTimer) void pollBackend();
+    if (!backendTimer && !backendPolling) void pollBackend();
     return () => {
       backendListeners.delete(listener);
       if (!backendListeners.size && backendTimer) {
@@ -255,10 +261,14 @@ export function LoanTokenName() {
   return <>{loanTokenName()}</>;
 }
 
-/** What is real and what is a mock on this deployment (home page), from GET /config and the build. */
-export function RealAndMockList() {
-  const { real, mock } = realAndMock();
+/** What is real and what is a mock on this deployment (home page), from GET /config, GET /status and the build. */
+export function RealAndMockList({ verifierIsMock }: { verifierIsMock?: boolean | null }) {
+  const { real, mock } = realAndMock(undefined, undefined, verifierIsMock);
   return (
+    <>
+      {REPLAY ? (
+        <p className="mb-3 text-sm font-semibold text-demo">DEMO: this replay plays sample data in your browser; none of the real parts below ran in it.</p>
+      ) : null}
     <ul className="list-disc space-y-2 pl-5 text-sm text-soft">
       {real.map((r) => (
         <li key={r}>
@@ -273,6 +283,7 @@ export function RealAndMockList() {
         </li>
       ))}
     </ul>
+    </>
   );
 }
 

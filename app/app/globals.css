@@ -92,6 +92,12 @@
     background: color-mix(in oklab, var(--color-text) 26%, transparent);
   }
 
+  /* No orphaned last word ("alone.", "browser.") at the end of a paragraph. */
+  p,
+  li {
+    text-wrap: pretty;
+  }
+
   /* Plain links read as text: the light text colour (ink on paper), underlined, never gold. */
   a {
     color: var(--link, var(--color-text));
@@ -178,6 +184,13 @@ html {
   box-shadow: 0 0 0 3px var(--color-accent);
 }
 
+/* A file input hidden behind its label (drawn as a button): the label shows the input's focus. */
+.file-pick:focus-visible + label {
+  outline: 2px solid var(--focus-outline, var(--color-text));
+  outline-offset: 3px;
+  box-shadow: 0 0 0 3px var(--color-accent);
+}
+
 @layer components {
   .prose-calm h2 {
     font-size: 1.25rem;
@@ -252,6 +265,11 @@ html {
   .field:focus-visible {
     border-color: var(--color-soft);
     border-radius: 14px;
+  }
+
+  /* A grip would invite a resize the layout does not need. */
+  textarea.field {
+    resize: none;
   }
 
   .field[aria-invalid="true"] {

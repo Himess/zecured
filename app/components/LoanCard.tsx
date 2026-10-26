@@ -5,8 +5,8 @@ import { usePosition, useVault } from "@/lib/hooks";
 import { short, type StoredLoan } from "@/lib/keys";
 import { vaultHref } from "@/lib/routes";
 import { IconArrowRight } from "./icons";
-import { fallBeforeLiquidation, HealthRunway, healthOf, TokenAmount, usdc, zec } from "./loan";
-import { STATUS_LABEL } from "./status";
+import { fallBeforeLiquidation, fallPercent, HealthRunway, healthOf, TokenAmount, usdc, zec } from "./loan";
+import { statusOf } from "./status";
 import { Badge, buttonClass, cx, Skeleton } from "./ui";
 
 /**
@@ -19,7 +19,7 @@ export function LoanCard({ loan, compact = false }: { loan: StoredLoan; compact?
   const active = vault.data?.status === "active" || vault.data?.status === "closing";
   const position = usePosition(loan.vaultId && active ? loan.account : undefined, 60_000);
   const p = position.data;
-  const status = vault.data ? STATUS_LABEL[vault.data.status] : null;
+  const status = vault.data ? statusOf(vault.data) : null;
   const health = p ? healthOf(p) : null;
   const fall = health ? fallBeforeLiquidation(health) : null;
   // A loan that is over (closed, expired, cancelled) shows what it locked; a live one what is locked now.
@@ -71,7 +71,7 @@ export function LoanCard({ loan, compact = false }: { loan: StoredLoan; compact?
               <>
                 <HealthRunway health={health} size="s" />
                 <p className="text-[12px] text-muted">
-                  {fall === null ? "no debt" : fall === 0n ? "liquidatable now" : `ZEC can fall ${fall / 100n} %`}
+                  {fall === null ? "no debt" : fall === 0n ? "liquidatable now" : `ZEC can fall ${fallPercent(fall)} %`}
                 </p>
               </>
             ) : (

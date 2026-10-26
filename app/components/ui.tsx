@@ -38,7 +38,7 @@ export function Page({
   children: ReactNode;
 }) {
   return (
-    <div className="space-y-7">
+    <div className="space-y-6">
       <header className="flex flex-wrap items-end justify-between gap-x-8 gap-y-3">
         <div className="min-w-0 space-y-2">
           {eyebrow ? <p className="flex items-center gap-2 text-[13px] font-semibold text-muted">{eyebrow}</p> : null}
@@ -216,30 +216,32 @@ export function buttonClass(variant: Variant = "primary", className?: string, si
 
 /**
  * A button. While `busy`, it keeps its look and its focus (no `disabled`: a disabled button drops focus) and
- * ignores clicks; screen readers hear it as busy.
+ * ignores clicks; screen readers hear it as busy. `done`: its action just succeeded, a check for a moment.
  */
 export function Button({
   variant = "primary",
   size = "md",
   busy = false,
+  done = false,
   className,
   children,
   disabled,
   type = "button",
   onClick,
   ...rest
-}: ButtonHTMLAttributes<HTMLButtonElement> & { variant?: Variant; size?: Size; busy?: boolean }) {
+}: ButtonHTMLAttributes<HTMLButtonElement> & { variant?: Variant; size?: Size; busy?: boolean; done?: boolean }) {
+  const inert = busy || done;
   return (
     <button
       type={type}
       className={buttonClass(variant, className, size)}
-      disabled={disabled && !busy}
-      aria-disabled={busy || undefined}
+      disabled={disabled && !inert}
+      aria-disabled={inert || undefined}
       aria-busy={busy || undefined}
-      onClick={busy ? (e) => e.preventDefault() : onClick}
+      onClick={inert ? (e) => e.preventDefault() : onClick}
       {...rest}
     >
-      {busy ? <Spinner /> : null}
+      {busy ? <Spinner /> : done ? <IconCheck size={18} strokeWidth={2.6} /> : null}
       {children}
     </button>
   );
@@ -332,8 +334,6 @@ export function KeyValue({ rows }: { rows: [ReactNode, ReactNode][] }) {
   );
 }
 
-const pad2 = (n: number) => String(n).padStart(2, "0");
-
 /**
  * A flow's chapters, inline: a mono number in a pill (a white ring for the current one, a check once done), the
  * name, hairlines between. `proof`: the chapter a proof ends, whose π turns gold once `proven`. Phones get
@@ -360,11 +360,11 @@ export function Steps({
               <span
                 aria-hidden="true"
                 className={cx(
-                  "inline-flex h-[22px] min-w-[30px] items-center justify-center rounded-full px-1.5 font-mono text-[11.5px] font-medium",
+                  "inline-flex size-[22px] items-center justify-center rounded-full text-[12px] font-bold tabular-nums",
                   now ? "text-text shadow-[inset_0_0_0_1.5px_var(--color-text)]" : done ? "bg-surface-3 text-soft" : "text-faint shadow-[inset_0_0_0_1px_var(--color-line)]",
                 )}
               >
-                {done ? <IconCheck size={12} strokeWidth={2.8} /> : pad2(i + 1)}
+                {done ? <IconCheck size={12} strokeWidth={2.8} /> : i + 1}
               </span>
               <span className={cx("ml-2 text-[14px]", now ? "font-semibold text-text" : done ? "text-soft" : "text-faint")}>
                 {s}
@@ -387,11 +387,17 @@ export function Steps({
         })}
       </ol>
       <div className="sm:hidden">
-        <p className="text-[13.5px] font-semibold" aria-label={`Step ${current + 1} of ${n}: ${steps[current] ?? ""}`}>
-          <span className="font-mono text-[12px] text-muted">
-            {pad2(Math.min(current + 1, n))} of {pad2(n)}
-          </span>{" "}
-          · {steps[Math.min(current, n - 1)]}
+        <p className="text-[13.5px] font-semibold">
+          {current >= n ? (
+            <span className="text-muted">All {n} steps done</span>
+          ) : (
+            <>
+              <span className="text-muted">
+                Step {current + 1} of {n}
+              </span>{" "}
+              · {steps[current]}
+            </>
+          )}
         </p>
         <div aria-hidden="true" className="mt-2 grid gap-1" style={{ gridTemplateColumns: `repeat(${n}, minmax(0, 1fr))` }}>
           {steps.map((s, i) => (
@@ -399,33 +405,6 @@ export function Steps({
           ))}
         </div>
       </div>
-    </div>
-  );
-}
-
-/** A labelled form field: label, control, hint and error, wired for screen readers by the caller's ids. */
-export function Field({
-  label,
-  htmlFor,
-  hint,
-  error,
-  children,
-  className,
-}: {
-  label: ReactNode;
-  htmlFor: string;
-  hint?: ReactNode;
-  error?: ReactNode;
-  children: ReactNode;
-  className?: string;
-}) {
-  return (
-    <div className={cx("space-y-1.5", className)}>
-      <label htmlFor={htmlFor} className="block text-[14px] font-semibold text-soft">
-        {label}
-      </label>
-      {children}
-      {error ? <p className="text-sm text-danger">{error}</p> : hint ? <p className="text-xs text-muted">{hint}</p> : null}
     </div>
   );
 }

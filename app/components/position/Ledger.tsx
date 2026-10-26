@@ -351,7 +351,7 @@ export function ClaimsCard({
     <Card
       title="Payouts on Zcash"
       icon={<ZecMark size={20} />}
-      action={committed ? <span className="text-[12.5px] text-muted">paid by 3 of 5 signers · final once proven on Base</span> : null}
+      action={committed ? <span className="text-[12.5px] text-muted">paid by 3 of 5 signers · final once proven, or once undisputed</span> : null}
     >
       <ul className="divide-y divide-hairline text-sm">
         {claims.map((c) => (
@@ -359,6 +359,9 @@ export function ClaimsCard({
         ))}
       </ul>
       {vault?.payoutInFlight ? <p className="mt-2 text-xs text-muted">A payout transaction is being confirmed on Zcash.</p> : null}
+      {claims.some((c) => c.status === "Paid" && c.paidAt === 0) ? (
+        <p className="mt-3 text-xs text-muted">Final once proven on Base in zero knowledge, or once its dispute window closes undisputed.</p>
+      ) : null}
       {claims.some((c) => c.kind === "Release" || c.kind === "CloseUser") ? (
         <div className="mt-4">
           <PayoutNotice />
@@ -433,7 +436,7 @@ function ClaimRow({
         </span>
       </div>
       <PayoutTrack claim={claim} />
-      {view.detail ? <p className="text-xs text-muted">{view.detail}</p> : null}
+      {view.detail && view.badge.tone !== "proof" ? <p className="text-xs text-muted">{view.detail}</p> : null}
       <LivenessGuarantee ledger={ledger} claim={claim} loan={mine ? loan : null} onChanged={onChanged} />
       {mine && d.canDispute ? (
         <div className="space-y-2">

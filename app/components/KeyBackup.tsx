@@ -6,7 +6,7 @@ import { backupFileName, exportLoan, loanStore, short, verifyBackup, type Stored
 import { REPLAY } from "@/lib/replay/flag";
 import { CopyButton } from "./client";
 import { IconArrowRight, IconDownload, IconKey, IconUpload } from "./icons";
-import { Button, cx, Disclosure, Notice } from "./ui";
+import { Button, buttonClass, cx, Disclosure, Notice } from "./ui";
 
 /** Saves a loan backup as a local file (Blob URL: no network). */
 export function downloadBackup(loan: StoredLoan): void {
@@ -24,8 +24,8 @@ export function downloadBackup(loan: StoredLoan): void {
 /** One numbered row of the backup: its number, what to do, and the controls that do it. */
 function Row({ n, done, title, children }: { n: number; done?: boolean; title: string; children: ReactNode }) {
   return (
-    <li className="grid gap-3 border-t border-hairline py-4 first:border-t-0 sm:grid-cols-[13rem_minmax(0,1fr)] sm:items-center">
-      <p className="flex items-center gap-2.5 font-semibold">
+    <li className="grid gap-3 border-t border-hairline py-4 first:border-t-0 sm:grid-cols-[13rem_minmax(0,1fr)] sm:items-start">
+      <p className="flex items-center gap-2.5 font-semibold sm:pt-2.5">
         <span
           aria-hidden="true"
           className={cx(
@@ -70,11 +70,13 @@ export function KeyBackup({ loan, onConfirmed }: { loan: StoredLoan; onConfirmed
 
   return (
     <div className="space-y-5">
-      <p className="max-w-2xl text-[15px] text-soft">
-        A fresh owner key was made in this browser for this loan: it controls the loan account and signs every request,
-        and it is never sent anywhere. Clear this browser&apos;s data without a backup, and you lose the loan and the ZEC in
-        its vault. Anyone with the backup can act on the loan: keep it offline.
-      </p>
+      {REPLAY ? null : (
+        <p className="max-w-2xl text-[15px] text-soft">
+          A fresh owner key was made in this browser for this loan: it controls the loan account and signs every request,
+          and it is never sent anywhere. Clear this browser&apos;s data without a backup, and you lose the loan and the ZEC in
+          its vault. Anyone with the backup can act on the loan: keep it offline.
+        </p>
+      )}
       {REPLAY && !verified ? (
         <Notice tone="demo" title="DEMO: this key is a dummy">
           <p>
@@ -86,6 +88,13 @@ export function KeyBackup({ loan, onConfirmed }: { loan: StoredLoan; onConfirmed
             <IconArrowRight size={17} />
           </Button>
         </Notice>
+      ) : null}
+      {REPLAY ? (
+        <p className="max-w-2xl text-[15px] text-soft">
+          In the live app a fresh owner key is made in this browser for each loan: it controls the loan account and signs every
+          request, and it is never sent anywhere. Clear the browser&apos;s data without a backup, and you lose the loan and the
+          ZEC in its vault.
+        </p>
       ) : null}
       {!storageOk ? (
         <Notice tone="danger" title="Local storage is unavailable in this browser">
@@ -122,9 +131,7 @@ export function KeyBackup({ loan, onConfirmed }: { loan: StoredLoan; onConfirmed
         </Row>
         <Row n={2} done={verified} title="Prove it restores">
           <div className="space-y-2">
-            <label htmlFor={fileId} className="sr-only">
-              The saved backup file
-            </label>
+            {/* The native file input stays in the tab order, hidden behind its label; the label shows its focus. */}
             <input
               id={fileId}
               type="file"
@@ -134,8 +141,12 @@ export function KeyBackup({ loan, onConfirmed }: { loan: StoredLoan; onConfirmed
                 if (f) check(await f.text());
                 e.target.value = "";
               }}
-              className="block text-sm text-muted file:mr-3 file:min-h-11 file:rounded-full file:border-0 file:bg-surface-2 file:px-5 file:font-semibold file:text-text file:shadow-[inset_0_0_0_1px_var(--color-control)] hover:file:bg-surface-3"
+              className="file-pick sr-only"
             />
+            <label htmlFor={fileId} className={cx(buttonClass("secondary"), "cursor-pointer")}>
+              <IconUpload size={16} />
+              Choose the saved file
+            </label>
             <Disclosure summary="Or paste it instead">
               <label htmlFor={pasteId} className="sr-only">
                 The backup you copied

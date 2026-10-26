@@ -1,7 +1,8 @@
 /**
  * The placeholder recording (DEMO), until the live Base Sepolia run replaces it: the contracts of
- * the local fork's deployment (contracts/deployments/anvil.json, anvil.swap.json), the jury
- * setup's numbers (0.05 TAZ, ZEC at $50, MockUSDC), five DEMO signer keys that really sign the
+ * the local fork's deployment (contracts/deployments/anvil.json, anvil.swap.json), the numbers of
+ * a testnet run (0.05 TAZ, ZEC at the deploy script's $1,265, MockUSDC, 10 confirmations as the
+ * signers' default), five DEMO signer keys that really sign the
  * vault (so the app's own check of the signers' signatures runs and passes against them, pinned),
  * a valid Ironwood-only testnet address, and obviously dummy hashes (0x000…0001) with no explorer
  * link. Only lib/replay/placeholder.test.ts calls this: it writes and checks recording.json.
@@ -103,10 +104,11 @@ export async function buildPlaceholderRecording(): Promise<ReplayRecording> {
   const swapNonce = 1n;
   const executor = addressOf("market maker");
 
-  // ZEC at $50 (the testnet setup): 5e35 USDC units per zatoshi × 1e36. 0.05 TAZ less the 0.5 % opening fee
-  // (25,000 zat) is 4,975,000 zat of collateral, worth 2.4875 USDC; 0.90 USDC is a 36 % loan-to-value.
-  // The market maker repays 0.9001 USDC (the debt and a little interest) and takes its value plus 1 %.
-  const mmAmount = 1_818_202n;
+  // ZEC at $1,265 (the deploy script's ZEC_USD_PRICE_CENTS): 1.265e37 USDC units per zatoshi × 1e36. 0.05 TAZ less
+  // the 0.5 % opening fee (25,000 zat) is 4,975,000 zat of collateral, worth 62.93 USDC; 22.00 USDC is a 35 %
+  // loan-to-value. The market maker repays 22.0001 USDC (the debt and a little interest) and takes its value plus
+  // 1 %, rounded up: 1,756,530 zat.
+  const mmAmount = 1_756_530n;
   const userAmount = 4_975_000n - mmAmount;
 
   const base = (n: number) => dummyBase(n);
@@ -124,14 +126,14 @@ export async function buildPlaceholderRecording(): Promise<ReplayRecording> {
     step("deposit-paid", "loan", false, 0, {
       title: "Pay the vault from Ironwood",
       detail: "The demo wallet pays the vault 0.05 TAZ in one Ironwood → Ironwood transaction on Zcash testnet.",
-      hint: "Skip the key backup (the replay's key is a dummy), then press “Pay it with demo TAZ”.",
+      hint: "Press “Skip the backup (demo key)”, then “Pay it with demo TAZ”.",
       href: "/borrow",
       tx: { zcash: dummyZcash(2) },
       artifacts: [{ label: "The deposit on Zcash", chain: "zcash", tx: null, kind: "tx" }],
     }),
     step("deposit-seen", "loan", true, 4_000, {
       title: "Deposit confirmed on Zcash",
-      detail: "The signers see the deposit with its confirmations, and a zero-knowledge proof that it is in a Zcash block is made.",
+      detail: "The signers see the deposit confirmed, then a proof that it is in a Zcash block is made.",
       hint: "Confirmations come in; the proof is being made.",
       href: "/borrow",
       tx: {},
@@ -139,7 +141,7 @@ export async function buildPlaceholderRecording(): Promise<ReplayRecording> {
     }),
     step("proven", "loan", true, 9_000, {
       title: "Deposit proven on Base",
-      detail: "attestDepositWithProof checks the proof against a Zcash header the relay already verified: nothing is minted on anyone's word.",
+      detail: "Base checks the proof against a Zcash header its relay already verified: no one's word is taken.",
       hint: "Base verifies the proof.",
       href: "/borrow",
       tx: { base: base(4) },
@@ -155,16 +157,16 @@ export async function buildPlaceholderRecording(): Promise<ReplayRecording> {
     }),
     step("activated", "loan", true, 7_000, {
       title: "zZEC minted into Morpho",
-      detail: "A few Zcash blocks later the pending activation finalizes: zZEC is minted straight into the account's Morpho Blue position.",
+      detail: "A few Zcash blocks later the activation finalizes: zZEC is minted straight into Morpho Blue.",
       hint: "The keeper activates the deposit.",
       href: "/borrow",
       tx: { base: base(5) },
       artifacts: [{ label: "Activation: zZEC supplied as collateral", chain: "base", tx: null, kind: "tx" }],
     }),
     step("borrowed", "loan", false, 0, {
-      title: "Borrow USDC",
-      detail: "One sponsored UserOp deploys a fresh Safe, authorizes Zecured on Morpho Blue and borrows 0.90 MockUSDC; the account never holds ETH.",
-      hint: "Press “Borrow against it”, then “use the run's 0.90” and “Create account and borrow”.",
+      title: "Borrow MockUSDC",
+      detail: "One sponsored UserOp deploys a fresh Safe, authorizes Zecured on Morpho Blue and borrows 22.00 MockUSDC; the account never holds ETH.",
+      hint: "Press “Borrow against it”, then “DEMO: fill in 22.00” and “Create account and borrow”.",
       href: "/borrow",
       tx: { base: base(6), userOp: dummyBase(0x60) },
       artifacts: [{ label: "Sponsored UserOp: deploy, authorize, borrow", chain: "base", tx: null, kind: "tx" }],
@@ -180,14 +182,14 @@ export async function buildPlaceholderRecording(): Promise<ReplayRecording> {
     step("close-executed", "loan", false, 0, {
       title: "Close from collateral",
       detail: "A market maker repays the debt on Morpho and takes its value in ZEC from the vault; the rest is owed to your destination.",
-      hint: "Get a quote, then press “Sign and send to the market maker”.",
+      hint: "Press “Get a market maker's quote”, then “Sign and send to the market maker”.",
       href: `/position#${vaultId}`,
       tx: { base: base(8) },
       artifacts: [{ label: "closeWithCollateral, sent by the market maker", chain: "base", tx: null, kind: "tx" }],
     }),
     step("payouts-committed", "loan", true, 5_000, {
       title: "Payout committed on Base",
-      detail: "The signers commit the payout on Base before they sign it, so a payout to anyone else is provable theft.",
+      detail: "The signers commit the payout on Base before signing it: paying anyone else is provable theft.",
       hint: "The signers commit the payout.",
       href: `/position#${vaultId}`,
       tx: { base: base(9) },
@@ -195,7 +197,7 @@ export async function buildPlaceholderRecording(): Promise<ReplayRecording> {
     }),
     step("payouts-sent", "loan", true, 5_000, {
       title: "Paid on Zcash",
-      detail: "Three of the five signers sign one FROST transaction paying your remainder, the market maker and the opening fee.",
+      detail: "Three of five signers sign one FROST transaction paying you, the market maker and the fee.",
       hint: "The signers pay on Zcash.",
       href: `/position#${vaultId}`,
       tx: { zcash: dummyZcash(10) },
@@ -212,13 +214,13 @@ export async function buildPlaceholderRecording(): Promise<ReplayRecording> {
       ],
     }),
     step("swap-opened", "swap", false, 0, {
-      title: "Lock USDC in the swap",
-      detail: "Your wallet approves 25 MockUSDC and opens an order with the maker's signed quote; the USDC waits in ZecuredSwap.",
-      hint: "On Swap, press “use the run's 25.00”, then the one button as it changes: the quote, the demo wallet's address, connect, buy.",
+      title: "Lock MockUSDC in the swap",
+      detail: "Your wallet approves 25 MockUSDC and opens an order with the maker's signed quote; the MockUSDC waits in ZecuredSwap.",
+      hint: "On Swap, press “DEMO: fill in 25.00”, then the one button each time it changes.",
       href: "/buy",
       tx: { base: base(12), approve: dummyBase(0xc0) },
       artifacts: [
-        { label: "USDC approval", chain: "base", tx: null, kind: "tx" },
+        { label: "MockUSDC approval", chain: "base", tx: null, kind: "tx" },
         { label: "The order, opened on ZecuredSwap", chain: "base", tx: null, kind: "tx" },
       ],
     }),
@@ -232,7 +234,7 @@ export async function buildPlaceholderRecording(): Promise<ReplayRecording> {
     }),
     step("swap-proven", "swap", true, 8_000, {
       title: "Payment proven on Base",
-      detail: "The maker proves the payment in zero knowledge; the settlement waits for a deep enough Zcash header.",
+      detail: "The maker proves its payment in zero knowledge; settling waits for a deep enough Zcash header.",
       hint: "The maker proves its payment.",
       href: "/buy",
       tx: { base: base(14) },
@@ -241,8 +243,8 @@ export async function buildPlaceholderRecording(): Promise<ReplayRecording> {
       ],
     }),
     step("swap-settled", "swap", true, 6_000, {
-      title: "USDC released to the maker",
-      detail: "Settled: you hold shielded ZEC and the maker the USDC, with no custodian and no signer in between.",
+      title: "MockUSDC released to the maker",
+      detail: "Settled: you hold shielded ZEC, the maker the MockUSDC; no custodian, no signer in between.",
       hint: "The order settles.",
       href: "/buy",
       tx: { base: base(15) },
@@ -262,7 +264,7 @@ export async function buildPlaceholderRecording(): Promise<ReplayRecording> {
       registry: CONTRACTS.ZecuredRegistry.toLowerCase(),
       adapter: CONTRACTS.SettlementAdapter.toLowerCase(),
       intake: CONTRACTS.ZecuredIntake,
-      confirmations: 3,
+      confirmations: 10,
       vaultExpiryBlocks: 480,
       openVaultStampBits: 8,
       sponsorship: true,
@@ -312,7 +314,7 @@ export async function buildPlaceholderRecording(): Promise<ReplayRecording> {
     chain: {
       baseBlock: 48_600_000,
       zcashTip: 4_541_200,
-      price: (50n * 10n ** 34n).toString(),
+      price: (1265n * 10n ** 34n).toString(),
       // AdaptiveCurveIRM at near-zero utilization: a quarter of the 4 % initial rate at target.
       borrowRate: "317097919",
       market: {
@@ -336,11 +338,11 @@ export async function buildPlaceholderRecording(): Promise<ReplayRecording> {
       depositTag: demoBytes32("deposit tag"),
       anchor: demoBytes32("deposit anchor"),
       versionId: demoBytes32("deposit version"),
-      borrow: { assets: "900000", protected: false },
+      borrow: { assets: "22000000", protected: false },
       close: {
         executor,
         marginBps: 100,
-        repayAssets: "900100",
+        repayAssets: "22000100",
         mmAmount: mmAmount.toString(),
         userAmount: userAmount.toString(),
         userCommitment: demoBytes32("user commitment"),
@@ -355,7 +357,7 @@ export async function buildPlaceholderRecording(): Promise<ReplayRecording> {
       maker,
       taker,
       takerUsdc: "100000000",
-      zatoshi: "49500000",
+      zatoshi: "1956500",
       usdc: "25000000",
       makerReceiverCommitment: demoBytes32("maker receiver commitment"),
       receiverCommitment: demoBytes32("swap receiver commitment"),

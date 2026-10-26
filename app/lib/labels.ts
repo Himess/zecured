@@ -25,15 +25,23 @@ export interface RealOrMock {
   mock: string[];
 }
 
-/** The home page's list, consistent with README "What is real and what is a mock" and this deployment. */
-export function realAndMock(c: AppConfig = config, d: DeploymentProfile = DEPLOYMENT): RealOrMock {
+/** The price source in a money line ("at $1,265.00 (DEMO price)"); Market and World name the oracle itself. */
+export function priceLineName(c: AppConfig = config): string {
+  return c.marketLabels?.oracleIsDemo ? "DEMO price" : priceSourceName(c);
+}
+
+/**
+ * The home page's list, consistent with README "What is real and what is a mock" and this deployment. `verifierIsMock`:
+ * GET /status's word on the deployment's proof verifier (null: not reported, undefined: not read yet).
+ */
+export function realAndMock(c: AppConfig = config, d: DeploymentProfile = DEPLOYMENT, verifierIsMock?: boolean | null): RealOrMock {
   const testnet = d.kind === "testnet";
   const real = [
     testnet
       ? "Shielded Ironwood transactions on Zcash testnet (NU7), into 3-of-5 FROST threshold vaults."
       : "Shielded Ironwood transactions on Zcash mainnet, into 3-of-5 FROST threshold vaults.",
     "Minting on a zero-knowledge proof that the deposit is in a Zcash block, whose header Base verified (no signer's word).",
-    `The Morpho Blue market on ${d.chainName}, the Zecured contracts, the signers' USDC bonds, slashing and compensation.`,
+    `The Morpho Blue market on ${d.chainName}, the Zecured contracts, the signers' bonds (in the loan token), slashing and compensation.`,
     "Our own RPC, bundler and paymaster proxy with a sponsorship allowlist: the loan account never holds ETH.",
   ];
   const l = c.marketLabels;
@@ -43,6 +51,11 @@ export function realAndMock(c: AppConfig = config, d: DeploymentProfile = DEPLOY
       testnet
         ? "The ZEC/USD price: an owner-set MockZecOracle behind the DemoShockOracle (DEMO), shocked by hand to show a liquidation."
         : "The ZEC/USD price: the deployment reports no real feed yet.",
+    );
+  }
+  if (verifierIsMock === true || verifierIsMock === null) {
+    mock.push(
+      "The proof verifier of this deployment: MockRiscZeroVerifier (MOCK); real Groth16 proofs of every kind pass RISC Zero's deployed router in our fork tests.",
     );
   }
   if (l?.loanTokenIsMock) mock.push("The loan token: MockUSDC (MOCK), minted by the deployer: test tokens with no value.");

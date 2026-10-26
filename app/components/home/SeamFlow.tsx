@@ -9,7 +9,7 @@ import { ProofSeal } from "../seam";
 
 export function SeamFlow() {
   return (
-    <figure className="overflow-hidden rounded-[22px] shadow-[0_0_0_1px_var(--color-border),0_30px_60px_-36px_rgb(0_0_0/0.9)]">
+    <figure className="overflow-hidden rounded-t-[22px] rounded-b-[6px] shadow-[0_0_0_1px_var(--color-border),0_30px_60px_-36px_rgb(0_0_0/0.9)]">
       <figcaption className="sr-only">
         Your ZEC stays in a 3-of-5 threshold vault in Zcash&apos;s Ironwood pool; a zero-knowledge proof of the deposit
         crosses to Base, where a collateral receipt backs a Morpho Blue loan to a brand-new account.

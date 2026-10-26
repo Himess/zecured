@@ -64,6 +64,19 @@ export function awaitingDeposit(p: {
   return waiting && p.depositSeen !== true && !p.pending && !p.refunding;
 }
 
+/**
+ * Whether the vault's deposit has its confirmations on Zcash. The signers report a deposit as seen only once it has
+ * them (signer/crates/policy/src/classify.rs), and a live GET /vaults/:id carries no count (the backend's get_vault):
+ * a seen deposit without a count is confirmed. The replay reports the count as it climbs.
+ */
+export function depositConfirmed(
+  v: { status?: string; depositSeen?: boolean; confirmations?: number } | null | undefined,
+  needed: number | null,
+): boolean {
+  if (!v || !(v.status === "deposit_seen" || v.depositSeen === true)) return false;
+  return needed === null || v.confirmations === undefined || v.confirmations >= needed;
+}
+
 /** P-8: what the operator's switch on new vaults means (C01: separate from existing vaults' payouts). */
 export function openingsNotice(o: { open: boolean; inviteOnly: boolean } | null): { title: string; body: string } | null {
   if (!o) return null;

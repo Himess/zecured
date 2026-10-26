@@ -8,10 +8,10 @@ import { clock, CopyButton, CountUp, Qr, useElapsed, useMounted } from "@/compon
 import { IconArrowRight, IconClock, IconEyeOff, IconShield } from "@/components/icons";
 import { KeyBackup } from "@/components/KeyBackup";
 import { ProofTrail } from "@/components/ProofTrail";
-import { TokenAmount, usd, usdc } from "@/components/loan";
+import { TokenAmount, usd, usdcFloor } from "@/components/loan";
 import { UsdcMark } from "@/components/marks";
 import { SeamTracker, SignerRing, type TrackerRow } from "@/components/seam";
-import { Badge, Button, buttonClass, Card, cx, Disclosure, Hint, Mono, Notice, Steps } from "@/components/ui";
+import { Badge, Button, buttonClass, Card, cx, Disclosure, Hint, Mono, Notice, Spinner, Steps } from "@/components/ui";
 import { apiErrorCode, type Vault } from "@/lib/api";
 import { config } from "@/lib/config";
 import { DEPLOYMENT } from "@/lib/deployment";
@@ -37,7 +37,7 @@ import { checkVaultAddress, openVault, requestRefundProof } from "@/lib/owner";
 import { vaultHref } from "@/lib/routes";
 import { vaultCheckUnavailable, VaultProofError, type VaultCheck } from "@/lib/signers";
 import { formatPeriod, openGate, openingFee } from "@/lib/v3";
-import { awaitingDeposit, capWait, openingsNotice, openRefusal, refundProofRefusal } from "@/lib/v4";
+import { awaitingDeposit, capWait, depositConfirmed, openingsNotice, openRefusal, refundProofRefusal } from "@/lib/v4";
 import { blocksToDuration, formatTaz, formatZec } from "@/lib/zcash";
 import { DemoPayment } from "./DemoPayment";
 
@@ -70,20 +70,32 @@ export function BorrowWizard() {
   const [loan, setLoan] = useState<StoredLoan | null>(null);
   const [skippedBackup, setSkippedBackup] = useState(false);
   const [continueToBorrow, setContinueToBorrow] = useState(false);
+  // The deposit's proof landed on Base (before its activation): the stepper's π turns gold with the tracker's (L-12).
+  const [provenOnBase, setProvenOnBase] = useState(false);
+  // E-04: another loan starts its own chapters (no skipped backup, no proof carried over).
+  const [chaptersFor, setChaptersFor] = useState<string | null>(loan?.id ?? null);
+  if ((loan?.id ?? null) !== chaptersFor) {
+    setChaptersFor(loan?.id ?? null);
+    setSkippedBackup(false);
+    setContinueToBorrow(false);
+    setProvenOnBase(false);
+  }
   const vault = useVault(loan?.vaultId, 10_000);
   const phase = phaseOf(loan, skippedBackup, vault.data);
-  // The deposit chapter ends once the signers see the deposit; its proof is the next one's.
-  const seen = Boolean(vault.data && (vault.data.depositSeen || vault.data.status !== "awaiting_deposit"));
+  // The deposit chapter ends once the signers see the deposit; its proof is the next one's. An expired or cancelled
+  // vault stays in the deposit chapter (L-09).
+  const seen = Boolean(vault.data && (vault.data.depositSeen || ["deposit_seen", "active", "closing", "closed"].includes(vault.data.status)));
   const stepIndex =
     phase === "amount" ? 0 : phase === "backup" ? 1 : phase === "deposit" ? (seen ? PROVE : 2) : phase === "borrow" ? (continueToBorrow ? 4 : PROVE) : 5;
-  const proven = phase === "borrow" || phase === "done";
+  const proven = provenOnBase || phase === "borrow" || phase === "done";
 
-  // Keep the in-memory loan in sync with storage changes made elsewhere (e.g. backup flag).
+  // Keep the in-memory loan in sync with storage changes made elsewhere (e.g. backup flag). A backup verified on the
+  // backup step is confirmed there, with "Continue to the deposit", not skipped past (E-02).
   useEffect(() => {
     if (!loan) return;
     const stored = loans.find((l) => l.id === loan.id);
-    if (stored && stored.backedUp !== loan.backedUp) setLoan(stored);
-  }, [loans, loan]);
+    if (stored && stored.backedUp !== loan.backedUp && !(phase === "backup" && stored.backedUp)) setLoan(stored);
+  }, [loans, loan, phase]);
 
   const inProgress = loans.filter((l) => l.id !== loan?.id);
   // DEMO: the replay has one loan; coming back to this page picks it up where the judge left it.
@@ -104,7 +116,7 @@ export function BorrowWizard() {
   }, [stepIndex, mounted]);
 
   return (
-    <div className="space-y-6">
+    <div className="space-y-5">
       <Steps steps={STEPS} current={stepIndex} proof={{ index: PROVE, proven }} />
       <h2 ref={heading} tabIndex={-1} className="sr-only">
         {stepIndex < STEPS.length ? `Step ${stepIndex + 1} of ${STEPS.length}: ${STEPS[stepIndex]}` : "This loan is closed"}
@@ -115,7 +127,7 @@ export function BorrowWizard() {
         </Notice>
       ) : null}
 
-      <div key={stepIndex} className="animate-rise space-y-6">
+      <div key={stepIndex} className="animate-rise space-y-5">
         {phase === "amount" ? (
           <AmountStep
             loan={loan}
@@ -140,16 +152,18 @@ export function BorrowWizard() {
           </Card>
         ) : null}
 
-        {phase === "deposit" && loan ? <DepositStep loan={loan} vault={vault.data} vaultError={vault.error} /> : null}
+        {phase === "deposit" && loan ? <DepositStep loan={loan} vault={vault.data} vaultError={vault.error} onProven={setProvenOnBase} /> : null}
 
         {phase === "done" && loan ? (
           <Card title="This loan is already closed">
-            <p className="mb-4 text-sm text-muted">Its vault no longer accepts deposits. Start a new loan for new collateral.</p>
+            <p className="mb-4 text-sm text-muted">
+              {REPLAY ? "Its vault no longer accepts deposits. The replay plays one loan." : "Its vault no longer accepts deposits. Start a new loan for new collateral."}
+            </p>
             <div className="flex flex-wrap gap-2">
               <Link href={vaultHref("position", loan.vaultId!)} prefetch={false} className={buttonClass("secondary")}>
                 See its position
               </Link>
-              <Button onClick={() => setLoan(null)}>Start a new loan</Button>
+              {REPLAY ? null : <Button onClick={() => setLoan(null)}>Start a new loan</Button>}
             </div>
           </Card>
         ) : null}
@@ -203,9 +217,9 @@ function Fact({ children }: { children: ReactNode }) {
 type Stage = "work" | "keygen" | "check" | "signed";
 
 const STAGE_TEXT: Record<Stage, string> = {
-  work: "This browser computes a small proof of work, which keeps vault openings from being spammed…",
-  keygen: "The five signer nodes generate the vault's key together (FROST): each keeps one share, and none ever holds the whole key…",
-  check: "This browser checks the five signers' signatures on the vault's Ironwood address…",
+  work: "Your browser solves a small proof of work, so vault openings can't be spammed.",
+  keygen: "Five signer nodes generate the vault's key together (FROST): each keeps one share, none ever holds the whole key.",
+  check: "Your browser checks all five signatures on the vault's Ironwood address.",
   signed: "Signed by all 5 signers, checked in this browser.",
 };
 
@@ -261,7 +275,8 @@ function AmountStep({
       loanStore().save(opened);
       notifyLoansChanged();
       setStage("signed");
-      await new Promise((r) => setTimeout(r, reducedMotion() ? 300 : 1_400));
+      // DEMO: the replay holds the lit ring a little longer, the moment the video shows.
+      await new Promise((r) => setTimeout(r, reducedMotion() ? 300 : REPLAY ? 2_400 : 1_400));
       onLoan(opened);
       return res;
     } catch (e) {
@@ -284,7 +299,7 @@ function AmountStep({
 
   return (
     <div className="grid items-start gap-6 lg:grid-cols-[minmax(0,1fr)_minmax(0,22rem)] [&>*]:min-w-0">
-      <Card lead title="How much ZEC do you lock?">
+      <Card lead title={single ? "What you lock" : "How much ZEC do you lock?"}>
         <fieldset className="space-y-4" disabled={Boolean(loan) || working}>
           <legend className="sr-only">Collateral amount</legend>
           {single ? (
@@ -299,7 +314,7 @@ function AmountStep({
                   <>
                     {" "}
                     · {usd(collateralValue(amount, price))} · borrow up to{" "}
-                    <strong className="font-semibold text-text tabular-nums">{usdc(maxBorrowAtTargetLtv(collateral, price))}</strong> {loanTokenName()} at
+                    <strong className="font-semibold text-text tabular-nums">{usdcFloor(maxBorrowAtTargetLtv(collateral, price))}</strong> {loanTokenName()} at
                     40 %
                   </>
                 ) : null}
@@ -315,14 +330,14 @@ function AmountStep({
                   <label
                     key={d.toString()}
                     className={cx(
-                      "relative flex cursor-pointer flex-col gap-2.5 rounded-[18px] p-4 transition-[box-shadow,background-color]",
+                      "relative flex cursor-pointer flex-col gap-2.5 rounded-[18px] p-4 transition-[box-shadow,background-color] has-[:focus-visible]:outline-2 has-[:focus-visible]:outline-offset-2 has-[:focus-visible]:outline-[var(--color-text)]",
                       selected ? "bg-surface-3 shadow-[inset_0_0_0_2px_var(--color-text)]" : "bg-bg/70 shadow-[inset_0_0_0_1px_var(--color-control)] hover:bg-surface-2",
                     )}
                   >
                     <input type="radio" name={groupId} checked={selected} onChange={() => setAmount(d)} className="sr-only" />
                     <TokenAmount token="TAZ" value={formatZec(d)} size="lg" />
                     <span className="text-[13px] text-muted">
-                      {price !== null ? `${usd(collateralValue(d, price))} · borrow up to ${usdc(maxBorrowAtTargetLtv(d - dFee, price))} ${loanTokenName()}` : "Standard vault size"}
+                      {price !== null ? `${usd(collateralValue(d, price))} · borrow up to ${usdcFloor(maxBorrowAtTargetLtv(d - dFee, price))} ${loanTokenName()}` : "Standard vault size"}
                     </span>
                     {blocked ? <span className="text-xs font-semibold text-warn">A deposit of this size cannot back a loan right now.</span> : null}
                   </label>
@@ -353,7 +368,7 @@ function AmountStep({
         <label
           className={cx(
             "mt-5 flex cursor-pointer items-start gap-3 rounded-2xl px-4 py-3.5 text-[14px] transition-colors",
-            ready ? "bg-surface-2/80 shadow-[inset_0_0_0_1px_var(--color-soft)]" : "bg-bg/70 shadow-[inset_0_0_0_1px_var(--color-control)]",
+            ready ? "bg-surface-2/60 shadow-[inset_0_0_0_1px_var(--color-line)]" : "bg-bg/70 shadow-[inset_0_0_0_1px_var(--color-control)]",
           )}
         >
           <input
@@ -401,10 +416,11 @@ function AmountStep({
             size="lg"
             data-replay="open-vault"
             onClick={() => open.run(loan)}
-            busy={working}
+            busy={open.busy && stage !== "signed"}
+            done={stage === "signed"}
             disabled={(!ready && !loan) || !config.ownerSigning || cannotCheck !== null || !gate.allowed || needsInvite || openingsClosed}
           >
-            {stage === "signed" ? "Vault opened" : open.busy ? "Opening the vault…" : loan ? "Retry opening the vault" : `Open a ${formatTaz(amount)} vault`}
+            {stage === "signed" ? "Vault opened" : open.busy ? "Opening the vault" : loan ? "Retry opening the vault" : `Open a ${formatTaz(amount)} vault`}
             {working ? null : <IconArrowRight size={18} />}
           </Button>
           {loan && !working ? (
@@ -436,15 +452,20 @@ function AmountStep({
       {/* The vault itself: five signer nodes around it, lit as their signatures arrive. */}
       <aside aria-label="Your vault" className="panel space-y-5 p-6">
         <div className="flex justify-center pt-1">
-          <SignerRing state={stage === "signed" ? "signed" : open.busy ? "working" : "idle"} />
+          <SignerRing size={196} state={stage === "signed" ? "signed" : open.busy ? "working" : "idle"} />
         </div>
-        <p className="text-center text-[14px] font-semibold" aria-live="polite">
+        <p className="text-center text-[14px] font-semibold text-balance" aria-live="polite">
           {stage ? STAGE_TEXT[stage] : "Five signer nodes make its key together; any three move it, none alone."}
         </p>
         <ul className="space-y-2 border-t border-hairline pt-4">
           <Fact>A fresh key and a fresh account, made in this browser, for this loan only: no wallet, no ETH.</Fact>
           <Fact>Nothing touches Base until your deposit is proven there.</Fact>
-          {fee > 0n ? <Fact>Opening fee {formatTaz(fee)} (0.5 %), paid to the signers from the vault&apos;s first payout.</Fact> : null}
+          {fee > 0n && config.v3 ? (
+            <Fact>
+              Opening fee {formatTaz(fee)} ({(config.v3.feeBps / 100).toLocaleString("en-US", { maximumFractionDigits: 2 })} %), paid to the signers from
+              the vault&apos;s first payout.
+            </Fact>
+          ) : null}
           {config.vaultExpiryBlocks !== null ? (
             <Fact>
               Pay within {blocksToDuration(config.vaultExpiryBlocks)} ({config.vaultExpiryBlocks} Zcash blocks) of opening it.
@@ -458,11 +479,12 @@ function AmountStep({
 
 // ------------------------------------------------------------------ 03 Deposit and 04 Prove
 
-/** "2 / 3", or the signers' requirement from GET /config while the vault reports none. */
-function confirmationsText(seen: number | undefined): string {
+/** "2 / 3"; a confirmed deposit the vault reports no count for (live) has the signers' requirement from GET /config. */
+function confirmationsText(seen: number | undefined, confirmed: boolean): string {
   const needed = config.confirmations;
   if (seen !== undefined) return needed !== null ? `${Math.min(seen, needed)} / ${needed}` : String(seen);
-  return needed !== null ? `0 / ${needed}` : "—";
+  if (needed === null) return confirmed ? "Confirmed" : "—";
+  return confirmed ? `${needed} / ${needed}` : `0 / ${needed}`;
 }
 
 /** What the address label says about the signers' signatures (C-4). */
@@ -471,6 +493,10 @@ const VOUCHED: Record<VaultCheck, string> = {
   backend: "Ironwood-only, signed by the 5 signers the backend lists (development build: not pinned)",
   unchecked: "Ironwood-only, NOT checked against any signer set (development build)",
 };
+
+/** The prove step and the minted step share one layout, so nothing jumps when the vault becomes active. */
+const PROVE_GRID = "grid items-start gap-6 lg:grid-cols-[minmax(0,1fr)_minmax(0,22rem)] [&>*]:min-w-0";
+const PANEL_TITLE = "text-[length:clamp(22px,2.2vw,28px)] leading-tight font-extrabold font-stretch-116%";
 
 /** What Base learns from a deposit, under every tracker. */
 const BASE_SEES = (
@@ -484,7 +510,17 @@ const BASE_SEES = (
   </>
 );
 
-function DepositStep({ loan, vault, vaultError }: { loan: StoredLoan; vault: Vault | null; vaultError: string | null }) {
+function DepositStep({
+  loan,
+  vault,
+  vaultError,
+  onProven,
+}: {
+  loan: StoredLoan;
+  vault: Vault | null;
+  vaultError: string | null;
+  onProven?: (proven: boolean) => void;
+}) {
   const amount = BigInt(loan.amount);
   const check = loan.vaultAddress ? checkVaultAddress(loan.vaultAddress, amount) : null;
   // The stored address is shown, as text or QR code, only while every signer vouches for it.
@@ -530,8 +566,14 @@ function DepositStep({ loan, vault, vaultError }: { loan: StoredLoan; vault: Vau
   // P-8: typical durations measured on the deployment (the evidence file), when published.
   const durations = useTypicalDurations();
   const seen = Boolean(vault && (vault.status === "deposit_seen" || vault.depositSeen));
-  const needed = config.confirmations;
-  const confirmed = seen && (needed === null || (vault?.confirmations ?? 0) >= needed);
+  // L-01: a live vault reports no count; the signers see a deposit only once it has its confirmations.
+  const confirmed = depositConfirmed(vault, config.confirmations);
+  // L-04: the demo wallet paid; the payment is mined and confirmed before the signers see it.
+  const [paidHere, setPaidHere] = useState(false);
+  const demoPaid = !seen && (paidHere || Boolean(loan.demo));
+  useEffect(() => {
+    onProven?.(basePending || baseActive);
+  }, [basePending, baseActive, onProven]);
   // The seal pulses, and says so, while the deposit's proof is being made (not while the coverage cap holds it back).
   const proving = confirmed && !basePending && !baseActive && cap === "none";
   const provingFor = useElapsed(proving);
@@ -543,20 +585,22 @@ function DepositStep({ loan, vault, vaultError }: { loan: StoredLoan; vault: Vau
     { key: "opened", label: "Vault opened, signed by 5 of 5", state: "done" },
     {
       key: "paid",
-      label: seen ? `Paid ${formatTaz(amount)}, Ironwood → Ironwood` : `Waiting for your ${formatTaz(amount)}`,
+      label: seen
+        ? `Paid ${formatTaz(amount)}, Ironwood → Ironwood`
+        : demoPaid
+          ? "Paid by the demo wallet: being mined and confirmed"
+          : `Waiting for your ${formatTaz(amount)}`,
       state: seen ? "done" : awaiting ? "now" : "todo",
     },
     {
       key: "confirmations",
-      label: "Confirmed on Zcash",
-      detail: seen ? confirmationsText(vault?.confirmations) : undefined,
+      label: confirmed || basePending || baseActive ? "Confirmed on Zcash" : "Confirming on Zcash",
+      detail: seen ? confirmationsText(vault?.confirmations, confirmed) : undefined,
       state: confirmed || basePending || baseActive ? "done" : seen ? "now" : "todo",
     },
     {
       key: "prove",
-      label: "Proven in zero knowledge (RISC Zero)",
-      detail: proving ? clock(provingFor) : undefined,
-      note: proving && typicalProof !== undefined ? `usually ${formatPeriod(typicalProof)} from the deposit` : undefined,
+      label: basePending || baseActive ? "Proven in zero knowledge (RISC Zero)" : proving ? "Proving in zero knowledge (RISC Zero)" : "Zero-knowledge proof (RISC Zero)",
       state: basePending || baseActive ? "done" : proving ? "now" : "todo",
     },
   ];
@@ -566,7 +610,6 @@ function DepositStep({ loan, vault, vaultError }: { loan: StoredLoan; vault: Vau
       key: "activation",
       label: "Activated, a few Zcash blocks later",
       detail: basePending && !baseActive ? clock(activatingFor) : undefined,
-      note: basePending && !baseActive && typicalActivation !== undefined ? `usually ${formatPeriod(typicalActivation)}` : undefined,
       state: baseActive ? "done" : basePending ? "now" : "todo",
     },
     { key: "minted", label: "zZEC minted into your Morpho position", state: baseActive ? "done" : "todo" },
@@ -606,18 +649,33 @@ function DepositStep({ loan, vault, vaultError }: { loan: StoredLoan; vault: Vau
           Status unavailable: {vaultError}
         </p>
       ) : null}
+      {ledger.error ? (
+        <p className="mt-5 text-sm text-danger" role="status">
+          Base could not be read: {ledger.error}
+        </p>
+      ) : null}
     </>
   );
+  // A vault that ended without backing the loan: expired, cancelled, or its deposit proven as a refund (L-09).
+  const ended = refunded || refundPending ? "refund" : vault?.status === "expired" ? "expired" : vault?.status === "cancelled" ? "cancelled" : null;
   // One sentence for screen readers, changing only with the stage (the tracker's rows are not announced).
   const stageText = baseActive
     ? "zZEC minted into your Morpho position."
     : basePending
       ? "Proven on Base; activation in a few Zcash blocks."
-      : proving
-        ? "Confirmed on Zcash; its zero-knowledge proof is being made."
-        : seen
-          ? "Deposit seen on Zcash; confirmations coming in."
-          : "Waiting for your payment.";
+      : ended === "refund"
+        ? "Your deposit was proven as a refund."
+        : ended === "expired"
+          ? "This vault expired without a valid deposit."
+          : ended === "cancelled"
+            ? "This vault was cancelled."
+            : proving
+              ? "Confirmed on Zcash; its zero-knowledge proof is being made."
+              : seen
+                ? "Deposit seen on Zcash; confirmations coming in."
+                : demoPaid
+                  ? "Paid by the demo wallet; its confirmations on Zcash take a few blocks."
+                  : "Waiting for your payment.";
 
   const notices = (
     <>
@@ -683,29 +741,76 @@ function DepositStep({ loan, vault, vaultError }: { loan: StoredLoan; vault: Vau
   // 04 Prove: once the deposit is seen, the crossing is the page.
   if (!awaiting) {
     return (
-      <div className="mx-auto max-w-[46rem] space-y-5">
+      <div className="space-y-6">
         <p className="sr-only" aria-live="polite">
           {stageText}
         </p>
-        <SeamTracker
-          title="Your deposit, from Zcash to Base"
-          size="hero"
-          zcash={zcashRows}
-          base={baseRows}
-          seam={seam}
-          provingLabel={`Proving your deposit · ${clock(provingFor)}`}
-          zcashExtra={zcashExtra}
-          footer={BASE_SEES}
-        />
-        {seen && !basePending && !baseActive && cap === "none" ? (
-          <Hint>Paid. Do not pay again: a second payment does not back the loan, it only comes back as a refund.</Hint>
-        ) : null}
-        {basePending && !baseActive ? (
-          <Hint>
-            Proven on Base. zZEC is minted after a short safety delay (a few more Zcash blocks): our keeper finalizes it, and anyone
-            could.{REPLAY ? " The replay runs it in seconds." : ""}
-          </Hint>
-        ) : null}
+        <div className={PROVE_GRID}>
+          <SeamTracker
+            title="Your deposit, from Zcash to Base"
+            size="hero"
+            zcash={zcashRows}
+            base={baseRows}
+            seam={seam}
+            provingLabel="Proving in zero knowledge"
+            zcashExtra={zcashExtra}
+            footer={BASE_SEES}
+          />
+          <div className="panel space-y-4 p-6 max-lg:order-first">
+            {basePending || baseActive ? (
+              <>
+                <h3 className={PANEL_TITLE}>Proven on Base.</h3>
+                <p className="text-[14.5px] text-soft">
+                  zZEC is minted after a short safety delay (a few more Zcash blocks): our keeper finalizes it, and anyone could.
+                  {REPLAY ? " The replay runs it in seconds." : ""}
+                </p>
+                {typicalActivation !== undefined ? <p className="text-[13px] text-muted">Usually {formatPeriod(typicalActivation)}.</p> : null}
+              </>
+            ) : proving ? (
+              <>
+                <h3 className={PANEL_TITLE}>Proving your deposit</h3>
+                <p className="font-mono text-[30px] leading-none text-accent tabular-nums" aria-hidden="true">
+                  {clock(provingFor)}
+                </p>
+                <p className="text-[14.5px] text-soft">
+                  A zero-knowledge proof that your payment is in a Zcash block. Base checks it against a header its relay already
+                  verified: no one&apos;s word is taken.
+                </p>
+                {typicalProof !== undefined ? (
+                  <p className="text-[13px] text-muted">Usually {formatPeriod(typicalProof)} from the deposit.</p>
+                ) : REPLAY && recording().placeholder ? (
+                  <p className="text-[13px] text-muted">
+                    The replay takes seconds. In our recorded browser run (a fork, MOCK verifier) the proof was on Base 4 min 25 s after
+                    the deposit&apos;s broadcast; a real proof adds about 30 s on a GPU and a minute or more for its Groth16 wrap.
+                  </p>
+                ) : null}
+              </>
+            ) : ended ? (
+              <>
+                <h3 className={PANEL_TITLE}>
+                  {ended === "refund" ? "Proven as a refund" : ended === "expired" ? "This vault expired" : "This vault was cancelled"}
+                </h3>
+                <p className="text-[14.5px] text-soft">
+                  {ended === "refund"
+                    ? "Your deposit does not back a loan: it comes back to an Ironwood address you give on the refunds page."
+                    : "It backs no loan. Do not pay it; start a new loan. Anything sent to it comes back only as a refund proven on Base."}
+                </p>
+                <Link href={vaultHref("refund", loan.vaultId!)} prefetch={false} className={buttonClass("secondary", undefined, "sm")}>
+                  The vault&apos;s refunds
+                </Link>
+              </>
+            ) : (
+              <>
+                <h3 className={PANEL_TITLE}>Confirming on Zcash</h3>
+                <p className="font-mono text-[30px] leading-none tabular-nums">{confirmationsText(vault?.confirmations, confirmed)}</p>
+                <p className="text-[14.5px] text-soft">Your payment is in the chain; the signers wait for its confirmations before it is proven.</p>
+              </>
+            )}
+            {seen && !basePending && !baseActive && cap === "none" ? (
+              <Hint>Paid. Do not pay again: a second payment does not back the loan, it only comes back as a refund.</Hint>
+            ) : null}
+          </div>
+        </div>
         {notices}
         {basePending || baseActive ? (
           <section aria-label="What Base saw" className="space-y-3">
@@ -718,6 +823,15 @@ function DepositStep({ loan, vault, vaultError }: { loan: StoredLoan; vault: Vau
     );
   }
 
+  if (!vault && !vaultError) {
+    return (
+      <div className="panel flex items-center gap-3 p-6 text-[14.5px] text-muted" role="status">
+        <Spinner />
+        Reading the vault&apos;s status…
+      </div>
+    );
+  }
+
   // 03 Deposit: the payment request, with the tracker beside it.
   const sampleVault = REPLAY && recording().placeholder;
   return (
@@ -725,7 +839,11 @@ function DepositStep({ loan, vault, vaultError }: { loan: StoredLoan; vault: Vau
       <p className="sr-only" aria-live="polite">
         {stageText}
       </p>
-      <Card lead title={`Pay exactly ${formatTaz(amount)} from Ironwood`} action={vault ? <Badge tone="info" dot>Waiting for your payment</Badge> : null}>
+      <Card
+        lead
+        title={`Pay exactly ${formatTaz(amount)} from Ironwood`}
+        action={vault ? <Badge tone="info" dot>{demoPaid ? "Paid: confirming on Zcash" : "Waiting for your payment"}</Badge> : null}
+      >
         <div className="space-y-5">
           {check && !check.ok ? (
             <Notice tone="danger" title="Do not pay this address">
@@ -756,7 +874,7 @@ function DepositStep({ loan, vault, vaultError }: { loan: StoredLoan; vault: Vau
           {notices}
           {vouched && check?.ok && check.uri ? (
             <>
-              {REPLAY ? <DemoPayment loan={loan} /> : null}
+              {REPLAY ? <DemoPayment loan={loan} onPaid={() => setPaidHere(true)} /> : null}
               {vouched !== "pinned" ? (
                 <Notice tone="warn" title="Development build: the signer set is not pinned">
                   <p>
@@ -806,7 +924,7 @@ function DepositStep({ loan, vault, vaultError }: { loan: StoredLoan; vault: Vau
                   </div>
                 </div>
               </div>
-              {REPLAY ? null : <DemoPayment loan={loan} />}
+              {REPLAY ? null : <DemoPayment loan={loan} onPaid={() => setPaidHere(true)} />}
               <p className="flex flex-wrap items-center gap-x-3 gap-y-1 text-[13px] text-muted">
                 <span>
                   Vault <Mono>{short(loan.vaultId!, 8, 6)}</Mono>
@@ -852,10 +970,12 @@ function ProvenStep({ loan, onContinue }: { loan: StoredLoan; onContinue: () => 
   const collateral = position.data?.position.collateral ?? (config.v3 ? BigInt(loan.amount) - openingFee(BigInt(loan.amount), config.v3) : BigInt(loan.amount));
   const done = (key: string, label: string, extra: Partial<TrackerRow> = {}): TrackerRow => ({ key, label, state: "done", ...extra });
   return (
-    <div className="space-y-8">
-      <div className="grid items-start gap-6 lg:grid-cols-[minmax(0,1fr)_minmax(0,24rem)] [&>*]:min-w-0">
+    <div className="space-y-6">
+      <div className={PROVE_GRID}>
       <SeamTracker
         title="Your deposit, from Zcash to Base"
+        size="hero"
+        still
         zcash={[
           done("opened", "Vault opened, signed by 5 of 5"),
           done("paid", `Paid ${formatTaz(BigInt(loan.amount))}, Ironwood → Ironwood`),
@@ -871,7 +991,7 @@ function ProvenStep({ loan, onContinue }: { loan: StoredLoan; onContinue: () => 
         footer={BASE_SEES}
       />
       <div className="panel panel-lead space-y-5 p-6 max-lg:order-first">
-        <h3 className="text-[length:clamp(24px,2.4vw,30px)] leading-tight font-extrabold font-stretch-116%">Proven on Base. zZEC minted.</h3>
+        <h3 className={PANEL_TITLE}>Proven on Base. zZEC minted.</h3>
         <div className="space-y-1.5">
           <TokenAmount token="zZEC" value={<CountUp value={formatZec(collateral)} />} unit="zZEC" size="xl" className="animate-pop" />
           <p className="text-[13px] text-muted">collateral in your Morpho position</p>
@@ -921,6 +1041,7 @@ function BorrowStep({ loan }: { loan: StoredLoan }) {
       <BorrowForm
         loan={loan}
         snapshot={position.data}
+        oneShot
         onBorrowed={() => {
           setDone(true);
           void position.refresh();

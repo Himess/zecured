@@ -1,14 +1,16 @@
 "use client";
 
-import { useCallback, useEffect, useId, useState } from "react";
+import { useCallback, useEffect, useId, useRef, useState, type ReactNode } from "react";
 import { getAddress, type Address, type Hex } from "viem";
 import { ActionError } from "@/components/ActionError";
 import { CopyButton, useMounted } from "@/components/client";
 import { IronwoodAddressInput, destinationError } from "@/components/DestinationForm";
+import { PayoutNotice } from "@/components/PayoutNotice";
 import { IconArrowDown, IconArrowRight, IconCheck, IconRefresh, IconShield, IconWallet } from "@/components/icons";
 import { UsdcMark, ZecMark } from "@/components/marks";
 import { ProofSeal, SeamTracker, type TrackerRow } from "@/components/seam";
-import { Badge, Button, Card, Hint, Mono, Notice, Spinner } from "@/components/ui";
+import { TokenAmount } from "@/components/loan";
+import { Badge, Button, Card, Disclosure, Hint, Mono, Notice, Spinner } from "@/components/ui";
 import { erc20AllowanceAbi } from "@/lib/abi4";
 import { api, describeError, type MakerOrderStatus, type SignedSwapQuote } from "@/lib/api";
 import { formatUtc } from "@/lib/calls";
@@ -64,8 +66,14 @@ export function BuyZec() {
   const [dest, setDest] = useState<PreparedDestination | null>(null);
   const [stage, setStage] = useState<string | null>(null);
   const [opened, setOpened] = useState<StoredSwapOrder | null>(null);
+  // What just happened, for screen readers; focus moves to the card that says it (L-07).
+  const [announce, setAnnounce] = useState("");
+  const resultRef = useRef<HTMLDivElement>(null);
   const reload = useCallback(() => setOrders(store().list()), []);
   useEffect(() => reload(), [reload]);
+  useEffect(() => {
+    if (opened) resultRef.current?.focus({ preventScroll: true });
+  }, [opened]);
 
   const swap = config.swap;
   const token = config.usdc;
@@ -170,7 +178,10 @@ export function BuyZec() {
           // The order's card offers to send it again.
         }
         setOpened(order);
+        setAnnounce(`Order opened: ${amount} locked on Base. The maker now pays ${formatTaz(quote.quote.zatoshi)} to your Ironwood address.`);
         reload();
+        // The order's tracker, at the top of the page, is what to watch now.
+        window.scrollTo({ top: 0, behavior: window.matchMedia("(prefers-reduced-motion: reduce)").matches ? "auto" : "smooth" });
       }
     }
     setStage(null);
@@ -185,16 +196,23 @@ export function BuyZec() {
   const demoAddress = REPLAY ? replayDemoAddress() : null;
   const addressOk = Boolean(ua.trim()) && destinationError(ua) === null;
   // The one primary button: what is needed next, then the purchase.
+  const connectLabel = REPLAY ? "Connect the demo wallet (DEMO)" : "Connect your wallet";
   const next: { label: string; target?: string; run?: () => void; disabled?: boolean } = !usdc || inputError
     ? { label: "Enter an amount", disabled: true }
-    : !quote
+    : DEPLOYMENT.invites && !wallet
+      ? { label: connectLabel, target: "connect-wallet", run: () => void connect.run() }
+      : !quote
       ? { label: "Get the maker's quote", target: "swap-quote", run: () => void getQuote.run(usdc!) }
       : !addressOk
         ? { label: "Add your Ironwood address", disabled: true }
         : !wallet
-          ? { label: REPLAY ? "Connect the demo wallet (DEMO)" : "Connect your wallet", target: "connect-wallet", run: () => void connect.run() }
+          ? { label: connectLabel, target: "connect-wallet", run: () => void connect.run() }
           : { label: `Buy ${formatTaz(quote.quote.zatoshi)} (locks ${formatUsdc(quote.quote.usdc)} ${name})`, target: "buy", run: () => void buy.run() };
   const busy = getQuote.busy || connect.busy || buy.busy;
+  // The order just opened, as Base now knows it (its card saves what it reads); in the replay, its one order.
+  const shown = opened ?? (REPLAY ? (orders[0] ?? null) : null);
+  const live = shown ? (orders.find((o) => o.orderId === shown.orderId) ?? shown) : null;
+  const settledNow = live?.settled === true;
 
   const howItWorks = [
     { icon: <UsdcMark size={22} />, title: `Your ${name} waits on ${DEPLOYMENT.chainName}`, body: "Your wallet opens the order: the tokens sit in the swap contract, not with anyone." },
@@ -205,22 +223,44 @@ export function BuyZec() {
 
   return (
     <div className="grid items-start gap-6 lg:grid-cols-[minmax(0,30rem)_minmax(0,1fr)] [&>*]:min-w-0">
-      <div className="space-y-4">
+      <p className="sr-only" aria-live="polite">
+        {settledNow ? "Settled. The ZEC is yours, shielded." : announce}
+      </p>
+      <div ref={resultRef} tabIndex={-1} className="space-y-4 outline-none">
         {!usable ? (
           <Notice tone="warn" title="The swap is not configured in this build">
             <p>This deployment has no swap contract pinned (NEXT_PUBLIC_SWAP), or no USDC token.</p>
           </Notice>
-        ) : opened ? (
+        ) : live?.settled ? (
+          <Card lead title="Settled. The ZEC is yours, shielded.">
+            <div className="space-y-3">
+              <TokenAmount token="TAZ" value={`+${formatZec(BigInt(live.zatoshi))}`} size="xl" className="animate-pop" />
+              <p className="text-[15px] text-soft">
+                Paid to your Ironwood address and proven on Base. The maker holds your {formatUsdc(BigInt(live.usdc))} {name}. No
+                custodian in between.
+              </p>
+              <PayoutNotice bought />
+              {/* DEMO: the replay plays one order. */}
+              {REPLAY ? null : (
+                <Button variant="ghost" onClick={() => setOpened(null)}>
+                  Buy more
+                </Button>
+              )}
+            </div>
+          </Card>
+        ) : live ? (
           <Card lead title="Order opened">
             <div className="space-y-4">
               <p className="text-[15px] text-soft">
-                {formatUsdc(BigInt(opened.usdc))} {name} locked on Base. The maker now pays {formatTaz(BigInt(opened.zatoshi))} to your
+                {formatUsdc(BigInt(live.usdc))} {name} locked on Base. The maker now pays {formatTaz(BigInt(live.zatoshi))} to your
                 Ironwood address; your {name} is released only when that payment is proven on Base.
               </p>
-              <Hint>Follow it beside this card. If the maker does not pay and prove by {formatUtc(opened.payDeadline)}, you take it back.</Hint>
-              <Button variant="ghost" onClick={() => setOpened(null)}>
-                Buy more
-              </Button>
+              <Hint>Follow it beside this card. If the maker does not pay and prove by {formatUtc(live.payDeadline)}, you take it back.</Hint>
+              {REPLAY ? null : (
+                <Button variant="ghost" onClick={() => setOpened(null)}>
+                  Buy more
+                </Button>
+              )}
             </div>
           </Card>
         ) : (
@@ -262,7 +302,7 @@ export function BuyZec() {
                       setQuote(null);
                     }}
                   >
-                    DEMO: use the run&apos;s {recorded}
+                    DEMO: fill in {recorded}
                   </Button>
                 ) : null}
               </div>
@@ -401,13 +441,38 @@ export function BuyZec() {
               Your orders <span className="text-[14px] font-semibold text-muted">· kept in this browser</span>
             </h2>
             {orders.map((o) => (
-              <OrderCard key={o.orderId} order={o} wallet={wallet} onChanged={reload} />
+              <OrderCard
+                key={o.orderId}
+                order={o}
+                wallet={wallet}
+                onConnect={() => void connect.run()}
+                connecting={connect.busy}
+                connectError={connect.error}
+                onChanged={reload}
+              />
             ))}
           </section>
         ) : null}
-        <Card title="How the swap works" icon={<IconShield size={18} />}>
+        {orders.length > 0 ? (
+          <Disclosure summary="How the swap works">
+            <HowItWorks steps={howItWorks} />
+          </Disclosure>
+        ) : (
+          <Card title="How the swap works" icon={<IconShield size={18} />}>
+            <HowItWorks steps={howItWorks} />
+          </Card>
+        )}
+      </div>
+    </div>
+  );
+}
+
+/** The swap's four steps, and what Base sees of them. */
+function HowItWorks({ steps }: { steps: { icon: ReactNode; title: string; body: string }[] }) {
+  return (
+    <>
           <ol className="space-y-4">
-            {howItWorks.map((s, i) => (
+            {steps.map((s, i) => (
               <li key={s.title} className="grid grid-cols-[auto_minmax(0,1fr)] gap-3.5">
                 <span className="relative inline-flex size-10 items-center justify-center rounded-xl bg-bg shadow-[inset_0_0_0_1px_var(--color-border)]">
                   {s.icon}
@@ -426,9 +491,7 @@ export function BuyZec() {
             <strong className="text-text">{SWAP_PRIVACY_SENTENCE}</strong> Your wallet&apos;s address opens the order on Base; your Ironwood
             address and the salt hiding it stay in this browser and go to the maker only, never to Base.
           </p>
-        </Card>
-      </div>
-    </div>
+    </>
   );
 }
 
@@ -443,20 +506,38 @@ const STATUS: Record<SwapStatus["kind"], { tone: "info" | "ok" | "warn" | "neutr
 };
 
 /** One order, as a crossing: its status from Base (and the maker's word for "paid"), the hand-off, the refund. */
-function OrderCard({ order, wallet, onChanged }: { order: StoredSwapOrder; wallet: Address | null; onChanged: () => void }) {
+function OrderCard({
+  order,
+  wallet,
+  onConnect,
+  connecting,
+  connectError,
+  onChanged,
+}: {
+  order: StoredSwapOrder;
+  wallet: Address | null;
+  onConnect: () => void;
+  connecting: boolean;
+  connectError: string | null;
+  onChanged: () => void;
+}) {
   const [maker, setMaker] = useState<MakerOrderStatus | null>(null);
   const [error, setError] = useState<string | null>(null);
   const final = order.settled || order.refunded;
+  // The poll reads the order as last saved, without restarting when a save hands a new object down.
+  const orderRef = useRef(order);
+  orderRef.current = order;
   useEffect(() => {
     if (final) return;
     let stop = false;
     let timer: ReturnType<typeof setTimeout> | undefined;
     // One read at a time: the next one is scheduled when this one is done.
     const tick = async () => {
+      const current = orderRef.current;
       try {
-        const next = await followOrder(publicClient(), order);
+        const next = await followOrder(publicClient(), current);
         if (stop) return;
-        if (next.scannedTo !== order.scannedTo || next.proven !== order.proven || next.settled !== order.settled || next.refunded !== order.refunded) {
+        if (next.scannedTo !== current.scannedTo || next.proven !== current.proven || next.settled !== current.settled || next.refunded !== current.refunded) {
           store().save(next);
           onChanged();
         }
@@ -465,7 +546,7 @@ function OrderCard({ order, wallet, onChanged }: { order: StoredSwapOrder; walle
         if (!stop) setError(describeError(e));
       }
       try {
-        const s = await api.getSwapOrder(order.orderId);
+        const s = await api.getSwapOrder(current.orderId);
         if (!stop) setMaker(s);
       } catch {
         // The maker's word is optional: Base decides.
@@ -478,7 +559,7 @@ function OrderCard({ order, wallet, onChanged }: { order: StoredSwapOrder; walle
       stop = true;
       clearTimeout(timer);
     };
-  }, [order, final, onChanged]);
+  }, [order.orderId, final, onChanged]);
   const resend = useAction(async () => {
     await api.postSwapDestination(order.orderId, order.receiver, order.salt);
     store().save({ ...order, destinationSent: true });
@@ -564,9 +645,16 @@ function OrderCard({ order, wallet, onChanged }: { order: StoredSwapOrder; walle
           </Button>
         ) : null}
         {s.kind === "refundable" ? (
-          <Button variant="danger" size="sm" onClick={() => void refund.run()} busy={refund.busy}>
-            Take my {name} back
-          </Button>
+          wallet ? (
+            <Button variant="danger" size="sm" onClick={() => void refund.run()} busy={refund.busy}>
+              Take my {name} back
+            </Button>
+          ) : (
+            <Button variant="secondary" size="sm" onClick={onConnect} busy={connecting}>
+              <IconWallet size={15} />
+              Connect the wallet that opened it ({short(order.taker)})
+            </Button>
+          )
         ) : null}
         <CopyButton value={JSON.stringify(order, null, 2)} label="Copy order details (includes your address and salt)" />
         {final ? (
@@ -583,6 +671,7 @@ function OrderCard({ order, wallet, onChanged }: { order: StoredSwapOrder; walle
         ) : null}
       </div>
       {error ? <p className="text-xs text-warn">Base could not be read: {error}</p> : null}
+      {s.kind === "refundable" && !wallet ? <ActionError error={connectError} title="The wallet did not connect" /> : null}
       <ActionError error={resend.error} refusal={resend.refusal} title="Not sent" />
       <ActionError error={refund.error} refusal={refund.refusal} title="No refund" />
     </article>
