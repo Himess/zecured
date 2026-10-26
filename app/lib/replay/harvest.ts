@@ -616,7 +616,8 @@ export async function gatherFacts(inp: HarvestInputs, client: PublicClient): Pro
     recordedAt: run.recordedAt ?? iso(openedAt),
     note,
     network: { base: "base-sepolia", zcash: "zcash-testnet", chainId },
-    explorers: { base: "https://sepolia.basescan.org/tx/", zcash: null },
+    // ZecBlock's testnet explorer shows NU7's v6 transactions (checked on 2026-10-27, docs/TESTING.md).
+    explorers: { base: "https://sepolia.basescan.org/tx/", zcash: "https://testnet.zecblock.com/tx/" },
     config: {
       ...config0,
       openVaultStampBits: Math.min(config0.openVaultStampBits, REPLAY_STAMP_BITS),

@@ -410,7 +410,7 @@
           <li class="tl-b tl-proof"><span class="tl-m mono">00:04:40 UTC</span><p><span class="mono">proveViolation</span> lands. Its journal holds no Zcash transaction, note or address, and the vault freezes at once.</p></li>
           <li class="tl-b"><span class="tl-m mono">00:06:47 UTC</span><p><span class="mono">executeSlash</span>, once the 2-minute window is over: all five bonds are slashed.</p></li>
           <li class="tl-b"><span class="tl-m mono">00:16:53 UTC</span><p>The incident closes at $1,265 per ZEC. The slashed bonds repay the victim’s debt and retire its zZEC.</p></li>
-          <li class="tl-b tl-end"><span class="tl-big"><span class="mono">3 → 12.65</span> USDC</span><p>The victim’s account after it withdrew its equity: the full value of its 0.01 ZEC.</p></li>
+          <li class="tl-b tl-end"><span class="tl-big"><span class="mono" aria-hidden="true">3 → 12.65</span><span class="sr">from 3 to 12.65</span> USDC</span><p>The victim’s account after it withdrew its equity: the full value of its 0.01 ZEC.</p></li>
         </ol>
         <p class="note">On this fork the violation’s seal came from the MOCK verifier; a real F1 seal passes RISC Zero’s router in the fork tests. On Zcash testnet one Equihash ASIC out-mines the whole network about 40 times over, so every guarantee here that rests on proof of work is demonstrative. The five demo signers are run by us: the bonds show the mechanism, not independent economic security.</p>
       </div>
@@ -453,10 +453,10 @@
       </div>
 
       <h3 class="doc-h3">On Zcash testnet</h3>
-      <p>Ordinary Ironwood transactions: a block explorer shows nothing but shielded actions.</p>
+      <p>Ordinary Ironwood transactions: a block explorer shows nothing but shielded actions (the linked ones open on ZecBlock’s testnet explorer).</p>
       <ul class="runs">
-        <li><span>A payout committed on Base before it was signed</span><span class="mono">19eab8ea…</span><span class="run-b">block 4,490,655</span></li>
-        <li><span>Close from collateral: market maker and borrower in one transaction</span><span class="mono">a3d0f0e1…</span><span class="run-b">block 4,488,453</span></li>
+        <li><span>A payout committed on Base before it was signed</span><a class="mono" href="https://testnet.zecblock.com/tx/19eab8ea2907ca1f24e2a516885a4e8fb091ce78468febd92da9afd334eddca8" rel="noopener noreferrer" referrerpolicy="no-referrer">19eab8ea…</a><span class="run-b">block 4,490,655</span></li>
+        <li><span>Close from collateral: market maker and borrower in one transaction</span><a class="mono" href="https://testnet.zecblock.com/tx/a3d0f0e10df413004daca268f504b11af823493a60df002d009487d0eed6bb06" rel="noopener noreferrer" referrerpolicy="no-referrer">a3d0f0e1…</a><span class="run-b">block 4,488,453</span></li>
         <li><span>A liquidation paid with no outgoing viewing key</span><span class="mono">dc7c669a…</span><span class="run-b">block 4,518,234</span></li>
         <li><span>A swap’s shielded payment, sent from the command line</span><span class="mono">d5aaef42…</span><span class="run-b">block 4,523,265</span></li>
         <li><span>The theft demonstration’s sweep, slashed on Base</span><span class="mono">43ea5e91…</span><span class="run-b">block 4,523,730</span></li>
