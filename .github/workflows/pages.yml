@@ -22,11 +22,30 @@ jobs:
     steps:
       - uses: actions/checkout@v4
 
-      - name: The site's files, without its tooling
+      # Where Pages serves this repository: base_url https://himess.github.io/zecured and base_path /zecured on
+      # github.io; https://<domain> and an empty base_path once a custom domain is set (then run this again at once).
+      - id: pages
+        uses: actions/configure-pages@v5
+
+      - name: The site's files, without its tooling, for where Pages serves them
+        env:
+          BASE_URL: ${{ steps.pages.outputs.base_url }}
+          BASE_PATH: ${{ steps.pages.outputs.base_path }}
         run: |
           mkdir _site
           cp -R site/. _site/
           rm -rf _site/dev
+          # Canonical and social-card URLs name the github.io address in the source.
+          for f in _site/index.html _site/docs/index.html _site/404.html; do
+            if [ -f "$f" ]; then sed -i "s#https://himess.github.io/zecured#${BASE_URL}#g" "$f"; fi
+          done
+          # The 404 page is served at any missing path, so its links are absolute: {{BASE}} is the base path.
+          if [ -f _site/404.html ]; then sed -i "s#{{BASE}}#${BASE_PATH}#g" _site/404.html; fi
+          # robots.txt and a sitemap count only at a domain's root.
+          if [ -z "$BASE_PATH" ]; then
+            printf 'User-agent: *\nAllow: /\nDisallow: /app/\nSitemap: %s/sitemap.xml\n' "$BASE_URL" > _site/robots.txt
+            printf '<?xml version="1.0" encoding="UTF-8"?>\n<urlset xmlns="http://www.sitemaps.org/schemas/sitemap/0.9"><url><loc>%s/</loc></url><url><loc>%s/docs/</loc></url></urlset>\n' "$BASE_URL" "$BASE_URL" > _site/sitemap.xml
+          fi
 
       # The pnpm version comes from app/package.json's packageManager field.
       - uses: pnpm/action-setup@v4
@@ -42,14 +61,13 @@ jobs:
       - name: The app's replay (DEMO), a static export served at app/
         working-directory: app
         env:
-          NEXT_PUBLIC_BASE_PATH: /${{ github.event.repository.name }}/app
+          NEXT_PUBLIC_BASE_PATH: ${{ steps.pages.outputs.base_path }}/app
         run: |
           pnpm install --frozen-lockfile
           node scripts/build-replay.mjs
+          node scripts/check-export.mjs
           cp -R out ../_site/app
           find ../_site -type f | sort | head -400
-
-      - uses: actions/configure-pages@v5
 
       - uses: actions/upload-pages-artifact@v3
         with:

@@ -2,9 +2,10 @@
  * REPLAY (DEMO): the judges' build of the app (`NEXT_PUBLIC_REPLAY=1`, a static export with no
  * backend). In it, an in-browser simulator (lib/replay) answers every backend call, every Base read,
  * the loan account's UserOps and the swap's wallet from a recording of the live Base Sepolia run;
- * nothing ever leaves the page. Every other build leaves this false, so none of the replay code
- * runs there: each hook point tests this constant, which Next.js inlines at build time (the
- * variable is read with its literal name for that reason).
+ * nothing ever leaves the page. Every other build leaves this false, so no replay path ever runs
+ * there: each hook point tests this constant (read with its literal name, so that Next.js inlines
+ * the variable when it is set). The simulator's code still ships in a live build: the bundler does
+ * not drop it across modules.
  */
 export const REPLAY: boolean = process.env.NEXT_PUBLIC_REPLAY === "1";
 
@@ -26,7 +27,7 @@ export const REPLAY_CSP = [
   "img-src 'self' data: blob:",
   "font-src 'self'",
   "connect-src 'self'",
-  "worker-src 'self' blob:",
+  "worker-src 'none'",
   "object-src 'none'",
   "base-uri 'self'",
   "form-action 'self'",

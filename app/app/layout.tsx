@@ -14,9 +14,14 @@ import "./globals.css";
 
 const TESTNET = DEPLOYMENT.kind === "testnet";
 
-/** The site and its docs: beside the app on Pages (`/<repo>/` next to `/<repo>/app/`), else the public site. */
+/**
+ * The site and its docs: beside the app on Pages (`/<repo>/` next to `/<repo>/app/`, or `/` next to `/app/` on a
+ * custom domain), else the public site.
+ */
 const BASE_PATH = process.env.NEXT_PUBLIC_BASE_PATH ?? "";
-const SITE_URL = BASE_PATH ? `${BASE_PATH.replace(/\/app\/?$/, "")}/` : "https://himess.github.io/zecured/";
+const SITE_URL = BASE_PATH
+  ? `${BASE_PATH.replace(/\/app\/?$/, "")}/`
+  : (process.env.NEXT_PUBLIC_SITE_URL ?? "https://himess.github.io/zecured/");
 
 /*
  * Archivo for text and Martian Mono for chain data, both variable in weight and width and
@@ -44,8 +49,8 @@ const martianMono = localFont({
 export const metadata: Metadata = {
   title: { default: "Zecured: borrow against shielded ZEC", template: "%s · Zecured" },
   description: TESTNET
-    ? "Borrow against shielded ZEC. Sell nothing. Reveal nothing. Testnet experiment, not a financial product."
-    : "Borrow against shielded ZEC. Sell nothing. Reveal nothing. Mainnet beta: unaudited, invite only, small caps.",
+    ? "Borrow against shielded ZEC. Only the proof crosses. A testnet experiment, not a financial product."
+    : "Borrow against shielded ZEC. Only the proof crosses. Mainnet beta: unaudited, invite only, small caps.",
   referrer: "no-referrer",
   robots: { index: false, follow: false },
 };
