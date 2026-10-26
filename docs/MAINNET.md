@@ -1,8 +1,9 @@
 # Mainnet
 
-Zecured runs on Base Sepolia and Zcash Testnet. The code is meant to run on mainnet as it is: a
-mainnet deployment changes configuration, and brings what code cannot: independent operators, real
-bonds and liquidity, and an audit. This page says what was checked against mainnet, what the
+Zecured is built for Zcash testnet and Base Sepolia, and its Base side is tested on forks of Base Sepolia and
+Base mainnet. The mainnet beta changes configuration, not code. Full mainnet also needs the designs not yet built
+(a dispute bond, per-signer reimbursement, the fixes in Known limitations), and what code can't bring: independent
+operators, real bonds and liquidity, and an audit. This page says what was checked against mainnet, what the
 configuration changes and why, what a deployment needs, and what is designed but not built. The
 decisions are in docs/DECISIONS.md; the parties and the money are in docs/ECONOMICS.md.
 
@@ -18,17 +19,17 @@ decisions are in docs/DECISIONS.md; the parties and the money are in docs/ECONOM
 | The whole deployment, mainnet configuration | On a local anvil fork of Base mainnet: `DeployPriceFeed` over the live Chainlink and API3 feeds, `DeployRelay` with the Mainnet parameters and a real Mainnet checkpoint, `DeployZecured` with `config/zecured-base-mainnet.json`, then `BondSigners` (five bonds of 50,000 USDC) | Nine contracts on Circle USDC, mainnet's Morpho Blue (a new zZEC/USDC market) and RISC Zero router, the feed as both the market's oracle and the cap's price; at a ZEC price of 1,187.68 USD the bonds cover about 105 ZEC, so the 100 ZEC cap is the limit, and minting is open |
 
 Not done yet: a shadow relay following Zcash Mainnet at Mainnet difficulty (it waits for NU7's
-Mainnet height, to be published on 2026-10-20), and a real Mainnet deposit into a Mainnet FROST
-vault (a decision for 2026-10-22).
+Mainnet height: 3,543,405 was proposed on 2026-10-20 and was not yet ratified when last checked, docs/ref/FACTS.md),
+and a real Mainnet deposit into a Mainnet FROST vault, which the hackathon build does not make.
 
 ## 2. Configuration
 
-`contracts/config/zecured-base-sepolia.json` (the judge deployment) against
+`contracts/config/zecured-base-sepolia.json` (testnet, Base Sepolia) against
 `contracts/config/zecured-base-mainnet.json` (the template). Only what differs:
 
-| Parameter | Judge | Mainnet | Why |
+| Parameter | Testnet (Base Sepolia) | Mainnet | Why |
 |---|---|---|---|
-| `loanToken` | Circle's Base Sepolia USDC | Circle USDC `0x8335…2913` | |
+| `loanToken` | MockUSDC, a test token we mint (MOCK: no value): the deploy script mints one on a local fork, and a Base Sepolia deployment takes one as `LOAN_TOKEN` (the file's default is Circle's Base Sepolia USDC, which no run used) | Circle USDC `0x8335…2913` | Test USDC the deployer can mint for the bonds, the lenders and the market makers; the contracts take any 6-decimal USDC |
 | `coverageBps` (k) | 10,000 | 5,000 | With independent operators the bonds should cover twice what is locked |
 | `maxTotalZat` | 5 TAZ | 100 ZEC | Start small. The cap is immutable: raising it means a new deployment; within it, the bonds decide |
 | `minBond` | 100 USDC | 50,000 USDC | Five equal bonds that cover 100 ZEC at k = 50 % and about 1,265 USD per ZEC |
@@ -37,7 +38,7 @@ vault (a decision for 2026-10-22).
 | `slashConfirmationWork` | 38 M | the work of 100 Mainnet blocks | at least `max(100 blocks, 3 x bountyCap / block value)`: a fake case gains at most the bounty |
 | `finalizeDelay` | 150 s | 30 min | Time for the honest feeders to replace a slow fake branch after a feeder outage |
 | `challengeWindow`, `livenessPeriod` | 24 h | 72 h | Time to notice and react, on both sides |
-| `commitGrace` | 2 h | 6 h | At least twice a payout's lifetime of 136 blocks (target height, the 120-block expiry, the nodes' tip skew and reorganisation margin), which the deploy script checks: 6,800 s at 25 s blocks, 20,400 s at 75 s before NU7 |
+| `commitGrace` | 2 h | 6 h | At least twice a payout's lifetime of 136 blocks (target height, the 120-block expiry, the nodes' tip skew and reorganization margin), which the deploy script checks: 6,800 s at 25 s blocks, 20,400 s at 75 s before NU7 |
 | `disputeWindow` / `inclusionWindow` | 24 h / 6 h | 72 h / 48 h | Within the challenge window plus the unbonding, which the deploy script checks |
 | `unbondingPeriod` | 54 h | 7 days | Outlasts the challenge window, the liveness period and the commit grace |
 | `incidentWindow` | 3 days | 7 days | Cases of one incident share one price |
@@ -94,10 +95,10 @@ name a public-good address instead of burning what no victim needs.
   version registry: all five signers schedule a new adapter, which zZEC and the Registry accept
   after a public delay; three signers remove one at once, never the last.
 - **Confirmations by proof only.** Since v4 every payout is proven (proven delivery, D76): a payout
-  is final on Base only on a proof of its inclusion, and a signed confirmation is a disputable first
-  step. Mainnet could drop signed confirmations altogether, at the cost of a proof's delay (about an
+  is final on Base on a proof of its inclusion, or once its signed confirmation's dispute window
+  closes undisputed (R-3), so a signed confirmation is a disputable first step. Mainnet could drop signed confirmations altogether, at the cost of a proof's delay (about an
   hour of confirmation work, then one GPU proof) before a claim counts as paid.
-- **A dispute bond, a launch condition.** On the judge deployment a claimant disputes a
+- **A dispute bond, a launch condition.** On testnet a claimant disputes a
   confirmation for free, once per confirmation. Mainnet launches with a small bond on each dispute,
   returned when the dispute reopens the claim and paid to the prover when an inclusion proof upholds
   the confirmation. Routine inclusion proofs of every payout make disputes rare.
@@ -120,7 +121,7 @@ name a public-good address instead of burning what no victim needs.
   liquidated on prices users could not react to. While the feed is stale the market keeps the last
   good price: Morpho goes on lending against it, new minting stops at the cap and the bonds pay no
   liveness claim. A haircut that grows with staleness is an option to evaluate during the beta.
-- **Swap: a maker stake and a verifiable delivery of the destination.** On the judge deployment a
+- **Swap: a maker stake and a verifiable delivery of the destination.** On testnet a
   maker that never pays costs its taker only time: the USDC comes back after the pay window. A
   mainnet maker would stake USDC, slashable for an order it did not pay although it had received the
   order's destination. That needs the delivery to be provable without putting the receiver on
@@ -186,9 +187,9 @@ only by the work it demands; and someone must build each witness and run the pro
 
 ## 7. Known limitations and their designs
 
-What the independent v4 review (2026-10-21) found that v4.1 does not close, with the design that
-would. Each has a row in docs/DECISIONS.md (D94 to D103). The last three items come from the review
-of the v4.1 diff.
+What our internal v4 review (2026-10-21, by reviewers who did not write the code) found that v4.1 does
+not close, with the design that would. Each has a row in docs/DECISIONS.md (D94 to D103). The last
+three items come from the review of the v4.1 diff.
 
 - **W-22: compensation for claims paid on Zcash (medium).** F3 does not check that the payout X it
   judges spent the committed input (a claimant cannot compute the input's tag), F4 does not either,
@@ -199,7 +200,7 @@ of the v4.1 diff.
   Zcash already paid compensated again: commit the input a second time naming an unrelated X2 and
   prove F3 on X2's output (or prove X2 included first), or commit their own claim under a wrong
   reference and prove F4. Each case slashes the commitment's signers, so while the bonds stand they
-  lose more than they gain (mainnet's coverage is 50 %; at the judge deployment's 100 % they gain at
+  lose more than they gain (mainnet's coverage is 50 %; at testnet's 100 % they gain at
   most the bounty, 50 USDC). After any slash the bonds are empty and new bonds are refused, so it
   costs nothing, and the compensation joins the open incident in layer 2 or 4, ahead of the lenders
   and owners of the real theft. Design: (a) a second `Included` and F4 that also prove X spent the
@@ -215,8 +216,8 @@ of the v4.1 diff.
   to the change's tag, so that its input never freezes; the same for a compensated claim whose
   input is unspent. And a liveness arming needs the receipts of two different signers, with the
   later `receivedAt`: one dishonest signer can now arm a claim it never let be delivered.
-- **W-24: borrowing during a challenge window.** Until a theft's case is executed (24 hours on the
-  judge deployment, 3 days on mainnet) the owner of the robbed vault can still borrow up to the
+- **W-24: borrowing during a challenge window.** Until a theft's case is executed (24 hours on
+  testnet, 3 days on mainnet) the owner of the robbed vault can still borrow up to the
   LLTV; the keeper burns the collateral down to the LLTV again whenever that would retire something
   (W-12), but what was borrowed in between is the compensator's. Design: the debt is fixed at
   `frozenSince` by a snapshot and later borrowing comes out of the owner's equity, or the collateral
@@ -234,8 +235,8 @@ of the v4.1 diff.
   proof stays valid. Design: a bounded period to prove again, and a taker's collateral on Sell.
 - **W-28: the prover's budget when confirmations are withheld.** If three colluders withhold a
   payout's confirmation, the honest `Included` proof must land within `commitGrace` less the
-  payout's lifetime and the slasher's work: about 20 minutes in the worst case on the judge
-  deployment (docs/OPERATORS.md states the budget). Design: a larger `commitGrace` on mainnet.
+  payout's lifetime and the slasher's work: about 20 minutes in the worst case on
+  testnet (docs/OPERATORS.md states the budget). Design: a larger `commitGrace` on mainnet.
 - **W-29: liveness taken before an F3 is proven.** A claimant that takes the bonds' liveness
   payment first and proves F3 afterwards is paid part of its 105 % by the honest signers' bonds:
   the F3 still slashes the culprits (W-5), but the slash goes to the pool, not back to them.

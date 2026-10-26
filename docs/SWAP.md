@@ -24,21 +24,21 @@ remove a broken one at once (D63).
 1. **Quote.** The app asks the maker for a quote (`GET /swap/quote`, through our backend's
    proxy, docs/INTERFACES.md § 4.3): a `SwapQuote` signed under EIP-712 (`ZecuredSwap` `1`) that
    names the taker, so nobody else can take it.
-2. **Open.** The app draws a salt and computes `C = keccak256(salt ‖ receiver)` locally, approves
+2. **Open.** The app draws a salt and computes `C = keccak256(salt || receiver)` locally, approves
    the USDC and calls `open(quote, signature, C)` from the user's own wallet. The order id is
    `keccak256(abi.encode(chainid, swap, maker, nonce))`, and the maker's nonce is spent.
 3. **Destination.** The app hands the maker the salt and the receiver off-chain
    (`POST /swap/orders/:id/destination`); the maker checks them against `C`. Base only ever sees
    `C`, and no authentication is needed: a receiver that does not match `C` is refused.
 4. **Payment.** The maker fixes the height of its proof's anchor, then, after a random delay,
-   pays the receiver in one Ironwood-only transaction, with `"ZSWP" ‖ orderId` at the start of
+   pays the receiver in one Ironwood-only transaction, with `"ZSWP" || orderId` at the start of
    the note's memo and no outgoing viewing key (see "Privacy").
 5. **Proof.** Once the header at the anchor's height has the work the order's size requires on
    top of it, the maker proves the payment under exactly that header with the payment guest and
    calls `proveSettlement` before the order's deadline: the settlement is pending.
 6. **Finalize.** After `finalizeDepth` headers and `finalizeDelay` seconds, with the anchor still
    on the relay's best chain and the version still active, `finalizeSettlement` pays the USDC to
-   the maker, less the fee (none on the judge deployment or the beta).
+   the maker, less the fee (none on testnet or in the beta).
 7. **Refund.** If no valid proof stands when the deadline passes, `refund` returns the USDC to
    the taker. A proof only needs to arrive by the deadline while it stays valid: one whose anchor
    leaves the best chain after the deadline cannot be proven again (W-27, docs/MAINNET.md § 7);
@@ -72,9 +72,9 @@ The payment statement (`tier2/payment-statement`, guests payment-test and paymen
 2. one of its Ironwood actions creates the V3 note the payer opens (receiver, value, `rseed`):
    the action's ciphertext decrypts, under the ephemeral secret that note derives, to exactly that
    note, so its receiver finds it and can spend it;
-3. the note's 512-byte memo starts with `"ZSWP" ‖ orderId`, so one note pays one order, even
+3. the note's 512-byte memo starts with `"ZSWP" || orderId`, so one note pays one order, even
    when two orders share a receiver;
-4. `C = keccak256(salt ‖ receiver)`;
+4. `C = keccak256(salt || receiver)`;
 5. the transaction is in a block committed, through the epoch's ZIP 221 history tree, by a later
    header (the anchor), with the deposit statement's epoch rules.
 
@@ -86,11 +86,11 @@ anchor's work for the order's size.
 
 ## Parameters
 
-| | Judge (Base Sepolia) | Mainnet beta |
+| | Testnet (Base Sepolia) | Mainnet beta |
 |---|---|---|
 | Pay window a quote may set | 2 to 6 hours | 6 to 24 hours |
 | Finalization | 150 s and 6 headers | 1,800 s and 6 headers |
-| Anchor work | the Intake's judge tier | the Intake's mainnet tiers (by amount) |
+| Anchor work | the Intake's testnet tier | the Intake's mainnet tiers (by amount) |
 | Branch ids | NU7 | NU6.3 and NU7 |
 | Largest order | 200 USDC, 10 TAZ | 250 USDC, 5 ZEC |
 | Protocol fee | 0 (at most 1 % by construction) | 0 |
@@ -179,7 +179,7 @@ being mined, draws `r` uniformly in 0 to `pay_delay_max_blocks` once for the ord
 order book or order file, across restarts), and fixes the anchor at
 `a = c + pay_delay_max_blocks + 1 + 2 + r`. Only then does it pay, after a random delay of 1 to
 `pay_delay_max_blocks` blocks (at least 2 outside a local fork, where 0 counts as 1 for the plan; 8
-for the judge maker and by default in the CLI): the payment lands in one of the blocks `c + 1` to
+for the testnet maker and by default in the CLI): the payment lands in one of the blocks `c + 1` to
 `c + pay_delay_max_blocks` (uniformly, plus any wait in the mempool), below `a`. The two blocks of
 headroom are for building the payment (the CLI scans its wallet, both payers prove Halo 2): the
 payer decides to pay once its delay is over, builds the payment, then decides again on the chains
@@ -187,7 +187,7 @@ as they are right before the broadcast, and does not send a payment that could n
 `a`. The payer proves under the header at exactly `a`, once the order's tier of work is on top of
 it. Base thus shows the order's opening, which puts `c` within a block or so, the anchor, and that
 the payment's block is below the anchor in the same epoch: the payment hides among the
-`pay_delay_max_blocks` blocks after `c` (8 on the judge deployment; a block or two more when it was
+`pay_delay_max_blocks` blocks after `c` (8 on testnet; a block or two more when it was
 slow to build), and the anchor says nothing about which. There is no separate proving delay any
 more: the draw `r` does that work, and a delay after the anchor would hide nothing. The time a
 proof reaches Base follows the anchor's work and the proving time, not the payment.

@@ -63,9 +63,9 @@ Ironwood pool. This document describes the system as built; interfaces are in
    - **Liquidation (P3):** a liquidator repays through the Adapter and receives the seized
      ZEC; the vault stays open for the borrower's remainder.
 5. **Refunds.** A proven deposit that lands as a Refund claim is paid like any claim, once the
-   account gives its destination (D41). With journal v2, as on the judge deployment, a deposit of
+   account gives its destination (D41). With journal v2, as on testnet, a deposit of
    another amount or paid late is proven in Refund mode and lands the same way. A deposit no
-   deployed guest can prove (on a deployment without refund proofs, another amount than the
+   deployed guest can prove (on a deployment without refund proofs, any amount other than the
    vault's) is refunded off-chain on the owner's signed request (P5); a note a deployed guest can
    prove is never refunded off-chain (I30).
 
@@ -118,7 +118,7 @@ seizes more than the outstanding (I9); the signers' books hold what Base owes (I
 ## Privacy
 
 What each observer can and cannot see, and every leakage vector we considered, is in
-[THREAT_MODEL.md](THREAT_MODEL.md) (in progress). In short: the ZEC never leaves the Ironwood
+[THREAT_MODEL.md](THREAT_MODEL.md). In short: the ZEC never leaves the Ironwood
 pool and never crosses pools; Base sees a fresh gasless account, a standard-size position, and
 salted commitments instead of Zcash recipients; third-party payouts are encrypted without an
 outgoing viewing key so the borrower's vault viewing key reveals nothing about them.
