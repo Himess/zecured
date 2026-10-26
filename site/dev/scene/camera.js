@@ -48,8 +48,8 @@ export function boxAt(s, out) {
 // Wide screens: the text on the left, the story on the right.
 const WIDE = [
   // The mark, whole: the logo made solid.
-  key(0.0, [0, 0, 0], 24, 34, 21, 0.25, -0.02),
-  key(0.62, [0, 0, 0], 24, 34, 21, 0.25, -0.02),
+  key(0.0, [0, 0, 0], 24, 34, 18, 0.25, -0.02),
+  key(0.62, [0, 0, 0], 24, 34, 18, 0.25, -0.02),
   // Deposit: the vault, its signers, the coin.
   key(1.12, [-2.65, 0.7, 0], 10, 36, 10.5, 0.2, 0),
   key(1.8, [-2.65, 0.6, 0], 4, 34, 11, 0.2, 0),
@@ -81,8 +81,9 @@ const WIDE = [
   // The rest of the page: the mark again, turning.
   key(8.3, [0, 0, 0], -16, 40, 33, 0.24, 0.24),
   key(9.2, [0, 0, 0], -16, 40, 33, 0.24, 0.24),
-  key(9.5, [0, 0, 0], 20, 38, 28, 0.22, 0.02),
-  key(10.2, [0, 0, 0], 20, 38, 28, 0.22, 0.02),
+  // The demo: the mark sinks out of the way of the app's picture.
+  key(9.5, [0, 0, 0], 20, 44, 30, 0.22, -0.95),
+  key(10.2, [0, 0, 0], 20, 44, 30, 0.22, -0.95),
   key(10.5, [0, 0, 0], 24, 52, 30, 0, -0.24),
   key(11, [0, 0, 0], 24, 52, 30, 0, -0.24),
 ];
@@ -113,6 +114,11 @@ const TALL = [
   key(7.78, [1.4, 0.3, -0.6], -90, 44, 17, 0, 0.24),
   key(7.98, [1.4, 0.3, -0.4], -88, 44, 17.5, 0, 0.24),
   key(8.3, [0, 0, 0], -16, 40, 38, 0, 0.1),
+  key(9.2, [0, 0, 0], -8, 42, 39, 0, 0.1),
+  // The demo: the mark sinks out of the way of the app's picture, then comes back for the end.
+  key(9.5, [0, 0, 0], 0, 44, 40, 0, -0.95),
+  key(10.2, [0, 0, 0], 10, 44, 40, 0, -0.95),
+  key(10.5, [0, 0, 0], 18, 46, 40, 0, 0.1),
   key(11, [0, 0, 0], 24, 46, 40, 0, 0.1),
 ];
 

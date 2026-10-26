@@ -13,10 +13,13 @@ import { buildProps } from "./props.js";
 import { CHAPTERS, createStory, seg } from "./story.js";
 import { buildWorld } from "./world.js";
 
-export function startScene(canvas, { tags: tagLayer = null, onReady } = {}) {
+export function startScene(canvas, { tags: tagLayer = null, onReady, onLost } = {}) {
   let renderer;
   try {
-    renderer = new WebGLRenderer({ canvas, antialias: true, powerPreference: "high-performance" });
+    // No antialiasing on the canvas: the scene is drawn into the composer's own target and only copied onto the
+    // canvas, where multisampling would smooth nothing. Its edges are smoothed by drawing it a little larger than
+    // the screen instead (below), which costs far less memory than a multisampled float target.
+    renderer = new WebGLRenderer({ canvas, antialias: false, powerPreference: "default" });
   } catch {
     return null;
   }
@@ -29,7 +32,9 @@ export function startScene(canvas, { tags: tagLayer = null, onReady } = {}) {
   renderer.shadowMap.type = PCFShadowMap;
 
   const small = Math.min(window.innerWidth, window.innerHeight) < 700;
-  let pixelRatio = Math.min(window.devicePixelRatio || 1, small ? 1.5 : 1.75);
+  // A desktop screen gets at least 1.25 pixels a pixel (that is the antialiasing) and at most 1.5, a phone at most
+  // 1.5; the frame-rate keeper below steps it down if frames run slow.
+  let pixelRatio = small ? Math.min(window.devicePixelRatio || 1, 1.5) : Math.min(Math.max(window.devicePixelRatio || 1, 1.25), 1.5);
   renderer.setPixelRatio(pixelRatio);
 
   const scene = new Scene();
@@ -40,7 +45,8 @@ export function startScene(canvas, { tags: tagLayer = null, onReady } = {}) {
 
   const composer = new EffectComposer(renderer);
   composer.addPass(new RenderPass(scene, camera));
-  const bloom = new UnrealBloomPass(new Vector2(256, 256), 0.45, 0.55, 1.0);
+  // Only what is brighter than white glows: a proof, the seam while one crosses, the core's flash.
+  const bloom = new UnrealBloomPass(new Vector2(256, 256), 0.38, 0.55, 1.15);
   composer.addPass(bloom);
   composer.addPass(new OutputPass());
 
@@ -83,7 +89,9 @@ export function startScene(canvas, { tags: tagLayer = null, onReady } = {}) {
   function fit(p) {
     if (edgeShown <= 0.02) return;
     if (tall) {
-      p.y = Math.min(0.32, Math.max(0.1, 0.5 - (0.07 + edgeShown) / 2));
+      // Above the text, unless the track sinks the mark out of the way (the demo): then it goes down with it.
+      const sink = Math.min(1, Math.max(0, (0.1 - p.y) / 1.05));
+      p.y = Math.min(0.32, Math.max(0.1, 0.5 - (0.07 + edgeShown) / 2)) * (1 - sink) + p.y * sink;
     } else {
       p.x = edgeShown / 2;
       p.dist *= Math.min(1.4, Math.max(0.85, 0.933 / ((1 - edgeShown) * (width / height))));
@@ -125,8 +133,10 @@ export function startScene(canvas, { tags: tagLayer = null, onReady } = {}) {
       p.x += (left + right) / 2 - (x0 + x1) / 2;
       p.y -= (top + bottom) / 2 - (y0 + y1) / 2;
       const over = Math.max((x1 - x0) / (right - left), (y1 - y0) / (bottom - top));
-      if (over <= 1) break;
-      p.dist *= over * 1.02;
+      // The first screen's mark may also come closer, until it fills most of the space the headline leaves.
+      const fill = storyTime < 0.8 && over < 0.84;
+      if (over <= 1 && !fill) break;
+      p.dist *= fill ? Math.max(0.88, over / 0.88) : over * 1.02;
     }
   }
 
@@ -163,7 +173,7 @@ export function startScene(canvas, { tags: tagLayer = null, onReady } = {}) {
     parts.world.updateMatrixWorld();
 
     // The camera glides after the story's, and leans a little toward the pointer. Once, as the page opens, it swings
-    // in toward the mark while the core lights up.
+    // in a little toward the mark while the core lights up (gently: the still image it replaces shows the end pose).
     edgeShown = snap ? edge : edgeShown + (edge - edgeShown) * (1 - Math.exp(-dt * 3));
     poseAt(tall ? TRACK.tall : TRACK.wide, storyTime, goal);
     fit(goal);
@@ -171,7 +181,7 @@ export function startScene(canvas, { tags: tagLayer = null, onReady } = {}) {
     pointer.sx += (pointer.x - pointer.sx) * (1 - Math.exp(-dt * 3));
     pointer.sy += (pointer.y - pointer.sy) * (1 - Math.exp(-dt * 3));
     const opening = (1 - Math.min(1, time / 2.8)) ** 3;
-    place(camera, view, width, height, pointer.sx * 2.5 - opening * 30, -pointer.sy * 1.5 + opening * 16, 1 + opening * 0.45);
+    place(camera, view, width, height, pointer.sx * 2.5 - opening * 10, -pointer.sy * 1.5 + opening * 5, 1 + opening * 0.12);
     camera.updateMatrixWorld();
 
     // Ciphertext never sits still.
@@ -187,9 +197,11 @@ export function startScene(canvas, { tags: tagLayer = null, onReady } = {}) {
     parts.coreLight.intensity *= 1 - opening;
     parts.goldMaterial.emissiveIntensity *= 1 - opening * 0.8;
 
-    // Tags: placed on the things they name, faded with the story.
+    // Tags: placed on the things they name, faded with the story. Where the text fills nearly all of a tall screen,
+    // there is nothing left for a tag to point at.
+    const crowded = tall && edgeShown > 0.02 && edgeShown < 0.24;
     for (const [name, entry] of tagEls) {
-      const spec = anchors[name];
+      const spec = crowded ? null : anchors[name];
       const goalOn = spec ? spec.on : 0;
       entry.on = snap ? goalOn : entry.on + (goalOn - entry.on) * (1 - Math.exp(-dt * 8));
       if (spec) {
@@ -210,7 +222,9 @@ export function startScene(canvas, { tags: tagLayer = null, onReady } = {}) {
           if (entry.label) {
             if (!entry.width) entry.width = entry.label.offsetWidth;
             const half = entry.width / 2;
-            const fix = x - half < 12 ? 12 - (x - half) : x + half > width - 12 ? width - 12 - (x + half) : 0;
+            // A name stays clear of the chapter's text column, as its thing does.
+            const left = !tall && edgeShown > 0.02 ? edgeShown * width + 12 : 12;
+            const fix = x - half < left ? left - (x - half) : x + half > width - 12 ? width - 12 - (x + half) : 0;
             entry.label.style.transform = `translateX(${(fix - half).toFixed(1)}px)`;
           }
         } else entry.on = 0;
@@ -252,7 +266,7 @@ export function startScene(canvas, { tags: tagLayer = null, onReady } = {}) {
   }
 
   function play() {
-    if (running) return;
+    if (running || lost) return;
     running = true;
     last = 0;
     requestAnimationFrame(frame);
@@ -281,6 +295,14 @@ export function startScene(canvas, { tags: tagLayer = null, onReady } = {}) {
     { passive: true },
   );
   document.addEventListener("visibilitychange", () => (document.hidden ? pause() : play()));
+  // If the GPU takes the context away (a driver reset, too many tabs), the scene stops and the page shows its still.
+  let lost = false;
+  canvas.addEventListener("webglcontextlost", (e) => {
+    e.preventDefault();
+    lost = true;
+    pause();
+    onLost?.();
+  });
 
   resize();
   update(0, 0.016, true);

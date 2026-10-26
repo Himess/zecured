@@ -1,6 +1,7 @@
 // The things of the story, all made of the same few solids: tiles with a face (notes, events, keys, proofs), coins
 // (ZEC, zZEC, USDC) and a few fixtures (the market, the account, the escrow, the signers' bonds, a bridge).
 import {
+  AdditiveBlending,
   BufferGeometry,
   CatmullRomCurve3,
   CircleGeometry,
@@ -19,6 +20,7 @@ import {
   MeshPhysicalMaterial,
   Object3D,
   PlaneGeometry,
+  SphereGeometry,
   TetrahedronGeometry,
   TorusGeometry,
   TubeGeometry,
@@ -78,7 +80,7 @@ export function buildProps(renderer, world, rand) {
       metalness: 0.05,
       roughness: 0.2,
       clearcoat: 1,
-      clearcoatRoughness: 0.08,
+      clearcoatRoughness: 0.2,
       emissive: new Color(0x062018),
       emissiveIntensity: 1,
     });
@@ -179,18 +181,40 @@ export function buildProps(renderer, world, rand) {
 
   // ------------------------------------------------------------------------------------------- the proof
 
+  // A proof is light, not metal: pale and glowing, so it never reads as the gold ZEC coins it is not.
   function proofToken() {
     const group = new Group();
-    const material = gold();
-    material.emissiveIntensity = 0.55;
+    const material = new MeshPhysicalMaterial({
+      color: new Color(0xfff2c9),
+      metalness: 0,
+      roughness: 0.35,
+      clearcoat: 0.4,
+      emissive: new Color(0xffc94a),
+      emissiveIntensity: 1.6,
+    });
     const body = new Mesh(rounded(0.56, 0.16, 0.56, 0.08), material);
     body.castShadow = true;
-    const label = canvasTexture(renderer, 128, 128, (ctx, w, h) => drawGlyph(ctx, w, h, "π", "#3d2800", 700, 0.7));
+    const label = canvasTexture(renderer, 128, 128, (ctx, w, h) => drawGlyph(ctx, w, h, "π", "#2e1e00", 900, 0.86));
     const top = face(0.46, 0.46, label.texture, 0.083);
     group.add(body, top);
     world.add(group);
     return { group, material };
   }
+
+  // And a comet's tail behind it: where it was a moment of the story before, smaller and fainter the further back.
+  const TRAIL = 14;
+  const trail = new InstancedMesh(
+    new SphereGeometry(0.1, 14, 10),
+    new MeshBasicMaterial({ color: new Color(2.2, 1.5, 0.5), transparent: true, blending: AdditiveBlending, depthWrite: false }),
+    TRAIL,
+  );
+  trail.instanceMatrix.setUsage(DynamicDrawUsage);
+  trail.frustumCulled = false;
+  for (let k = 0; k < TRAIL; k += 1) {
+    const f = (1 - k / TRAIL) ** 1.4;
+    trail.setColorAt(k, new Color(f, f, f));
+  }
+  world.add(trail);
 
   // --------------------------------------------------------------------------------- the market and USDC
 
@@ -301,10 +325,19 @@ export function buildProps(renderer, world, rand) {
 
   // ------------------------------------------------------------------------------ the bonds and a theft
 
+  // The signers' bonds are USDC: blue bricks, the colour of the chips they pay a victim with.
+  const bondMaterial = () =>
+    new MeshPhysicalMaterial({
+      color: new Color(0x1f62dd),
+      metalness: 0.35,
+      roughness: 0.3,
+      clearcoat: 1,
+      emissive: COLORS.usdc,
+      emissiveIntensity: 0.12,
+    });
   function bond() {
     const group = new Group();
-    const material = gold();
-    material.color = new Color(0xc99512);
+    const material = bondMaterial();
     const body = new Mesh(rounded(0.5, 0.18, 0.5, 0.05), material);
     body.castShadow = true;
     group.add(body);
@@ -313,7 +346,7 @@ export function buildProps(renderer, world, rand) {
   }
 
   const SHARDS = 80;
-  const shardMaterial = gold();
+  const shardMaterial = bondMaterial();
   const shards = new InstancedMesh(new TetrahedronGeometry(0.12), shardMaterial, SHARDS);
   shards.instanceMatrix.setUsage(DynamicDrawUsage);
   shards.frustumCulled = false;
@@ -383,13 +416,8 @@ export function buildProps(renderer, world, rand) {
   const morpho = market();
   const account = card("A fresh Safe", ["deployed by its first", "UserOp, gas sponsored", "ETH ever received: 0"]);
   const maker = card("Market maker", ["its own USDC here,", "its own ZEC on Zcash,", "paid on a proof alone"]);
-  // The maker's quote: a gold ticket, its price signed for one taker.
-  const quote = card("Quote", ["signed for you alone:", "0.01 ZEC for", "11.115555 USDC"], "#2e1f00", "#4a3300");
-  quote.material.color.set(COLORS.gold);
-  quote.material.metalness = 0.55;
-  quote.material.roughness = 0.28;
-  quote.material.emissive.set(COLORS.gold);
-  quote.material.emissiveIntensity = 0.12;
+  // The maker's quote: a card on Base's side, its price signed for one taker.
+  const quote = card("Quote", ["signed for you alone:", "0.01 ZEC for", "11.115555 USDC"]);
   const address = ghost();
   const box = escrow();
   const bonds = Array.from({ length: 5 }, () => bond());
@@ -399,6 +427,7 @@ export function buildProps(renderer, world, rand) {
     thread([[-1.2, 0.1, 3.0], [0.0, 1.3, 3.2], [1.6, 1.0, 3.1], [3.2, 0.12, 2.6]]),
     thread([[3.2, 0.12, 2.6], [3.6, 0.9, 2.2], [3.95, 0.12, 1.3]]),
     thread([[3.9, 0.12, -1.4], [4.5, 1.1, 0.0], [3.95, 0.12, 1.3]]),
+    thread([[1.95, 0.12, 2.0], [1.1, 1.15, 2.3], [-0.2, 0.95, 2.85], [-1.0, 0.2, 3.0]]),
   ];
   const gasWallet = coin(wzecMaterial, 0.34, 0.11, "ETH", "0x51c0…9e1a", "rgba(154, 31, 21, 0.95)");
 
@@ -420,6 +449,7 @@ export function buildProps(renderer, world, rand) {
     gasWallet,
     keys,
     proof,
+    trail,
     events,
     morpho,
     chips,

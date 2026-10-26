@@ -1,11 +1,12 @@
-import { mkdirSync } from "node:fs";
+import { mkdirSync, writeFileSync } from "node:fs";
 import { resolve } from "node:path";
 import { type Page, test } from "@playwright/test";
 
-// `pnpm shots`: the page's still image (site/img/still.jpg, shown before the scene runs and instead of it without
-// WebGL or motion), the social card (site/og.png), the README's images (docs/assets), the frames of
-// docs/assets/loan.gif (scripts/site-gif.sh assembles them) and full pages for review (site/dev/shots, not
-// committed). Reduced motion keeps the text still; the scene is frozen on one frame of the hero.
+// `pnpm shots`: the page's still images (site/img/still.jpg and, for tall screens, site/img/still-tall.jpg, shown
+// before the scene runs and instead of it without WebGL or motion), the social card (site/og.jpg), the README's
+// images (docs/assets), the frames of docs/assets/loan.gif (scripts/site-gif.sh assembles them) and full pages for
+// review (site/dev/shots, not committed). Reduced motion keeps the text still; the scene is frozen on one frame of
+// the hero.
 
 const repo = resolve(import.meta.dirname, "..", "..");
 const assets = resolve(repo, "docs", "assets");
@@ -34,33 +35,65 @@ async function freezeScene(page: Page) {
     stage.insertBefore(canvas, stage.querySelector(".veil"));
     const { startScene } = await import(new URL("scene.js", document.baseURI).href);
     const scene = startScene(canvas, { tags: document.querySelector(".stage .tags") });
-    // Where the hero's text ends, measured as main.js measures it, so the mark stands where the page puts it.
-    let edge = 0;
-    document.querySelectorAll(".hero-in > .eyebrow, .hero-in > .lead, .display .line > span, .ctas > *").forEach((el) => {
-      edge = Math.max(edge, el.getBoundingClientRect().right / window.innerWidth);
-    });
-    scene.still(3.1, "hero", 0, edge);
+    // Where the hero's text ends, measured as main.js measures it (its right edge on a wide screen, its top on a
+    // tall one), so the mark stands where the page puts it.
+    const tall = window.innerWidth / window.innerHeight < 0.9;
+    let edge = tall ? 1 : 0;
+    document
+      .querySelector(".hero")!
+      .querySelectorAll<HTMLElement>(".hero-in > .eyebrow, .hero-in > .lead, .hero-in > .proofline, .display .line > span, .ctas > *")
+      .forEach((el) => {
+        if (tall) edge = Math.min(edge, el.offsetTop / window.innerHeight);
+        else edge = Math.max(edge, el.getBoundingClientRect().right / window.innerWidth);
+      });
+    const frame = () => scene.still(3.1, "hero", 0, edge === 1 ? 0 : edge);
+    frame();
+    // The scene draws without preserving its drawing buffer: draw the frame again right before each screenshot.
+    (window as unknown as { refreeze: () => void }).refreeze = frame;
     document.documentElement.classList.add("scene-on");
   });
   await page.waitForTimeout(1600);
 }
 
+/** Draws the frozen frame once more, then takes the screenshot. */
+async function refreeze(page: Page) {
+  await page.evaluate(() => (window as unknown as { refreeze: () => void }).refreeze());
+}
+
+/** The frozen frame itself, read from the canvas in the same task that draws it, as a JPEG file. */
+async function saveCanvas(page: Page, path: string, quality: number) {
+  const url = await page.evaluate((q) => {
+    (window as unknown as { refreeze: () => void }).refreeze();
+    return (document.getElementById("scene") as HTMLCanvasElement).toDataURL("image/jpeg", q);
+  }, quality);
+  // A software renderer short of memory can lose the context and hand back an empty image: never write that.
+  if (url.length < 10_000) throw new Error(`the scene drew nothing (${url.length} bytes); run it again`);
+  writeFileSync(path, Buffer.from(url.slice(url.indexOf(",") + 1), "base64"));
+}
+
 test("the still image of the scene", async ({ page }) => {
   await open(page, "/", 1920, 1080);
   await freezeScene(page);
-  await page.evaluate(() => {
-    for (const el of document.querySelectorAll<HTMLElement>(".top, main, .foot, .veil, .tags")) el.style.visibility = "hidden";
-  });
-  await page.screenshot({ path: resolve(repo, "site", "img", "still.jpg"), type: "jpeg", quality: 82 });
+  await saveCanvas(page, resolve(repo, "site", "img", "still.jpg"), 0.82);
+});
+
+test("the still image of the scene for a tall screen", async ({ browser }) => {
+  const context = await browser.newContext({ viewport: { width: 390, height: 844 }, deviceScaleFactor: 2 });
+  const page = await context.newPage();
+  await open(page, "/", 390, 844);
+  await freezeScene(page);
+  await saveCanvas(page, resolve(repo, "site", "img", "still-tall.jpg"), 0.78);
+  await context.close();
 });
 
 test("the social card, 1200 by 630", async ({ page }) => {
   await open(page, "/", 1200, 630);
   await freezeScene(page);
   await page.evaluate(() => {
-    for (const el of document.querySelectorAll<HTMLElement>(".links, .top .btn, .eyebrow, .lead, .ctas, .cue, .tags")) el.style.visibility = "hidden";
+    for (const el of document.querySelectorAll<HTMLElement>(".links, .top .btn, .eyebrow, .lead, .ctas, .proofline, .cue, .tags")) el.style.visibility = "hidden";
   });
-  await page.screenshot({ path: resolve(repo, "site", "og.png"), clip: { x: 0, y: 0, width: 1200, height: 630 } });
+  await refreeze(page);
+  await page.screenshot({ path: resolve(repo, "site", "og.jpg"), type: "jpeg", quality: 86, clip: { x: 0, y: 0, width: 1200, height: 630 } });
 });
 
 test("the README's hero, at 1440 px and twice the density", async ({ browser }) => {
@@ -68,6 +101,7 @@ test("the README's hero, at 1440 px and twice the density", async ({ browser }) 
   const page = await context.newPage();
   await open(page, "/", 1440, 900);
   await freezeScene(page);
+  await refreeze(page);
   await page.screenshot({ path: resolve(assets, "hero.png") });
   await context.close();
 });

@@ -182,7 +182,7 @@ export function buildWorld(renderer, scene, { small }) {
     envMapIntensity: 1.1,
   });
   const porcelain = new MeshPhysicalMaterial({
-    color: new Color(0xd9dfe6),
+    color: new Color(0xc5cdd7),
     metalness: 0,
     roughness: 0.42,
     clearcoat: 0.7,
@@ -217,15 +217,16 @@ export function buildWorld(renderer, scene, { small }) {
   world.add(seam);
 
   // The core, where proofs cross.
+  // Brushed rather than mirrored, so it glows instead of showing the room's lights as hard dots.
   const goldMaterial = new MeshPhysicalMaterial({
     color: COLORS.gold,
     metalness: 1,
-    roughness: 0.2,
+    roughness: 0.34,
     clearcoat: 0.5,
-    clearcoatRoughness: 0.1,
+    clearcoatRoughness: 0.18,
     emissive: COLORS.gold,
     emissiveIntensity: 0.25,
-    envMapIntensity: 1.4,
+    envMapIntensity: 0.9,
   });
   const core = new Mesh(new SphereGeometry(0.5, 64, 32), goldMaterial);
   core.position.set(0, 0.02, 0);

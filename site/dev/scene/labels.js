@@ -92,12 +92,12 @@ export function drawCoin(ctx, w, h, top, bottom, color = "rgba(74, 46, 0, 0.92)"
   ctx.stroke();
 }
 
-/** One glyph, centred: π on a proof, a signer's number on its key. */
+/** One glyph, centred: π on a proof, a signer's number on its key (in Archivo, which draws π; Martian Mono does not). */
 export function drawGlyph(ctx, w, h, glyph, color = "#0f1b2a", weight = 800, scale = 0.62) {
   ctx.textAlign = "center";
   ctx.textBaseline = "middle";
   ctx.fillStyle = color;
-  ctx.font = `${weight} ${Math.round(h * scale)}px ${glyph === "π" ? MONO : SANS}`;
+  ctx.font = `${weight} ${Math.round(h * scale)}px ${SANS}`;
   ctx.fillText(glyph, w / 2, h * 0.53);
 }
 

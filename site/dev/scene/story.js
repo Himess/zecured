@@ -92,7 +92,7 @@ function proofAt(s, a, b, from, to, out) {
 // --------------------------------------------------------------------------------------- the story
 
 export function createStory(world, props) {
-  const { notes, vaultNote, yourNote, makerNote, swapNote, theftNote, zec, makerStack, quote, coinYou, coinMaker, makerZec, zzec, wzec, gasWallet, keys, proof, events, morpho, chips, account, maker, address, box, bonds, shards, shardSeeds, ring, tethers, threads, plank, dummy } = props;
+  const { notes, vaultNote, yourNote, makerNote, swapNote, theftNote, zec, makerStack, quote, coinYou, coinMaker, makerZec, zzec, wzec, gasWallet, keys, proof, trail, events, morpho, chips, account, maker, address, box, bonds, shards, shardSeeds, ring, tethers, threads, plank, dummy } = props;
   const red = new Color(COLORS.red);
   const goldCore = new Color(COLORS.gold);
   const keyWhite = new Color(0xcfe0f2);
@@ -126,7 +126,8 @@ export function createStory(world, props) {
       const fresh = i === 0 ? 1 - seg(s, newest.t + 0.06, newest.t + 0.3) : 0;
       const glow = e.tone === "leak" ? COLORS.red : e.tone === "gold" ? COLORS.gold : keyWhite;
       tile.material.emissive.copy(glow);
-      tile.material.emissiveIntensity = fresh * (e.tone ? 0.55 : 0.25);
+      // The newest row lights up a little as it lands, not so much that its words wash out.
+      tile.material.emissiveIntensity = fresh * (e.tone ? 0.2 : 0.06);
     });
   }
 
@@ -191,14 +192,15 @@ export function createStory(world, props) {
     if (vaultScale > 0.5) anchors.vault = { at: v(VAULT.x, 0.6, VAULT.z), on: win(s, 1.6, 1.7, 2.1, 2.2) };
 
     // The signers: around the vault to create it and to sign its release, never for the proof; again for the theft.
-    const keysUp = Math.max(win(s, 1.1, 1.26, 1.82, 1.96), win(s, 4.3, 4.42, 4.64, 4.74), win(s, 7.04, 7.12, 7.88, 7.98));
+    const keysUp = Math.max(win(s, 1.1, 1.26, 1.82, 1.96), win(s, 4.3, 4.42, 4.64, 4.74), win(s, 7.04, 7.12, 7.74, 7.82));
     const compromised = seg(s, 7.16, 7.26);
     const slashed = seg(s, 7.78, 7.88);
     keys.forEach((k, i) => {
       const angle = (i / 5) * Math.PI * 2 + time * 0.12;
       const y = mix(-0.4, 0.62 + Math.sin(time * 1.4 + i) * 0.05, keysUp) - slashed * 0.4;
       put(k.group, tmp.set(VAULT.x + Math.cos(angle) * 1.05, y, VAULT.z + Math.sin(angle) * 1.05), keysUp);
-      k.group.rotation.y = -angle;
+      // Every key faces the camera's way, so its number reads.
+      k.group.rotation.y = 0;
       const bad = i < 3 ? compromised : 0;
       k.material.emissive.copy(keyWhite).lerp(red, bad);
       k.material.emissiveIntensity = 0.1 + bad * 0.3 - slashed * 0.1;
@@ -226,10 +228,20 @@ export function createStory(world, props) {
       if (s < a || s > b) return;
       const { scale, through: t } = proofAt(s, a, b, from, to, proof.group.position);
       proof.group.visible = scale > 0.01;
-      proof.group.scale.setScalar(scale);
-      proof.group.rotation.set(0, time * 1.2, 0);
+      proof.group.scale.setScalar(scale * 1.35);
+      // A gentle sway rather than a spin, so the π on its face stays upright to the camera and reads.
+      proof.group.rotation.set(0, Math.sin(time * 1.2) * 0.22, 0);
       through = Math.max(through, t);
       proofShown = true;
+      // Its trail covers the last quarter of its way, however fast the chapter tells it.
+      const step = (b - a) * 0.018;
+      for (let k = 0; k < trail.count; k += 1) {
+        const back = proofAt(s - (k + 1) * step, a, b, from, to, dummy.position);
+        dummy.rotation.set(0, 0, 0);
+        dummy.scale.setScalar(back.scale * 1.7 * (1 - k / trail.count));
+        dummy.updateMatrix();
+        trail.setMatrixAt(k, dummy.matrix);
+      }
       if (tag) anchors[tag] = { at: proof.group.position, on: win(s, a + 0.02, a + 0.06, b - 0.08, b - 0.03) };
     };
     showProof(2.24, 2.7, VAULT, v(LEDGER_X, 0.06, SLOTS[0]), "proof");
@@ -237,14 +249,24 @@ export function createStory(world, props) {
     showProof(5.62, 5.78, YOUR_ADDRESS, v(ESCROW.x, 0.4, ESCROW.z), "payment");
     showProof(6.7, 6.92, TO_YOU, v(LEDGER_X, 0.06, SLOTS[0]), "only");
     showProof(7.5, 7.62, VAULT, v(LEDGER_X, 0.06, SLOTS[0]), "violation");
-    if (!proofShown) proof.group.visible = false;
+    if (!proofShown) {
+      proof.group.visible = false;
+      dummy.position.set(0, -50, 0);
+      dummy.scale.setScalar(0);
+      dummy.updateMatrix();
+      for (let k = 0; k < trail.count; k += 1) trail.setMatrixAt(k, dummy.matrix);
+    }
+    trail.instanceMatrix.needsUpdate = true;
     const alarm = win(s, 7.46, 7.48, 7.52, 7.55);
+    // In the close-ups of the vault the core sits at the frame's edge: it glows less there, so it does not flare.
+    const closeUp = Math.max(win(s, 1.1, 1.2, 1.85, 1.95), win(s, 4.3, 4.36, 4.68, 4.74), win(s, 7.04, 7.1, 7.44, 7.5));
+    const dim = 1 - 0.55 * closeUp;
     world.goldMaterial.emissive.copy(goldCore).lerp(red, alarm);
-    world.goldMaterial.emissiveIntensity = 0.16 + 0.06 * Math.sin(time * 2.2) + through * 0.9 + alarm * 1.2;
+    world.goldMaterial.emissiveIntensity = (0.16 + 0.06 * Math.sin(time * 2.2) + through * 0.9) * dim + alarm * 1.2;
     world.coreLight.color.copy(goldCore).lerp(red, alarm);
     world.seamMaterial.opacity = 0.35 + through * 0.65 + alarm * 0.65;
     world.seamMaterial.color.setRGB(2.2 + alarm * 0.6, 1.45 - alarm * 1.1, 0.35 - alarm * 0.1);
-    world.coreLight.intensity = 3.5 + through * 10 + alarm * 14;
+    world.coreLight.intensity = (2.6 + through * 7) * dim + alarm * 12;
     if (s < 1) anchors.core = { at: world.core.position, on: 1 - seg(s, 0.55, 0.75) };
 
     // What Base records.
@@ -260,7 +282,7 @@ export function createStory(world, props) {
     if (zzecIn > 0.5) anchors.minted = { at: zzec.group.position, on: win(s, 2.74, 2.82, 3.06, 3.14) };
 
     // The market and the account.
-    const marketUp = Math.max(win(s, 3.06, 3.16, 4.92, 5.02), win(s, 8.0, 8.12, 99, 100));
+    const marketUp = win(s, 3.06, 3.16, 4.92, 5.02);
     put(morpho.group, tmp.set(MARKET.x, mix(-0.3, 0, marketUp), MARKET.z), marketUp);
     morpho.ringMaterial.emissiveIntensity = 0.6 + 0.25 * Math.sin(time * 2);
     morpho.pool.rotation.y = time * 0.15;
@@ -383,7 +405,7 @@ export function createStory(world, props) {
     put(gasWallet.group, v(GAS.x, 0.12, GAS.z), win(s, 6.32, 6.38, 6.54, 6.6));
     const linked = win(s, 6.38, 6.5, 6.54, 6.6);
     threads.forEach((t, i) => {
-      const drawn = clamp01(linked * 1.6 - i * 0.25);
+      const drawn = clamp01(linked * 1.75 - i * 0.22);
       t.mesh.visible = drawn > 0.01;
       t.mesh.geometry.setDrawRange(0, Math.floor((t.total * drawn) / 3) * 3);
     });
