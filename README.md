@@ -7,6 +7,8 @@
 > Borrow USDC on Base against ZEC that never leaves Zcash's shielded pool, or swap USDC into shielded ZEC.
 > Base sees zero-knowledge proofs, never your Zcash address, transaction or balance.
 
+[![ci](https://github.com/Himess/zecured/actions/workflows/ci.yml/badge.svg)](https://github.com/Himess/zecured/actions/workflows/ci.yml)
+
 [The site](https://himess.github.io/zecured/) · [the docs page](https://himess.github.io/zecured/docs/) ·
 [the app as a guided replay](https://himess.github.io/zecured/app/) (DEMO, with sample data, in your browser) ·
 [run it yourself](#running-it)
@@ -42,7 +44,7 @@
 ## What it does
 
 Using ZEC in DeFi today usually means taking it out of the shielded pool. Zecured doesn't. People already borrow
-against ZEC on Base: Morpho's cbZEC/USDC market, backed by Coinbase's custodial wrapped ZEC and public on-chain,
+against ZEC on Base: [Morpho's cbZEC/USDC market](https://app.morpho.org/base/variable/0xe458a501c1103ca3b256f2bcb45d223263fb34b6349d82675494ce3a94ce1327/usdc-cbzec), backed by Coinbase's custodial wrapped ZEC and public on-chain,
 held about USD 2.5 M of supplied USDC when we read it on 16 October 2026
 ([docs/ref/FACTS.md](docs/ref/FACTS.md)). Zecured is that market for shielded ZEC.
 

@@ -57,8 +57,8 @@ receipt only on a RISC Zero proof that the deposit is in one of those blocks; a 
 borrows USDC on Morpho Blue. The same Zcash light client releases a swap's escrowed USDC only on a zero-knowledge
 proof that the market maker paid your shielded address.
 
-People already borrow against ZEC on Base: Morpho's cbZEC/USDC market, backed by Coinbase's custodial wrapped ZEC
-and public on-chain, held about USD 2.5 M of supplied USDC when we read it on 16 October 2026. Zecured is that
+People already borrow against ZEC on Base: Morpho's cbZEC/USDC market (https://app.morpho.org/base/variable/0xe458a501c1103ca3b256f2bcb45d223263fb34b6349d82675494ce3a94ce1327/usdc-cbzec),
+backed by Coinbase's custodial wrapped ZEC and public on-chain, held about USD 2.5 M of supplied USDC when we read it on 16 October 2026. Zecured is that
 market for shielded ZEC.
 
 Built from scratch for ZECATHON 2026 (Cross-Chain track), first commit 10 October: 804 contract tests, 35
