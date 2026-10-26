@@ -30,10 +30,12 @@
   --muted: #8fa699;
   --gold: #f4b728;
   --gold-hi: #ffd36e;
+  --teal: #5ed3a8;
   --ice: #cfe0f2;
   --ledger: #eef2f6;
   --ink: #0f1b2a;
   --ink-muted: #4c5d70;
+  --rule: rgba(15, 27, 42, 0.12);
   --usdc: #6aa6ff;
   --red: #ff5a4e;
   --leak-ground: #fbe1dc;
@@ -159,6 +161,17 @@ mark {
   top: 16px;
 }
 
+/* An arrow after a link that leaves the site (the fonts draw no ↗). */
+svg.ext {
+  display: inline-block;
+  flex: none;
+  width: 0.62em;
+  height: 0.62em;
+  margin-left: 0.32em;
+  vertical-align: 0.06em;
+  opacity: 0.75;
+}
+
 /* ---------------------------------------------------------------------------------------- header */
 
 .top {
@@ -170,7 +183,7 @@ mark {
 }
 
 .top.scrolled {
-  background: rgba(4, 9, 7, 0.86);
+  background: rgba(4, 9, 7, 0.92);
   border-bottom-color: var(--hair);
   -webkit-backdrop-filter: blur(14px) saturate(140%);
   backdrop-filter: blur(14px) saturate(140%);
@@ -256,22 +269,18 @@ mark {
 .btn-gold {
   background: var(--gold);
   color: var(--ink);
-  box-shadow: 0 0 0 1px rgba(255, 255, 255, 0.18) inset, 0 18px 40px -18px rgba(244, 183, 40, 0.85),
-    0 0 60px -20px rgba(244, 183, 40, 0.6);
+  box-shadow: 0 0 0 1px rgba(255, 255, 255, 0.18) inset, 0 12px 28px -14px rgba(244, 183, 40, 0.6);
 }
 
 .btn-gold:hover {
   background: var(--gold-hi);
-  box-shadow: 0 0 0 1px rgba(255, 255, 255, 0.3) inset, 0 22px 48px -18px rgba(255, 211, 110, 0.95),
-    0 0 80px -18px rgba(244, 183, 40, 0.75);
+  box-shadow: 0 0 0 1px rgba(255, 255, 255, 0.3) inset, 0 16px 34px -14px rgba(255, 211, 110, 0.75);
 }
 
 .btn-line {
   border: 1px solid var(--hair-2);
-  background: rgba(4, 9, 7, 0.35);
+  background: rgba(4, 9, 7, 0.55);
   color: var(--text);
-  -webkit-backdrop-filter: blur(6px);
-  backdrop-filter: blur(6px);
 }
 
 .btn-line:hover {
@@ -282,6 +291,10 @@ mark {
   min-height: 40px;
   padding: 0 18px;
   font-size: 14.5px;
+}
+
+.btn svg.ext {
+  margin-left: -2px;
 }
 
 /* ---------------------------------------------------------------------------------------- chips */
@@ -316,41 +329,122 @@ mark {
   position: relative;
   z-index: 2;
   border-top: 1px solid var(--hair);
-  background: rgba(4, 9, 7, 0.88);
+  background: rgba(4, 9, 7, 0.94);
 }
 
 .foot-in {
   display: grid;
-  gap: 10px;
+  grid-template-columns: minmax(0, 1.1fr) minmax(0, 1.4fr);
+  gap: 32px 56px;
   max-width: var(--max);
   margin: 0 auto;
-  padding: 48px var(--gut) 56px;
+  padding: 56px var(--gut) 48px;
   color: var(--muted);
   font-size: 14.5px;
 }
 
+.foot-id {
+  display: grid;
+  align-content: start;
+  gap: 12px;
+  max-width: 26rem;
+}
+
 .foot-brand {
+  display: inline-flex;
+  align-items: center;
+  gap: 10px;
   color: var(--text);
   font-size: 18px;
   font-weight: 800;
   font-stretch: 125%;
 }
 
-.foot-links {
-  display: flex;
-  flex-wrap: wrap;
-  gap: 8px 26px;
-  margin-top: 10px;
+.foot-cols {
+  display: grid;
+  grid-template-columns: repeat(3, minmax(0, 1fr));
+  gap: 24px;
 }
 
-.foot-links a {
+.foot-h {
+  margin-bottom: 12px;
+  color: var(--text);
+  font-size: 13px;
+  font-weight: 700;
+  letter-spacing: 0.06em;
+  text-transform: uppercase;
+}
+
+.foot-cols ul {
+  display: grid;
+  gap: 4px;
+}
+
+.foot-cols a {
+  display: inline-flex;
+  align-items: center;
+  min-height: 32px;
   color: var(--soft);
   text-decoration: none;
 }
 
-.foot-links a:hover {
+.foot-cols a:hover {
   color: var(--text);
   text-decoration: underline;
+}
+
+.foot-note {
+  grid-column: 1 / -1;
+  padding-top: 22px;
+  border-top: 1px solid var(--hair);
+}
+
+/* ---------------------------------------------------------------------------------------- not found */
+
+.lost-page {
+  background: radial-gradient(90% 60% at 80% 0%, rgba(56, 166, 132, 0.12) 0%, rgba(4, 9, 7, 0) 60%), var(--night);
+}
+
+.lost {
+  max-width: var(--max);
+  min-height: 100vh;
+  min-height: 100svh;
+  margin: 0 auto;
+  padding: 168px var(--gut) 96px;
+}
+
+.lost-n {
+  color: var(--muted);
+  font-size: 14px;
+}
+
+.lost-t {
+  max-width: 14em;
+  margin-top: 14px;
+  font-size: clamp(36px, 5vw, 68px);
+  line-height: 0.98;
+  font-weight: 800;
+  font-stretch: 118%;
+  letter-spacing: -0.02em;
+}
+
+.lost-b {
+  max-width: 34rem;
+  margin-top: 22px;
+  color: var(--soft);
+}
+
+.lost-links {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 12px;
+  margin-top: 32px;
+}
+
+@media (max-width: 1000px) {
+  .links .wide {
+    display: none;
+  }
 }
 
 @media (max-width: 760px) {
@@ -363,24 +457,30 @@ mark {
     height: 64px;
   }
 
-  .links .wide {
-    display: none;
-  }
-
   .links a {
     padding: 0 10px;
   }
-}
 
-@media (max-width: 900px) {
-  .links .wide {
-    display: none;
+  .foot-in {
+    grid-template-columns: minmax(0, 1fr);
+    padding-top: 44px;
   }
 }
 
+@media (max-width: 480px) {
+  .foot-cols {
+    grid-template-columns: repeat(2, minmax(0, 1fr));
+  }
+}
+
+/* On the narrowest phones the header keeps its one action and drops the link out. */
 @media (max-width: 420px) {
-  .top .btn-sm {
+  .links .gh {
     display: none;
+  }
+
+  .top .btn-sm {
+    padding: 0 14px;
   }
 }
 

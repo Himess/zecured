@@ -5,27 +5,30 @@
 <meta name="viewport" content="width=device-width, initial-scale=1">
 <meta http-equiv="Content-Security-Policy" content="default-src 'none'; style-src 'self'; script-src 'self'; font-src 'self'; img-src 'self'; media-src 'self'; base-uri 'none'; form-action 'none'">
 <meta name="referrer" content="no-referrer">
-<title>Zecured: borrow against shielded ZEC</title>
-<meta name="description" content="Borrow USDC on Base against ZEC that never leaves Zcash's shielded pool, or swap USDC into shielded ZEC with no custodian. Only zero-knowledge proofs cross.">
+<title>Zecured: borrow against shielded ZEC. Only the proof crosses.</title>
+<meta name="description" content="Borrow USDC on Base against ZEC that never leaves Zcash’s shielded pool, or swap USDC into shielded ZEC. Base sees zero-knowledge proofs, never your Zcash address, transaction or balance.">
 <meta name="theme-color" content="#040907">
 <meta name="color-scheme" content="dark">
 <link rel="canonical" href="https://himess.github.io/zecured/">
 <meta property="og:type" content="website">
 <meta property="og:site_name" content="Zecured">
-<meta property="og:title" content="Zecured: your ZEC stays shielded, only the proof crosses">
-<meta property="og:description" content="Borrow USDC on Base against shielded ZEC, or swap USDC into shielded ZEC with no custodian. Base never learns your Zcash address, transaction or balance.">
+<meta property="og:title" content="Zecured: borrow against shielded ZEC. Only the proof crosses.">
+<meta property="og:description" content="Borrow USDC on Base against ZEC that never leaves Zcash’s shielded pool, or swap USDC into shielded ZEC. Base sees zero-knowledge proofs, never your Zcash address, transaction or balance.">
 <meta property="og:url" content="https://himess.github.io/zecured/">
-<meta property="og:image" content="https://himess.github.io/zecured/og.png">
+<meta property="og:image" content="https://himess.github.io/zecured/og.jpg">
 <meta property="og:image:width" content="1200">
 <meta property="og:image:height" content="630">
-<meta property="og:image:alt" content="Zecured’s mark as a 3D disc: a dark half of shielded notes, a white half that is Base’s ledger, and a gold core in the seam between them, the only place anything crosses.">
+<meta property="og:image:alt" content="Zecured’s headline, “Borrow against shielded ZEC. Only the proof crosses.”, beside its mark as a 3D disc: a dark half of shielded notes, a white half that is Base’s ledger, and a gold core in the seam between them.">
 <meta name="twitter:card" content="summary_large_image">
-<meta name="twitter:title" content="Zecured: your ZEC stays shielded, only the proof crosses">
-<meta name="twitter:description" content="Borrow USDC on Base against shielded ZEC, or swap USDC into shielded ZEC with no custodian.">
-<meta name="twitter:image" content="https://himess.github.io/zecured/og.png">
+<meta name="twitter:title" content="Zecured: borrow against shielded ZEC. Only the proof crosses.">
+<meta name="twitter:description" content="Borrow USDC on Base against ZEC that never leaves Zcash’s shielded pool, or swap USDC into shielded ZEC. Base sees zero-knowledge proofs, never your Zcash address, transaction or balance.">
+<meta name="twitter:image" content="https://himess.github.io/zecured/og.jpg">
+<meta name="twitter:image:alt" content="Zecured’s headline beside its mark as a 3D disc: a dark half of shielded notes, a white half that is Base’s ledger, and a gold core in the seam.">
 <link rel="icon" href="favicon.svg" type="image/svg+xml">
 <link rel="preload" href="fonts/archivo.woff2" as="font" type="font/woff2" crossorigin>
 <link rel="preload" href="fonts/martian-mono.woff2" as="font" type="font/woff2" crossorigin>
+<link rel="preload" href="img/still.jpg" as="image" media="(min-aspect-ratio: 901/1000)">
+<link rel="preload" href="img/still-tall.jpg" as="image" media="(max-aspect-ratio: 9/10)">
 <link rel="stylesheet" href="base.css">
 <link rel="stylesheet" href="landing.css">
 <script src="main.js"></script>
@@ -41,7 +44,7 @@
     <div class="tag3d t-z" data-tag="pool"><span>Zcash: the shielded pool</span></div>
     <div class="tag3d t-b" data-tag="ledger"><span>Base: the public ledger</span></div>
     <div class="tag3d t-gold" data-tag="core"><span>the seam: only proofs cross</span></div>
-    <div class="tag3d t-gold" data-tag="coin"><span>your ZEC</span></div>
+    <div class="tag3d t-z" data-tag="coin"><span>your ZEC</span></div>
     <div class="tag3d t-b" data-tag="keys"><span>five signers, any three to spend</span></div>
     <div class="tag3d t-z" data-tag="vault"><span>your vault: one encrypted note</span></div>
     <div class="tag3d t-gold" data-tag="proof"><span>a zero-knowledge proof of the deposit</span></div>
@@ -53,7 +56,7 @@
     <div class="tag3d t-z" data-tag="to-maker"><span>the market maker’s share</span></div>
     <div class="tag3d t-gold" data-tag="inclusion"><span>a proof the payout landed</span></div>
     <div class="tag3d t-b" data-tag="liquidity"><span>liquidity: a market maker’s own USDC and ZEC</span></div>
-    <div class="tag3d t-gold" data-tag="quote"><span>its price, signed for you alone</span></div>
+    <div class="tag3d t-b" data-tag="quote"><span>its price, signed for you alone</span></div>
     <div class="tag3d t-b" data-tag="escrow"><span>your USDC, into escrow</span></div>
     <div class="tag3d t-b" data-tag="hash"><span>locked to a salted hash of your address</span></div>
     <div class="tag3d t-z" data-tag="address"><span>a new shielded address of yours</span></div>
@@ -66,7 +69,7 @@
     <div class="tag3d t-red" data-tag="compromised"><span>three of five signers turned</span></div>
     <div class="tag3d t-red" data-tag="swept"><span>the vault, swept</span></div>
     <div class="tag3d t-gold" data-tag="violation"><span>a proof of the theft</span></div>
-    <div class="tag3d t-b" data-tag="bonds"><span>the signers’ bonds</span></div>
+    <div class="tag3d t-b" data-tag="bonds"><span>the signers’ bonds, in USDC</span></div>
     <div class="tag3d t-red" data-tag="slashed"><span>all five bonds, slashed</span></div>
     <div class="tag3d t-b" data-tag="victim"><span>the victim, made whole</span></div>
   </div>
@@ -83,10 +86,11 @@
       <li class="wide"><a href="#swap">Swap</a></li>
       <li class="wide"><a href="#privacy">Privacy</a></li>
       <li class="wide"><a href="#trust">Trust</a></li>
+      <li class="wide"><a href="#demo">Demo</a></li>
       <li><a href="docs/">Docs</a></li>
-      <li><a href="https://github.com/Himess/zecured">GitHub</a></li>
+      <li class="gh"><a href="https://github.com/Himess/zecured">GitHub<svg class="ext" width="11" height="11" viewBox="0 0 12 12" aria-hidden="true" focusable="false"><path d="M3.5 2.5h6v6M9.5 2.5 2.5 9.5" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round"/></svg></a></li>
     </ul>
-    <a class="btn btn-gold btn-sm" href="app/">Open the app</a>
+    <a class="btn btn-gold btn-sm" href="app/">Try the app</a>
   </nav>
 </header>
 
@@ -94,18 +98,20 @@
 
 <section class="hero" id="top" data-scene="hero" aria-labelledby="hero-h">
   <div class="hero-in">
-    <p class="eyebrow reveal">Built for ZECATHON 2026 <span class="dot" aria-hidden="true"></span> on testnets</p>
+    <p class="eyebrow reveal">ZECATHON 2026<span class="dot" aria-hidden="true"></span>Cross-Chain track<span class="dot" aria-hidden="true"></span>testnet</p>
     <h1 id="hero-h" class="display">
-      <span class="line"><span>Your ZEC stays</span></span>
-      <span class="line"><span>shielded.</span></span>
+      <span class="line"><span>Borrow against</span></span>
+      <span class="line"><span>shielded ZEC.</span></span>
       <span class="line"><span>Only the <em>proof</em></span></span>
       <span class="line"><span>crosses.</span></span>
     </h1>
-    <p class="lead reveal">Borrow USDC on Base against ZEC that never leaves Zcash’s Ironwood pool, or swap USDC into shielded ZEC. No bridge, no wrapped token, no single custodian.</p>
+    <p class="lead reveal">Your ZEC never leaves Ironwood, Zcash’s newest shielded pool. Borrow USDC on Base against it, or swap USDC into shielded ZEC. Base sees zero-knowledge proofs, never your Zcash address, transaction or balance.</p>
     <div class="ctas reveal">
-      <a class="btn btn-gold" href="app/">Open the app</a>
-      <a class="btn btn-line" href="#demo">Watch the demo</a>
+      <a class="btn btn-gold" href="app/">Try the app</a>
+      <a class="btn btn-line" href="#demo">See it run</a>
+      <p class="cta-note">A guided replay in your browser, with sample data. No wallet, nothing to install.</p>
     </div>
+    <p class="proofline reveal">Tested end to end on Zcash testnet and Base Sepolia forks. Its real zero-knowledge proofs pass RISC Zero’s deployed verifier in our fork tests.</p>
   </div>
   <a class="cue" href="#how"><span class="cue-line" aria-hidden="true"></span><span class="cue-t">Scroll</span></a>
 </section>
@@ -125,13 +131,16 @@
 <section class="chapter" data-scene="prove" aria-labelledby="c-prove">
   <div class="panel">
     <p class="kicker reveal"><span class="kicker-n">02</span>Prove</p>
-    <h2 id="c-prove" class="title reveal">Only a proof crosses.</h2>
-    <p class="body reveal">A zero-knowledge proof shows your deposit sits in a Zcash block, under a header Base verified itself. zZEC is minted on the proof alone: no signer vouches for it.</p>
+    <h2 id="c-prove" class="title reveal">Base checks Zcash itself.</h2>
+    <p class="body reveal">Base verifies Zcash’s block headers and their proof of work on its own. A zero-knowledge proof then shows your deposit is in one of those blocks, without saying which. zZEC, a collateral receipt nobody can transfer, is minted on that proof alone: no signer vouches for it.</p>
     <ul class="seen reveal" aria-label="What each chain records">
       <li><span class="chip chip-z">Zcash</span>nothing new</li>
       <li><span class="chip chip-b">Base</span>a vault id, a standard amount, a keyed tag</li>
     </ul>
-    <p class="note reveal">The relay and the proofs form a Zcash light client on Base: other contracts can use them to check a shielded Zcash payment, with no bridge.</p>
+    <p class="note reveal">Together, the header relay and the proofs are a Zcash light client on Base: any contract can use them to check a shielded Zcash payment, without a bridge.</p>
+    <figure class="still-fig">
+      <img src="img/seam.svg" width="1000" height="600" loading="lazy" decoding="async" alt="What crosses from Zcash to Base: four zero-knowledge proofs (a deposit proof mints zZEC, an inclusion proof makes a payout final, a violation proof slashes the signers' bonds, a payment proof releases a swap's USDC) and salted commitments; never a Zcash transaction, note or address.">
+    </figure>
   </div>
 </section>
 
@@ -139,8 +148,8 @@
   <div class="panel">
     <p class="kicker reveal"><span class="kicker-n">03</span>Borrow</p>
     <h2 id="c-borrow" class="title reveal">Borrow from a <span class="nb">brand-new</span> account.</h2>
-    <p class="body reveal">A fresh smart account borrows USDC on Morpho Blue against your zZEC. Its gas is sponsored, so it never held ETH, and nothing on Base points back to your wallet.</p>
-    <p class="note reveal">The USDC comes from lenders on Morpho Blue, who earn its interest: a new market backed by Zcash collateral.</p>
+    <p class="body reveal">A fresh smart account borrows USDC on Morpho Blue against your zZEC. Its gas is sponsored, so it never holds ETH, and nothing on Base points back to your wallet.</p>
+    <p class="note reveal">Lenders on Morpho Blue supply the USDC and earn the interest, in a new market backed by Zcash collateral.</p>
   </div>
 </section>
 
@@ -148,8 +157,8 @@
   <div class="panel">
     <p class="kicker reveal"><span class="kicker-n">04</span>Close</p>
     <h2 id="c-close" class="title reveal">Leave without unshielding.</h2>
-    <p class="body reveal">Repay, or let a market maker close from your collateral. The rest returns to a new Ironwood address, and every payout is committed on Base before it is signed.</p>
-    <p class="note reveal">If ZEC falls too far, a liquidator repays part of the debt and is paid in shielded ZEC too, with no outgoing viewing key; the rest stays yours. Pre-liquidation is <span class="nb">opt-in</span>.</p>
+    <p class="body reveal">Repay, or let a market maker repay for you out of your collateral. Your ZEC, or what is left of it, returns to a new Ironwood address, and every payout is recorded on Base before the signers sign it.</p>
+    <p class="note reveal">If ZEC falls too far, a liquidator repays part of the debt and is paid in shielded ZEC too, which even your viewing key cannot see; the rest stays yours. You can also opt in to gentler, earlier partial liquidations.</p>
   </div>
 </section>
 
@@ -157,19 +166,19 @@
   <div class="panel">
     <p class="kicker reveal"><span class="kicker-n">05</span>Swap</p>
     <h2 id="c-swap" class="title reveal">Buy shielded ZEC with USDC.</h2>
-    <p class="body reveal">A market maker fills your order from its own ZEC and USDC, at a price it signs for you alone. Your USDC waits in escrow on Base until a zero-knowledge proof shows the maker paid your shielded address for that very order.</p>
+    <p class="body reveal">The same light client settles a swap. A market maker fills your order from its own ZEC and USDC, at a price it signs for you alone. Your USDC waits in escrow on Base until a zero-knowledge proof shows the maker paid your shielded address for that very order.</p>
     <ul class="seen reveal" aria-label="What each chain records">
-      <li><span class="chip chip-b">Base</span>the order and a salted commitment, never your address</li>
+      <li><span class="chip chip-b">Base</span>the order and a salted hash, never your address</li>
       <li><span class="chip chip-z">Zcash</span>a shielded payment to you</li>
     </ul>
-    <p class="note reveal">No liquidity pool, no bridge: anyone with ZEC and USDC can run a market maker. The demo’s is ours, its price set by hand (MOCK); on mainnet it quotes from Chainlink’s ZEC/USD, checked against API3’s.</p>
+    <p class="note reveal">No liquidity pool, no bridge: anyone with ZEC and USDC can run a market maker. In the demo the market maker is ours and sets its price by hand (MOCK); on mainnet it would quote Chainlink’s ZEC/USD, checked against API3’s.</p>
   </div>
 </section>
 
 <section class="chapter wide" id="privacy" data-scene="privacy" aria-labelledby="c-privacy">
   <div class="panel">
     <p class="kicker reveal"><span class="kicker-n">06</span>Privacy</p>
-    <h2 id="c-privacy" class="title reveal">A bridge leaves four links to you. Zecured leaves none.</h2>
+    <h2 id="c-privacy" class="title reveal">A bridge leaves four links to you. Zecured leaves none of them.</h2>
     <div class="versus">
       <div class="side side-bad reveal">
         <p class="side-h">Through a typical bridge</p>
@@ -183,14 +192,14 @@
       <div class="side side-good reveal">
         <p class="side-h">Through Zecured</p>
         <ul>
-          <li>a proof, a vault id, a standard amount</li>
-          <li>salted commitments, never an address</li>
+          <li><span class="pi-chip" aria-hidden="true">π</span>a proof, a vault id, a standard amount</li>
+          <li>salted hashes, never an address</li>
           <li>a fresh account that never held ETH</li>
           <li>nothing that leads back to your wallet</li>
         </ul>
       </div>
     </div>
-    <p class="note reveal">Checked on every deployment: none of 302 identifiers of our own runs appears in 77 events, 55 transactions’ calldata or 177 storage words.</p>
+    <p class="note reveal">Our leak scanner checks each deployment. In the last run, none of 302 Zcash identifiers from our own transactions (txids, note commitments, nullifiers, addresses, keys) appeared in its 77 events, 55 transactions’ calldata or 177 storage words.</p>
   </div>
 </section>
 
@@ -198,62 +207,97 @@
   <div class="panel">
     <p class="kicker reveal"><span class="kicker-n">07</span>Trust</p>
     <h2 id="c-trust" class="title reveal">We let three signers steal.</h2>
-    <p class="body reveal">On a separate DEMO deployment, three of five signers swept a vault. The borrower’s watchtower caught it two minutes later, a violation proof slashed all five bonds, and the victim was made whole.</p>
-    <p class="big-stat reveal"><span class="mono">3 → 12.65</span> USDC</p>
-    <p class="note reveal">The victim’s account after it withdrew its equity: the full value of its 0.01 ZEC. On that fork the proof’s seal came from the MOCK verifier; real violation seals pass RISC Zero’s router in the fork tests. <a href="docs/#theft">The whole timeline</a></p>
+    <p class="body reveal">On a separate DEMO deployment, three of five signers swept a vault. The borrower’s watchtower caught it two minutes later; a zero-knowledge proof of the theft slashed all five bonds (FROST hides which three signed), and the victim was made whole.</p>
+    <p class="big-stat reveal"><span class="big-n"><span class="mono">3 → 12.65</span> USDC</span><span class="big-cap">the victim’s account, before and after</span></p>
+    <p class="note reveal">From the 3 USDC it had borrowed to 12.65 USDC, once the slashed bonds repaid its debt and paid out its equity: the full value of its stolen 0.01 ZEC at the demo’s price of $1,265. On that fork a MOCK verifier checked the proof; a real violation proof passes RISC Zero’s verifier in our fork tests. <a href="docs/#theft">The whole timeline</a></p>
   </div>
 </section>
 
 <section class="numbers" data-scene="numbers" data-veil="wide" aria-labelledby="n-h">
   <h2 id="n-h" class="title reveal">Every number is a run you can repeat.</h2>
   <ul class="stats">
-    <li class="stat reveal"><span class="stat-n" data-count="804">804</span><span class="stat-l">contract tests pass</span></li>
-    <li class="stat reveal"><span class="stat-n" data-count="0">0</span><span class="stat-l">of 302 identifiers found on Base</span></li>
-    <li class="stat reveal"><span class="stat-n" data-count="28.1" data-decimals="1">28.1</span><span class="stat-u">s</span><span class="stat-l">to prove a deposit on one GPU</span></li>
-    <li class="stat reveal"><span class="stat-n">3 of 5</span><span class="stat-l">bonded signers to move a vault</span></li>
+    <li class="stat reveal"><span class="stat-n" data-count="804" aria-hidden="true">804</span><span class="stat-l"><span class="sr">804 </span>contract tests pass</span></li>
+    <li class="stat reveal"><span class="stat-n">4 of 4</span><span class="stat-l">kinds of real zero-knowledge proof (deposit, payout, theft, swap) pass RISC Zero’s verifier on Base forks</span></li>
+    <li class="stat reveal"><span class="stat-n">0</span><span class="stat-l">of 302 Zcash identifiers found on Base, on our forks</span></li>
+    <li class="stat reveal"><span class="stat-n" data-count="28.1" data-decimals="1" aria-hidden="true">28.1</span><span class="stat-u" aria-hidden="true">s</span><span class="stat-l"><span class="sr">28.1 seconds: </span>a deposit’s proof on one GPU, before its Groth16 wrap</span></li>
   </ul>
-  <p class="note reveal">All of it on Zcash testnet and Base Sepolia forks. <a href="docs/#evidence">The evidence</a></p>
+  <p class="note reveal">All of it on Zcash testnet, local forks of Base Sepolia and Base mainnet, and one rented GPU. <a href="docs/#evidence">The evidence</a></p>
 </section>
 
 <section class="demo" id="demo" data-scene="demo" data-veil="wide" aria-labelledby="demo-h">
   <div class="demo-copy">
     <h2 id="demo-h" class="title reveal">See it run.</h2>
-    <p class="body reveal">Three minutes, narrated: a loan opened in the browser, its deposit proven, USDC borrowed, a close from collateral, a swap, and the theft demonstration.</p>
-    <p class="note reveal">Or run it yourself: the app replays the live run in your browser, step by step, and links every step to its real transaction.</p>
-    <p class="ctas reveal"><a class="btn btn-gold" href="app/">Open the app</a></p>
+    <p class="body reveal">Click through a whole loan and a swap yourself: the app runs as a guided replay in your browser, with sample data (DEMO). No wallet, nothing to install.</p>
+    <p class="note reveal">Every screen is the real app. The replay stands in for the signers, the prover and the chains, which are not kept running through judging.</p>
+    <p class="ctas reveal"><a class="btn btn-gold" href="app/">Replay it in the app</a></p>
   </div>
-  <div class="video reveal">
-    <span class="play" aria-hidden="true"></span>
-    <p class="video-t">[DEMO VIDEO: published October 26]</p>
-  </div>
+  <a class="frame reveal" href="app/"><img src="img/app.webp" width="1440" height="900" loading="lazy" decoding="async" alt="The Zecured app: open its replay"></a>
 </section>
 
 <section class="more" data-scene="end" data-veil="wide" aria-labelledby="more-h">
-  <h2 id="more-h" class="title reveal">Everything, in detail.</h2>
+  <div class="more-head">
+    <h2 id="more-h" class="title reveal">Everything, in detail.</h2>
+    <figure class="recap reveal">
+      <img src="img/seam.svg" width="1000" height="600" loading="lazy" decoding="async" alt="What crosses from Zcash to Base: four zero-knowledge proofs (a deposit proof mints zZEC, an inclusion proof makes a payout final, a violation proof slashes the signers' bonds, a payment proof releases a swap's USDC) and salted commitments; never a Zcash transaction, note or address.">
+      <figcaption>What crosses from Zcash to Base, and what never does.</figcaption>
+    </figure>
+  </div>
   <ul class="doors">
     <li class="reveal"><a href="docs/#loan"><span class="door-t">How a loan works</span><span class="door-d">Five steps, seen from both chains</span></a></li>
     <li class="reveal"><a href="docs/#privacy"><span class="door-t">What Base sees</span><span class="door-d">And what a bridge would show</span></a></li>
     <li class="reveal"><a href="docs/#swap"><span class="door-t">The swap</span><span class="door-d">Escrow released by a proof</span></a></li>
     <li class="reveal"><a href="docs/#trust"><span class="door-t">Who you trust</span><span class="door-d">Signers, bonds and the theft demo</span></a></li>
     <li class="reveal"><a href="docs/#evidence"><span class="door-t">Evidence</span><span class="door-d">Tests and testnet transactions</span></a></li>
-    <li class="reveal"><a href="docs/#faq"><span class="door-t">A judge’s questions</span><span class="door-d">Multisig, bridge, interest, collusion</span></a></li>
+    <li class="reveal"><a href="docs/#faq"><span class="door-t">A judge’s questions</span><span class="door-d">Multisig, bridge, time and cost</span></a></li>
     <li class="reveal"><a href="docs/#mainnet"><span class="door-t">Toward mainnet</span><span class="door-d">What changes, and what can’t be coded</span></a></li>
     <li class="reveal"><a href="https://github.com/Himess/zecured/blob/main/docs/zip-draft-shielded-collateral-vaults.md"><span class="door-t">A draft ZIP</span><span class="door-d">Shielded Collateral Vaults, for any wallet or chain</span></a></li>
   </ul>
+  <div class="closer reveal">
+    <svg class="closer-mark" width="48" height="48" viewBox="0 0 30 30" aria-hidden="true" focusable="false"><circle cx="15" cy="15" r="13.25" fill="#0D1611" stroke="#E4ECE6" stroke-width="1.2"/><path d="M15 1.75 A13.25 13.25 0 0 1 15 28.25 Z" fill="#EEF2F6"/><circle cx="15" cy="15" r="4" fill="#F4B728" stroke="#0D1611" stroke-width="1.2"/></svg>
+    <p class="closer-t"><span>Borrow against shielded ZEC.</span> <span>Only the <em>proof</em> crosses.</span></p>
+    <p class="ctas">
+      <a class="btn btn-gold" href="app/">Try the app</a>
+      <a class="btn btn-line" href="#demo">See it run</a>
+      <a class="btn btn-line" href="https://github.com/Himess/zecured">Read the code<svg class="ext" width="12" height="12" viewBox="0 0 12 12" aria-hidden="true" focusable="false"><path d="M3.5 2.5h6v6M9.5 2.5 2.5 9.5" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round"/></svg></a>
+    </p>
+  </div>
 </section>
 
 </main>
 
 <footer class="foot">
   <div class="foot-in">
-    <p class="foot-brand">Zecured</p>
-    <p>Built for ZECATHON 2026, Cross-Chain track. A testnet experiment, not a financial product. MIT licence.</p>
-    <p>This page loads nothing from anyone else: no analytics, no third-party fonts or scripts.</p>
-    <ul class="foot-links">
-      <li><a href="docs/">Docs</a></li>
-      <li><a href="https://github.com/Himess/zecured">GitHub</a></li>
-      <li><a href="https://github.com/Himess/zecured#running-it">Run it yourself</a></li>
-    </ul>
+    <div class="foot-id">
+      <p class="foot-brand"><svg width="22" height="22" viewBox="0 0 30 30" aria-hidden="true" focusable="false"><circle cx="15" cy="15" r="13.25" fill="#0D1611" stroke="#E4ECE6" stroke-width="1.5"/><path d="M15 1.75 A13.25 13.25 0 0 1 15 28.25 Z" fill="#EEF2F6"/><circle cx="15" cy="15" r="4" fill="#F4B728" stroke="#0D1611" stroke-width="1.4"/></svg>Zecured</p>
+      <p>Built by Himess for ZECATHON 2026, Cross-Chain track, from 10 October 2026. A testnet experiment, not a financial product. MIT licence.</p>
+    </div>
+    <nav class="foot-cols" aria-label="More">
+      <div>
+        <p class="foot-h">Product</p>
+        <ul>
+          <li><a href="app/">The app</a></li>
+          <li><a href="#demo">See it run</a></li>
+          <li><a href="docs/">Docs</a></li>
+        </ul>
+      </div>
+      <div>
+        <p class="foot-h">Build</p>
+        <ul>
+          <li><a href="https://github.com/Himess/zecured">GitHub</a></li>
+          <li><a href="https://github.com/Himess/zecured#running-it">Run it yourself</a></li>
+          <li><a href="https://github.com/Himess/zecured/blob/main/docs/zip-draft-shielded-collateral-vaults.md">The draft ZIP</a></li>
+        </ul>
+      </div>
+      <div>
+        <p class="foot-h">Project</p>
+        <ul>
+          <li><a href="docs/#evidence">Evidence</a></li>
+          <li><a href="docs/#real">Real, and mock</a></li>
+          <li><a href="docs/#mainnet">Toward mainnet</a></li>
+        </ul>
+      </div>
+    </nav>
+    <p class="foot-note">This page loads nothing from anyone else: no analytics, no third-party fonts or scripts.</p>
   </div>
 </footer>
 </body>

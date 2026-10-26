@@ -16,6 +16,14 @@ document.documentElement.classList.add("js");
     }
   }
 
+  // A custom property on the page's root, written only when it changes (each write restyles the whole page).
+  const written = new Map();
+  function setVar(name, value) {
+    if (written.get(name) === value) return;
+    written.set(name, value);
+    root.style.setProperty(name, value);
+  }
+
   // Each element with .reveal (and the headline) comes in once it enters the view.
   function setUpReveals() {
     const items = document.querySelectorAll(".reveal, .display");
@@ -26,7 +34,7 @@ document.documentElement.classList.add("js");
     // Siblings that arrive together come in one after another.
     document.querySelectorAll(".panel, .hero-in, .stats, .doors, .versus").forEach((group) => {
       group.querySelectorAll(":scope > .reveal, :scope > li.reveal, :scope > div.reveal").forEach((el, i) => {
-        el.style.setProperty("--delay", `${Math.min(i, 6) * 0.08}s`);
+        el.style.setProperty("--delay", `${Math.min(i, 6) * 0.07}s`);
       });
     });
     const seen = new IntersectionObserver(
@@ -42,7 +50,8 @@ document.documentElement.classList.add("js");
     items.forEach((el) => seen.observe(el));
   }
 
-  // The figures count up once, when they come into view.
+  // The figures count up once, when they come into view. Each counting figure is hidden from screen readers, which
+  // read its final value from the label beside it.
   function setUpCounters() {
     const figures = Array.from(document.querySelectorAll(".stat-n[data-count]"));
     if (reduced || !("IntersectionObserver" in window)) return;
@@ -94,13 +103,15 @@ document.documentElement.classList.add("js");
     // Where a section's text ends, as a share of the screen: its right edge on a wide screen, its top on a tall one
     // (from the top of its own screen, so neither the scroll nor a reveal's transform moves it). The scene stands its
     // story in the space left over; 0 when the text runs across the screen.
-    const TEXT = ".panel > *, .hero-in > .eyebrow, .hero-in > .lead, .display .line > span, .ctas > *";
+    const TEXT = ".panel > *, .hero-in > .eyebrow, .hero-in > .lead, .hero-in > .proofline, .display .line > span, .ctas > *";
     const edges = new Map();
     function edgeOf(section) {
       if (!edges.has(section)) {
         const tall = window.innerWidth / window.innerHeight < 0.9;
         let edge = tall ? 1 : 0;
         section.querySelectorAll(TEXT).forEach((el) => {
+          // A picture only some readers get takes no room when it is not shown.
+          if (el.offsetParent === null) return;
           if (tall) edge = Math.min(edge, el.offsetTop / window.innerHeight);
           else edge = Math.max(edge, el.getBoundingClientRect().right / window.innerWidth);
         });
@@ -120,10 +131,12 @@ document.documentElement.classList.add("js");
           if (scene) {
             const edge = edgeOf(sections[i]);
             scene.setScroll(sections[i].dataset.scene, p, edge);
-            // On a tall screen the veil darkens from where the text begins (landing.css).
+            // On a tall screen the veil darkens from where the text begins, on a wide one up to where its lines end
+            // (landing.css).
             const tall = window.innerWidth / window.innerHeight < 0.9;
             root.classList.toggle("text-top", tall && edge > 0);
-            if (tall && edge > 0) root.style.setProperty("--text-top", edge.toFixed(3));
+            if (tall && edge > 0) setVar("--text-top", edge.toFixed(3));
+            if (!tall) setVar("--text-edge", edge.toFixed(3));
           }
           return;
         }
@@ -155,6 +168,8 @@ document.documentElement.classList.add("js");
         scene = startScene(canvas, {
           tags: document.querySelector(".stage .tags"),
           onReady: () => requestAnimationFrame(() => root.classList.add("scene-on")),
+          // If the GPU drops the scene, the still image comes back in its place.
+          onLost: () => root.classList.remove("scene-on"),
         });
         if (!scene) root.classList.add("no-scene");
         else place();
