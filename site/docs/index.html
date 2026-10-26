@@ -446,7 +446,7 @@
         <div class="tr" role="row"><span role="cell">Real Groth16 seals</span><span role="cell"><b>4 kinds</b> of real seal (deposit, F1, inclusion, payment) pass RISC Zero’s router, in 12 tests</span><span role="cell" class="mono">forge test --match-path test/fork/RealSealsV2.t.sol --isolate</span></div>
         <div class="tr" role="row"><span role="cell">On a Base mainnet fork</span><span role="cell"><b>533 pass</b>, the v3 suites, against mainnet’s Morpho Blue and RISC Zero router</span><span role="cell" class="mono">ZECURED_FORK_NETWORK=base-mainnet forge test --isolate</span></div>
         <div class="tr" role="row"><span role="cell">Rust workspace</span><span role="cell"><b>600 pass</b> in CI on Linux</span><span role="cell" class="mono">cargo test --workspace --locked</span></div>
-        <div class="tr" role="row"><span role="cell">App</span><span role="cell"><b>438 pass</b></span><span role="cell" class="mono">pnpm test</span></div>
+        <div class="tr" role="row"><span role="cell">App</span><span role="cell"><b>451 pass</b></span><span role="cell" class="mono">pnpm test</span></div>
         <div class="tr" role="row"><span role="cell">GPU proofs</span><span role="cell"><b>28.1 s</b> for a deposit, 36.9 s for an F1 violation, on one RTX 4090 (the STARK; the Groth16 wrap runs on a CPU)</span><span role="cell" class="mono">scripts/gpu-prove.sh</span></div>
         <div class="tr" role="row"><span role="cell">Leak scan</span><span role="cell"><b>0 matches</b> for 302 identifiers of our own runs</span><span role="cell" class="mono">cargo run -p zecured-leak-scan</span></div>
       </div>

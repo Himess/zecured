@@ -100,7 +100,7 @@ Every number on the site comes from a recorded run, and each has its source:
 | Halmos 22 of 22, for every input of a single call | TESTING § 1 |
 | 4 of 4 kinds of real proof (deposit, F1, inclusion, payment) pass RISC Zero’s router, in 12 tests (`RealSealsV2.t.sol`) | TESTING § 2, “Statement v2's seals on-chain” |
 | 533 on a Base mainnet fork (the v3 suites) | TESTING § 1, MAINNET § 1 |
-| Rust 600 (CI on Linux), app 438 | TESTING § 1 |
+| Rust 600 (CI on Linux), app 451 | TESTING § 1 |
 | GPU: a deposit in 28.1 s, an F1 in 36.9 s (the STARK); about a minute more for the Groth16 wrap (61.5 s on a 15-vCPU x86 machine) | TESTING § 2, 2026-10-21 and 2026-10-14 |
 | Leak scan: 302 identifiers (txids, note commitments, nullifiers, raw receivers, viewing and tag keys), 77 events, 55 calldata, 177 storage words, 0 matches | TESTING § 2 (P-6) and its leak scanner |
 | The browser run: 2 min 50 s, 4 min 25 s, 7 min 56 s (MOCK verifier on that fork); 729,131 gas | TESTING § 2 |
