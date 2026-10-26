@@ -520,7 +520,7 @@
       "at": null,
       "durationSeconds": null,
       "title": "Lock MockUSDC in the swap",
-      "detail": "Your wallet approves 25 MockUSDC and opens an order with the maker's signed quote; the MockUSDC waits in ZecuredSwap.",
+      "detail": "Your wallet approves 25.00 MockUSDC and opens an order with the maker's signed quote; the MockUSDC waits in ZecuredSwap.",
       "hint": "On Swap, press “DEMO: fill in 25.00”, then the one button each time it changes.",
       "href": "/buy",
       "tx": {

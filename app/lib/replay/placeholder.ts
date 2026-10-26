@@ -14,7 +14,8 @@ import { predictAccountAddress } from "../safe";
 import { vaultOpenedMessage } from "../signers";
 import { orderIdOf } from "../swap";
 import { encodeUnifiedAddress, TYPECODE_ORCHARD } from "../ua";
-import { zip321Uri } from "../zcash";
+import { formatUsdc } from "../morpho";
+import { formatZec, zip321Uri } from "../zcash";
 import { demoBytes32, demoKey } from "./demo-keys";
 import { REPLAY_SCHEMA, type ReplayRecording, type ReplayStep, type ReplayStepId } from "./types";
 
@@ -111,146 +112,34 @@ export async function buildPlaceholderRecording(): Promise<ReplayRecording> {
   const mmAmount = 1_756_530n;
   const userAmount = 4_975_000n - mmAmount;
 
+  const borrowAssets = 22_000_000n;
+  const swapUsdc = 25_000_000n;
   const base = (n: number) => dummyBase(n);
-  const steps: ReplayStep[] = [
-    step("opened", "loan", false, 0, {
-      title: "Open a vault",
-      detail: "Five signer nodes run a distributed key generation for a new 3-of-5 vault, and each signs its Ironwood address; nothing touches Base.",
-      hint: "On Borrow, press “Open a 0.05 TAZ vault”: five signer nodes make its key together.",
-      href: "/borrow",
-      tx: {},
-      artifacts: [
-        { label: "The five signers' VaultOpened signatures", chain: "offchain", tx: null, kind: "signatures", meta: { signers: "5 of 5", scheme: "EIP-712 VaultOpened v2" } },
-      ],
+  const steps = withTx(
+    replaySteps({
+      amount,
+      borrowAssets,
+      swapUsdc,
+      vaultId,
+      imageIds: { deposit: DEPOSIT_IMAGE_ID, violation: VIOLATION_IMAGE_ID, payment: PAYMENT_IMAGE_ID },
+      prover: "RISC Zero zkVM, Groth16",
+      feePaidAlone: false,
     }),
-    step("deposit-paid", "loan", false, 0, {
-      title: "Pay the vault from Ironwood",
-      detail: "The demo wallet pays the vault 0.05 TAZ in one Ironwood → Ironwood transaction on Zcash testnet.",
-      hint: "Press “Skip the backup (demo key)”, then “Pay it with demo TAZ”.",
-      href: "/borrow",
-      tx: { zcash: dummyZcash(2) },
-      artifacts: [{ label: "The deposit on Zcash", chain: "zcash", tx: null, kind: "tx" }],
-    }),
-    step("deposit-seen", "loan", true, 4_000, {
-      title: "Deposit confirmed on Zcash",
-      detail: "The signers see the deposit confirmed, then a proof that it is in a Zcash block is made.",
-      hint: "Confirmations come in; the proof is being made.",
-      href: "/borrow",
-      tx: {},
-      artifacts: [],
-    }),
-    step("proven", "loan", true, 9_000, {
-      title: "Deposit proven on Base",
-      detail: "Base checks the proof against a Zcash header its relay already verified: no one's word is taken.",
-      hint: "Base verifies the proof.",
-      href: "/borrow",
-      tx: { base: base(4) },
-      artifacts: [
-        {
-          label: "attestDepositWithProof: the deposit proof, verified on Base",
-          chain: "base",
-          tx: null,
-          kind: "proof",
-          meta: { imageId: DEPOSIT_IMAGE_ID, prover: "RISC Zero zkVM, Groth16" },
-        },
-      ],
-    }),
-    step("activated", "loan", true, 7_000, {
-      title: "zZEC minted into Morpho",
-      detail: "A few Zcash blocks later the activation finalizes: zZEC is minted straight into Morpho Blue.",
-      hint: "The keeper activates the deposit.",
-      href: "/borrow",
-      tx: { base: base(5) },
-      artifacts: [{ label: "Activation: zZEC supplied as collateral", chain: "base", tx: null, kind: "tx" }],
-    }),
-    step("borrowed", "loan", false, 0, {
-      title: "Borrow MockUSDC",
-      detail: "One sponsored UserOp deploys a fresh Safe, authorizes Zecured on Morpho Blue and borrows 22.00 MockUSDC; the account never holds ETH.",
-      hint: "Press “Borrow against it”, then “DEMO: fill in 22.00” and “Create account and borrow”.",
-      href: "/borrow",
-      tx: { base: base(6), userOp: dummyBase(0x60) },
-      artifacts: [{ label: "Sponsored UserOp: deploy, authorize, borrow", chain: "base", tx: null, kind: "tx" }],
-    }),
-    step("destination", "loan", false, 0, {
-      title: "Give an Ironwood destination",
-      detail: "The signers validate a fresh Ironwood address for the payout; Base only ever sees a salted commitment to it.",
-      hint: "On your loan, under “What next?”, press “Send my ZEC back to the demo wallet”.",
-      href: `/position#${vaultId}`,
-      tx: {},
-      artifacts: [],
-    }),
-    step("close-executed", "loan", false, 0, {
-      title: "Close from collateral",
-      detail: "A market maker repays the debt on Morpho and takes its value in ZEC from the vault; the rest is owed to your destination.",
-      hint: "Press “Get a market maker's quote”, then “Sign and send to the market maker”.",
-      href: `/position#${vaultId}`,
-      tx: { base: base(8) },
-      artifacts: [{ label: "closeWithCollateral, sent by the market maker", chain: "base", tx: null, kind: "tx" }],
-    }),
-    step("payouts-committed", "loan", true, 5_000, {
-      title: "Payout committed on Base",
-      detail: "The signers commit the payout on Base before signing it: paying anyone else is provable theft.",
-      hint: "The signers commit the payout.",
-      href: `/position#${vaultId}`,
-      tx: { base: base(9) },
-      artifacts: [{ label: "The payout's commitment", chain: "base", tx: null, kind: "tx" }],
-    }),
-    step("payouts-sent", "loan", true, 5_000, {
-      title: "Paid on Zcash",
-      detail: "Three of five signers sign one FROST transaction paying you, the market maker and the fee.",
-      hint: "The signers pay on Zcash.",
-      href: `/position#${vaultId}`,
-      tx: { zcash: dummyZcash(10) },
-      artifacts: [{ label: "The FROST 3-of-5 payout on Zcash", chain: "zcash", tx: null, kind: "tx" }],
-    }),
-    step("payouts-confirmed", "loan", true, 8_000, {
-      title: "Payout proven on Base",
-      detail: "A zero-knowledge proof that the payout is in a Zcash block makes every claim of the vault final.",
-      hint: "The payout's proof lands on Base.",
-      href: `/position#${vaultId}`,
-      tx: { base: base(11) },
-      artifacts: [
-        { label: "The payout, confirmed and proven on Base", chain: "base", tx: null, kind: "proof", meta: { imageId: VIOLATION_IMAGE_ID, prover: "RISC Zero zkVM, Groth16" } },
-      ],
-    }),
-    step("swap-opened", "swap", false, 0, {
-      title: "Lock MockUSDC in the swap",
-      detail: "Your wallet approves 25 MockUSDC and opens an order with the maker's signed quote; the MockUSDC waits in ZecuredSwap.",
-      hint: "On Swap, press “DEMO: fill in 25.00”, then the one button each time it changes.",
-      href: "/buy",
-      tx: { base: base(12), approve: dummyBase(0xc0) },
-      artifacts: [
-        { label: "MockUSDC approval", chain: "base", tx: null, kind: "tx" },
-        { label: "The order, opened on ZecuredSwap", chain: "base", tx: null, kind: "tx" },
-      ],
-    }),
-    step("swap-paid", "swap", true, 6_000, {
-      title: "The maker pays on Zcash",
-      detail: "The maker pays the ZEC to your Ironwood address, with the order id in the memo.",
-      hint: "The maker pays.",
-      href: "/buy",
-      tx: { zcash: dummyZcash(13) },
-      artifacts: [{ label: "The maker's payment on Zcash", chain: "zcash", tx: null, kind: "tx" }],
-    }),
-    step("swap-proven", "swap", true, 8_000, {
-      title: "Payment proven on Base",
-      detail: "The maker proves its payment in zero knowledge; settling waits for a deep enough Zcash header.",
-      hint: "The maker proves its payment.",
-      href: "/buy",
-      tx: { base: base(14) },
-      artifacts: [
-        { label: "The payment proof, verified on Base", chain: "base", tx: null, kind: "proof", meta: { imageId: PAYMENT_IMAGE_ID, prover: "RISC Zero zkVM, Groth16" } },
-      ],
-    }),
-    step("swap-settled", "swap", true, 6_000, {
-      title: "MockUSDC released to the maker",
-      detail: "Settled: you hold shielded ZEC, the maker the MockUSDC; no custodian, no signer in between.",
-      hint: "The order settles.",
-      href: "/buy",
-      tx: { base: base(15) },
-      artifacts: [{ label: "Settlement", chain: "base", tx: null, kind: "tx" }],
-    }),
-  ];
+    {
+      "deposit-paid": { zcash: dummyZcash(2) },
+      proven: { base: base(4) },
+      activated: { base: base(5) },
+      borrowed: { base: base(6), userOp: dummyBase(0x60) },
+      "close-executed": { base: base(8) },
+      "payouts-committed": { base: base(9) },
+      "payouts-sent": { zcash: dummyZcash(10) },
+      "payouts-confirmed": { base: base(11) },
+      "swap-opened": { base: base(12), approve: dummyBase(0xc0) },
+      "swap-paid": { zcash: dummyZcash(13) },
+      "swap-proven": { base: base(14) },
+      "swap-settled": { base: base(15) },
+    },
+  );
 
   return {
     schema: REPLAY_SCHEMA,
@@ -338,7 +227,7 @@ export async function buildPlaceholderRecording(): Promise<ReplayRecording> {
       depositTag: demoBytes32("deposit tag"),
       anchor: demoBytes32("deposit anchor"),
       versionId: demoBytes32("deposit version"),
-      borrow: { assets: "22000000", protected: false },
+      borrow: { assets: borrowAssets.toString(), protected: false },
       close: {
         executor,
         marginBps: 100,
@@ -358,7 +247,7 @@ export async function buildPlaceholderRecording(): Promise<ReplayRecording> {
       taker,
       takerUsdc: "100000000",
       zatoshi: "1956500",
-      usdc: "25000000",
+      usdc: swapUsdc.toString(),
       makerReceiverCommitment: demoBytes32("maker receiver commitment"),
       receiverCommitment: demoBytes32("swap receiver commitment"),
       payWindow: 3_600,
@@ -389,7 +278,167 @@ function step(
   track: ReplayStep["track"],
   auto: boolean,
   delayMs: number,
-  rest: Pick<ReplayStep, "title" | "detail" | "hint" | "href" | "tx" | "artifacts">,
+  rest: Pick<ReplayStep, "title" | "detail" | "hint" | "href" | "artifacts">,
 ): ReplayStep {
-  return { id, track, auto, delayMs, at: null, durationSeconds: null, ...rest };
+  // In the recording's key order: the hashes after the page, before the artifacts.
+  const { title, detail, hint, href, artifacts } = rest;
+  return { id, track, auto, delayMs, at: null, durationSeconds: null, title, detail, hint, href, tx: {}, artifacts };
+}
+
+/** What a step's words and artifacts depend on: the recorded amounts, the vault, the proofs' guests and prover. */
+export interface StepParams {
+  /** The vault's size, zatoshi. */
+  amount: bigint;
+  /** The borrow and the swap, in loan-token units (6 decimals). */
+  borrowAssets: bigint;
+  swapUsdc: bigint;
+  vaultId: Hex;
+  imageIds: { deposit: Hex; violation: Hex; payment: Hex };
+  /** What made the proofs, as the dock names it. */
+  prover: string;
+  /** The opening fee went out in a payout of its own after the activation (a live run), not with the close's. */
+  feePaidAlone: boolean;
+}
+
+/**
+ * The run's fifteen steps as the replay's dock tells them, for the placeholder and for a recorded run alike (the
+ * harvester, lib/replay/harvest.ts): their words, pages, which follow by themselves and how fast, and what each leaves
+ * behind. No transaction yet: `tx` empty, every artifact's `tx` null, no times.
+ */
+export function replaySteps(p: StepParams): ReplayStep[] {
+  const taz = `${formatZec(p.amount)} TAZ`;
+  const borrow = formatUsdc(p.borrowAssets);
+  const swap = formatUsdc(p.swapUsdc);
+  const position = `/position#${p.vaultId}`;
+  return [
+    step("opened", "loan", false, 0, {
+      title: "Open a vault",
+      detail: "Five signer nodes run a distributed key generation for a new 3-of-5 vault, and each signs its Ironwood address; nothing touches Base.",
+      hint: `On Borrow, press “Open a ${taz} vault”: five signer nodes make its key together.`,
+      href: "/borrow",
+      artifacts: [
+        { label: "The five signers' VaultOpened signatures", chain: "offchain", tx: null, kind: "signatures", meta: { signers: "5 of 5", scheme: "EIP-712 VaultOpened v2" } },
+      ],
+    }),
+    step("deposit-paid", "loan", false, 0, {
+      title: "Pay the vault from Ironwood",
+      detail: `The demo wallet pays the vault ${taz} in one Ironwood → Ironwood transaction on Zcash testnet.`,
+      hint: "Press “Skip the backup (demo key)”, then “Pay it with demo TAZ”.",
+      href: "/borrow",
+      artifacts: [{ label: "The deposit on Zcash", chain: "zcash", tx: null, kind: "tx" }],
+    }),
+    step("deposit-seen", "loan", true, 4_000, {
+      title: "Deposit confirmed on Zcash",
+      detail: "The signers see the deposit confirmed, then a proof that it is in a Zcash block is made.",
+      hint: "Confirmations come in; the proof is being made.",
+      href: "/borrow",
+      artifacts: [],
+    }),
+    step("proven", "loan", true, 9_000, {
+      title: "Deposit proven on Base",
+      detail: "Base checks the proof against a Zcash header its relay already verified: no one's word is taken.",
+      hint: "Base verifies the proof.",
+      href: "/borrow",
+      artifacts: [
+        {
+          label: "attestDepositWithProof: the deposit proof, verified on Base",
+          chain: "base",
+          tx: null,
+          kind: "proof",
+          meta: { imageId: p.imageIds.deposit, prover: p.prover },
+        },
+      ],
+    }),
+    step("activated", "loan", true, 7_000, {
+      title: "zZEC minted into Morpho",
+      detail: "A few Zcash blocks later the activation finalizes: zZEC is minted straight into Morpho Blue.",
+      hint: "The keeper activates the deposit.",
+      href: "/borrow",
+      artifacts: [{ label: "Activation: zZEC supplied as collateral", chain: "base", tx: null, kind: "tx" }],
+    }),
+    step("borrowed", "loan", false, 0, {
+      title: "Borrow MockUSDC",
+      detail: `One sponsored UserOp deploys a fresh Safe, authorizes Zecured on Morpho Blue and borrows ${borrow} MockUSDC; the account never holds ETH.`,
+      hint: `Press “Borrow against it”, then “DEMO: fill in ${borrow}” and “Create account and borrow”.`,
+      href: "/borrow",
+      artifacts: [{ label: "Sponsored UserOp: deploy, authorize, borrow", chain: "base", tx: null, kind: "tx" }],
+    }),
+    step("destination", "loan", false, 0, {
+      title: "Give an Ironwood destination",
+      detail: "The signers validate a fresh Ironwood address for the payout; Base only ever sees a salted commitment to it.",
+      hint: "On your loan, under “What next?”, press “Send my ZEC back to the demo wallet”.",
+      href: position,
+      artifacts: [],
+    }),
+    step("close-executed", "loan", false, 0, {
+      title: "Close from collateral",
+      detail: "A market maker repays the debt on Morpho and takes its value in ZEC from the vault; the rest is owed to your destination.",
+      hint: "Press “Get a market maker's quote”, then “Sign and send to the market maker”.",
+      href: position,
+      artifacts: [{ label: "closeWithCollateral, sent by the market maker", chain: "base", tx: null, kind: "tx" }],
+    }),
+    step("payouts-committed", "loan", true, 5_000, {
+      title: "Payout committed on Base",
+      detail: "The signers commit the payout on Base before signing it: paying anyone else is provable theft.",
+      hint: "The signers commit the payout.",
+      href: position,
+      artifacts: [{ label: "The payout's commitment", chain: "base", tx: null, kind: "tx" }],
+    }),
+    step("payouts-sent", "loan", true, 5_000, {
+      title: "Paid on Zcash",
+      detail: p.feePaidAlone
+        ? "Three of five signers sign one FROST transaction paying you and the market maker."
+        : "Three of five signers sign one FROST transaction paying you, the market maker and the fee.",
+      hint: "The signers pay on Zcash.",
+      href: position,
+      artifacts: [{ label: "The FROST 3-of-5 payout on Zcash", chain: "zcash", tx: null, kind: "tx" }],
+    }),
+    step("payouts-confirmed", "loan", true, 8_000, {
+      title: "Payout proven on Base",
+      detail: "A zero-knowledge proof that the payout is in a Zcash block makes every claim of the vault final.",
+      hint: "The payout's proof lands on Base.",
+      href: position,
+      artifacts: [
+        { label: "The payout, confirmed and proven on Base", chain: "base", tx: null, kind: "proof", meta: { imageId: p.imageIds.violation, prover: p.prover } },
+      ],
+    }),
+    step("swap-opened", "swap", false, 0, {
+      title: "Lock MockUSDC in the swap",
+      detail: `Your wallet approves ${swap} MockUSDC and opens an order with the maker's signed quote; the MockUSDC waits in ZecuredSwap.`,
+      hint: `On Swap, press “DEMO: fill in ${swap}”, then the one button each time it changes.`,
+      href: "/buy",
+      artifacts: [
+        { label: "MockUSDC approval", chain: "base", tx: null, kind: "tx" },
+        { label: "The order, opened on ZecuredSwap", chain: "base", tx: null, kind: "tx" },
+      ],
+    }),
+    step("swap-paid", "swap", true, 6_000, {
+      title: "The maker pays on Zcash",
+      detail: "The maker pays the ZEC to your Ironwood address, with the order id in the memo.",
+      hint: "The maker pays.",
+      href: "/buy",
+      artifacts: [{ label: "The maker's payment on Zcash", chain: "zcash", tx: null, kind: "tx" }],
+    }),
+    step("swap-proven", "swap", true, 8_000, {
+      title: "Payment proven on Base",
+      detail: "The maker proves its payment in zero knowledge; settling waits for a deep enough Zcash header.",
+      hint: "The maker proves its payment.",
+      href: "/buy",
+      artifacts: [
+        { label: "The payment proof, verified on Base", chain: "base", tx: null, kind: "proof", meta: { imageId: p.imageIds.payment, prover: p.prover } },
+      ],
+    }),
+    step("swap-settled", "swap", true, 6_000, {
+      title: "MockUSDC released to the maker",
+      detail: "Settled: you hold shielded ZEC, the maker the MockUSDC; no custodian, no signer in between.",
+      hint: "The order settles.",
+      href: "/buy",
+      artifacts: [{ label: "Settlement", chain: "base", tx: null, kind: "tx" }],
+    }),
+  ];
+}
+
+/** The steps with the hashes the app shows for each (`tx`), from `txs`. */
+export function withTx(steps: ReplayStep[], txs: Partial<Record<ReplayStepId, ReplayStep["tx"]>>): ReplayStep[] {
+  return steps.map((s) => ({ ...s, tx: txs[s.id] ?? {} }));
 }

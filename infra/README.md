@@ -103,8 +103,10 @@ first one watches the public stack.
 
 **One prover for both.** Set each stack's prover (the backend's `DEPOSIT_PROOF_HOST`, and the maker's) to
 `/opt/zecured/src/infra/prover-lock.sh`, with `ZECURED_PROVER_HOST` naming that network's `zecured-tier2-host` build
-(the Mainnet one is built with `--features mainnet`). The wrapper holds one lock for each whole proof, so the stacks
-take turns on the GPU; each coordinator keeps its own queue.
+(the Mainnet one is built with `--features mainnet`). The wrapper takes one lock for the STARKs and another for the
+Groth16 wraps, so two proofs never share the GPU and two wraps never share the memory; each coordinator keeps its own
+queue. A cuda build's own Groth16 wrap fails (docs/TESTING.md § 2b): set `ZECURED_PROVER_GROTH16_HOST` to a build
+without cuda, which wraps with Docker on x86, and the wrapper sends every `groth16` there.
 
 ```bash
 sudo install -d -o zecured -g zecured -m 0700 /var/lib/zecured-prover
