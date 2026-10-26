@@ -107,6 +107,8 @@ jobs:
         env:
           NEXT_PUBLIC_BASE_PATH: /zecured/app
           ZECURED_TYPECHECKED: "1"
+      # The live build too, as a deployment makes it (its pins come from scripts/pin-deployment.mjs; here a fork's).
+      - run: node scripts/pin-deployment.mjs anvil http://127.0.0.1:8080 > .env.local && pnpm build
 
   # The site in a real browser: same origin only, axe, no-JS, keyboard, reduced motion, no WebGL, four widths,
   # and the scene's bundle built from its source.
