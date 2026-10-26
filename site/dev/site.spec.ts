@@ -254,6 +254,26 @@ test("every link inside the site has a target", async ({ page }) => {
   expect(missing).toEqual([]);
 });
 
+test("a missing page gets the site's 404 page, styled, with its way back", async ({ page }) => {
+  const failed: string[] = [];
+  page.on("requestfailed", (r) => failed.push(r.url()));
+  page.on("response", (r) => {
+    if (r.status() >= 400 && !r.url().endsWith("/no-such-page/")) failed.push(`${r.status()} ${r.url()}`);
+  });
+  const response = await page.goto("/no-such-page/");
+  expect(response?.status()).toBe(404);
+  await expect(page).toHaveTitle(/Page not found/);
+  await expect(page.locator(".lost-t")).toBeVisible();
+  // The stylesheet and its fonts load from the site's root, whatever the missing path was.
+  await expect(page.locator(".lost-t")).toHaveCSS("font-family", /Archivo/);
+  const links = await page.locator(".lost-links a").evaluateAll((all) => all.map((a) => a.getAttribute("href")));
+  expect(links).toEqual(["/app/", "/", "/docs/"]);
+  expect(await page.content()).not.toContain("{{BASE}}");
+  expect(failed).toEqual([]);
+  const result = await new AxeBuilder({ page }).analyze();
+  expect(result.violations.map((v) => v.id)).toEqual([]);
+});
+
 test("site/scene.js is what site/dev/scene builds to", async () => {
   const out = await build({ ...sceneBuild, write: false });
   const fresh = out.outputFiles[0].text.replace(/\r\n/g, "\n");

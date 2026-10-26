@@ -1,4 +1,5 @@
-// The tests' static server: the site's files as GitHub Pages serves them (site/ without dev/), nothing else.
+// The tests' static server: the site's files as GitHub Pages serves them (site/ without dev/), nothing else. A missing
+// path gets the site's 404 page with a 404 status, its {{BASE}} written as the root, as the publishing workflow does.
 import { createServer } from "node:http";
 import { readFile, stat } from "node:fs/promises";
 import { extname, resolve } from "node:path";
@@ -30,7 +31,13 @@ createServer(async (req, res) => {
     res.writeHead(200, { "content-type": types[extname(file)] ?? "application/octet-stream" });
     res.end(req.method === "HEAD" ? undefined : body);
   } catch {
-    res.writeHead(404, { "content-type": "text/plain; charset=utf-8" });
-    res.end("not found");
+    try {
+      const page = (await readFile(resolve(root, "404.html"), "utf8")).replaceAll("{{BASE}}", "");
+      res.writeHead(404, { "content-type": "text/html; charset=utf-8" });
+      res.end(req.method === "HEAD" ? undefined : page);
+    } catch {
+      res.writeHead(404, { "content-type": "text/plain; charset=utf-8" });
+      res.end("not found");
+    }
   }
 }).listen(port, "127.0.0.1", () => console.log(`site on http://127.0.0.1:${port}`));
