@@ -407,7 +407,9 @@ interface LogFilter {
 
 function getLogs(m: Model, f: LogFilter): Record<string, unknown>[] {
   const from = blockNumberOf(f.fromBlock ?? "latest", m);
-  const to = blockNumberOf(f.toBlock ?? "latest", m);
+  // Nothing past the latest sealed block (see the model's `block`).
+  const asked = blockNumberOf(f.toBlock ?? "latest", m);
+  const to = asked < m.block ? asked : m.block;
   const addresses = f.address === undefined ? null : (Array.isArray(f.address) ? f.address : [f.address]).map((a) => a.toLowerCase());
   return m.logs
     .filter((l) => l.blockNumber >= from && l.blockNumber <= to)

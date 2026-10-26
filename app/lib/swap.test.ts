@@ -273,7 +273,7 @@ describe("reading the order's events through the proxy", () => {
     return { client, ranges };
   }
 
-  it("reads 2,000-block windows from the open block, keeps a cursor, and a dropped proof is no proof", async () => {
+  it("reads 2,000-block windows from the open block, keeps a cursor that re-reads the last blocks, and a dropped proof is no proof", async () => {
     const logs = new Map([
       [2_500n, [{ name: "SettlementPending" }]],
       [3_100n, [{ name: "SettlementDropped" }]],
@@ -281,16 +281,17 @@ describe("reading the order's events through the proxy", () => {
     const { client, ranges } = chain(4_500n, logs);
     const after = await followOrder(client, ORDER);
     expect(ranges).toEqual([
-      [1_001n, 3_000n],
-      [3_001n, 4_500n],
+      [1_000n, 2_999n],
+      [3_000n, 4_500n],
     ]);
     expect(after).toMatchObject({ proven: false, settled: false, scannedTo: "4500" });
-    // Proven again later, then settled: only the new blocks are read.
-    logs.set(4_600n, [{ name: "SettlementPending" }]);
+    // Proven again, by an event of block 4,495 that a provider trailing its head served only after the cursor
+    // passed it, then settled: the new blocks are read, and the last 12 again.
+    logs.set(4_495n, [{ name: "SettlementPending" }]);
     logs.set(4_700n, [{ name: "OrderSettled" }]);
     const second = chain(5_000n, logs);
     const done = await followOrder(second.client, after);
-    expect(second.ranges).toEqual([[4_501n, 5_000n]]);
+    expect(second.ranges).toEqual([[4_489n, 5_000n]]);
     expect(done).toMatchObject({ proven: true, settled: true, scannedTo: "5000" });
   });
 

@@ -154,7 +154,9 @@ export function buildModel(w: ReplayWorld, t: number = w.now()): Model {
   const blockAt = (ms: number): bigint => block0 + BigInt(Math.max(0, Math.floor((ms - epochMs) / BASE_BLOCK_MS)));
   const timeOf = (n: bigint): bigint => epochSec + (n - block0) * 2n;
   const secAt = (ms: number): bigint => timeOf(blockAt(ms));
-  const block = blockAt(t);
+  // The latest block is the last one sealed: the block under way can still take a step's transaction, so a
+  // reader whose cursor reached "latest" just before a step in the same 2 s never skips the step's logs.
+  const block = blockAt(t) - 1n;
 
   const amount = BigInt(r.loan.amount);
   const v3 = r.config.v3;

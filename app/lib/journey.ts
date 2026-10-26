@@ -31,6 +31,10 @@ const REGISTRY_EVENTS = [
 const topic = (abi: readonly unknown[], name: string): Hex => encodeEventTopics({ abi, eventName: name } as never)[0] as Hex;
 const padAddress = (a: Address): Hex => `0x${getAddress(a).slice(2).toLowerCase().padStart(64, "0")}` as Hex;
 const hexBlock = (n: bigint) => `0x${n.toString(16)}`;
+/** Blocks read again on each forward read (steps are keyed by transaction and log, so a second read adds nothing). */
+const RESCAN = 12n;
+/** Without the loan's creation time, how far back the scan may ever go: 40 windows, about 44 hours of Base. */
+const BLIND_DEPTH = 40n * LOG_CHUNK;
 
 export type JourneyKind =
   | "proven"
@@ -174,8 +178,10 @@ export interface Journey {
   steps: JourneyStep[];
   /** The block of each step's time (Unix s), for the steps read so far. */
   times: Map<bigint, number>;
-  /** The scan reached the vault's proof (its first event), or the start of the chain. */
+  /** The scan reached the vault's proof (its first event), the loan's creation, or the start of the chain. */
   complete: boolean;
+  /** Without the loan's creation time, the scan stopped BLIND_DEPTH back without the proof: older blocks were not read. */
+  truncated: boolean;
 }
 
 /** Scan state per client and vault: what was read, and down to which block. */
@@ -184,6 +190,8 @@ interface Scan {
   times: Map<bigint, number>;
   top: bigint;
   bottom: bigint;
+  /** The latest block at the first read. */
+  start: bigint;
   complete: boolean;
 }
 const scans = new WeakMap<PublicClient, Map<string, Scan>>();
@@ -206,22 +214,23 @@ export async function readJourney(
   const latest = await c.getBlock({ blockTag: "latest" });
   let scan = perClient.get(key);
   if (!scan) {
-    scan = { steps: new Map(), times: new Map(), top: latest.number, bottom: latest.number + 1n, complete: false };
+    scan = { steps: new Map(), times: new Map(), top: latest.number, bottom: latest.number + 1n, start: latest.number, complete: false };
     perClient.set(key, scan);
   }
   const add = (list: JourneyStep[]) => {
     for (const s of list) scan!.steps.set(`${s.txHash}:${s.logIndex}`, s);
   };
-  // New blocks since the last read.
+  // New blocks since the last read, and the last RESCAN blocks again (a provider whose logs trail its head).
   if (scan.bottom <= scan.top && latest.number > scan.top) {
-    for (let from = scan.top + 1n; from <= latest.number; ) {
+    const again = scan.top + 1n - RESCAN;
+    for (let from = again > scan.bottom ? again : scan.bottom; from <= latest.number; ) {
       const to = from + LOG_CHUNK - 1n < latest.number ? from + LOG_CHUNK - 1n : latest.number;
       add(await windowSteps(c, vaultId, account, from, to, deps));
       from = to + 1n;
     }
     scan.top = latest.number;
   }
-  // Backwards until the proof, the loan's creation, or the bound.
+  // Backwards until the proof, the loan's creation, or, without it, BLIND_DEPTH before the first read.
   const floor =
     opts.since !== undefined
       ? (() => {
@@ -229,8 +238,10 @@ export async function readJourney(
           const ago = BigInt(Math.max(0, Math.floor((Number(latest.timestamp) * 1000 - opts.since) / 2000) + 300));
           return latest.number > ago ? latest.number - ago : 0n;
         })()
-      : 0n;
-  // Bounded by the loan's creation, the scan may reach back further; a vault viewed without it, about 11 hours.
+      : scan.start > BLIND_DEPTH
+        ? scan.start - BLIND_DEPTH
+        : 0n;
+  // Per read: bounded by the loan's creation, up to 40 windows; a vault viewed without it, 10 (about 11 hours).
   const maxChunks = opts.maxChunks ?? (opts.since !== undefined ? 40 : 10);
   for (let i = 0; i < maxChunks && !scan.complete; i++) {
     const to = scan.bottom - 1n;
@@ -266,7 +277,8 @@ export async function readJourney(
       scan.times.set(s.blockNumber, Number(b.timestamp));
     }
   }
-  return { steps, times: new Map(scan.times), complete: scan.complete };
+  const truncated = scan.complete && opts.since === undefined && floor > 0n && !steps.some((s) => s.kind === "proven");
+  return { steps, times: new Map(scan.times), complete: scan.complete, truncated };
 }
 
 /** The vault's trail, read once and then every `intervalMs` for new blocks; disabled without contracts. */
@@ -287,7 +299,14 @@ export function useJourney(
     }
     let stop = false;
     let timer: ReturnType<typeof setTimeout> | undefined;
+    // DEMO: the replay's steps come seconds apart, as the other polls (hooks.ts) follow them.
+    const every = REPLAY ? Math.min(intervalMs, 2_500) : intervalMs;
     const tick = async () => {
+      // A hidden tab reads nothing; it catches up on the first tick after it is shown.
+      if (typeof document !== "undefined" && document.hidden) {
+        timer = setTimeout(tick, every);
+        return;
+      }
       try {
         const j = await readJourney(vaultId, account ?? null, { since: sinceRef.current });
         if (!stop) {
@@ -299,8 +318,7 @@ export function useJourney(
       } finally {
         if (!stop) {
           setLoading(false);
-          // DEMO: the replay's steps come seconds apart, as the other polls (hooks.ts) follow them.
-          timer = setTimeout(tick, REPLAY ? Math.min(intervalMs, 2_500) : intervalMs);
+          timer = setTimeout(tick, every);
         }
       }
     };

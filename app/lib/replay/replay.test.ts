@@ -4,6 +4,7 @@ import { baseSepolia } from "viem/chains";
 import { ApiError, createApi } from "../api";
 import { borrowCalls } from "../calls";
 import { isNonceUsed, readPosition, readRecentRegistryEvents, readVaultLedger } from "../chain";
+import { readJourney } from "../journey";
 import { buildConfig, type AppConfig } from "../config";
 import { solveDemoStamp } from "../demo";
 import { openVault, submitDestination } from "../owner";
@@ -14,8 +15,10 @@ import { createReplayFetch } from "./fetch";
 import { REPLAY_BASE_URL } from "./flag";
 import { stepViews } from "./index";
 import { createReplayLoan } from "./loans";
+import { BASE_BLOCK_MS } from "./model";
 import { replayBuildEnv } from "./pins";
 import { recording } from "./recording";
+import type { ReplayStepId } from "./types";
 import { ReplayWorld, WORLD_KEY, type WorldStorage } from "./world";
 import { replayWallet } from "./wallet";
 
@@ -56,6 +59,20 @@ function memoryStorage(): WorldStorage & { map: Map<string, string>; length: num
 
 const delay = (id: string) => rec.steps.find((s) => s.id === id)!.delayMs;
 const txOf = (id: string) => rec.steps.find((s) => s.id === id)!.tx;
+
+/**
+ * A poll in the 2 s Base block of automatic step `id`, just before the step, then one a block after it: what a
+ * page polling every few seconds can do. The second poll must still see the step's events.
+ */
+async function aroundStep(w: ReplayWorld, clock: { t: number }, id: ReplayStepId, poll: () => Promise<unknown>) {
+  const due = w.doneAt(id)!;
+  const blockStart = w.epochMs + Math.floor((due - w.epochMs) / BASE_BLOCK_MS) * BASE_BLOCK_MS;
+  expect(blockStart).toBeLessThan(due);
+  clock.t = blockStart;
+  await poll();
+  clock.t = due + BASE_BLOCK_MS;
+  await poll();
+}
 
 describe("the replay", () => {
   it("walks the recorded loan as the live run did, through the app's own code", async () => {
@@ -176,6 +193,8 @@ describe("the replay", () => {
     ledger = await readVaultLedger(vaultId, { client, config });
     expect(ledger.unpaidClaims).toBe(0);
     expect(ledger.claims.every((c) => c.status === "Paid" && c.paidAt === 0)).toBe(true);
+    // The proof's logs show once its block is sealed, the next one.
+    advance(BASE_BLOCK_MS);
     const events = await readRecentRegistryEvents({ client, config });
     expect(events.map((e) => e.name).sort()).toEqual(
       ["CloseRelease", "FeeCharged", "PayoutConfirmed", "PayoutProven", "PayoutProven", "PayoutProven", "VaultActivated"].sort(),
@@ -186,8 +205,10 @@ describe("the replay", () => {
   });
 
   it("walks the recorded swap with the replay's wallet", async () => {
-    const { w, api, config, client, advance } = await setup();
+    const { w, api, config, client, advance, clock } = await setup();
     const s = rec.swap;
+    // Half a block in: each automatic step is then due inside a block, after its start (see aroundStep).
+    advance(BASE_BLOCK_MS / 4);
     const wallet = replayWallet(w);
     const [taker] = (await wallet.request({ method: "eth_requestAccounts" })) as string[];
     expect(taker).toBe(getAddress(s.taker));
@@ -246,17 +267,45 @@ describe("the replay", () => {
     expect(await api.getSwapOrder(s.orderId)).toBe("awaiting_destination");
     await api.postSwapDestination(s.orderId, rec.demo.returnAddress, stored.salt);
     expect(await api.getSwapOrder(s.orderId)).toBe("destination_received");
-    advance(delay("swap-paid"));
+    // The page follows the order every few seconds, its cursor carried from one read to the next.
+    let followed = stored;
+    const follow = async () => {
+      followed = await followOrder(client, followed);
+    };
+    await aroundStep(w, clock, "swap-paid", follow);
     expect(await api.getSwapOrder(s.orderId)).toBe("paid");
-    advance(delay("swap-proven"));
-    expect((await followOrder(client, stored)).proven).toBe(true);
-    advance(delay("swap-settled"));
-    const final = await followOrder(client, stored);
-    expect([final.proven, final.settled, final.refunded]).toEqual([true, true, false]);
+    expect(followed.proven).toBe(false);
+    await aroundStep(w, clock, "swap-proven", follow);
+    expect(followed.proven).toBe(true);
+    await aroundStep(w, clock, "swap-settled", follow);
+    expect([followed.proven, followed.settled, followed.refunded]).toEqual([true, true, false]);
     expect(await api.getSwapOrder(s.orderId)).toBe("settled");
     expect(w.pending("swap")).toBeNull();
     // The swap's track is independent of the loan's, which has not started.
     expect(w.pending("loan")?.id).toBe("opened");
+  });
+
+  it("lists every step of the loan's trail, even when a read lands in a step's block just before it", async () => {
+    const { w, config, client, clock } = await setup();
+    const poll = () => readJourney(rec.loan.vault.vaultId, getAddress(rec.loan.account), { since: w.epochMs, client, config });
+    clock.t += BASE_BLOCK_MS / 4;
+    w.complete("opened");
+    w.complete("deposit-paid");
+    for (const id of ["deposit-seen", "proven", "activated"] as const) await aroundStep(w, clock, id, poll);
+    w.complete("borrowed");
+    w.complete("destination");
+    clock.t += BASE_BLOCK_MS;
+    await poll();
+    w.complete("close-executed");
+    for (const id of ["payouts-committed", "payouts-sent", "payouts-confirmed"] as const) await aroundStep(w, clock, id, poll);
+    const j = await poll();
+    expect(j.steps.map((s) => s.kind)).toEqual(["proven", "activated", "borrowed", "close", "committed", "confirmed", "payout-proven"]);
+    expect(j.steps.map((s) => s.txHash)).toEqual(
+      (["proven", "activated", "borrowed", "close-executed", "payouts-committed", "payouts-confirmed", "payouts-confirmed"] as const).map(
+        (id) => txOf(id).base,
+      ),
+    );
+    expect([j.complete, j.truncated]).toEqual([true, false]);
   });
 
   it("refuses what the replay never does", async () => {
