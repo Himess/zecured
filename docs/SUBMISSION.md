@@ -6,6 +6,7 @@ through judging (DECISIONS D82): the evidence is in TESTING.md, and the README r
 on a local fork.
 
 **Links.** The site: https://himess.github.io/zecured/ (the details: https://himess.github.io/zecured/docs/).
+The app, as a replay of the live run that plays in the browser (DEMO, no server needed): https://himess.github.io/zecured/app/.
 The demo video: [VIDEO LINK, published October 26]. The code: https://github.com/Himess/zecured.
 
 ---

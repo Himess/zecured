@@ -230,7 +230,8 @@ export async function readJourney(
           return latest.number > ago ? latest.number - ago : 0n;
         })()
       : 0n;
-  const maxChunks = opts.maxChunks ?? 40;
+  // Bounded by the loan's creation, the scan may reach back further; a vault viewed without it, about 11 hours.
+  const maxChunks = opts.maxChunks ?? (opts.since !== undefined ? 40 : 10);
   for (let i = 0; i < maxChunks && !scan.complete; i++) {
     const to = scan.bottom - 1n;
     if (to < floor || scan.bottom === 0n) {

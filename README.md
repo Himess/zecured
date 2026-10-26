@@ -4,7 +4,7 @@
 
 > **Use shielded ZEC on Base: borrow against it, or swap into it. It never leaves the shielded pool.**
 
-See [the site](https://himess.github.io/zecured/), [the demo video](https://himess.github.io/zecured/#demo) or [how to run it on a local fork](#local-base-fork).
+See [the site](https://himess.github.io/zecured/), [the demo video](https://himess.github.io/zecured/#demo), [the app's replay of the live run](https://himess.github.io/zecured/app/) (DEMO, in your browser) or [how to run it on a local fork](#local-base-fork).
 
 Using ZEC in DeFi today usually means taking it out of the shielded pool. Zecured doesn't.
 

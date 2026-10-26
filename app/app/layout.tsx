@@ -140,7 +140,8 @@ export default function RootLayout({ children }: { children: ReactNode }) {
                 <li><Link href="/status" className="text-soft no-underline hover:text-text hover:underline">System status</Link></li>
                 <li><Link href="/world" className="text-soft no-underline hover:text-text hover:underline">What the world sees</Link></li>
                 <li><a href={SITE_URL} className="text-soft no-underline hover:text-text hover:underline">The site</a> · <a href={`${SITE_URL}docs/`} className="text-soft no-underline hover:text-text hover:underline">the docs</a></li>
-                {TESTNET ? (
+                {/* The operators' panel needs our backend's admin token: not in the judges' replay. */}
+                {TESTNET && !REPLAY ? (
                   <li><Link href="/demo" className="text-soft no-underline hover:text-text hover:underline">Demo panel</Link></li>
                 ) : null}
               </ul>

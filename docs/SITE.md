@@ -102,6 +102,7 @@ Every number on the site comes from a recorded run, and each has its source:
 | The draft ZIP, Shielded Collateral Vaults | `docs/zip-draft-shielded-collateral-vaults.md` |
 | A judge’s questions | JURY_FAQ |
 | Known limitations and their designs | MAINNET § 7 |
+| The app replays the live run in the browser, each step linked to its real transaction | `app/README.md` (“The judges' replay”) |
 
 When a run changes a number, change it on the site too. The docs’ “Real” and “Mock, or run by us” lists say what
 the README’s “What is real and what is a mock” says; when one changes, so does the other.
@@ -152,7 +153,9 @@ hinting. The licence is `site/fonts/OFL.txt`.
 ## Publishing
 
 `.github/workflows/pages.yml` publishes everything in `site/` except its tooling, `site/dev`, to GitHub Pages, at
-https://himess.github.io/zecured/; the pages’ canonical and social-card URLs name that address. The tests’ server
+https://himess.github.io/zecured/; the pages’ canonical and social-card URLs name that address. Beside it, at `app/`,
+the same workflow builds and publishes the judges' replay of the app (DEMO, `app/README.md`): its static export, which
+plays a recording of the live run in the browser. The site's "Open the app" buttons link there. The tests’ server
 (`site/dev/serve.mjs`) serves the same files, so a file the site needs and the tests find is a file Pages
 publishes. The workflow runs only by hand (`workflow_dispatch`). Pages on a private repository needs a paid plan, so
 the first publication waits for the repository to become public. Turning Pages on and running the workflow are the

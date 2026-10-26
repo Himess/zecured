@@ -1,4 +1,6 @@
-# Publishes the site to GitHub Pages: everything in site/ except its tooling, site/dev (docs/SITE.md, "Publishing").
+# Publishes the site to GitHub Pages: everything in site/ except its tooling, site/dev (docs/SITE.md, "Publishing"),
+# and under app/ the judges' replay of the app (DEMO, app/README.md): the same pages as a static site that plays a
+# recording of the live run, since no server of ours runs through the judging (D82).
 # Only by hand, and only when the project owner decides to: Pages has to be turned on first in the repository's
 # settings, with GitHub Actions as its source, and on GitHub Free that needs a public repository.
 name: pages
@@ -25,7 +27,27 @@ jobs:
           mkdir _site
           cp -R site/. _site/
           rm -rf _site/dev
-          find _site -type f | sort
+
+      # The pnpm version comes from app/package.json's packageManager field.
+      - uses: pnpm/action-setup@v4
+        with:
+          package_json_file: app/package.json
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: pnpm
+          cache-dependency-path: app/pnpm-lock.yaml
+
+      - name: The app's replay (DEMO), a static export served at app/
+        working-directory: app
+        env:
+          NEXT_PUBLIC_BASE_PATH: /${{ github.event.repository.name }}/app
+        run: |
+          pnpm install --frozen-lockfile
+          node scripts/build-replay.mjs
+          cp -R out ../_site/app
+          find ../_site -type f | sort | head -400
 
       - uses: actions/configure-pages@v5
 
