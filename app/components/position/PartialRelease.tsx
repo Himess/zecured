@@ -139,13 +139,13 @@ export function PartialRelease({
                 Max
               </Button>
             </div>
-            <p id={`${amountId}-hint`} className={amountError ? "text-sm text-danger" : "text-xs text-muted"} aria-live="polite">
+            <p id={`${amountId}-hint`} className={amountError ? "text-sm text-danger" : "text-xs text-muted"}>
               {amountError ??
                 `Up to ${formatTaz(max)} of ${formatTaz(collateral)}, minus the Zcash network fee when it is paid out.`}
             </p>
           </div>
           {remaining !== null ? (
-            <div aria-live="polite">
+            <div>
               <KeyValue
                 rows={[
                   ["Collateral after", `${formatTaz(remaining)} (≈ ${formatUsdc(collateralValue(remaining, price))} USDC)`],

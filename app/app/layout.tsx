@@ -107,7 +107,13 @@ export default function RootLayout({ children }: { children: ReactNode }) {
           </div>
         </header>
         {/* Clear of the fixed bars below: the phones' tab bar and, in the replay, its dock (globals.css). */}
-        <main id="main" className="wrap pt-7 pb-[calc(var(--dock-h)+var(--nav-h)+4rem)] sm:pt-9">
+        <main id="main" className="wrap min-h-dvh pt-7 pb-[calc(var(--dock-h)+var(--nav-h)+4rem)] sm:pt-9">
+          <noscript>
+            <p className="mb-6 rounded-2xl bg-surface-2 p-4 text-[15px] text-soft">
+              This app needs JavaScript: it checks the deployment and the signers&apos; signatures in your browser. The{" "}
+              <a href={`${SITE_URL}docs/`}>docs page</a> reads without it.
+            </p>
+          </noscript>
           <ConfigGate>{children}</ConfigGate>
         </main>
         <footer className="border-t border-hairline pb-[calc(var(--dock-h)+var(--nav-h))]">
