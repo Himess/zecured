@@ -3,6 +3,8 @@
 import { useId, useState, type ReactNode } from "react";
 import { getAddress, isAddress, type Hex } from "viem";
 import { DestinationStep } from "@/components/DestinationForm";
+import { IconArrowRight, IconCheck, IconRefresh } from "@/components/icons";
+import { TokenAmount, usdc, zec } from "@/components/loan";
 import { TxResult } from "@/components/TxResult";
 import { Button, cx, KeyValue, Mono, Notice } from "@/components/ui";
 import { loanAccount } from "@/lib/account";
@@ -64,14 +66,16 @@ export function Exits({
 
   return (
     <div className="space-y-5">
-      <fieldset className="space-y-2">
-        <legend className="mb-2 text-sm font-medium">Choose how to exit</legend>
+      <fieldset className="grid gap-2 md:grid-cols-2">
+        <legend className="mb-2 text-[14px] font-semibold text-soft">Choose how to exit</legend>
         {options.map((o) => (
           <label
             key={o.kind}
             className={cx(
-              "flex cursor-pointer items-start gap-3 rounded-lg border p-3",
-              kind === o.kind ? "border-soft bg-surface-2" : "border-border hover:border-faint",
+              "flex cursor-pointer items-start gap-3 rounded-2xl px-4 py-3.5 transition-[box-shadow,background-color]",
+              kind === o.kind
+                ? "bg-[linear-gradient(180deg,rgb(244_183_40/0.08),transparent)] shadow-[inset_0_0_0_2px_var(--color-accent)]"
+                : "bg-bg/70 shadow-[inset_0_0_0_1px_var(--color-border)] hover:shadow-[inset_0_0_0_1px_var(--color-line)]",
             )}
           >
             <input
@@ -85,16 +89,21 @@ export function Exits({
               className="mt-1.5"
             />
             <span>
-              <span className="block font-medium">{o.title}</span>
-              <span className="block text-sm text-muted">{o.body}</span>
+              <span className="block font-bold">{o.title}</span>
+              <span className="mt-0.5 block text-[13.5px] text-muted">{o.body}</span>
             </span>
           </label>
         ))}
       </fieldset>
 
       <ol className="space-y-5">
-        <li className="space-y-3">
-          <h3 className="font-semibold">1. Where should your ZEC go?</h3>
+        <li className="space-y-3 rounded-2xl bg-bg/50 p-5 shadow-[inset_0_0_0_1px_var(--color-hairline)]">
+          <h3 className="flex items-center gap-2.5 font-bold">
+            <span className={cx("inline-flex size-6 items-center justify-center rounded-full text-[12px]", commitment ? "bg-ok/15 text-ok" : "bg-surface-3")}>
+              {commitment ? <IconCheck size={14} strokeWidth={2.6} /> : "1"}
+            </span>
+            Where should your ZEC go?
+          </h3>
           {commitment ? (
             <Notice tone="ok" title="Destination validated by the signers">
               <p>
@@ -108,8 +117,11 @@ export function Exits({
             <DestinationStep loan={loan} vaultId={vault.vaultId} onDone={setCommitment} />
           )}
         </li>
-        <li className="space-y-3">
-          <h3 className={cx("font-semibold", !commitment && "text-faint")}>2. {current.title.replace(" (recommended)", "")}</h3>
+        <li className="space-y-3 rounded-2xl bg-bg/50 p-5 shadow-[inset_0_0_0_1px_var(--color-hairline)]">
+          <h3 className={cx("flex items-center gap-2.5 font-bold", !commitment && "text-faint")}>
+            <span className="inline-flex size-6 items-center justify-center rounded-full bg-surface-3 text-[12px]">2</span>
+            {current.title.replace(" (recommended)", "")}
+          </h3>
           {commitment ? (
             kind === "close" ? (
               <CloseFlow loan={loan} vault={vault} snapshot={snapshot} commitment={commitment} onChanged={onChanged} />
@@ -287,7 +299,8 @@ function CloseFlow({ loan, vault, snapshot, commitment, onChanged }: FlowProps) 
         </Notice>
       ) : null}
       <Button variant="secondary" onClick={() => getQuote.run()} busy={getQuote.busy}>
-        {quote ? "Refresh quote" : "Get a quote"}
+        {getQuote.busy ? null : <IconRefresh size={16} />}
+        {quote ? "Refresh quote" : "Get a market maker's quote"}
       </Button>
       {getQuote.error ? (
         <Notice tone="danger" title="No quote" live>
@@ -295,12 +308,26 @@ function CloseFlow({ loan, vault, snapshot, commitment, onChanged }: FlowProps) 
         </Notice>
       ) : null}
       {quote ? (
-        <div className="space-y-3">
+        <div className="space-y-4">
+          <div className="grid gap-3 sm:grid-cols-3">
+            <div className="rounded-2xl bg-bg/80 p-4 shadow-[inset_0_0_0_1px_var(--color-border)]">
+              <p className="text-[12.5px] text-muted">The market maker repays</p>
+              <TokenAmount token="USDC" value={usdc(quote.repayAssets)} unit={loanTokenName()} size="lg" />
+              <p className="mt-1 text-[12px] text-muted">your whole debt, on Morpho</p>
+            </div>
+            <div className="rounded-2xl bg-bg/80 p-4 shadow-[inset_0_0_0_1px_var(--color-border)]">
+              <p className="text-[12.5px] text-muted">and takes from the vault</p>
+              <TokenAmount token="TAZ" value={zec(quote.mmAmount)} size="lg" />
+              <p className="mt-1 text-[12px] text-muted">margin {quote.marginBps / 100} %, shielded</p>
+            </div>
+            <div className="rounded-2xl bg-ok/[0.06] p-4 shadow-[inset_0_0_0_1px_color-mix(in_oklab,var(--color-ok)_35%,transparent)]">
+              <p className="text-[12.5px] text-muted">You receive</p>
+              <TokenAmount token="TAZ" value={zec(quote.userAmount)} size="lg" />
+              <p className="mt-1 text-[12px] text-muted">at your new Ironwood address, less the network fee</p>
+            </div>
+          </div>
           <KeyValue
             rows={[
-              ["Market maker repays", `${formatUsdc(quote.repayAssets)} USDC`],
-              ["Market maker receives", `${formatTaz(quote.mmAmount)} (margin ${quote.marginBps / 100} %)`],
-              ["You receive", `${formatTaz(quote.userAmount)} minus the Zcash network fee`],
               ["Minimum you accept", formatTaz((quote.userAmount * (10_000n - CLOSE_SLIPPAGE_BPS)) / 10_000n)],
               ["Executor", <Mono key="e">{quote.executor}</Mono>],
               ["Quote valid until", new Date(quote.expiresAt * 1000).toLocaleTimeString()],
@@ -311,11 +338,13 @@ function CloseFlow({ loan, vault, snapshot, commitment, onChanged }: FlowProps) 
             cancel until it executes.
           </p>
           <Button
+            size="lg"
             onClick={() => submit.run(quote)}
             busy={submit.busy}
             disabled={quoteExpired || !snapshot.accountDeployed || !snapshot.adapterAuthorized}
           >
             Sign and send to the market maker
+            {submit.busy ? null : <IconArrowRight size={18} />}
           </Button>
           {quoteExpired ? <p className="text-sm text-warn">This quote expired. Refresh it.</p> : null}
         </div>
@@ -450,7 +479,7 @@ export function SendUsdcForm({ loan, snapshot, onChanged }: { loan: StoredLoan; 
             placeholder="0x…"
             spellCheck={false}
             autoComplete="off"
-            className="w-full rounded-lg border border-border bg-bg px-3 py-2 font-mono text-sm text-text focus:border-muted"
+            className="field font-mono text-sm"
           />
         </div>
         <div className="space-y-1">
@@ -463,7 +492,7 @@ export function SendUsdcForm({ loan, snapshot, onChanged }: { loan: StoredLoan; 
             inputMode="decimal"
             onChange={(e) => setAmount(e.target.value)}
             placeholder={formatUsdc(snapshot.usdcBalance)}
-            className="w-full rounded-lg border border-border bg-bg px-3 py-2 tabular-nums text-text focus:border-muted"
+            className="field tabular-nums"
           />
         </div>
       </div>

@@ -17,6 +17,7 @@ import {
 } from "./chain";
 import type { PreLiquidationTerms } from "./preliq";
 import { readProtocol, type ProtocolSnapshot } from "./public";
+import { REPLAY } from "./replay/flag";
 import { config } from "./config";
 import { loanStore, type StoredLoan } from "./keys";
 import { storedVault, verifyVaultOpened, type VaultCheck } from "./signers";
@@ -170,7 +171,11 @@ export function createStagger(minGapMs = 1_500, jitterMs = 2_500, now = () => Da
 
 const staggerDelay = createStagger();
 
-function usePolling(fn: () => Promise<void>, intervalMs: number, enabled: boolean, staggered = false) {
+/** In a replay build (DEMO) its steps come seconds apart: no poll waits longer than this. */
+const REPLAY_POLL_MS = 2_000;
+
+function usePolling(fn: () => Promise<void>, requestedMs: number, enabled: boolean, staggered = false) {
+  const intervalMs = REPLAY && requestedMs > 0 ? Math.min(requestedMs, REPLAY_POLL_MS) : requestedMs;
   const fnRef = useRef(fn);
   fnRef.current = fn;
   useEffect(() => {

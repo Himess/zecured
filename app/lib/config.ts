@@ -26,6 +26,8 @@
  */
 import { encodeAbiParameters, getAddress, isAddress, isHex, keccak256, type Address, type Hex } from "viem";
 import { DEPLOYMENT, deploymentProfile, type DeploymentKind } from "./deployment";
+import { REPLAY } from "./replay/flag";
+import { replayBuildEnv } from "./replay/pins";
 
 /**
  * Base Sepolia (84532) on the judge deployment, Base (8453) on the mainnet beta
@@ -197,7 +199,7 @@ export interface RemoteContracts {
   ZecuredIntake: Address | null;
   /** v4: the swap contract, when the deployment file names one. */
   ZecuredSwap: Address | null;
-  /** The loan token is the deployment's own MockUSDC (MOCK, local fork). */
+  /** The loan token is the deployment's own MockUSDC (MOCK: the local fork, or a testnet deployment that names it). */
   loanTokenIsMock: boolean;
   /** The market's oracle is the deployment's DemoShockOracle (MOCK / DEMO, testnets). */
   oracleIsDemo: boolean;
@@ -239,7 +241,7 @@ export function marketLabelsOf(c: RemoteContracts, kind: DeploymentKind, circleU
   const circle = same(c.LoanToken, circleUsdc);
   const loanToken = c.loanTokenIsMock ? "MockUSDC" : "USDC";
   const loanTokenNote = c.loanTokenIsMock
-    ? "a MOCK token minted by the deployer (local fork only)"
+    ? "a MOCK token minted by the deployer (testnets only)"
     : circle
       ? kind === "mainnet-beta"
         ? "Circle's USDC on Base"
@@ -521,8 +523,11 @@ export function buildConfig(env: ConfigEnv, remote?: RemoteConfigResult): AppCon
   };
 }
 
-/** The build's environment (literal names: Next.js inlines them). */
-const BUILD_ENV: ConfigEnv = {
+/**
+ * The build's environment (literal names: Next.js inlines them). A replay build (DEMO) pins the
+ * recorded deployment instead (lib/replay/pins.ts), and checks the replay's GET /config against it.
+ */
+const BUILD_ENV: ConfigEnv = REPLAY ? replayBuildEnv(process.env.NODE_ENV) : {
   NODE_ENV: process.env.NODE_ENV,
   NEXT_PUBLIC_BACKEND_URL: process.env.NEXT_PUBLIC_BACKEND_URL,
   NEXT_PUBLIC_REGISTRY: process.env.NEXT_PUBLIC_REGISTRY,

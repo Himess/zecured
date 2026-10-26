@@ -92,7 +92,7 @@ export function DemoPanel() {
                 autoComplete="off"
                 value={draft}
                 onChange={(e) => setDraft(e.target.value)}
-                className="w-full rounded-lg border border-border bg-bg px-3 py-2 text-sm text-text focus:border-muted"
+                className="field text-sm"
               />
             </div>
             <Button type="submit" disabled={!draft.trim()}>
@@ -224,7 +224,7 @@ function SweepCard({ token }: { token: string }) {
             placeholder="0x…"
             spellCheck={false}
             autoComplete="off"
-            className="w-full rounded-lg border border-border bg-bg px-3 py-2 font-mono text-xs text-text focus:border-muted"
+            className="field font-mono text-xs"
           />
           <datalist id={`${vaultInputId}-list`}>
             {loans
@@ -381,7 +381,7 @@ function OracleCard({ token }: { token: string }) {
                 onChange={(e) => setDraft(e.target.value)}
                 placeholder="40.00"
                 aria-invalid={draftError ? true : undefined}
-                className="w-full rounded-lg border border-border bg-bg px-3 py-2 tabular-nums text-text focus:border-muted"
+                className="field tabular-nums"
               />
               <Button type="submit" busy={update.busy} disabled={!cents || Boolean(draftError)}>
                 Set

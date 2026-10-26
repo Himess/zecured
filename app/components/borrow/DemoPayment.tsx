@@ -2,6 +2,8 @@
 
 import { Badge, Button, Mono, Notice } from "@/components/ui";
 import { CopyButton } from "@/components/client";
+import { IconBolt } from "@/components/icons";
+import { ZecMark } from "@/components/marks";
 import { api, apiErrorCode } from "@/lib/api";
 import { config } from "@/lib/config";
 import { demoRefusal, solveDemoStamp } from "@/lib/demo";
@@ -48,11 +50,13 @@ export function DemoPayment({ loan }: { loan: StoredLoan }) {
 
   if (!config.demoPath || !demo.data?.enabled) return null;
   return (
-    <div className="space-y-3 rounded-2xl border border-dashed border-warn/60 p-4">
-      <p className="flex flex-wrap items-center gap-2 text-sm font-medium">
-        <Badge tone="warn">DEMO</Badge> No testnet ZEC at hand?
+    <div className="space-y-3 rounded-[20px] bg-[linear-gradient(135deg,rgb(244_183_40/0.10),rgb(244_183_40/0.02)_60%)] p-5 shadow-[inset_0_0_0_1px_rgb(244_183_40/0.35)]">
+      <p className="flex flex-wrap items-center gap-2.5 text-[15px] font-bold">
+        <ZecMark size={22} />
+        No testnet ZEC at hand?
+        <Badge tone="warn">DEMO</Badge>
       </p>
-      <p className="text-sm text-muted">
+      <p className="text-sm text-soft">
         The demo wallet can pay this vault its {formatTaz(BigInt(loan.amount))} from its own Ironwood notes, once per vault. It
         is a real Zcash testnet payment, proven on Base like any deposit. When you exit, your ZEC goes back to the demo
         wallet unless you give an Ironwood address of your own.
@@ -66,8 +70,9 @@ export function DemoPayment({ loan }: { loan: StoredLoan }) {
           <p className="text-xs">The deposit is proven on Base once it has its confirmations; this page follows it.</p>
         </Notice>
       ) : (
-        <Button variant="secondary" onClick={() => void pay.run()} busy={pay.busy}>
-          Try with demo TAZ (DEMO)
+        <Button onClick={() => void pay.run()} busy={pay.busy}>
+          {pay.busy ? null : <IconBolt size={17} />}
+          Pay it with demo TAZ
         </Button>
       )}
       {pay.busy ? <p className="text-xs text-muted">Computing a small proof of work, then the demo wallet builds and proves the payment (up to a minute)…</p> : null}

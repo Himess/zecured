@@ -9,6 +9,8 @@
   "scripts": {
     "dev": "next dev",
     "build": "next build",
+    "build:replay": "node scripts/build-replay.mjs",
+    "dev:replay": "node scripts/build-replay.mjs --dev",
     "start": "next start",
     "test": "vitest run",
     "test:watch": "vitest",

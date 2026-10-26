@@ -4,6 +4,8 @@ import Link from "next/link";
 import { useEffect, useState, type ReactNode } from "react";
 import { isHex, type Hex } from "viem";
 import { useMounted } from "./client";
+import { IconGlobe, IconKey, IconSigners } from "./icons";
+import { BaseMark } from "./marks";
 import { ChainChip, Leaky, type Chain } from "./seam";
 import { STATUS_LABEL } from "./status";
 import { Badge, Mono, Notice } from "./ui";
@@ -67,18 +69,26 @@ const PANEL_TITLE = "text-[22px] leading-[1.15] font-extrabold tracking-[-0.006e
 /** Base's side of the page, as a block explorer shows it: light, sharp corners, ruled rows. */
 function PublicPanel({ children }: { children: ReactNode }) {
   return (
-    <section aria-label="Everyone" className="paper min-w-0 space-y-7 p-5 sm:p-7">
-      <h2 className={PANEL_TITLE}>Everyone</h2>
+    <section aria-label="Everyone" className="paper min-w-0 space-y-7 p-5 shadow-[0_30px_60px_-40px_rgb(0_0_0/0.9)] sm:p-7">
+      <h2 className={`${PANEL_TITLE} flex items-center justify-between gap-3`}>
+        <span className="flex items-center gap-2.5">
+          <IconGlobe size={22} /> Everyone
+        </span>
+        <BaseMark size={20} title="Base" />
+      </h2>
       {children}
     </section>
   );
 }
 
 /** The shielded side: dark, rounded, no rules. */
-function ShieldedPanel({ title, children }: { title: string; children: ReactNode }) {
+function ShieldedPanel({ title, icon, children }: { title: string; icon: ReactNode; children: ReactNode }) {
   return (
-    <section aria-label={title} className="min-w-0 space-y-6 rounded-[22px] bg-surface p-5 sm:p-7">
-      <h2 className={PANEL_TITLE}>{title}</h2>
+    <section aria-label={title} className="panel min-w-0 space-y-6 p-5 sm:p-7">
+      <h2 className={`${PANEL_TITLE} flex items-center gap-2.5`}>
+        <span className="text-pool-soft">{icon}</span>
+        {title}
+      </h2>
       {children}
     </section>
   );
@@ -205,7 +215,7 @@ export function WorldView() {
           </div>
         </PublicPanel>
 
-        <ShieldedPanel title="Signer network">
+        <ShieldedPanel title="Signer network" icon={<IconSigners size={22} />}>
           <SeesList
             sees={[
               "The vault's notes, balance and timing (they hold its viewing key).",
@@ -232,14 +242,14 @@ export function WorldView() {
                 placeholder="0x…"
                 spellCheck={false}
                 autoComplete="off"
-                className="mt-1 w-full rounded-lg border border-border bg-bg px-3 py-2 font-mono text-xs text-text focus:border-muted"
+                className="mt-1 field font-mono text-xs"
               />
             </label>
             {inspectId ? <SignerView vaultId={inspectId} /> : null}
           </div>
         </ShieldedPanel>
 
-        <ShieldedPanel title="You">
+        <ShieldedPanel title="You" icon={<IconKey size={22} />}>
           <SeesList
             sees={[
               "Everything about your loan: the owner key in this browser, the account, the vault address.",

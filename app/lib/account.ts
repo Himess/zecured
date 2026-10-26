@@ -28,6 +28,8 @@ import {
   type CloseRequestMessage,
   type DeleverageRequestMessage,
 } from "./eip712";
+import { replayLoanAccount } from "./replay/account";
+import { REPLAY } from "./replay/flag";
 import { predictAccountAddress, SAFE } from "./safe";
 
 export interface SentUserOp {
@@ -121,6 +123,8 @@ export interface AccountDeps {
 }
 
 export function loanAccount(ownerKey: Hex, deps: AccountDeps = {}): LoanAccount {
+  // DEMO: a replay build sends no UserOp; the recorded run's account answers (lib/replay/account.ts).
+  if (REPLAY) return replayLoanAccount(ownerKey);
   const config = deps.config ?? defaultConfig;
   const api = deps.api ?? defaultApi;
   const owner = privateKeyToAccount(ownerKey);

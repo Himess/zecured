@@ -4,6 +4,7 @@ import { useId, useState } from "react";
 import { notifyLoansChanged, useLoans } from "@/lib/hooks";
 import { backupFileName, exportLoan, loanStore, verifyBackup, type StoredLoan } from "@/lib/keys";
 import { CopyButton } from "./client";
+import { IconArrowRight, IconDownload, IconUpload } from "./icons";
 import { Button, Notice } from "./ui";
 
 /** Saves a loan backup as a local file (Blob URL: no network). */
@@ -60,17 +61,24 @@ export function KeyBackup({ loan, onConfirmed }: { loan: StoredLoan; onConfirmed
           <p>The key cannot be kept after you close this tab. Download the backup now.</p>
         </Notice>
       ) : null}
-      <div className="space-y-2">
-        <h3 className="font-semibold">1. Save the backup</h3>
+      <div className="space-y-3 rounded-2xl bg-bg/70 p-5 shadow-[inset_0_0_0_1px_var(--color-border)]">
+        <h3 className="flex items-center gap-2.5 font-bold">
+          <span className="inline-flex size-6 items-center justify-center rounded-full bg-surface-3 text-[12px]">1</span>
+          Save the backup
+        </h3>
         <div className="flex flex-wrap gap-2">
           <Button variant="secondary" onClick={() => downloadBackup(loan)}>
+            <IconDownload size={16} />
             Download backup (.json)
           </Button>
           <CopyButton value={exportLoan(loan)} label="Copy backup to clipboard" size="md" />
         </div>
       </div>
-      <div className="space-y-2">
-        <h3 className="font-semibold">2. Check that it restores</h3>
+      <div className="space-y-3 rounded-2xl bg-bg/70 p-5 shadow-[inset_0_0_0_1px_var(--color-border)]">
+        <h3 className="flex items-center gap-2.5 font-bold">
+          <span className="inline-flex size-6 items-center justify-center rounded-full bg-surface-3 text-[12px]">2</span>
+          Check that it restores
+        </h3>
         <p className="text-sm text-muted">
           Choose the file you just saved (or paste what you copied). It is read in this browser only, and must restore this
           very loan: a backup that was never restored is only a hope.
@@ -87,7 +95,7 @@ export function KeyBackup({ loan, onConfirmed }: { loan: StoredLoan; onConfirmed
             if (f) check(await f.text());
             e.target.value = "";
           }}
-          className="block text-sm text-muted file:mr-3 file:rounded-full file:border file:border-line file:bg-transparent file:font-semibold file:px-3 file:py-2 file:text-text"
+          className="block text-sm text-muted file:mr-3 file:rounded-full file:border-0 file:bg-surface-3 file:px-4 file:py-2 file:font-semibold file:text-text hover:file:bg-line"
         />
         <label htmlFor={pasteId} className="block text-sm font-medium">
           Or paste it
@@ -99,9 +107,10 @@ export function KeyBackup({ loan, onConfirmed }: { loan: StoredLoan; onConfirmed
           rows={3}
           spellCheck={false}
           autoComplete="off"
-          className="w-full rounded-lg border border-border bg-bg px-3 py-2 font-mono text-xs text-text focus:border-muted"
+          className="field font-mono text-xs"
         />
-        <Button variant="ghost" onClick={() => check(paste)} disabled={!paste.trim()}>
+        <Button variant="ghost" size="sm" onClick={() => check(paste)} disabled={!paste.trim()}>
+          <IconUpload size={15} />
           Check the pasted backup
         </Button>
         {verified ? (
@@ -116,8 +125,9 @@ export function KeyBackup({ loan, onConfirmed }: { loan: StoredLoan; onConfirmed
         ) : null}
       </div>
       <div className="flex flex-wrap gap-2">
-        <Button onClick={() => onConfirmed?.(true)} disabled={!verified}>
-          Continue
+        <Button size="lg" onClick={() => onConfirmed?.(true)} disabled={!verified}>
+          Continue to the deposit
+          <IconArrowRight size={18} />
         </Button>
         {!verified ? (
           <Button variant="ghost" onClick={() => onConfirmed?.(false)}>

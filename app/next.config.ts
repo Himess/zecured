@@ -31,6 +31,23 @@ const csp = [
   "frame-ancestors 'none'",
 ].join("; ");
 
+/**
+ * REPLAY (DEMO, lib/replay): the judges' build, `NEXT_PUBLIC_REPLAY=1`, is a static export for a
+ * static host (GitHub Pages, under `NEXT_PUBLIC_BASE_PATH`). A static host sends no headers of
+ * ours, so the replay's Content Security Policy is a <meta> tag (lib/replay/flag.ts, REPLAY_CSP),
+ * and `headers()` is left out (a static export cannot serve it).
+ */
+const replay = process.env.NEXT_PUBLIC_REPLAY === "1";
+
+const replayConfig: NextConfig = {
+  reactStrictMode: true,
+  poweredByHeader: false,
+  output: "export",
+  basePath: process.env.NEXT_PUBLIC_BASE_PATH || "",
+  trailingSlash: true,
+  images: { unoptimized: true },
+};
+
 const nextConfig: NextConfig = {
   reactStrictMode: true,
   poweredByHeader: false,
@@ -55,4 +72,4 @@ const nextConfig: NextConfig = {
   },
 };
 
-export default nextConfig;
+export default replay ? replayConfig : nextConfig;

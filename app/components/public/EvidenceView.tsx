@@ -2,7 +2,8 @@
 
 import type { ReactNode } from "react";
 import { CopyButton } from "@/components/client";
-import { ChainChip } from "@/components/seam";
+import { IconClock, IconExternal, IconFileCheck } from "@/components/icons";
+import { BaseMark, ZecMark } from "@/components/marks";
 import { Badge, Card, KeyValue, Mono, Notice } from "@/components/ui";
 import { DEPLOYMENT } from "@/lib/deployment";
 import { explorerLink, orderedSections, type Evidence, type EvidenceSection } from "@/lib/evidence";
@@ -25,7 +26,11 @@ function when(iso: string | null): string {
 function Section({ e, s, own }: { e: Evidence; s: EvidenceSection; own: boolean }) {
   const m = s.manifest;
   return (
-    <Card title={s.title} action={own ? <Badge tone="ok">This deployment</Badge> : <Badge tone="neutral">{s.base === "base" ? "Base mainnet" : "Base Sepolia"}</Badge>}>
+    <Card
+      title={s.title}
+      icon={<IconFileCheck size={18} />}
+      action={own ? <Badge tone="ok" dot>This deployment</Badge> : <Badge tone="neutral">{s.base === "base" ? "Base mainnet" : "Base Sepolia"}</Badge>}
+    >
       <div className="space-y-6">
         <section className="space-y-2" aria-label="Manifest">
           <h3 className="font-semibold">Manifest</h3>
@@ -74,29 +79,44 @@ function Section({ e, s, own }: { e: Evidence; s: EvidenceSection; own: boolean 
           {s.flows.length === 0 ? (
             <p className="text-sm text-muted">No flow recorded yet.</p>
           ) : (
-            <ul className="space-y-4">
+            <ul className="grid gap-4 xl:grid-cols-2">
               {s.flows.map((f) => (
-                <li key={f.id} className="rounded-2xl bg-bg p-4">
+                <li key={f.id} className="rounded-[20px] bg-bg/70 p-5 shadow-[inset_0_0_0_1px_var(--color-border)]">
                   <div className="flex flex-wrap items-baseline justify-between gap-2">
-                    <span className="font-medium">{f.title}</span>
-                    {f.durationSeconds !== null ? <span className="text-xs text-muted">took {formatPeriod(f.durationSeconds)}</span> : null}
+                    <span className="text-[16px] font-bold">{f.title}</span>
+                    {f.durationSeconds !== null ? (
+                      <span className="inline-flex items-center gap-1.5 text-xs text-muted">
+                        <IconClock size={13} /> took {formatPeriod(f.durationSeconds)}
+                      </span>
+                    ) : null}
                   </div>
-                  {f.note ? <p className="text-xs text-muted">{f.note}</p> : null}
-                  <ol className="mt-2 space-y-1 text-sm">
+                  {f.note ? <p className="mt-1 text-xs text-muted">{f.note}</p> : null}
+                  <ol className="mt-3 space-y-2 text-sm">
                     {f.steps.map((st, i) => {
                       const link = explorerLink(e, s, st);
                       return (
-                        <li key={`${st.tx}-${i}`} className="flex flex-wrap items-baseline gap-2">
-                          <ChainChip chain={st.chain} />
-                          <span>{st.label}</span>
-                          {link ? (
-                            <a href={link} target="_blank" rel="noopener noreferrer" referrerPolicy="no-referrer">
-                              <Mono>{short(st.tx, 12, 8)}</Mono>
-                            </a>
-                          ) : (
-                            <Mono>{short(st.tx, 12, 8)}</Mono>
-                          )}
-                          {st.at ? <span className="text-xs text-faint">{when(st.at)}</span> : null}
+                        <li key={`${st.tx}-${i}`} className="grid grid-cols-[22px_minmax(0,1fr)] gap-2.5">
+                          <span className="mt-0.5">{st.chain === "zcash" ? <ZecMark size={18} /> : <BaseMark size={17} />}</span>
+                          <span className="min-w-0">
+                            <span className="block">{st.label}</span>
+                            <span className="flex flex-wrap items-center gap-x-2 text-[12.5px]">
+                              {link ? (
+                                <a
+                                  href={link}
+                                  target="_blank"
+                                  rel="noopener noreferrer"
+                                  referrerPolicy="no-referrer"
+                                  className="inline-flex items-center gap-1 text-info no-underline hover:underline"
+                                >
+                                  <Mono>{short(st.tx, 12, 8)}</Mono>
+                                  <IconExternal size={12} />
+                                </a>
+                              ) : (
+                                <Mono>{short(st.tx, 12, 8)}</Mono>
+                              )}
+                              {st.at ? <span className="text-faint">{when(st.at)}</span> : null}
+                            </span>
+                          </span>
                         </li>
                       );
                     })}

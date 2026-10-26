@@ -24,6 +24,27 @@ pnpm typecheck        # tsc --noEmit (app + tests)
 Requires Node.js ≥ 20.9 and pnpm 10. The backend is optional for browsing: every page renders
 without it and says what is unavailable.
 
+## The judges' replay (DEMO)
+
+No server of ours runs through the judging (D82), so the app also builds as a **replay**: the same pages as a
+static site, in which an in-browser simulator (`lib/replay/`) plays the backend, the Base reads, the loan account and
+the swap's wallet from a recording of the live Base Sepolia run (`lib/replay/recording.json`, schema
+`zecured-replay/1`). The judge presses the real buttons (open a vault, pay it with demo TAZ, watch its proof land,
+borrow, close from collateral, buy shielded ZEC); each action must be the recording's next step, every hash the app
+shows is the recorded transaction's, and a dock at the bottom of every page links each step to its explorer. Every
+page carries a DEMO band.
+
+```bash
+node scripts/build-replay.mjs --dev --port 3001            # next dev in replay mode
+NEXT_PUBLIC_BASE_PATH=/zecured/app node scripts/build-replay.mjs   # static export to out/
+```
+
+The replay never publishes a private key, a salt or a viewing key: its loan carries a dummy key that controls
+nothing, the viewing-key route answers `replay_unavailable`, and a destination the judge types stays in the browser.
+Every hook point tests `NEXT_PUBLIC_REPLAY`, which Next.js inlines at build time, so a live build never takes a
+replay path (`lib/replay/hooks.test.ts`). Until the live run is recorded, the recording is a placeholder: dummy hashes,
+no explorer links, and five DEMO signer keys that sign its vault.
+
 ## Configuration
 
 Every address the app signs for or sends calls to is **pinned in the build** (security review
@@ -301,6 +322,7 @@ the version-matched docs in `node_modules/next/dist/docs/`.
 | Base reads through `/proxy/rpc` (unit-tested against a mocked node; the running proxy answered live Base Sepolia reads in a manual check), the v3 ledger, refund reasons and compensation included | The v3 reads and pages are unit-tested against a mocked node only: no v3 deployment existed on Base Sepolia when they were written |
 | The minting banner and the borrow gate (GET /status, read by the backend from the Intake and the bond) | Demo panel: the oracle it sets is the MOCK MockZecOracle; bot status is a placeholder |
 | Demo panel price control (`GET` / `POST /admin/oracle`, the backend holds the owner key; refused where the market's oracle is a real feed, as on Base mainnet) | Close from collateral: needs the market-maker bot behind `GET /quotes/close` / `POST /closes` |
+| A vault's proof trail (`lib/journey.ts`): its own events on Base, read through the proxy | DEMO: the judges' replay (`lib/replay/`, `NEXT_PUBLIC_REPLAY=1`), a simulator that plays a recording of the live run in the browser |
 
 ## Open points
 

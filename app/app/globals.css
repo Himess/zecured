@@ -1,30 +1,36 @@
 @import "tailwindcss";
 
 /*
- * Zecured's look is the seam between two chains. Zcash is dark: rounded, blurred where it is
- * encrypted, no rules. Base is light: sharp corners, ruled ledger rows. Gold marks only the π proof
- * seal and primary buttons. Text colours meet WCAG AA (4.5:1) on bg, surface and surface-2, and the
- * ink colours on paper.
+ * Zecured's look is the seam between two chains, as on the site. Zcash is dark: rounded, blurred where it is
+ * encrypted, no rules. Base is light: sharp corners, ruled ledger rows. Gold marks only the π proof seal and
+ * primary buttons. Other projects appear only with their own marks (components/marks.tsx). Text colours meet
+ * WCAG AA (4.5:1) on bg, surface and surface-2, and the ink colours on paper.
  */
 @theme {
-  /* Zcash: the dark ground. */
-  --color-bg: #0d1611;
-  --color-surface: #142019;
-  --color-surface-2: #1a2a21;
-  --color-border: #24352b;
-  --color-hairline: #1c2b22;
+  /* Zcash: the dark ground, a hint of green like the site's (#040907). */
+  --color-bg: #070d0a;
+  --color-bg-2: #0a130e;
+  --color-surface: #0e1813;
+  --color-surface-2: #142219;
+  --color-surface-3: #1a2b21;
+  --color-border: #1e2f25;
+  --color-hairline: #15231b;
   /* Outlines of tags, pills and line buttons. */
-  --color-line: #3e5146;
-  --color-text: #e4ece6;
+  --color-line: #3a4d42;
+  --color-text: #e8efe9;
   /* Secondary text and done marks. */
   --color-soft: #c9d6cc;
   --color-muted: #93a89a;
-  --color-faint: #7f948a;
+  --color-faint: #82978c;
 
   /* Gold: the π proof seal and primary buttons, nothing else. */
   --color-accent: #f4b728;
   --color-accent-strong: #ffc845;
   --color-on-accent: #0f1b2a;
+
+  /* The shielded pool's teal (the site's), for what stays private. */
+  --color-pool: #38a684;
+  --color-pool-soft: #7fd1b4;
 
   /* Status, each at least 4.5:1 on bg, surface and surface-2. */
   --color-ok: #5fd3a5;
@@ -32,12 +38,13 @@
   --color-danger: #f26b5e;
   --color-info: #7fb2f0;
 
-  /* Base: the light ground. */
+  /* Base: the light ground, and its blue for chain marks only. */
   --color-paper: #eef2f6;
   --color-ink: #0f1b2a;
   --color-ink-muted: #4c5d70;
   --color-ink-faint: #6b7c8f;
   --color-rule: #cfd8e2;
+  --color-base: #0052ff;
 
   /* A leak: only on what ties a record to someone. */
   --color-leak: #9a1f15;
@@ -48,6 +55,10 @@
   --font-sans:
     var(--font-archivo), ui-sans-serif, system-ui, -apple-system, "Segoe UI", Roboto, "Helvetica Neue", Arial, sans-serif;
   --font-mono: var(--font-martian-mono), ui-monospace, "SFMono-Regular", Menlo, Consolas, monospace;
+
+  --animate-rise: rise 0.5s cubic-bezier(0.2, 0.7, 0.3, 1) both;
+  --animate-shimmer: shimmer 1.6s linear infinite;
+  --animate-flow: flow 2.4s linear infinite;
 }
 
 @layer base {
@@ -59,6 +70,11 @@
 
   body {
     background-color: var(--color-bg);
+    /* Two faint glows, gold where proofs cross and teal where the pool is: depth, no image. */
+    background-image:
+      radial-gradient(60rem 36rem at 12% -8%, rgb(244 183 40 / 0.07), transparent 60%),
+      radial-gradient(54rem 40rem at 100% 0%, rgb(56 166 132 / 0.08), transparent 62%);
+    background-repeat: no-repeat;
     color: var(--color-text);
     font-family: var(--font-sans);
     font-stretch: 100%;
@@ -98,7 +114,11 @@
 
   input[type="radio"],
   input[type="checkbox"] {
-    accent-color: var(--color-text);
+    accent-color: var(--color-accent);
+  }
+
+  input[type="range"] {
+    accent-color: var(--color-accent);
   }
 
   @media (prefers-reduced-motion: reduce) {
@@ -115,7 +135,7 @@
 /*
  * Focus, on every ground: the gold ring of the design hugs the element and a 2px outline runs
  * around it, in the light text colour on the dark grounds and in ink on paper (the design's ink
- * outline alone would vanish on #0d1611). Unlayered, so no utility's own shadow or ring hides it.
+ * outline alone would vanish on the dark ground). Unlayered, so no utility's own shadow or ring hides it.
  */
 :focus-visible {
   outline: 2px solid var(--focus-outline, var(--color-text));
@@ -149,6 +169,58 @@
   .prose-calm strong {
     color: var(--color-text);
     font-weight: 600;
+  }
+
+  /* A panel of the app: the dark ground raised a step, a hairline edge and a faint top light. */
+  .panel {
+    position: relative;
+    border-radius: 22px;
+    background: linear-gradient(180deg, color-mix(in oklab, var(--color-surface-2) 70%, var(--color-surface)) 0%, var(--color-surface) 46%);
+    box-shadow:
+      inset 0 0 0 1px var(--color-border),
+      inset 0 1px 0 rgb(255 255 255 / 0.035),
+      0 24px 48px -32px rgb(0 0 0 / 0.7);
+  }
+
+  /* A panel that leads its page (the swap card, the position's summary): a gold edge of light at the top. */
+  .panel-lead::before {
+    content: "";
+    position: absolute;
+    inset: 0 18% auto;
+    height: 1px;
+    background: linear-gradient(90deg, transparent, rgb(244 183 40 / 0.55), transparent);
+  }
+
+  /* A field: the app's text inputs, one look everywhere. */
+  .field {
+    width: 100%;
+    min-height: 46px;
+    border-radius: 14px;
+    border: 1px solid var(--color-border);
+    background: var(--color-bg);
+    padding: 10px 14px;
+    color: var(--color-text);
+    font-size: 15px;
+    transition:
+      border-color 0.15s,
+      background-color 0.15s;
+  }
+
+  .field::placeholder {
+    color: var(--color-faint);
+  }
+
+  .field:hover {
+    border-color: var(--color-line);
+  }
+
+  .field:focus-visible {
+    border-color: var(--color-soft);
+    border-radius: 14px;
+  }
+
+  .field[aria-invalid="true"] {
+    border-color: color-mix(in oklab, var(--color-danger) 70%, transparent);
   }
 
   /* The π proof seal: the gold mark of a proof crossing between the chains. */
@@ -193,6 +265,11 @@
     box-shadow: 0 0 0 4px color-mix(in oklab, var(--dot, var(--color-text)) 14%, transparent);
   }
 
+  /* A live indicator: the dot breathes while something is under way. */
+  .dot-live {
+    animation: breathe 1.8s ease-in-out infinite;
+  }
+
   /* What leaks: only on what ties a record to someone. */
   .leak {
     padding: 2px 5px;
@@ -204,8 +281,38 @@
     box-decoration-break: clone;
   }
 
+  /* Encrypted: what the pool hides, drawn as a soft blur over its placeholder. */
+  .cipher {
+    filter: blur(3.5px);
+    user-select: none;
+  }
+
+  /* A loading placeholder's sheen. */
+  .skeleton {
+    border-radius: 10px;
+    background: linear-gradient(
+      90deg,
+      var(--color-surface-2) 0%,
+      color-mix(in oklab, var(--color-surface-3) 80%, var(--color-soft)) 50%,
+      var(--color-surface-2) 100%
+    );
+    background-size: 200% 100%;
+    animation: shimmer 1.6s linear infinite;
+  }
+
+  /* The flow line between the chains: dashes running from Zcash to Base while a proof travels. */
+  .flow-line {
+    background-image: linear-gradient(90deg, var(--color-accent) 50%, transparent 50%);
+    background-size: 12px 2px;
+    background-repeat: repeat-x;
+    animation: flow 1.2s linear infinite;
+  }
+
   @media (prefers-reduced-motion: reduce) {
-    .seal-pulse {
+    .seal-pulse,
+    .dot-live,
+    .skeleton,
+    .flow-line {
       animation: none;
     }
   }
@@ -222,12 +329,51 @@
   }
 }
 
+@keyframes breathe {
+  0%,
+  100% {
+    opacity: 1;
+  }
+  50% {
+    opacity: 0.45;
+  }
+}
+
+@keyframes rise {
+  from {
+    opacity: 0;
+    transform: translateY(8px);
+  }
+  to {
+    opacity: 1;
+    transform: none;
+  }
+}
+
+@keyframes shimmer {
+  from {
+    background-position: 200% 0;
+  }
+  to {
+    background-position: -200% 0;
+  }
+}
+
+@keyframes flow {
+  from {
+    background-position: 0 0;
+  }
+  to {
+    background-position: 24px 0;
+  }
+}
+
 /* The page's column, as the design sets it. */
 @utility wrap {
   width: 100%;
-  max-width: 1200px;
+  max-width: 1240px;
   margin-inline: auto;
-  padding-inline: clamp(16px, 4vw, 48px);
+  padding-inline: clamp(16px, 4vw, 40px);
 }
 
 /* Base's light ground: ink text, ink links and chain data, and an ink focus outline. */

@@ -6,6 +6,8 @@
  * a loan account, this address pays its own gas and is the user's: it appears on Base.
  */
 import { getAddress, numberToHex, type Address, type Hex } from "viem";
+import { REPLAY } from "./replay/flag";
+import { replayWallet } from "./replay/wallet";
 
 export interface Eip1193Provider {
   request(args: { method: string; params?: readonly unknown[] }): Promise<unknown>;
@@ -18,9 +20,10 @@ export class WalletError extends Error {
   }
 }
 
-/** The injected wallet, if the browser has one. */
+/** The injected wallet, if the browser has one; in a replay build (DEMO), the recorded run's wallet (lib/replay/wallet.ts). */
 export function injectedWallet(): Eip1193Provider | null {
   if (typeof window === "undefined") return null;
+  if (REPLAY) return replayWallet();
   const w = (window as unknown as { ethereum?: Eip1193Provider }).ethereum;
   return w && typeof w.request === "function" ? w : null;
 }

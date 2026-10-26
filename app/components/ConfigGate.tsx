@@ -4,7 +4,8 @@ import { useEffect, useState, type ReactNode } from "react";
 import { loadRuntimeConfig } from "@/lib/api";
 import { config, configIssues } from "@/lib/config";
 import { MintingBanner } from "./MintingBanner";
-import { Button, Notice, Spinner } from "./ui";
+import { ProofSeal } from "./seam";
+import { Button, Notice } from "./ui";
 
 /**
  * Renders the page once the configuration is settled: the backend's GET /config checked against
@@ -29,8 +30,9 @@ export function ConfigGate({ children }: { children: ReactNode }) {
 
   if (!ready) {
     return (
-      <div role="status" aria-live="polite" className="flex min-h-[40vh] items-center justify-center text-sm text-muted">
-        <Spinner label="Loading the deployment configuration…" />
+      <div role="status" aria-live="polite" className="flex min-h-[48vh] flex-col items-center justify-center gap-5 text-sm text-muted">
+        <ProofSeal pulse />
+        <span>Checking the deployment against this build&apos;s pinned addresses…</span>
       </div>
     );
   }

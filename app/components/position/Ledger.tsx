@@ -5,6 +5,7 @@ import { useCallback, useEffect, useState } from "react";
 import type { Hex } from "viem";
 import { CopyButton } from "@/components/client";
 import { DestinationStep } from "@/components/DestinationForm";
+import { ZecMark } from "@/components/marks";
 import { PayoutNotice } from "@/components/PayoutNotice";
 import { ProofSeal, StepMark, type MarkState } from "@/components/seam";
 import { TxResult } from "@/components/TxResult";
@@ -344,8 +345,8 @@ export function ClaimsCard({
   if (ledger.claims.length === 0) return null;
   const claims = [...ledger.claims].sort((a, b) => a.sequence - b.sequence);
   return (
-    <Card title="Zcash payouts">
-      <ul className="divide-y divide-border text-sm">
+    <Card title="Zcash payouts" icon={<ZecMark size={20} />}>
+      <ul className="divide-y divide-hairline text-sm">
         {claims.map((c) => (
           <ClaimRow key={c.claimId} ledger={ledger} claim={c} loan={loan} onChanged={onChanged} />
         ))}
@@ -409,12 +410,17 @@ function ClaimRow({
     return r;
   });
   return (
-    <li className="space-y-2 py-3">
+    <li className="space-y-2.5 py-4 first:pt-1">
       <div className="flex flex-wrap items-center justify-between gap-2">
-        <span>{view.label}</span>
+        <span className="flex items-center gap-2.5 font-semibold">
+          <ZecMark size={18} />
+          {view.label}
+        </span>
         <span className="flex items-center gap-3">
-          <span className="tabular-nums">{formatTaz(claim.amount)}</span>
-          <Badge tone={view.badge.tone}>{view.badge.text}</Badge>
+          <span className="font-semibold tabular-nums">{formatTaz(claim.amount)}</span>
+          <Badge tone={view.badge.tone} dot>
+            {view.badge.text}
+          </Badge>
         </span>
       </div>
       <PayoutTrack claim={claim} />
@@ -538,7 +544,7 @@ function PayoutTrack({ claim }: { claim: LedgerClaim }) {
   return (
     <ol
       aria-label="Its record on Base"
-      className="paper flex w-fit max-w-full flex-wrap items-center gap-x-5 gap-y-2 rounded-[3px] px-3 py-2 text-xs"
+      className="paper flex w-fit max-w-full flex-wrap items-center gap-x-5 gap-y-2 rounded-[3px] px-3.5 py-2.5 text-xs"
     >
       {steps.map((s) => (
         <li

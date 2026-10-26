@@ -11,6 +11,7 @@ import { api } from "@/lib/api";
 import { config } from "@/lib/config";
 import { loanTokenName, realAndMock } from "@/lib/labels";
 import { formatDenominations } from "@/lib/zcash";
+import { IconCheck, IconCopy, IconEye, IconHome, IconLoans, IconMarket, IconSwap, IconVault } from "./icons";
 import { cx, Notice } from "./ui";
 
 /** Copies `value` to the clipboard; falls back to selecting text when the API is blocked. */
@@ -43,11 +44,13 @@ export function CopyButton({
         }
       }}
       className={cx(
-        "inline-flex items-center rounded-full border border-line font-semibold text-soft transition-colors hover:bg-bg hover:text-text",
-        size === "md" ? "min-h-11 px-5 text-sm" : "min-h-9 px-3.5 text-xs",
+        "inline-flex items-center gap-1.5 rounded-full bg-surface-2 font-semibold text-soft shadow-[inset_0_0_0_1px_var(--color-line)] transition-colors hover:bg-surface-3 hover:text-text",
+        size === "md" ? "min-h-11 px-5 text-sm" : "min-h-8 px-3 text-xs",
+        state === "copied" && "text-ok",
         className,
       )}
     >
+      {state === "copied" ? <IconCheck size={14} strokeWidth={2.4} /> : <IconCopy size={14} />}
       <span aria-live="polite">{state === "copied" ? "Copied" : state === "failed" ? "Copy failed: select and copy" : label}</span>
     </button>
   );
@@ -82,8 +85,8 @@ export function Qr({ value, label, size = 240 }: { value: string; label: string;
   );
 }
 
-/** Backend reachability indicator (pings our own backend only). */
-export function BackendStatus() {
+/** Backend reachability indicator (pings our own backend only); `compact`: the header's pill. */
+export function BackendStatus({ compact = false }: { compact?: boolean }) {
   const [up, setUp] = useState<boolean | null>(null);
   useEffect(() => {
     let stop = false;
@@ -107,46 +110,89 @@ export function BackendStatus() {
   }, []);
   const text = up === null ? "Checking backend" : up ? "Backend online" : "Backend offline";
   return (
-    <span className="inline-flex items-center gap-2 text-xs text-muted" title={api.baseUrl}>
-      <span
-        aria-hidden="true"
-        className={cx("h-2 w-2 rounded-full", up === null ? "bg-faint" : up ? "bg-ok" : "bg-danger")}
-      />
-      <span aria-live="polite">{text}</span>
+    <span
+      className={cx(
+        "inline-flex items-center gap-2 text-xs whitespace-nowrap text-muted",
+        compact && "min-h-8 rounded-full bg-surface px-3 shadow-[inset_0_0_0_1px_var(--color-border)]",
+      )}
+      title={api.baseUrl}
+    >
+      <span aria-hidden="true" className={cx("size-2 rounded-full", up === null ? "bg-faint" : up ? "dot-live bg-ok" : "bg-danger")} />
+      <span aria-live="polite" className={cx(compact && "max-[1240px]:sr-only")}>
+        {text}
+      </span>
     </span>
   );
 }
 
 const NAV = [
-  { href: "/borrow", label: "Borrow" },
-  { href: "/loans", label: "My loans" },
-  { href: "/buy", label: "Buy shielded ZEC" },
-  { href: "/market", label: "Market" },
-  { href: "/prepare", label: "Prepare" },
-  { href: "/world", label: "What the world sees" },
+  { href: "/", label: "Dashboard", short: "Home", Icon: IconHome, exact: true },
+  { href: "/borrow", label: "Borrow", short: "Borrow", Icon: IconVault, exact: false },
+  { href: "/loans", label: "My loans", short: "Loans", Icon: IconLoans, exact: false },
+  { href: "/buy", label: "Swap", short: "Swap", Icon: IconSwap, exact: false },
+  { href: "/market", label: "Market", short: "Market", Icon: IconMarket, exact: false },
+  { href: "/world", label: "Privacy", short: "Privacy", Icon: IconEye, exact: false },
 ] as const;
 
-/** The design's navigation pills: the current page on a surface with a line ring. */
+function isActive(pathname: string, href: string, exact: boolean): boolean {
+  if (exact) return pathname === href;
+  // A loan's own pages belong to "My loans".
+  if (href === "/loans" && ["/position", "/verify", "/refund"].some((p) => pathname === p || pathname.startsWith(`${p}/`))) return true;
+  return pathname === href || pathname.startsWith(`${href}/`);
+}
+
+/** The header's navigation: icon pills, the current page raised. Hidden on phones (BottomNav). */
 export function Nav() {
   const pathname = usePathname();
   return (
-    <nav aria-label="Main">
-      <ul className="flex flex-wrap items-center gap-1">
-        {NAV.map((n) => {
-          const active = pathname === n.href || pathname.startsWith(`${n.href}/`);
+    <nav aria-label="Main" className="max-[860px]:hidden">
+      <ul className="flex items-center gap-0.5">
+        {NAV.map(({ href, label, Icon, exact }) => {
+          const active = isActive(pathname, href, exact);
           return (
-            <li key={n.href}>
+            <li key={href}>
               <Link
-                href={n.href}
+                href={href}
                 aria-current={active ? "page" : undefined}
                 className={cx(
-                  "inline-flex min-h-10 items-center rounded-full px-2.5 text-[14.5px] font-medium no-underline transition-colors min-[561px]:px-3.5",
-                  active
-                    ? "bg-surface text-text shadow-[inset_0_0_0_1px_var(--color-line)]"
-                    : "text-muted hover:bg-surface hover:text-text",
+                  "inline-flex min-h-10 items-center gap-2 rounded-full px-3 text-[14px] font-semibold whitespace-nowrap no-underline transition-colors",
+                  active ? "bg-surface-2 text-text shadow-[inset_0_0_0_1px_var(--color-line)]" : "text-muted hover:bg-surface hover:text-text",
                 )}
               >
-                {n.label}
+                <Icon size={17} className={active ? "text-accent" : undefined} />
+                <span className="max-[1100px]:sr-only">{label}</span>
+              </Link>
+            </li>
+          );
+        })}
+      </ul>
+    </nav>
+  );
+}
+
+/** Phones: the same pages as a tab bar at the bottom of the screen. */
+export function BottomNav() {
+  const pathname = usePathname();
+  return (
+    <nav
+      aria-label="Main"
+      className="fixed inset-x-0 bottom-0 z-40 border-t border-hairline bg-bg/90 pb-[env(safe-area-inset-bottom)] backdrop-blur-xl min-[861px]:hidden"
+    >
+      <ul className="mx-auto grid max-w-lg grid-cols-6">
+        {NAV.map(({ href, short, Icon, exact }) => {
+          const active = isActive(pathname, href, exact);
+          return (
+            <li key={href}>
+              <Link
+                href={href}
+                aria-current={active ? "page" : undefined}
+                className={cx(
+                  "flex min-h-[58px] flex-col items-center justify-center gap-1 text-[11px] font-semibold no-underline",
+                  active ? "text-text" : "text-muted",
+                )}
+              >
+                <Icon size={20} className={active ? "text-accent" : undefined} />
+                {short}
               </Link>
             </li>
           );

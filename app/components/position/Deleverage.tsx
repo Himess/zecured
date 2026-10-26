@@ -121,7 +121,7 @@ export function Deleverage({
             }}
             placeholder={formatUsdc(snapshot.debt / 2n)}
             aria-invalid={inputError ? true : undefined}
-            className="w-full rounded-lg border border-border bg-bg px-3 py-2 tabular-nums text-text focus:border-muted"
+            className="field tabular-nums"
           />
           <Button variant="secondary" onClick={() => repay && void getQuote.run(repay)} busy={getQuote.busy} disabled={!repay || Boolean(inputError)}>
             {quote ? "Refresh quote" : "Get a quote"}

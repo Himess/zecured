@@ -2,11 +2,14 @@ import type { Metadata, Viewport } from "next";
 import localFont from "next/font/local";
 import Link from "next/link";
 import type { ReactNode } from "react";
-import { BackendStatus, Nav } from "@/components/client";
+import { BackendStatus, BottomNav, Nav } from "@/components/client";
 import { ConfigGate } from "@/components/ConfigGate";
+import { NetworkPill } from "@/components/marks";
+import { ReplayBand, ReplayDock } from "@/components/replay/ReplayDock";
 import { SeamMark } from "@/components/seam";
 import { Badge } from "@/components/ui";
 import { DEPLOYMENT } from "@/lib/deployment";
+import { REPLAY, REPLAY_CSP } from "@/lib/replay/flag";
 import "./globals.css";
 
 const TESTNET = DEPLOYMENT.kind === "testnet";
@@ -44,7 +47,7 @@ export const metadata: Metadata = {
 };
 
 export const viewport: Viewport = {
-  themeColor: "#0D1611",
+  themeColor: "#070D0A",
   colorScheme: "dark",
   width: "device-width",
   initialScale: 1,
@@ -54,63 +57,97 @@ export default function RootLayout({ children }: { children: ReactNode }) {
   return (
     <html lang="en" className={`${archivo.variable} ${martianMono.variable}`}>
       <body className="min-h-dvh antialiased">
+        {/* A static replay build has no server to send headers: its policy rides in the page (lib/replay/flag.ts). */}
+        {REPLAY ? (
+          <meta
+            httpEquiv="Content-Security-Policy"
+            // `next dev` needs eval for React's debugging, as the live build's header allows in development.
+            content={process.env.NODE_ENV === "development" ? REPLAY_CSP.replace("'unsafe-inline'", "'unsafe-inline' 'unsafe-eval'") : REPLAY_CSP}
+          />
+        ) : null}
         <a
           href="#main"
           className="sr-only focus:not-sr-only focus:fixed focus:left-4 focus:top-4 focus:z-50 focus:rounded-full focus:bg-surface-2 focus:px-4 focus:py-2"
         >
           Skip to content
         </a>
+        {REPLAY ? <ReplayBand /> : null}
         {DEPLOYMENT.band ? (
           <div role="note" className="border-b border-warn/60 bg-warn/10 px-4 py-2 text-center text-sm font-medium text-warn">
             {DEPLOYMENT.band}
           </div>
         ) : null}
-        <header className="border-b border-hairline">
-          <div className="wrap flex min-h-[72px] flex-wrap items-center justify-between gap-x-7 gap-y-3 py-3">
-            <div className="flex items-center gap-3.5">
-              <Link href="/" className="inline-flex items-center gap-[11px] text-text no-underline">
-                <SeamMark />
+        <header className="sticky top-0 z-40 border-b border-hairline bg-bg/80 backdrop-blur-xl">
+          <div className="wrap flex min-h-16 items-center gap-x-5 py-2.5">
+            <div className="flex items-center gap-3">
+              <Link href="/" className="inline-flex items-center gap-[10px] text-text no-underline">
+                <SeamMark size={28} />
                 <span className="text-[19px] font-extrabold font-stretch-125%">Zecured</span>
               </Link>
               <Badge tone="neutral">{TESTNET ? "Testnet" : "Mainnet beta"}</Badge>
             </div>
-            <Nav />
-          </div>
-        </header>
-        <main id="main" className="wrap pt-8 pb-[72px] sm:pt-10">
-          <ConfigGate>{children}</ConfigGate>
-        </main>
-        <footer className="border-t border-hairline">
-          <div className="wrap flex flex-col gap-x-10 gap-y-3 py-6 text-[13.5px] text-faint sm:flex-row sm:items-center sm:justify-between">
-            <p className="max-w-2xl">
-              {TESTNET ? (
-                <>
-                  Zecured is a ZECATHON 2026 testnet experiment, <strong className="font-semibold text-soft">not a financial product</strong>.
-                  Testnet funds only: TAZ on Zcash testnet and test USDC on Base Sepolia.
-                </>
-              ) : (
-                <>
-                  Zecured mainnet beta: <strong className="font-semibold text-soft">unaudited, invite only, small caps</strong>. Use only
-                  what you can afford to lose.
-                </>
-              )}
-            </p>
-            <div className="flex flex-wrap items-center gap-x-6 gap-y-2 sm:shrink-0">
-              <BackendStatus />
-              <Link href="/status" className="text-soft no-underline hover:text-text hover:underline">
-                Status
-              </Link>
-              <Link href="/evidence" className="text-soft no-underline hover:text-text hover:underline">
-                Evidence
-              </Link>
-              {TESTNET ? (
-                <Link href="/demo" className="text-soft no-underline hover:text-text hover:underline">
-                  Demo panel
-                </Link>
-              ) : null}
+            <div className="flex flex-1 justify-center">
+              <Nav />
+            </div>
+            <div className="flex items-center gap-2 max-[560px]:hidden">
+              <NetworkPill zcash={TESTNET ? "Zcash testnet" : "Zcash"} base={DEPLOYMENT.chainName} className="max-[960px]:hidden" />
+              <BackendStatus compact />
             </div>
           </div>
+        </header>
+        <main id="main" className={`wrap pt-8 sm:pt-10 ${REPLAY ? "pb-56 min-[861px]:pb-36" : "pb-32 min-[861px]:pb-20"}`}>
+          <ConfigGate>{children}</ConfigGate>
+        </main>
+        <footer className="border-t border-hairline pb-24 min-[861px]:pb-0">
+          <div className="wrap grid gap-x-10 gap-y-8 py-10 text-[13.5px] text-muted md:grid-cols-[minmax(0,1.4fr)_repeat(2,minmax(0,1fr))]">
+            <div className="space-y-3">
+              <p className="inline-flex items-center gap-2.5 text-text">
+                <SeamMark size={22} />
+                <span className="text-[16px] font-extrabold font-stretch-125%">Zecured</span>
+              </p>
+              <p className="max-w-md">
+                {TESTNET ? (
+                  <>
+                    Borrow against shielded ZEC without unshielding it. A ZECATHON 2026 testnet experiment,{" "}
+                    <strong className="font-semibold text-soft">not a financial product</strong>: TAZ on Zcash testnet and test
+                    tokens on Base Sepolia only.
+                  </>
+                ) : (
+                  <>
+                    Zecured mainnet beta: <strong className="font-semibold text-soft">unaudited, invite only, small caps</strong>.
+                    Use only what you can afford to lose.
+                  </>
+                )}
+              </p>
+            </div>
+            <nav aria-label="The app" className="space-y-2.5">
+              <p className="text-xs font-bold tracking-[0.08em] text-faint uppercase">Use it</p>
+              <ul className="space-y-2">
+                <li><Link href="/borrow" className="text-soft no-underline hover:text-text hover:underline">Borrow against ZEC</Link></li>
+                <li><Link href="/buy" className="text-soft no-underline hover:text-text hover:underline">Buy shielded ZEC</Link></li>
+                <li><Link href="/prepare" className="text-soft no-underline hover:text-text hover:underline">Prepare your ZEC</Link></li>
+                <li><Link href="/loans" className="text-soft no-underline hover:text-text hover:underline">My loans and key backups</Link></li>
+              </ul>
+            </nav>
+            <nav aria-label="Proof" className="space-y-2.5">
+              <p className="text-xs font-bold tracking-[0.08em] text-faint uppercase">Check it</p>
+              <ul className="space-y-2">
+                <li><Link href="/evidence" className="text-soft no-underline hover:text-text hover:underline">Evidence of real transactions</Link></li>
+                <li><Link href="/status" className="text-soft no-underline hover:text-text hover:underline">System status</Link></li>
+                <li><Link href="/world" className="text-soft no-underline hover:text-text hover:underline">What the world sees</Link></li>
+                {TESTNET ? (
+                  <li><Link href="/demo" className="text-soft no-underline hover:text-text hover:underline">Demo panel</Link></li>
+                ) : null}
+              </ul>
+            </nav>
+          </div>
+          <div className="wrap flex flex-wrap items-center justify-between gap-3 border-t border-hairline py-5 text-xs text-faint">
+            <p>ZEC, USDC and Morpho marks belong to their owners and only name the asset or protocol.</p>
+            <BackendStatus />
+          </div>
         </footer>
+        <BottomNav />
+        {REPLAY ? <ReplayDock /> : null}
       </body>
     </html>
   );

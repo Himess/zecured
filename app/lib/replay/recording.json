@@ -1,0 +1,619 @@
+{
+  "schema": "zecured-replay/1",
+  "placeholder": true,
+  "recordedAt": null,
+  "note": "Placeholder until the live Base Sepolia run is recorded: its hashes are dummies and nothing links to an explorer.",
+  "network": {
+    "base": "base-sepolia",
+    "zcash": "zcash-testnet",
+    "chainId": 84532
+  },
+  "explorers": {
+    "base": "https://sepolia.basescan.org/tx/",
+    "zcash": null
+  },
+  "config": {
+    "chainId": 84532,
+    "registry": "0xa3f846f7c7a8a62f65bbf8be34d9a1f108118b21",
+    "adapter": "0xd146f298980980dd574620abfaeb5b89a8bc9f66",
+    "intake": "0xdD86fEbD0551b97b5c1298324590B6B27cc64285",
+    "confirmations": 3,
+    "vaultExpiryBlocks": 480,
+    "openVaultStampBits": 8,
+    "sponsorship": true,
+    "denominations": [
+      "5000000"
+    ],
+    "signers": [
+      "0x4BbbBa696eA6179eEd4F1DC0A5b609146f82D87F",
+      "0x6cA331571E5605D21B6B4e77B22C93573abBc062",
+      "0x6e9c75fe890261c498DE3bba2Aa7CacA1dA0DB61",
+      "0xc824b56c9834a3EA23FcF898385EbB53D61Ef106",
+      "0xCcfeaB6F968Cb51DAEA06c011c795fb66b590A45"
+    ],
+    "openings": {
+      "open": true,
+      "inviteOnly": false
+    },
+    "contracts": {
+      "BaseOracle": "0xE4079E41738c5c365B9EAdE39e9ec67971DF63dE",
+      "CapPrice": "0xd6a41044a7485e4f0B2d2ab079af2EDa3c231fa4",
+      "DemoShockOracle": "0xb36157EA2E28df291e6f4805E0582Bf0d3BDc113",
+      "LoanToken": "0x8228b67b43E671511E07a4A547add6471de9d4F0",
+      "MarketOracle": "0xb36157EA2E28df291e6f4805E0582Bf0d3BDc113",
+      "MockUSDC": "0x8228b67b43E671511E07a4A547add6471de9d4F0",
+      "MockZecOracle": "0xE4079E41738c5c365B9EAdE39e9ec67971DF63dE",
+      "SettlementAdapter": "0xD146f298980980dD574620abFaeB5B89A8BC9F66",
+      "SignerBond": "0xa9D70e64Ff000DbFab3332A665d9CA5e190E53Ce",
+      "ZZEC": "0x1E2e751452CaB7a3ef59f319D08D4Fbba861440d",
+      "ZecuredCompensator": "0x5CF271B75eC511FB12C3667a1dfc69AD566A12a9",
+      "ZecuredIntake": "0xdD86fEbD0551b97b5c1298324590B6B27cc64285",
+      "ZecuredRegistry": "0xa3f846F7C7a8a62F65bBf8be34D9A1f108118b21",
+      "ZecuredSlasher": "0xEc34aA21cDe1366b397a99A4d90fc6B2f02cFaEa",
+      "ZecuredSpendLogic": "0x1c1068d4Cf5CE052da15ff3467fcb5A27cF2C508",
+      "ZecuredSwap": "0x3983F1e1C7929A2208296895F01cE0d422917594",
+      "ZecuredVersions": "0x53a3D268683Cd748b3B71B55a202dF48B7cE633A"
+    },
+    "market": {
+      "collateralToken": "0x1E2e751452CaB7a3ef59f319D08D4Fbba861440d",
+      "irm": "0x46415998764C29aB2a25CbeA6254146D50D22687",
+      "lltv": "625000000000000000",
+      "loanToken": "0x8228b67b43E671511E07a4A547add6471de9d4F0",
+      "marketId": "0xdb98e90105d5872cd5066976f0ee5ab6188496db83472c48db3165c5ad26558f",
+      "morphoBlue": "0xBBBBBbbBBb9cC5e90e3b3Af64bdAF62C37EEFFCb",
+      "oracle": "0xb36157EA2E28df291e6f4805E0582Bf0d3BDc113"
+    },
+    "v3": {
+      "feeBps": 50,
+      "minFeeZat": 20000,
+      "minRefundZat": 20000,
+      "refundAbandonPeriod": 86400,
+      "pendingRefundDelay": 300,
+      "maxPause": 2592000,
+      "livenessPeriod": 600,
+      "commitGrace": 7200,
+      "livenessPremiumBps": 500,
+      "coverageBps": 10000,
+      "maxTotalZat": 150000000,
+      "incidentWindow": 600
+    }
+  },
+  "links": {
+    "relay": "0x637BBA9C47190C7a1ab2412F72cF0A9c088dE58b",
+    "disputeWindow": 600,
+    "inclusionWindow": 1200,
+    "refundDormancy": 2592000,
+    "maxMarginBps": 500,
+    "feeCommitment": "0x4c240d3fbe45206bf8b96a11c5a1ca09130dee390c70068ca8bf988161154ad8"
+  },
+  "status": {
+    "commit": "0000000",
+    "treeClean": true,
+    "deployment": {
+      "chainId": 84532,
+      "registry": "0xa3f846F7C7a8a62F65bBf8be34D9A1f108118b21",
+      "intake": "0xdD86fEbD0551b97b5c1298324590B6B27cc64285",
+      "signerBond": "0xa9D70e64Ff000DbFab3332A665d9CA5e190E53Ce",
+      "mintMode": "proof-only",
+      "verifierIsMock": false,
+      "depositImageId": "0x406c6d268f29270226c775db1fe4bec04acf51ba919e250078125d71c10bff41",
+      "violationImageId": "0x65705f75c5482b2b0cf6fee12760b2364d48213bb2933f3882dc2d92f824866e"
+    },
+    "versions": {
+      "deposit": [
+        {
+          "versionId": "0xabb53c7425ef3be52156b791ea0cc8f323afc7e4e3d993efbe62121203339075",
+          "selector": "0x73c457ba",
+          "imageId": "0x406c6d268f29270226c775db1fe4bec04acf51ba919e250078125d71c10bff41",
+          "branches": [
+            1998129881
+          ],
+          "activeAt": 1792591229,
+          "active": true,
+          "removed": false
+        }
+      ],
+      "violation": [
+        {
+          "versionId": "0xcd57ef4bc1c055c3fdca96a7920d4fed2aa7a1e7e52f2a674bb924ed6bff5309",
+          "selector": "0x73c457ba",
+          "imageId": "0x65705f75c5482b2b0cf6fee12760b2364d48213bb2933f3882dc2d92f824866e",
+          "branches": [
+            1998129881
+          ],
+          "activeAt": 1792591229,
+          "active": true,
+          "removed": false
+        }
+      ]
+    }
+  },
+  "chain": {
+    "baseBlock": 48600000,
+    "zcashTip": 4541200,
+    "price": "500000000000000000000000000000000000",
+    "borrowRate": "317097919",
+    "market": {
+      "totalSupplyAssets": "100000000000",
+      "totalSupplyShares": "100000000000000000",
+      "totalBorrowAssets": "0",
+      "totalBorrowShares": "0",
+      "fee": "0"
+    },
+    "otherLockedZat": "0",
+    "otherOpenVaults": {
+      "5000000": 0
+    },
+    "bonds": {
+      "each": [
+        "100000000",
+        "100000000",
+        "100000000",
+        "100000000",
+        "100000000"
+      ],
+      "effective": "500000000",
+      "totalSlashable": "500000000",
+      "minBond": "100000000"
+    },
+    "relayChainWork": "1000000000"
+  },
+  "loan": {
+    "owner": "0x5393a9bb30f1968fF21702E1b980950BE616Fd4B",
+    "account": "0xcc6caF9b1faA20FA23689194190528Dcf57Bd4f3",
+    "requestId": "0xfa2ade39400c6a857a8d92ab0d5721fe0348687de0df3ecc4a8a3f705cd79895",
+    "amount": "5000000",
+    "vault": {
+      "vaultId": "0x9c9ad033ddbcef74d303b8e0bfa258cc29df408fb7db49e2a766ce509d9c5c4e",
+      "address": "utest12rtd5lg7g7eusrs5wxcsq7zcxkp5dte0vf8m4a5sdufx30rtl9phw9yge0s426eesynw64aqau5v6jmvqtpr6uanm2apurfagsds3yjn",
+      "zip321": "zcash:utest12rtd5lg7g7eusrs5wxcsq7zcxkp5dte0vf8m4a5sdufx30rtl9phw9yge0s426eesynw64aqau5v6jmvqtpr6uanm2apurfagsds3yjn?amount=0.05",
+      "expiryHeight": 4541630,
+      "birthdayHeight": 4541150,
+      "tagKeyHash": "0x7c2733a6080e43e5fe15519b88a93f6caddba95a96bd8e2dcffc1a150fca2e46",
+      "signatures": [
+        {
+          "index": 0,
+          "signature": "0x24dbd22c4cc14acfecda6d3f392a2a97d5fd725d3ba4d0c92a7cd40c3021dd5d7c6dbaad844b50179a26aaefba8e95b7e694ed64101fce8376b194cd87e8205b1b"
+        },
+        {
+          "index": 1,
+          "signature": "0xf67d4dde1dd122dd5f004f9c1b08cadb84ea2e4b70e5bac6dff4c29dec87d1510b1383d7988305e2e6c881fabb959edbe9296101a0b2a79036d0b3a725f2ef271c"
+        },
+        {
+          "index": 2,
+          "signature": "0x2263a109843658a073dc5b541c71d89ce0629482c0506dc57946a723f8a9ed46732d2d95a61270df45a9d48f27e9f521d0039a49fc3d1a8b0b9a602cb88700981b"
+        },
+        {
+          "index": 3,
+          "signature": "0xccc5efaff564c3ec09b8245ce3ca8cd0d9db71f49271e0c3bc9cee67913b3af442df3fd85cdce5246c084dbadac2c3a036ddbfb1d6bd9cc45a481be7bf9bb8501c"
+        },
+        {
+          "index": 4,
+          "signature": "0xa1326b8c435339ea22665de4a3e7a634f7c658120e9d3e438909d658de99c80f04bda1998e580b1b50096b281e1c95a9920c2fe76ae43927cd34248c8a24e99e1b"
+        }
+      ]
+    },
+    "depositTag": "0x8479b7cd461bcf25796c4d4c819e73e6cb07e3e29b643d0e1a57d7313b90835f",
+    "anchor": "0xba0b79d6cde7ed814a67ae76a0f0a6ea559ddd4bcc3be1a90027fdb7651d814e",
+    "versionId": "0xabb53c7425ef3be52156b791ea0cc8f323afc7e4e3d993efbe62121203339075",
+    "borrow": {
+      "assets": "900000",
+      "protected": false
+    },
+    "close": {
+      "executor": "0x11f0a66D6674E0E9788d55E5387B43d6ad1eB738",
+      "marginBps": 100,
+      "repayAssets": "900100",
+      "mmAmount": "1818202",
+      "userAmount": "3156798",
+      "userCommitment": "0x9ea3eaf9cd5d5cfe2c9e0c00a9f4e0a6ee635f366593f548f729d158ffb55223",
+      "mmCommitment": "0x593d17818ece4b5421facae13aa0e5c615aae767f089c7fd67f19dc22764f0e8",
+      "payoutRef": "0x60818af0ee26b3fbef1eb114bc43634896db09fd98454943523c7c877f2a38b2",
+      "inputTag": "0x005f6b56747bcf07427ed0aa58b3c8b9555687342b65d81d39981496be42394b"
+    }
+  },
+  "demo": {
+    "returnAddress": "utest1z6hw43grsf55qwnrjkewd3wljd6mscwqnpnvmzrd46tuu8empen5595tg0geyd3cknqjqe2jfmxkx0jrg2c8wxn7mpkj0g4g7ceefjld",
+    "stampBits": 8,
+    "dailyCapZat": "50000000"
+  },
+  "swap": {
+    "swap": "0x3983F1e1C7929A2208296895F01cE0d422917594",
+    "maker": "0x27C08c142dC3edC61C022C03c8be4990fDc52156",
+    "taker": "0xe0D641588D60200c6A39027Ee9df744cF5Ba734c",
+    "takerUsdc": "100000000",
+    "zatoshi": "49500000",
+    "usdc": "25000000",
+    "makerReceiverCommitment": "0xd9176524959b1557262f0afeda0118dcaaa2b60b2ea3e40b44e37dbab84f1c69",
+    "receiverCommitment": "0x196bcf5817bf0dddda5603e59a53123eefe21fb86a0a63e9dc86ef6a28c5a629",
+    "payWindow": 3600,
+    "nonce": "1",
+    "orderId": "0x197eba8f4721ac1695c9cc7284e1c42b3efbacc727ae0ce1a04629858c07d59e",
+    "anchor": "0x2606e702b32addff92976b0fa3d8227c39d7008c704eedb83f1bc24f8cdf609b",
+    "signing": "demo-key",
+    "signature": null
+  },
+  "evidence": {
+    "commit": "0000000",
+    "tag": null,
+    "deployedAtBlock": null,
+    "mocks": [
+      {
+        "name": "MockUSDC",
+        "address": "0x8228b67b43E671511E07a4A547add6471de9d4F0",
+        "label": "MOCK",
+        "why": "The loan token, minted by the deployer."
+      },
+      {
+        "name": "DemoShockOracle",
+        "address": "0xb36157EA2E28df291e6f4805E0582Bf0d3BDc113",
+        "label": "MOCK / DEMO",
+        "why": "An owner-set shock on the price, to show a liquidation."
+      },
+      {
+        "name": "MockZecOracle",
+        "address": "0xE4079E41738c5c365B9EAdE39e9ec67971DF63dE",
+        "label": "MOCK",
+        "why": "An owner-set ZEC/USD price."
+      },
+      {
+        "name": "This replay",
+        "address": null,
+        "label": "DEMO",
+        "why": "The judges' build replays the live run in the browser: no backend, no chain."
+      }
+    ],
+    "leakScan": null
+  },
+  "steps": [
+    {
+      "id": "opened",
+      "track": "loan",
+      "auto": false,
+      "delayMs": 0,
+      "at": null,
+      "durationSeconds": null,
+      "title": "Open a vault",
+      "detail": "Five signer nodes run a distributed key generation for a new 3-of-5 vault, and each signs its Ironwood address; nothing touches Base.",
+      "hint": "On Borrow, keep 0.05 TAZ, tick that your ZEC is in Ironwood and press “Open a 0.05 TAZ vault”.",
+      "href": "/borrow",
+      "tx": {},
+      "artifacts": [
+        {
+          "label": "The five signers' VaultOpened signatures",
+          "chain": "offchain",
+          "tx": null,
+          "kind": "signatures",
+          "meta": {
+            "signers": "5 of 5",
+            "scheme": "EIP-712 VaultOpened v2"
+          }
+        }
+      ]
+    },
+    {
+      "id": "deposit-paid",
+      "track": "loan",
+      "auto": false,
+      "delayMs": 0,
+      "at": null,
+      "durationSeconds": null,
+      "title": "Pay the vault from Ironwood",
+      "detail": "The demo wallet pays the vault 0.05 TAZ in one Ironwood → Ironwood transaction on Zcash testnet.",
+      "hint": "Back up the key (or skip), then press “Pay it with demo TAZ”.",
+      "href": "/borrow",
+      "tx": {
+        "zcash": "0000000000000000000000000000000000000000000000000000000000000002"
+      },
+      "artifacts": [
+        {
+          "label": "The deposit on Zcash",
+          "chain": "zcash",
+          "tx": null,
+          "kind": "tx"
+        }
+      ]
+    },
+    {
+      "id": "deposit-seen",
+      "track": "loan",
+      "auto": true,
+      "delayMs": 4000,
+      "at": null,
+      "durationSeconds": null,
+      "title": "Deposit confirmed on Zcash",
+      "detail": "The signers see the deposit with its confirmations, and a zero-knowledge proof that it is in a Zcash block is made.",
+      "hint": "Confirmations come in; the proof is being made.",
+      "href": "/borrow",
+      "tx": {},
+      "artifacts": []
+    },
+    {
+      "id": "proven",
+      "track": "loan",
+      "auto": true,
+      "delayMs": 9000,
+      "at": null,
+      "durationSeconds": null,
+      "title": "Deposit proven on Base",
+      "detail": "attestDeposit checks the proof against a Zcash header the relay already verified: nothing is minted on anyone's word.",
+      "hint": "Base verifies the proof.",
+      "href": "/borrow",
+      "tx": {
+        "base": "0x0000000000000000000000000000000000000000000000000000000000000004"
+      },
+      "artifacts": [
+        {
+          "label": "attestDeposit: the deposit proof, verified on Base",
+          "chain": "base",
+          "tx": null,
+          "kind": "proof",
+          "meta": {
+            "imageId": "0x406c6d268f29270226c775db1fe4bec04acf51ba919e250078125d71c10bff41",
+            "prover": "RISC Zero zkVM, Groth16"
+          }
+        }
+      ]
+    },
+    {
+      "id": "activated",
+      "track": "loan",
+      "auto": true,
+      "delayMs": 7000,
+      "at": null,
+      "durationSeconds": null,
+      "title": "zZEC minted into Morpho",
+      "detail": "A few Zcash blocks later the pending activation finalizes: zZEC is minted straight into the account's Morpho Blue position.",
+      "hint": "The keeper activates the deposit.",
+      "href": "/borrow",
+      "tx": {
+        "base": "0x0000000000000000000000000000000000000000000000000000000000000005"
+      },
+      "artifacts": [
+        {
+          "label": "Activation: zZEC supplied as collateral",
+          "chain": "base",
+          "tx": null,
+          "kind": "tx"
+        }
+      ]
+    },
+    {
+      "id": "borrowed",
+      "track": "loan",
+      "auto": false,
+      "delayMs": 0,
+      "at": null,
+      "durationSeconds": null,
+      "title": "Borrow USDC",
+      "detail": "One sponsored UserOp deploys a fresh Safe, authorizes Zecured on Morpho Blue and borrows 0.90 MockUSDC; the account never holds ETH.",
+      "hint": "Press “Continue to borrow”, enter 0.90 and press “Create account and borrow”.",
+      "href": "/borrow",
+      "tx": {
+        "base": "0x0000000000000000000000000000000000000000000000000000000000000006",
+        "userOp": "0x0000000000000000000000000000000000000000000000000000000000000060"
+      },
+      "artifacts": [
+        {
+          "label": "Sponsored UserOp: deploy, authorize, borrow",
+          "chain": "base",
+          "tx": null,
+          "kind": "tx"
+        }
+      ]
+    },
+    {
+      "id": "destination",
+      "track": "loan",
+      "auto": false,
+      "delayMs": 0,
+      "at": null,
+      "durationSeconds": null,
+      "title": "Give an Ironwood destination",
+      "detail": "The signers validate a fresh Ironwood address for the payout; Base only ever sees a salted commitment to it.",
+      "hint": "On your loan, under “Close or repay”, send it back to the demo wallet (or give your own address).",
+      "href": "/position#0x9c9ad033ddbcef74d303b8e0bfa258cc29df408fb7db49e2a766ce509d9c5c4e",
+      "tx": {},
+      "artifacts": []
+    },
+    {
+      "id": "close-executed",
+      "track": "loan",
+      "auto": false,
+      "delayMs": 0,
+      "at": null,
+      "durationSeconds": null,
+      "title": "Close from collateral",
+      "detail": "A market maker repays the debt on Morpho and takes its value in ZEC from the vault; the rest is owed to your destination.",
+      "hint": "Get a quote, then press “Sign and send to the market maker”.",
+      "href": "/position#0x9c9ad033ddbcef74d303b8e0bfa258cc29df408fb7db49e2a766ce509d9c5c4e",
+      "tx": {
+        "base": "0x0000000000000000000000000000000000000000000000000000000000000008"
+      },
+      "artifacts": [
+        {
+          "label": "closeWithCollateral, sent by the market maker",
+          "chain": "base",
+          "tx": null,
+          "kind": "tx"
+        }
+      ]
+    },
+    {
+      "id": "payouts-committed",
+      "track": "loan",
+      "auto": true,
+      "delayMs": 5000,
+      "at": null,
+      "durationSeconds": null,
+      "title": "Payout committed on Base",
+      "detail": "The signers commit the payout on Base before they sign it, so a payout to anyone else is provable theft.",
+      "hint": "The signers commit the payout.",
+      "href": "/position#0x9c9ad033ddbcef74d303b8e0bfa258cc29df408fb7db49e2a766ce509d9c5c4e",
+      "tx": {
+        "base": "0x0000000000000000000000000000000000000000000000000000000000000009"
+      },
+      "artifacts": [
+        {
+          "label": "The payout's commitment",
+          "chain": "base",
+          "tx": null,
+          "kind": "tx"
+        }
+      ]
+    },
+    {
+      "id": "payouts-sent",
+      "track": "loan",
+      "auto": true,
+      "delayMs": 5000,
+      "at": null,
+      "durationSeconds": null,
+      "title": "Paid on Zcash",
+      "detail": "Three of the five signers sign one FROST transaction paying your remainder, the market maker and the opening fee.",
+      "hint": "The signers pay on Zcash.",
+      "href": "/position#0x9c9ad033ddbcef74d303b8e0bfa258cc29df408fb7db49e2a766ce509d9c5c4e",
+      "tx": {
+        "zcash": "000000000000000000000000000000000000000000000000000000000000000a"
+      },
+      "artifacts": [
+        {
+          "label": "The FROST 3-of-5 payout on Zcash",
+          "chain": "zcash",
+          "tx": null,
+          "kind": "tx"
+        }
+      ]
+    },
+    {
+      "id": "payouts-confirmed",
+      "track": "loan",
+      "auto": true,
+      "delayMs": 8000,
+      "at": null,
+      "durationSeconds": null,
+      "title": "Payout proven on Base",
+      "detail": "A zero-knowledge proof that the payout is in a Zcash block makes every claim of the vault final.",
+      "hint": "The payout's proof lands on Base.",
+      "href": "/position#0x9c9ad033ddbcef74d303b8e0bfa258cc29df408fb7db49e2a766ce509d9c5c4e",
+      "tx": {
+        "base": "0x000000000000000000000000000000000000000000000000000000000000000b"
+      },
+      "artifacts": [
+        {
+          "label": "The payout, confirmed and proven on Base",
+          "chain": "base",
+          "tx": null,
+          "kind": "proof",
+          "meta": {
+            "imageId": "0x199bf772d0780413a07081b4889f0473c8ae558c6d8c4dca96eef49b5e486134",
+            "prover": "RISC Zero zkVM, Groth16"
+          }
+        }
+      ]
+    },
+    {
+      "id": "swap-opened",
+      "track": "swap",
+      "auto": false,
+      "delayMs": 0,
+      "at": null,
+      "durationSeconds": null,
+      "title": "Lock USDC in the swap",
+      "detail": "Your wallet approves 25 MockUSDC and opens an order with the maker's signed quote; the USDC waits in ZecuredSwap.",
+      "hint": "On Swap, enter 25 USDC, get the quote, give an Ironwood address, connect the wallet and buy.",
+      "href": "/buy",
+      "tx": {
+        "base": "0x000000000000000000000000000000000000000000000000000000000000000c",
+        "approve": "0x00000000000000000000000000000000000000000000000000000000000000c0"
+      },
+      "artifacts": [
+        {
+          "label": "USDC approval",
+          "chain": "base",
+          "tx": null,
+          "kind": "tx"
+        },
+        {
+          "label": "The order, opened on ZecuredSwap",
+          "chain": "base",
+          "tx": null,
+          "kind": "tx"
+        }
+      ]
+    },
+    {
+      "id": "swap-paid",
+      "track": "swap",
+      "auto": true,
+      "delayMs": 6000,
+      "at": null,
+      "durationSeconds": null,
+      "title": "The maker pays on Zcash",
+      "detail": "The maker pays the ZEC to your Ironwood address, with the order id in the memo.",
+      "hint": "The maker pays.",
+      "href": "/buy",
+      "tx": {
+        "zcash": "000000000000000000000000000000000000000000000000000000000000000d"
+      },
+      "artifacts": [
+        {
+          "label": "The maker's payment on Zcash",
+          "chain": "zcash",
+          "tx": null,
+          "kind": "tx"
+        }
+      ]
+    },
+    {
+      "id": "swap-proven",
+      "track": "swap",
+      "auto": true,
+      "delayMs": 8000,
+      "at": null,
+      "durationSeconds": null,
+      "title": "Payment proven on Base",
+      "detail": "The maker proves the payment in zero knowledge; the settlement waits for a deep enough Zcash header.",
+      "hint": "The maker proves its payment.",
+      "href": "/buy",
+      "tx": {
+        "base": "0x000000000000000000000000000000000000000000000000000000000000000e"
+      },
+      "artifacts": [
+        {
+          "label": "The payment proof, verified on Base",
+          "chain": "base",
+          "tx": null,
+          "kind": "proof",
+          "meta": {
+            "imageId": "0x199bf772d0780413a07081b4889f0473c8ae558c6d8c4dca96eef49b5e486134",
+            "prover": "RISC Zero zkVM, Groth16"
+          }
+        }
+      ]
+    },
+    {
+      "id": "swap-settled",
+      "track": "swap",
+      "auto": true,
+      "delayMs": 6000,
+      "at": null,
+      "durationSeconds": null,
+      "title": "USDC released to the maker",
+      "detail": "Settled: you hold shielded ZEC and the maker the USDC, with no custodian and no signer in between.",
+      "hint": "The order settles.",
+      "href": "/buy",
+      "tx": {
+        "base": "0x000000000000000000000000000000000000000000000000000000000000000f"
+      },
+      "artifacts": [
+        {
+          "label": "Settlement",
+          "chain": "base",
+          "tx": null,
+          "kind": "tx"
+        }
+      ]
+    }
+  ]
+}

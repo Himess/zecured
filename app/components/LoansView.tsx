@@ -3,13 +3,15 @@
 import Link from "next/link";
 import { useId, useState } from "react";
 import { useMounted } from "./client";
+import { IconArrowRight, IconDownload, IconKey, IconUpload, IconVault } from "./icons";
 import { downloadBackup } from "./KeyBackup";
+import { TokenAmount } from "./loan";
 import { STATUS_LABEL } from "./status";
-import { Badge, Button, buttonClass, Card, Mono, Notice } from "./ui";
+import { Badge, Button, buttonClass, Card, EmptyState, Mono, Notice } from "./ui";
 import { notifyLoansChanged, useLoans, useVault } from "@/lib/hooks";
 import { importLoan, loanStore, short, type StoredLoan } from "@/lib/keys";
 import { vaultHref } from "@/lib/routes";
-import { formatTaz } from "@/lib/zcash";
+import { formatZec } from "@/lib/zcash";
 
 export function LoansView() {
   const mounted = useMounted();
@@ -26,11 +28,18 @@ export function LoansView() {
         </Notice>
       ) : null}
       {loans.length === 0 ? (
-        <Card>
-          <p className="text-sm text-muted">
-            No loan keys in this browser. <Link href="/borrow">Start a loan</Link> or import a backup below.
-          </p>
-        </Card>
+        <EmptyState
+          icon={<IconVault size={22} />}
+          title="No loan keys in this browser"
+          action={
+            <Link href="/borrow" className={buttonClass("primary")}>
+              Start a loan
+              <IconArrowRight size={16} />
+            </Link>
+          }
+        >
+          Each loan has its own key, kept in this browser only. Start a loan, or import a backup below.
+        </EmptyState>
       ) : (
         <ul className="space-y-4">
           {loans.map((l) => (
@@ -79,12 +88,18 @@ function LoanRow({ loan }: { loan: StoredLoan }) {
   const [confirmForget, setConfirmForget] = useState(false);
   const status = vault.data ? STATUS_LABEL[vault.data.status] : null;
   return (
-    <li className="rounded-[18px] bg-surface p-5 sm:p-6">
-      <div className="flex flex-wrap items-start justify-between gap-3">
-        <div className="space-y-1 text-sm">
-          <p className="text-base font-semibold">
-            {formatTaz(BigInt(loan.amount))}{" "}
-            {status ? <Badge tone={status.tone}>{status.text}</Badge> : loan.vaultId ? null : <Badge tone="warn">Vault not opened</Badge>}
+    <li className="panel p-5 sm:p-6">
+      <div className="flex flex-wrap items-start justify-between gap-4">
+        <div className="space-y-1.5 text-sm">
+          <p className="flex flex-wrap items-center gap-2.5">
+            <TokenAmount token="TAZ" value={formatZec(BigInt(loan.amount))} size="lg" />
+            {status ? (
+              <Badge tone={status.tone} dot>
+                {status.text}
+              </Badge>
+            ) : loan.vaultId ? null : (
+              <Badge tone="warn">Vault not opened</Badge>
+            )}
           </p>
           <p className="text-muted">
             Account <Mono>{short(loan.account)}</Mono>
@@ -109,31 +124,36 @@ function LoanRow({ loan }: { loan: StoredLoan }) {
         </div>
         <div className="flex flex-wrap gap-2">
           {loan.vaultId ? (
-            <Link href={vaultHref("position", loan.vaultId)} prefetch={false} className={buttonClass("primary", "no-underline")}>
+            <Link href={vaultHref("position", loan.vaultId)} prefetch={false} className={buttonClass("primary", undefined, "sm")}>
               Open
+              <IconArrowRight size={15} />
             </Link>
           ) : (
-            <Link href="/borrow" className={buttonClass("primary", "no-underline")}>
+            <Link href="/borrow" className={buttonClass("primary", undefined, "sm")}>
               Continue
+              <IconArrowRight size={15} />
             </Link>
           )}
           <Button
             variant="secondary"
+            size="sm"
             onClick={() => {
               downloadBackup(loan);
               loanStore().update(loan.id, { backedUp: true });
               notifyLoansChanged();
             }}
           >
+            <IconDownload size={15} />
             Export key
           </Button>
           {!confirmForget ? (
-            <Button variant="ghost" onClick={() => setConfirmForget(true)}>
+            <Button variant="ghost" size="sm" onClick={() => setConfirmForget(true)}>
               Forget…
             </Button>
           ) : (
             <Button
               variant="danger"
+              size="sm"
               onClick={() => {
                 loanStore().remove(loan.id);
                 notifyLoansChanged();
@@ -169,7 +189,7 @@ function ImportCard() {
   };
 
   return (
-    <Card title="Import a loan backup">
+    <Card title="Import a loan backup" icon={<IconKey size={18} />}>
       <p className="mb-3 text-sm text-muted">
         Paste the JSON backup or pick the file. It is read locally and never uploaded. The app checks that the key matches
         the loan&apos;s account before saving it.
@@ -187,7 +207,7 @@ function ImportCard() {
             if (f) doImport(await f.text());
             e.target.value = "";
           }}
-          className="block text-sm text-muted file:mr-3 file:rounded-full file:border file:border-line file:bg-transparent file:font-semibold file:px-3 file:py-2 file:text-text"
+          className="block text-sm text-muted file:mr-3 file:rounded-full file:border-0 file:bg-surface-3 file:px-4 file:py-2 file:font-semibold file:text-text hover:file:bg-line"
         />
         <label htmlFor={textId} className="block text-sm font-medium">
           Or paste it
@@ -199,9 +219,10 @@ function ImportCard() {
           rows={4}
           spellCheck={false}
           autoComplete="off"
-          className="w-full rounded-lg border border-border bg-bg px-3 py-2 font-mono text-xs text-text focus:border-muted"
+          className="field font-mono text-xs"
         />
         <Button variant="secondary" onClick={() => doImport(text)} disabled={!text.trim()}>
+          <IconUpload size={16} />
           Import
         </Button>
         {message ? (

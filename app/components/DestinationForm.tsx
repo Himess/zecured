@@ -45,7 +45,7 @@ export function IronwoodAddressInput({
   }
   return (
     <div className="space-y-2">
-      <label htmlFor={id} className="block text-sm font-medium">
+      <label htmlFor={id} className="block text-[14px] font-semibold text-soft">
         {label}
       </label>
       <textarea
@@ -60,7 +60,7 @@ export function IronwoodAddressInput({
         placeholder={DEPLOYMENT.zcashNetwork === "test" ? "utest1…" : "u1…"}
         aria-invalid={error ? true : undefined}
         aria-describedby={`${id}-hint`}
-        className="w-full rounded-lg border border-border bg-bg px-3 py-2 font-mono text-sm break-all text-text placeholder:text-faint focus:border-muted"
+        className="field font-mono text-sm break-all"
       />
       <p id={`${id}-hint`} className={error ? "text-sm text-danger" : "text-xs text-muted"} aria-live="polite">
         {error ??
@@ -123,7 +123,7 @@ export function DestinationStep({
         Validate destination with the signers
       </Button>
       {demoReturn ? (
-        <div className="space-y-2 rounded-2xl border border-dashed border-warn/60 p-3 text-sm">
+        <div className="space-y-2 rounded-2xl bg-[linear-gradient(135deg,rgb(244_183_40/0.10),rgb(244_183_40/0.02)_60%)] p-4 text-sm shadow-[inset_0_0_0_1px_rgb(244_183_40/0.35)]">
           <p className="flex flex-wrap items-center gap-2">
             <Badge tone="warn">DEMO</Badge> No Ironwood address of your own?
           </p>

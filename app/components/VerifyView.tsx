@@ -84,7 +84,7 @@ export function VerifyView() {
                 value={key.ufvk}
                 rows={5}
                 spellCheck={false}
-                className="w-full rounded-lg border border-border bg-bg px-3 py-2 font-mono text-xs break-all text-text"
+                className="field font-mono text-xs break-all"
               />
               <div className="flex flex-wrap gap-2">
                 <CopyButton value={key.ufvk} label="Copy viewing key" size="md" />
