@@ -621,13 +621,16 @@ function DepositStep({ loan, vault, vaultError }: { loan: StoredLoan; vault: Vau
             </p>
           ) : null}
           {!awaiting && (vault?.status === "deposit_seen" || vault?.depositSeen) && !l?.pending && cap === "none" ? (
-            <Notice tone="ok" title="Deposit received on Zcash" live>
-              <p>
-                A zero-knowledge proof that your deposit is in a Zcash block is being made and sent to Base; nothing is minted
-                on anyone&apos;s word. Do not pay again: a second payment does not back the loan (it can only come back as a
-                refund).
-              </p>
-            </Notice>
+            <>
+              <ProofPipeline confirmations={vault?.confirmations} />
+              <Notice tone="ok" title="Deposit received on Zcash" live>
+                <p>
+                  A zero-knowledge proof that your deposit is in a Zcash block is being made and sent to Base; nothing is minted
+                  on anyone&apos;s word. Do not pay again: a second payment does not back the loan (it can only come back as a
+                  refund).
+                </p>
+              </Notice>
+            </>
           ) : null}
           {cap !== "none" ? (
             <Notice
@@ -876,6 +879,64 @@ function DepositStep({ loan, vault, vaultError }: { loan: StoredLoan; vault: Vau
         </p>
       </div>
     </div>
+  );
+}
+
+/**
+ * The deposit's way to Base while it is proven: its confirmations on Zcash, the zero-knowledge proof made of it, and
+ * Base's check of that proof. The second stage runs while the confirmations are in; the third is the proof's landing.
+ */
+function ProofPipeline({ confirmations }: { confirmations: number | undefined }) {
+  const needed = config.confirmations;
+  const confirmed = needed !== null && confirmations !== undefined && confirmations >= needed;
+  const stages = [
+    {
+      icon: <ZecMark size={20} />,
+      title: "Confirmed on Zcash",
+      body: needed !== null ? `${Math.min(confirmations ?? 0, needed)} of ${needed} confirmations` : "Its confirmations come in",
+      state: confirmed ? "done" : "now",
+    },
+    {
+      icon: <ProofSeal size="sm" className="!size-[20px]" />,
+      title: "Proven in zero knowledge",
+      body: "The RISC Zero zkVM proves the deposit is in a Zcash block whose header Base already verified",
+      state: confirmed ? "now" : "todo",
+    },
+    {
+      icon: <BaseMark size={18} />,
+      title: "Verified on Base",
+      body: "The Intake checks the proof: no signer vouches for the deposit",
+      state: "todo",
+    },
+  ] as const;
+  return (
+    <ol className="grid gap-2 sm:grid-cols-3" aria-label="Your deposit's proof">
+      {stages.map((s) => (
+        <li
+          key={s.title}
+          aria-current={s.state === "now" ? "step" : undefined}
+          className={cx(
+            "rounded-2xl p-4",
+            s.state === "now"
+              ? "bg-accent/[0.07] shadow-[inset_0_0_0_1.5px_rgb(244_183_40/0.6)]"
+              : s.state === "done"
+                ? "bg-ok/[0.06] shadow-[inset_0_0_0_1px_color-mix(in_oklab,var(--color-ok)_35%,transparent)]"
+                : "bg-bg/60 shadow-[inset_0_0_0_1px_var(--color-hairline)]",
+          )}
+        >
+          <p className="flex items-center justify-between">
+            <span className="inline-flex size-8 items-center justify-center rounded-lg bg-bg">{s.icon}</span>
+            {s.state === "done" ? (
+              <IconCheck size={16} strokeWidth={2.6} className="text-ok" />
+            ) : s.state === "now" ? (
+              <span aria-hidden="true" className="dot-live size-2 rounded-full bg-accent" />
+            ) : null}
+          </p>
+          <p className={cx("mt-2.5 text-[14px] font-bold", s.state === "todo" && "text-muted")}>{s.title}</p>
+          <p className="mt-0.5 text-[12.5px] text-muted">{s.body}</p>
+        </li>
+      ))}
+    </ol>
   );
 }
 
