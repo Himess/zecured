@@ -43,8 +43,8 @@ export default function PreparePage() {
                 you borrow.
               </li>
               <li>
-                <strong className="text-text">Migrate a different amount than your collateral.</strong> Move, say, 0.125 TAZ
-                rather than exactly <Denominations />, so the public crossing does not match a loan size.
+                <strong className="text-text">Migrate an amount that matches no vault size.</strong> Move, say, 0.12 TAZ
+                rather than exactly <Denominations />, so the public crossing does not match a loan.
               </li>
               <li>
                 <strong className="text-text">Wait before depositing.</strong> Hours or days between the migration and the

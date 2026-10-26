@@ -49,6 +49,8 @@ const replayConfig: NextConfig = {
   // The build's own type check repeats `pnpm typecheck`: a machine short of memory, or CI right after its own
   // `pnpm typecheck` on the same tree, may skip it (ZECURED_TYPECHECKED=1).
   typescript: { ignoreBuildErrors: process.env.ZECURED_TYPECHECKED === "1" },
+  // And it may generate the pages with fewer workers than its cores (ZECURED_BUILD_CPUS=1): each one costs memory.
+  ...(process.env.ZECURED_BUILD_CPUS ? { experimental: { cpus: Number(process.env.ZECURED_BUILD_CPUS) } } : {}),
 };
 
 const nextConfig: NextConfig = {

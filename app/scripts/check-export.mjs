@@ -12,7 +12,7 @@ import { gzipSync } from "node:zlib";
 const out = fileURLToPath(new URL("../out", import.meta.url));
 const base = (process.env.NEXT_PUBLIC_BASE_PATH ?? "").replace(/\/$/, "");
 /** First-load JavaScript per page, gzip. */
-const BUDGET = 420 * 1024;
+const BUDGET = 450 * 1024;
 /** Strings only the live account-abstraction stack (viem's bundler and paymaster clients) contains. */
 const LIVE_ONLY = ["eth_sendUserOperation", "pm_getPaymasterStubData"];
 

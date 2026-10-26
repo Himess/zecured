@@ -229,7 +229,7 @@ export function SeamTracker({
           <ProofSeal pulse={seam === "proving"} stamp={seam === "proven"} idle={seam === "idle"} className={big ? undefined : "!size-[52px]"} />
         </div>
         {seam === "proving" && provingLabel ? (
-          <span className="absolute top-0 left-[calc(50%+40px)] inline-flex min-h-[26px] -translate-y-1/2 items-center rounded-full bg-accent px-3 text-[12.5px] font-bold whitespace-nowrap text-on-accent tabular-nums">
+          <span className="absolute top-0 left-[calc(50%+40px)] inline-flex min-h-[26px] -translate-y-1/2 items-center rounded-full bg-accent px-3 text-[12.5px] font-bold whitespace-nowrap text-on-accent tabular-nums max-sm:hidden">
             {provingLabel}
           </span>
         ) : null}

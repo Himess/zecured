@@ -16,6 +16,7 @@ import { useLoans, useVault } from "@/lib/hooks";
 import { short, type StoredLoan } from "@/lib/keys";
 import { formatUsdc, formatUsdPrice, type MarketState } from "@/lib/morpho";
 import { priceSourceName } from "@/lib/labels";
+import { REPLAY } from "@/lib/replay/flag";
 import { SWAP_PRIVACY_SENTENCE } from "@/lib/v4";
 import { formatTaz } from "@/lib/zcash";
 
@@ -141,6 +142,9 @@ export function WorldView() {
 
   return (
     <div className="space-y-6">
+      <p className="text-[13px] text-muted">
+        <mark className="leak">Marked like this</mark>: the one part of a record that ties it to you.
+      </p>
       <div className="grid items-start gap-6 lg:grid-cols-3">
         <PublicPanel>
           <div>
@@ -165,7 +169,7 @@ export function WorldView() {
             </ul>
           </div>
           <div className="space-y-3">
-            <LedgerHeading>Live from Base Sepolia</LedgerHeading>
+            <LedgerHeading>{REPLAY ? "From the replay's Base Sepolia" : "Live from Base Sepolia"}</LedgerHeading>
             {!config.contractsDeployed ? (
               <p className="text-sm text-ink-muted">Appears once the contracts are deployed.</p>
             ) : base.loading ? (

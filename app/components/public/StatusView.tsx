@@ -2,6 +2,7 @@
 
 import Link from "next/link";
 import { IconSigners } from "@/components/icons";
+import { SignerRing, type SignerNode } from "@/components/seam";
 import { Badge, Card, cx, KeyValue, Mono, Notice, Stat } from "@/components/ui";
 import type { MintBlock, StatusReport, VersionView } from "@/lib/api";
 import { formatUtc } from "@/lib/calls";
@@ -16,6 +17,20 @@ import { formatTaz } from "@/lib/zcash";
 
 const MODE_TONE: Record<StatusReport["nodes"][number]["mode"], "ok" | "warn" | "danger"> = {
   normal: "ok",
+  offline: "warn",
+  unreachable: "warn",
+  compromised: "danger",
+};
+
+/** A node's mode in words, and how the ring draws it. */
+const MODE_TEXT: Record<StatusReport["nodes"][number]["mode"], string> = {
+  normal: "Online",
+  offline: "Offline",
+  unreachable: "Unreachable",
+  compromised: "Compromised (DEMO)",
+};
+const MODE_NODE: Record<StatusReport["nodes"][number]["mode"], SignerNode> = {
+  normal: "on",
   offline: "warn",
   unreachable: "warn",
   compromised: "danger",
@@ -94,42 +109,28 @@ export function StatusView() {
       <Card title="Signer network" icon={<IconSigners size={18} />} action={r ? <Badge tone="neutral">3 of 5 sign every payout</Badge> : null}>
         {r ? (
           <div className="space-y-5">
-            <ul className="grid grid-cols-2 gap-3 sm:grid-cols-5">
-              {r.nodes.map((n) => {
-                const tone = MODE_TONE[n.mode];
-                return (
-                  <li
-                    key={n.index}
-                    className={cx(
-                      "flex flex-col items-center gap-2 rounded-2xl px-3 py-4 text-center",
-                      tone === "ok"
-                        ? "bg-ok/[0.06] shadow-[inset_0_0_0_1px_color-mix(in_oklab,var(--color-ok)_30%,transparent)]"
-                        : tone === "warn"
-                          ? "bg-warn/[0.07] shadow-[inset_0_0_0_1px_color-mix(in_oklab,var(--color-warn)_40%,transparent)]"
-                          : "bg-danger/[0.08] shadow-[inset_0_0_0_1px_color-mix(in_oklab,var(--color-danger)_50%,transparent)]",
-                    )}
-                  >
-                    <span
-                      aria-hidden="true"
-                      className={cx(
-                        "inline-flex size-10 items-center justify-center rounded-full text-[15px] font-bold",
-                        tone === "ok" ? "bg-ok/15 text-ok" : tone === "warn" ? "bg-warn/15 text-warn" : "bg-danger/15 text-danger",
-                      )}
-                    >
-                      {n.index}
-                    </span>
-                    <span className="text-[13px] font-semibold">Signer {n.index}</span>
-                    <span className={cx("inline-flex items-center gap-1.5 text-[12px] font-semibold", tone === "ok" ? "text-ok" : tone === "warn" ? "text-warn" : "text-danger")}>
-                      <span aria-hidden="true" className={cx("size-1.5 rounded-full bg-current", n.mode === "normal" && "dot-live")} />
-                      {n.mode}
-                    </span>
-                  </li>
-                );
-              })}
-            </ul>
+            <div className="grid items-center gap-6 sm:grid-cols-[auto_minmax(0,1fr)]">
+              <div className="flex justify-center">
+                <SignerRing nodes={r.nodes.map((n) => MODE_NODE[n.mode])} size={176} />
+              </div>
+              <ul className="divide-y divide-hairline">
+                {r.nodes.map((n) => {
+                  const tone = MODE_TONE[n.mode];
+                  return (
+                    <li key={n.index} className="flex items-center justify-between gap-3 py-2.5 text-[14px]">
+                      <span className="font-semibold">Signer {n.index}</span>
+                      <span className={cx("inline-flex items-center gap-1.5 text-[13px] font-semibold", tone === "ok" ? "text-ok" : tone === "warn" ? "text-warn" : "text-danger")}>
+                        <span aria-hidden="true" className="size-1.5 rounded-full bg-current" />
+                        {MODE_TEXT[n.mode]}
+                      </span>
+                    </li>
+                  );
+                })}
+              </ul>
+            </div>
             <p className="text-xs text-muted">
               Three of the five signers must sign every payout; a signer switched to &quot;compromised&quot; exists only in the
-              DEMO panel of the judge deployment.
+              DEMO panel of the testnet deployment.
             </p>
             <KeyValue
               rows={[

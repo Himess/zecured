@@ -260,11 +260,11 @@ export function ReplayDock() {
       <div className="flex flex-col-reverse">
         {/* The bar comes first in the page's order (and the sheet after it), but the sheet is drawn above it. */}
         <div className="border-t border-line/70 bg-[color-mix(in_oklab,var(--color-surface)_94%,transparent)] backdrop-blur-xl">
-          <div className="wrap flex min-h-[var(--dock-h)] flex-wrap items-center gap-x-4 gap-y-1.5 py-2.5">
+          <div className="wrap flex min-h-[var(--dock-h)] items-center gap-x-3 py-2.5 sm:gap-x-4">
             <span className="max-sm:hidden">
               <Badge tone="demo">DEMO</Badge>
             </span>
-            <div className="min-w-0 flex-1 basis-[16rem]">
+            <div className="min-w-0 flex-1">
               <p className="flex min-w-0 items-baseline gap-2 text-[13.5px]">
                 <span className={cx("font-semibold min-[1101px]:shrink-0", finished ? "text-text" : next?.status === "now" ? "text-text" : "text-demo")}>{title}</span>
                 <span className="min-w-0 truncate text-muted max-[1100px]:hidden" title={hint}>
@@ -290,10 +290,9 @@ export function ReplayDock() {
               aria-expanded={open}
               aria-controls={sheetId}
               onClick={() => setOpen((o) => !o)}
-              className={buttonClass("ghost", "flex-none", "sm")}
+              className={buttonClass("ghost", "flex-none max-sm:!px-2.5", "sm")}
             >
               <span className="max-sm:sr-only">{open ? "Hide the steps" : "Steps and proofs"}</span>
-              <span className="sm:hidden">Steps</span>
               <IconChevronDown size={15} className={cx("transition-transform", open ? "" : "rotate-180")} />
             </button>
           </div>
@@ -312,7 +311,8 @@ export function ReplayDock() {
                   <p className="mt-0.5 max-w-2xl text-[12.5px] text-muted">
                     {sample
                       ? "Sample data in the shape of the live run, played by your browser: the hashes below are not real transactions."
-                      : r.recording.note}
+                      : r.recording.note}{" "}
+                    Progress is kept in this tab only.
                   </p>
                 </div>
                 <div className="flex flex-none items-center gap-1">

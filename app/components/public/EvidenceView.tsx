@@ -4,8 +4,9 @@ import type { ReactNode } from "react";
 import { CopyButton } from "@/components/client";
 import { IconClock, IconExternal, IconFileCheck } from "@/components/icons";
 import { BaseMark, ZecMark } from "@/components/marks";
-import { Badge, Card, KeyValue, Mono, Notice } from "@/components/ui";
+import { Badge, Card, Hint, KeyValue, Mono, Notice } from "@/components/ui";
 import { DEPLOYMENT } from "@/lib/deployment";
+import { sampleTransactions } from "@/lib/explorer";
 import { explorerLink, orderedSections, type Evidence, type EvidenceSection } from "@/lib/evidence";
 import { useEvidence } from "@/lib/hooks";
 import { short } from "@/lib/keys";
@@ -38,10 +39,16 @@ function Section({ e, s, own }: { e: Evidence; s: EvidenceSection; own: boolean 
             rows={[
               [
                 "Commit",
-                <span key="c">
-                  <Mono>{m.commit}</Mono>
-                  {m.tag ? <span className="text-muted"> (tag {m.tag})</span> : null}
-                </span>,
+                sampleTransactions() ? (
+                  <span key="c" className="text-muted">
+                    sample data
+                  </span>
+                ) : (
+                  <span key="c">
+                    <Mono>{m.commit}</Mono>
+                    {m.tag ? <span className="text-muted"> (tag {m.tag})</span> : null}
+                  </span>
+                ),
               ],
               ["Deployed at block", m.deployedAtBlock === null ? "—" : `#${m.deployedAtBlock.toLocaleString("en-US")}`],
               ...m.contracts.map(
@@ -62,7 +69,7 @@ function Section({ e, s, own }: { e: Evidence; s: EvidenceSection; own: boolean 
             <ul className="space-y-1 text-sm">
               {m.mocks.map((x) => (
                 <li key={x.name} className="flex flex-wrap items-baseline gap-2">
-                  <Badge tone="warn">{x.label}</Badge>
+                  <Badge tone={x.label === "DEMO" ? "demo" : "warn"}>{x.label}</Badge>
                   <span className="font-medium">{x.name}</span>
                   {x.address ? <Mono>{short(x.address, 10, 6)}</Mono> : null}
                   <span className="text-muted">{x.why}</span>
@@ -169,14 +176,34 @@ export function EvidenceView() {
   }
   const mainnet = DEPLOYMENT.kind === "mainnet-beta";
   const sections = orderedSections(e, mainnet);
+  // The leak scan leads: a statement about Base that carries no Zcash identifier itself.
+  const scan = sections.map((s) => s.leakScan).find((l) => l !== null) ?? null;
   return (
     <div className="space-y-6">
-      <Notice tone="info" title="Public on purpose">
-        <p>
-          Only disposable demo vaults appear here: every transaction listed is public on purpose. Updated {when(e.updatedAt)}. Links
-          open the block explorers in a new tab; this page fetches nothing from them.
-        </p>
-      </Notice>
+      {sampleTransactions() ? (
+        <Notice tone="demo" title="DEMO: sample data">
+          <p>
+            The replay shows the evidence file in its real shape, with sample data. The live run&apos;s file names its commit, its
+            deployment block, every transaction of every flow, and its leak scan.
+          </p>
+        </Notice>
+      ) : null}
+      {scan ? (
+        <section aria-label="Leak scan" className="paper rounded-[3px] p-6 shadow-[0_30px_60px_-40px_rgb(0_0_0/0.9)] sm:p-7">
+          <p className="text-[13px] font-semibold text-ink-muted">Leak scan of Base</p>
+          <p className="mt-2 text-[length:clamp(26px,3.4vw,40px)] leading-tight font-extrabold text-ink font-stretch-110%">
+            {scan.result} <span className="text-[0.55em] font-bold text-ink-muted">among {scan.identifiers} Zcash identifiers</span>
+          </p>
+          <p className="mt-2 max-w-3xl text-[14px] text-ink-muted">
+            Txids, note commitments and addresses from our own runs, searched in every event and calldata of blocks #
+            {scan.fromBlock.toLocaleString("en-US")} to #{scan.toBlock.toLocaleString("en-US")}, on {when(scan.at)}.
+          </p>
+        </section>
+      ) : null}
+      <Hint>
+        Public on purpose: only disposable demo vaults appear here. Updated {when(e.updatedAt)}. Links open the block explorers in a new
+        tab; this page fetches nothing from them.
+      </Hint>
       {e.durations.size > 0 ? (
         <Card title="Measured durations">
           <KeyValue rows={[...e.durations.entries()].map(([k, v]): [string, string] => [DURATION_LABEL[k] ?? k, formatPeriod(v)])} />

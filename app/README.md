@@ -30,13 +30,19 @@ No server of ours runs through the judging (D82), so the app also builds as a **
 static site, in which an in-browser simulator (`lib/replay/`) plays the backend, the Base reads, the loan account and
 the swap's wallet from a recording (`lib/replay/recording.json`, schema `zecured-replay/1`). The judge presses the
 real buttons (open a vault, pay it with demo TAZ, watch its proof land, borrow, close from collateral, buy shielded
-ZEC); each action must be the recording's next step, and a dock at the bottom of every page lists the steps. Every
-page carries a DEMO band.
+ZEC); each action must be the recording's next step. A dock at the bottom of every page says what to do next and
+where: "Show me" outlines the control on the page (`components/replay/spotlight.ts`), "Go there" opens its page and
+outlines it there. An action the run did not take is answered by a DEMO note naming the next step, never an error.
+Every page carries a DEMO band.
 
 ```bash
 node scripts/build-replay.mjs --dev --port 3001            # next dev in replay mode
 NEXT_PUBLIC_BASE_PATH=/zecured/app node scripts/build-replay.mjs   # static export to out/
+NEXT_PUBLIC_BASE_PATH=/zecured/app node scripts/check-export.mjs   # its assets, payloads, policy and budget
 ```
+
+On a machine short of memory, `ZECURED_TYPECHECKED=1` (after `pnpm typecheck`) and `ZECURED_BUILD_CPUS=1` (one
+static-generation worker) keep the build within a few hundred megabytes.
 
 The replay never publishes a private key, a salt or a viewing key: its loan carries a dummy key that controls
 nothing, the viewing-key route answers `replay_unavailable`, and a destination the judge types stays in the browser.
