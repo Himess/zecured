@@ -1064,3 +1064,20 @@ html:not(.js) .still-fig {
     position: static;
   }
 }
+
+/* On a tall phone the two halves' names hang below their dots, clear of the gold core and of the coin; on a short one
+   the headline is right under them, so they stay above. */
+@media (max-width: 760px) and (min-height: 800px) {
+  .tag3d[data-tag="pool"] span,
+  .tag3d[data-tag="ledger"] span {
+    top: 34px;
+    bottom: auto;
+  }
+
+  .tag3d[data-tag="pool"]::after,
+  .tag3d[data-tag="ledger"]::after {
+    top: 6px;
+    bottom: auto;
+    background: linear-gradient(180deg, currentColor, rgba(255, 255, 255, 0));
+  }
+}
