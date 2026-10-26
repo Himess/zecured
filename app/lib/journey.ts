@@ -52,6 +52,8 @@ export interface JourneyStep {
   detail: string | null;
   txHash: Hex;
   blockNumber: bigint;
+  /** The transaction's position in its block, then the log's: Base's own order within a block. */
+  txIndex: number;
   logIndex: number;
 }
 
@@ -90,12 +92,18 @@ async function windowSteps(c: PublicClient, vaultId: Hex, account: Address | nul
         detail: `${formatTaz(l.args.amount)} on Zcash, its block header checked by the relay`,
         txHash: l.transactionHash as Hex,
         blockNumber: l.blockNumber as bigint,
+        txIndex: l.transactionIndex as number,
         logIndex: l.logIndex as number,
       })),
     ),
     logsOf(c, cfg.registry, [REGISTRY_EVENTS.map((e) => topic([e], e.name)), vault], from, to).then((logs) =>
       parseEventLogs({ abi: REGISTRY_EVENTS, logs }).map((l): JourneyStep => {
-        const base = { txHash: l.transactionHash as Hex, blockNumber: l.blockNumber as bigint, logIndex: l.logIndex as number };
+        const base = {
+          txHash: l.transactionHash as Hex,
+          blockNumber: l.blockNumber as bigint,
+          txIndex: l.transactionIndex as number,
+          logIndex: l.logIndex as number,
+        };
         switch (l.eventName) {
           case "VaultActivated":
             return { ...base, kind: "activated", label: JOURNEY_LABEL.activated, detail: `${formatTaz(l.args.amount)} of collateral` };
@@ -136,6 +144,7 @@ async function windowSteps(c: PublicClient, vaultId: Hex, account: Address | nul
           detail: `${formatUsdc(l.args.assets)} ${loanTokenName(cfg)}`,
           txHash: l.transactionHash as Hex,
           blockNumber: l.blockNumber as bigint,
+          txIndex: l.transactionIndex as number,
           logIndex: l.logIndex as number,
         })),
       ),
@@ -146,6 +155,7 @@ async function windowSteps(c: PublicClient, vaultId: Hex, account: Address | nul
           detail: `${formatUsdc(l.args.assets)} ${loanTokenName(cfg)}`,
           txHash: l.transactionHash as Hex,
           blockNumber: l.blockNumber as bigint,
+          txIndex: l.transactionIndex as number,
           logIndex: l.logIndex as number,
         })),
       ),
@@ -233,7 +243,7 @@ export async function readJourney(
     if ([...scan.steps.values()].some((s) => s.kind === "proven")) scan.complete = true;
   }
   const sorted = [...scan.steps.values()].sort((a, b) =>
-    a.blockNumber === b.blockNumber ? a.logIndex - b.logIndex : a.blockNumber < b.blockNumber ? -1 : 1,
+    a.blockNumber !== b.blockNumber ? (a.blockNumber < b.blockNumber ? -1 : 1) : a.txIndex !== b.txIndex ? a.txIndex - b.txIndex : a.logIndex - b.logIndex,
   );
   // One payout's proof covers each of its claims (one event per claim): a single step, with their count.
   const steps: JourneyStep[] = [];

@@ -14,6 +14,10 @@ import "./globals.css";
 
 const TESTNET = DEPLOYMENT.kind === "testnet";
 
+/** The site and its docs: beside the app on Pages (`/<repo>/` next to `/<repo>/app/`), else the public site. */
+const BASE_PATH = process.env.NEXT_PUBLIC_BASE_PATH ?? "";
+const SITE_URL = BASE_PATH ? `${BASE_PATH.replace(/\/app\/?$/, "")}/` : "https://himess.github.io/zecured/";
+
 /*
  * Archivo for text and Martian Mono for chain data, both variable in weight and width and
  * self-hosted from app/fonts (OFL, fonts/OFL.txt): the build reads them from disk, the browser
@@ -135,6 +139,7 @@ export default function RootLayout({ children }: { children: ReactNode }) {
                 <li><Link href="/evidence" className="text-soft no-underline hover:text-text hover:underline">Evidence of real transactions</Link></li>
                 <li><Link href="/status" className="text-soft no-underline hover:text-text hover:underline">System status</Link></li>
                 <li><Link href="/world" className="text-soft no-underline hover:text-text hover:underline">What the world sees</Link></li>
+                <li><a href={SITE_URL} className="text-soft no-underline hover:text-text hover:underline">The site</a> · <a href={`${SITE_URL}docs/`} className="text-soft no-underline hover:text-text hover:underline">the docs</a></li>
                 {TESTNET ? (
                   <li><Link href="/demo" className="text-soft no-underline hover:text-text hover:underline">Demo panel</Link></li>
                 ) : null}

@@ -10,6 +10,7 @@ import { useEffect, useMemo, useState } from "react";
 import { api } from "@/lib/api";
 import { config } from "@/lib/config";
 import { loanTokenName, realAndMock } from "@/lib/labels";
+import { REPLAY } from "@/lib/replay/flag";
 import { formatDenominations } from "@/lib/zcash";
 import { IconCheck, IconCopy, IconEye, IconHome, IconLoans, IconMarket, IconSwap, IconVault } from "./icons";
 import { cx, Notice } from "./ui";
@@ -108,7 +109,8 @@ export function BackendStatus({ compact = false }: { compact?: boolean }) {
       if (timer) clearTimeout(timer);
     };
   }, []);
-  const text = up === null ? "Checking backend" : up ? "Backend online" : "Backend offline";
+  // DEMO: the replay has no backend; the simulator in this tab answers for it.
+  const text = REPLAY ? "Replay in this browser" : up === null ? "Checking backend" : up ? "Backend online" : "Backend offline";
   return (
     <span
       className={cx(
@@ -117,7 +119,7 @@ export function BackendStatus({ compact = false }: { compact?: boolean }) {
       )}
       title={api.baseUrl}
     >
-      <span aria-hidden="true" className={cx("size-2 rounded-full", up === null ? "bg-faint" : up ? "dot-live bg-ok" : "bg-danger")} />
+      <span aria-hidden="true" className={cx("size-2 rounded-full", REPLAY ? "bg-warn" : up === null ? "bg-faint" : up ? "dot-live bg-ok" : "bg-danger")} />
       <span aria-live="polite" className={cx(compact && "max-[1240px]:sr-only")}>
         {text}
       </span>
