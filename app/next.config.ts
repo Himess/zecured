@@ -46,6 +46,9 @@ const replayConfig: NextConfig = {
   basePath: process.env.NEXT_PUBLIC_BASE_PATH || "",
   trailingSlash: true,
   images: { unoptimized: true },
+  // A machine short of memory may skip the build's own type check once `pnpm typecheck` passed on the same tree
+  // (ZECURED_TYPECHECKED=1). CI never sets it.
+  typescript: { ignoreBuildErrors: process.env.ZECURED_TYPECHECKED === "1" },
 };
 
 const nextConfig: NextConfig = {
