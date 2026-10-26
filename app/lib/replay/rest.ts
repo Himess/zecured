@@ -124,7 +124,7 @@ async function swapQuote(w: ReplayWorld, query: URLSearchParams): Promise<RestAn
   const zatoshi = query.get("zatoshi");
   if ((usdc !== null && usdc !== s.usdc) || (zatoshi !== null && zatoshi !== s.zatoshi)) {
     const amount = `${Number(BigInt(s.usdc)) / 1e6}`;
-    return refuse(409, `This replay buys with exactly ${amount} USDC, what the live run spent: enter ${amount}.`, "replay_off_script");
+    return refuse(409, `This replay buys with exactly ${amount} USDC, what the recorded run spent: enter ${amount}.`, "replay_off_script");
   }
   try {
     w.expect("swap-opened");
@@ -218,11 +218,11 @@ async function route(w: ReplayWorld, method: string, path: string, query: URLSea
   // ---------------------------------------------------------------- vaults
   if (post && path === "/vaults") {
     if (body.amount !== r.loan.amount) {
-      return refuse(409, `This replay opens only the live run's vault, of ${Number(BigInt(r.loan.amount)) / 1e8} TAZ.`, "replay_off_script");
+      return refuse(409, `This replay opens only the recorded run's vault, of ${Number(BigInt(r.loan.amount)) / 1e8} TAZ.`, "replay_off_script");
     }
     const same = (a: unknown, b: string) => typeof a === "string" && a.toLowerCase() === b.toLowerCase();
     if (!same(body.owner, r.loan.owner) || !same(body.account, r.loan.account)) {
-      return refuse(409, "This replay opens only the live run's vault, for the loan it creates.", "replay_off_script");
+      return refuse(409, "This replay opens only the recorded run's vault, for the loan it creates.", "replay_off_script");
     }
     // A retry of the same request returns the same vault, as the backend does.
     if (!w.isDone("opened")) w.complete("opened");
@@ -265,7 +265,7 @@ async function route(w: ReplayWorld, method: string, path: string, query: URLSea
     if (!model.borrowed || model.closed) {
       const next = w.pending("loan");
       throw new OffScriptError(
-        next ? `The live run closed this loan after borrowing; its next step here is “${next.title}”.` : "This replay's loan is closed already.",
+        next ? `The recorded run closed this loan after borrowing; its next step here is “${next.title}”.` : "This replay's loan is closed already.",
       );
     }
     const c = r.loan.close;

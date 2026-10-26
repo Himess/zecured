@@ -17,7 +17,7 @@ import {
 } from "./chain";
 import type { PreLiquidationTerms } from "./preliq";
 import { readProtocol, type ProtocolSnapshot } from "./public";
-import { REPLAY } from "./replay/flag";
+import { isReplayRefusal, REPLAY } from "./replay/flag";
 import { config } from "./config";
 import { loanStore, type StoredLoan } from "./keys";
 import { storedVault, verifyVaultOpened, type VaultCheck } from "./signers";
@@ -423,6 +423,8 @@ export interface Action<A extends unknown[], R> {
   run: (...args: A) => Promise<R | undefined>;
   busy: boolean;
   error: string | null;
+  /** DEMO: the error is the replay saying the recorded run did not do this (lib/replay/flag.ts). */
+  refusal: boolean;
   result: R | undefined;
   reset: () => void;
 }
@@ -431,18 +433,21 @@ export interface Action<A extends unknown[], R> {
 export function useAction<A extends unknown[], R>(fn: (...args: A) => Promise<R>): Action<A, R> {
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState<string | null>(null);
+  const [refusal, setRefusal] = useState(false);
   const [result, setResult] = useState<R | undefined>(undefined);
   const fnRef = useRef(fn);
   fnRef.current = fn;
   const run = useCallback(async (...args: A) => {
     setBusy(true);
     setError(null);
+    setRefusal(false);
     try {
       const r = await fnRef.current(...args);
       setResult(r);
       return r;
     } catch (e) {
       setError(describeError(e));
+      setRefusal(isReplayRefusal(e));
       return undefined;
     } finally {
       setBusy(false);
@@ -450,7 +455,8 @@ export function useAction<A extends unknown[], R>(fn: (...args: A) => Promise<R>
   }, []);
   const reset = useCallback(() => {
     setError(null);
+    setRefusal(false);
     setResult(undefined);
   }, []);
-  return { run, busy, error, result, reset };
+  return { run, busy, error, refusal, result, reset };
 }

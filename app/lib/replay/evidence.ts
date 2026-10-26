@@ -66,7 +66,7 @@ export function evidenceDocument(r: ReplayRecording): unknown {
     sections: [
       {
         id: "judge",
-        title: r.placeholder ? "Judge deployment (placeholder until the live run)" : "Judge deployment, Base Sepolia and Zcash testnet",
+        title: r.placeholder ? "Testnet deployment (sample data)" : "Testnet deployment, Base Sepolia and Zcash testnet",
         base: r.network.base,
         zcash: r.network.zcash,
         manifest: {

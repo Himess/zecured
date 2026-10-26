@@ -14,7 +14,7 @@ import { REPLAY_STORAGE_PREFIX, sessionStore } from "./world";
 /** `createLoan` in a replay build: the recorded loan, with the dummy key. */
 export function createReplayLoan(amount: bigint, now: number): StoredLoan {
   const l = recording().loan;
-  if (amount !== BigInt(l.amount)) throw new Error("This replay opens only the live run's vault size.");
+  if (amount !== BigInt(l.amount)) throw new Error("This replay opens only the recorded run's vault size.");
   return {
     v: 1,
     id: l.requestId,

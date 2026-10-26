@@ -176,8 +176,8 @@ export class ReplayWorld {
     if (p?.auto) throw new OffScriptError(`One moment: “${p.title}” is still under way in this replay.`);
     throw new OffScriptError(
       p
-        ? `This replay follows the live run step by step; its next step here is “${p.title}”: ${p.hint}`
-        : "The live run did not do this.",
+        ? `This replay follows the recorded run step by step; its next step here is “${p.title}”: ${p.hint}`
+        : "The recorded run did not do this.",
     );
   }
 

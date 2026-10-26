@@ -311,7 +311,7 @@ describe("the replay", () => {
   it("refuses what the replay never does", async () => {
     const { api } = await setup();
     await expect(api.adminNodes("token")).rejects.toMatchObject({ status: 401, code: "replay_unavailable" });
-    expect(() => createReplayLoan(1n, Date.now())).toThrow(/only the live run's vault size/);
+    expect(() => createReplayLoan(1n, Date.now())).toThrow(/only the recorded run's vault size/);
     await expect(api.getVault(rec.loan.vault.vaultId)).rejects.toBeInstanceOf(ApiError);
   });
 

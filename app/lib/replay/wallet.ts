@@ -35,7 +35,7 @@ export function replayWallet(w: ReplayWorld = world()): Eip1193Provider {
         const d = decodeFunctionData({ abi: erc20Abi as Abi, data: tx.data }) as { functionName: string; args?: readonly unknown[] };
         const [spender, amount] = (d.args ?? []) as [string, bigint];
         if (d.functionName !== "approve" || !same(spender, s.swap) || amount !== BigInt(s.usdc)) {
-          throw new OffScriptError("The live run approved exactly the order's USDC to ZecuredSwap, nothing else.");
+          throw new OffScriptError("The recorded run approved exactly the order's USDC to ZecuredSwap, nothing else.");
         }
         w.expect("swap-opened");
         await w.latency(1_800);
@@ -44,7 +44,7 @@ export function replayWallet(w: ReplayWorld = world()): Eip1193Provider {
       }
       if (same(tx.to, s.swap) && tx.data) {
         const d = decodeFunctionData({ abi: swapAbi as Abi, data: tx.data }) as { functionName: string; args?: readonly unknown[] };
-        if (d.functionName !== "open") throw new OffScriptError("The live run did not refund an order.");
+        if (d.functionName !== "open") throw new OffScriptError("The recorded run did not refund an order.");
         const [quote] = (d.args ?? []) as [{ maker: string; usdc: bigint; zatoshi: bigint }];
         if (!same(quote.maker, s.maker) || quote.usdc !== BigInt(s.usdc) || quote.zatoshi !== BigInt(s.zatoshi)) {
           throw new OffScriptError("This is not the recorded order: ask for a new quote.");
@@ -54,7 +54,7 @@ export function replayWallet(w: ReplayWorld = world()): Eip1193Provider {
         w.complete("swap-opened");
         return step.tx.base!;
       }
-      throw new OffScriptError("The live run's wallet sent nothing else: lending and other transactions are not part of the replay.");
+      throw new OffScriptError("The recorded run's wallet sent nothing else: lending and other transactions are not part of the replay.");
     } catch (e) {
       if (e instanceof OffScriptError) throw new WalletRefusal(4200, `not part of the replay. ${e.message}`);
       throw e;

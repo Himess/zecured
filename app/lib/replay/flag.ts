@@ -10,6 +10,22 @@
 export const REPLAY: boolean = process.env.NEXT_PUBLIC_REPLAY === "1";
 
 /**
+ * True for an error the replay raised because the recorded run did not take that action at this point (its
+ * simulator's `replay_off_script` or `replay_unavailable`, or its wallet's EIP-1193 4200), anywhere in the
+ * error's causes: the page then says so as a note, not as a failure. Always false outside a replay build.
+ */
+export function isReplayRefusal(e: unknown): boolean {
+  if (!REPLAY) return false;
+  let x: unknown = e;
+  for (let i = 0; x && i < 6; i++) {
+    const code = (x as { code?: unknown }).code;
+    if (code === "replay_off_script" || code === "replay_unavailable" || code === 4200) return true;
+    x = (x as { cause?: unknown }).cause;
+  }
+  return false;
+}
+
+/**
  * The backend URL of a replay build. `.invalid` is reserved (RFC 2606), so it can never resolve:
  * the replay's fetch answers every request to it in the page, and a request that somehow escaped
  * the simulator would fail rather than reach anyone.

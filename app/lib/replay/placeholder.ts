@@ -103,7 +103,7 @@ export async function buildPlaceholderRecording(): Promise<ReplayRecording> {
   const swapNonce = 1n;
   const executor = addressOf("market maker");
 
-  // ZEC at $50 (the jury setup): 5e35 USDC units per zatoshi × 1e36. 0.05 TAZ less the 0.5 % opening fee
+  // ZEC at $50 (the testnet setup): 5e35 USDC units per zatoshi × 1e36. 0.05 TAZ less the 0.5 % opening fee
   // (25,000 zat) is 4,975,000 zat of collateral, worth 2.4875 USDC; 0.90 USDC is a 36 % loan-to-value.
   // The market maker repays 0.9001 USDC (the debt and a little interest) and takes its value plus 1 %.
   const mmAmount = 1_818_202n;
@@ -114,7 +114,7 @@ export async function buildPlaceholderRecording(): Promise<ReplayRecording> {
     step("opened", "loan", false, 0, {
       title: "Open a vault",
       detail: "Five signer nodes run a distributed key generation for a new 3-of-5 vault, and each signs its Ironwood address; nothing touches Base.",
-      hint: "On Borrow, keep 0.05 TAZ, tick that your ZEC is in Ironwood and press “Open a 0.05 TAZ vault”.",
+      hint: "On Borrow, press “Open a 0.05 TAZ vault”: five signer nodes make its key together.",
       href: "/borrow",
       tx: {},
       artifacts: [
@@ -124,7 +124,7 @@ export async function buildPlaceholderRecording(): Promise<ReplayRecording> {
     step("deposit-paid", "loan", false, 0, {
       title: "Pay the vault from Ironwood",
       detail: "The demo wallet pays the vault 0.05 TAZ in one Ironwood → Ironwood transaction on Zcash testnet.",
-      hint: "Back up the key (or skip), then press “Pay it with demo TAZ”.",
+      hint: "Skip the key backup (the replay's key is a dummy), then press “Pay it with demo TAZ”.",
       href: "/borrow",
       tx: { zcash: dummyZcash(2) },
       artifacts: [{ label: "The deposit on Zcash", chain: "zcash", tx: null, kind: "tx" }],
@@ -139,13 +139,13 @@ export async function buildPlaceholderRecording(): Promise<ReplayRecording> {
     }),
     step("proven", "loan", true, 9_000, {
       title: "Deposit proven on Base",
-      detail: "attestDeposit checks the proof against a Zcash header the relay already verified: nothing is minted on anyone's word.",
+      detail: "attestDepositWithProof checks the proof against a Zcash header the relay already verified: nothing is minted on anyone's word.",
       hint: "Base verifies the proof.",
       href: "/borrow",
       tx: { base: base(4) },
       artifacts: [
         {
-          label: "attestDeposit: the deposit proof, verified on Base",
+          label: "attestDepositWithProof: the deposit proof, verified on Base",
           chain: "base",
           tx: null,
           kind: "proof",
@@ -164,7 +164,7 @@ export async function buildPlaceholderRecording(): Promise<ReplayRecording> {
     step("borrowed", "loan", false, 0, {
       title: "Borrow USDC",
       detail: "One sponsored UserOp deploys a fresh Safe, authorizes Zecured on Morpho Blue and borrows 0.90 MockUSDC; the account never holds ETH.",
-      hint: "Press “Continue to borrow”, enter 0.90 and press “Create account and borrow”.",
+      hint: "Press “Borrow against it”, then “use the run's 0.90” and “Create account and borrow”.",
       href: "/borrow",
       tx: { base: base(6), userOp: dummyBase(0x60) },
       artifacts: [{ label: "Sponsored UserOp: deploy, authorize, borrow", chain: "base", tx: null, kind: "tx" }],
@@ -172,7 +172,7 @@ export async function buildPlaceholderRecording(): Promise<ReplayRecording> {
     step("destination", "loan", false, 0, {
       title: "Give an Ironwood destination",
       detail: "The signers validate a fresh Ironwood address for the payout; Base only ever sees a salted commitment to it.",
-      hint: "On your loan, under “Close or repay”, send it back to the demo wallet (or give your own address).",
+      hint: "On your loan, under “What next?”, press “Send my ZEC back to the demo wallet”.",
       href: `/position#${vaultId}`,
       tx: {},
       artifacts: [],
@@ -208,13 +208,13 @@ export async function buildPlaceholderRecording(): Promise<ReplayRecording> {
       href: `/position#${vaultId}`,
       tx: { base: base(11) },
       artifacts: [
-        { label: "The payout, confirmed and proven on Base", chain: "base", tx: null, kind: "proof", meta: { imageId: PAYMENT_IMAGE_ID, prover: "RISC Zero zkVM, Groth16" } },
+        { label: "The payout, confirmed and proven on Base", chain: "base", tx: null, kind: "proof", meta: { imageId: VIOLATION_IMAGE_ID, prover: "RISC Zero zkVM, Groth16" } },
       ],
     }),
     step("swap-opened", "swap", false, 0, {
       title: "Lock USDC in the swap",
       detail: "Your wallet approves 25 MockUSDC and opens an order with the maker's signed quote; the USDC waits in ZecuredSwap.",
-      hint: "On Swap, enter 25 USDC, get the quote, give an Ironwood address, connect the wallet and buy.",
+      hint: "On Swap, press “use the run's 25.00”, then the one button as it changes: the quote, the demo wallet's address, connect, buy.",
       href: "/buy",
       tx: { base: base(12), approve: dummyBase(0xc0) },
       artifacts: [
@@ -374,7 +374,7 @@ export async function buildPlaceholderRecording(): Promise<ReplayRecording> {
         { name: "MockUSDC", address: CONTRACTS.MockUSDC, label: "MOCK", why: "The loan token, minted by the deployer." },
         { name: "DemoShockOracle", address: CONTRACTS.DemoShockOracle, label: "MOCK / DEMO", why: "An owner-set shock on the price, to show a liquidation." },
         { name: "MockZecOracle", address: CONTRACTS.MockZecOracle, label: "MOCK", why: "An owner-set ZEC/USD price." },
-        { name: "This replay", address: null, label: "DEMO", why: "The judges' build replays the live run in the browser: no backend, no chain." },
+        { name: "This replay", address: null, label: "DEMO", why: "The judges' build replays the run in the browser: no backend, no chain." },
       ],
       leakScan: null,
     },
