@@ -113,8 +113,9 @@ NEXT_PUBLIC_IRM=\(.market.irm)
 NEXT_PUBLIC_SIGNERS=\(.signers | join(","))"' ../contracts/deployments/anvil.json >> .env.local
 ```
 
-(`base-sepolia.json` once deployed publicly.) Review the result before building: these
-addresses are what the app trusts.
+(`base-sepolia.json` once deployed publicly.) Or, with the swap contract and the demo path too (testnet only), without
+jq: `node scripts/pin-deployment.mjs base-sepolia http://127.0.0.1:8080 > .env.local`. Review the result before
+building: these addresses are what the app trusts.
 
 ## Pages
 
