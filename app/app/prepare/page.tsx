@@ -1,6 +1,8 @@
 import type { Metadata } from "next";
 import Link from "next/link";
 import { Denominations } from "@/components/client";
+import { IconArrowRight, IconShield } from "@/components/icons";
+import { ZecMark } from "@/components/marks";
 import { buttonClass, Card, Notice, Page } from "@/components/ui";
 
 export const metadata: Metadata = { title: "Prepare your ZEC" };
@@ -8,12 +10,17 @@ export const metadata: Metadata = { title: "Prepare your ZEC" };
 export default function PreparePage() {
   return (
     <Page
+      eyebrow={
+        <>
+          <ZecMark size={18} /> Before you borrow
+        </>
+      }
       title="Prepare your ZEC: Ironwood only"
       lead="Zecured only accepts deposits that stay inside Zcash's Ironwood pool. A few minutes of preparation keep your loan unlinkable to your wallet."
     >
       <div className="grid gap-6 lg:grid-cols-[minmax(0,1fr)_20rem]">
         <div className="min-w-0 space-y-6">
-          <Card title="Why only Ironwood">
+          <Card title="Why only Ironwood" icon={<IconShield size={18} />}>
             <div className="prose-calm">
               <p>
                 Zcash has several pools: transparent, Sapling, Orchard and, since NU6.3, <strong>Ironwood</strong>. Inside a
@@ -36,8 +43,8 @@ export default function PreparePage() {
                 you borrow.
               </li>
               <li>
-                <strong className="text-text">Migrate a different amount than your collateral.</strong> Move, say, 0.125 TAZ
-                rather than exactly <Denominations />, so the public crossing does not match a loan size.
+                <strong className="text-text">Migrate an amount that matches no vault size.</strong> Move, say, 0.12 TAZ
+                rather than exactly <Denominations />, so the public crossing does not match a loan.
               </li>
               <li>
                 <strong className="text-text">Wait before depositing.</strong> Hours or days between the migration and the
@@ -85,8 +92,9 @@ export default function PreparePage() {
           </Notice>
           <Card title="Ready?">
             <p className="mb-4 text-sm text-muted">Your Ironwood notes should cover the amount plus the network fee.</p>
-            <Link href="/borrow" className={buttonClass("primary", "w-full no-underline")}>
+            <Link href="/borrow" className={buttonClass("primary", "w-full")}>
               Start a loan
+              <IconArrowRight size={16} />
             </Link>
           </Card>
         </aside>

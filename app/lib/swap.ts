@@ -281,8 +281,8 @@ export function swapStatus(o: Pick<StoredSwapOrder, "proven" | "settled" | "refu
   if (o.settled) return { kind: "settled" };
   if (o.proven) return { kind: "proven" };
   if (nowSeconds > o.payDeadline) return { kind: "refundable" };
-  // "proven" by the maker's word, while this browser has not seen the proof's event yet: still "paid".
-  if (maker === "paid" || maker === "proven") return { kind: "paid", payDeadline: o.payDeadline };
+  // "proven" or "settled" by the maker's word, while this browser has not seen the events yet: still "paid".
+  if (maker === "paid" || maker === "proven" || maker === "settled") return { kind: "paid", payDeadline: o.payDeadline };
   if (maker === "abandoned") return { kind: "abandoned", payDeadline: o.payDeadline };
   return { kind: "open", payDeadline: o.payDeadline };
 }
@@ -297,14 +297,18 @@ const ORDER_EVENTS = swapAbi.filter((i) => i.type === "event" && i.name !== "Ord
 /** Blocks per eth_getLogs (the proxy's bound). */
 const LOG_SPAN = 2_000n;
 
+/** Blocks read again on each follow (events only set flags, so a second read changes nothing). */
+const RESCAN = 12n;
+
 /**
- * Reads the order's events after `o.scannedTo` up to the latest block (2,000 blocks per request,
+ * Reads the order's events from just before `o.scannedTo` (RESCAN) up to the latest block (2,000 blocks per request,
  * at most `maxChunks`), through the proxy, and returns the order with its flags and cursor updated.
  * A pending settlement later dropped is not a proof.
  */
 export async function followOrder(c: PublicClient, o: StoredSwapOrder, maxChunks = 12): Promise<StoredSwapOrder> {
   const latest = await c.getBlockNumber();
-  let from = BigInt(o.scannedTo) + 1n;
+  // The last RESCAN blocks are read again: a provider whose logs trail its head never makes an event slip past.
+  let from = BigInt(o.scannedTo) + 1n - RESCAN;
   if (from < BigInt(o.openedBlock)) from = BigInt(o.openedBlock);
   const next = { ...o };
   const topics = [

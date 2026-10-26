@@ -133,7 +133,7 @@ nodes' stores freezes the affected vaults; three leaked stores are enough to ste
 - **The prover's budget (W-28).** If three colluding signers withhold a payout's confirmation, the
   claim stays pending and the honest `Included` proof of its payout must be on Base before the bonds
   may pay its liveness: within `commitGrace` less the payout's lifetime and the slasher's confirmation
-  work, about 20 minutes in the worst case on the judge deployment. Whoever runs the coordinator's
+  work, about 20 minutes in the worst case on testnet. Whoever runs the coordinator's
   prover keeps a proof (queue, STARK, Groth16 wrap and submission) inside that budget: a GPU prover,
   or a larger `commitGrace` (the mainnet design, docs/MAINNET.md § 7). The coordinator drops a
   proof's privacy delay when the delayed anchor would miss such a deadline (W-10).
@@ -142,7 +142,7 @@ nodes' stores freezes the affected vaults; three leaked stores are enough to ste
   GPU prover, from its job to Base) and `deadline_margin_secs` (600). With a CPU prover a proof takes
   hours: raise `proof_secs` to match, or the delay is dropped too late to beat the deadline. A
   payout's confirmation by signatures also waits for its planned anchor (N-1: at most about 21
-  minutes on the judge deployment) and goes at once when a pending claim's liveness deadline is
+  minutes on testnet) and goes at once when a pending claim's liveness deadline is
   within `deadline_margin_secs` of that.
 - **Logs.** The default level is `info` (`RUST_LOG` unset), and debug is off. Warnings and errors may
   name a Zcash height; debug lines say more (heights, server and provider answers). Turn debug on

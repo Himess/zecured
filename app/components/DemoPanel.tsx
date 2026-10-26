@@ -92,7 +92,7 @@ export function DemoPanel() {
                 autoComplete="off"
                 value={draft}
                 onChange={(e) => setDraft(e.target.value)}
-                className="w-full rounded-lg border border-border bg-bg px-3 py-2 text-sm text-text focus:border-accent"
+                className="field text-sm"
               />
             </div>
             <Button type="submit" disabled={!draft.trim()}>
@@ -159,14 +159,14 @@ function NodesCard({ token }: { token: string }) {
       ) : null}
       {!nodes && !error ? <p className="text-sm text-muted">Loading…</p> : null}
       {nodes ? (
-        <ul className="grid gap-3 sm:grid-cols-2 lg:grid-cols-3">
+        <ul className="space-y-2">
           {nodes.map((n) => (
-            <li key={n.index} className="space-y-3 rounded-lg border border-border bg-surface-2 p-3">
-              <div className="flex items-center justify-between">
+            <li key={n.index} className="flex flex-wrap items-center justify-between gap-x-6 gap-y-3 rounded-2xl bg-bg px-4 py-3">
+              <div className="flex flex-wrap items-center gap-3">
                 <span className="font-semibold">Node {n.index}</span>
                 <Badge tone={n.mode === "normal" ? "ok" : n.mode === "compromised" ? "danger" : "warn"}>{n.mode}</Badge>
+                {n.vaults !== undefined ? <span className="text-xs text-muted">{n.vaults} vault share(s)</span> : null}
               </div>
-              {n.vaults !== undefined ? <p className="text-xs text-muted">{n.vaults} vault share(s)</p> : null}
               <div className="flex flex-wrap gap-1" role="group" aria-label={`Mode of node ${n.index}`}>
                 {/* "Compromised" only where the backend allows it (fewer nodes than the threshold). */}
                 {MODES.filter((m) => m.mode !== "compromised" || n.compromisable === true).map((m) => (
@@ -224,7 +224,7 @@ function SweepCard({ token }: { token: string }) {
             placeholder="0x…"
             spellCheck={false}
             autoComplete="off"
-            className="w-full rounded-lg border border-border bg-bg px-3 py-2 font-mono text-xs text-text focus:border-accent"
+            className="field font-mono text-xs"
           />
           <datalist id={`${vaultInputId}-list`}>
             {loans
@@ -276,7 +276,7 @@ function SweepCard({ token }: { token: string }) {
             </Notice>
             <ul className="space-y-2 text-sm">
               {report.votes.map((v) => (
-                <li key={v.index} className="flex flex-wrap items-start gap-2 rounded-lg border border-border p-3">
+                <li key={v.index} className="flex flex-wrap items-start gap-2 rounded-2xl bg-bg p-3">
                   <span className="font-medium">Node {v.index}</span>
                   <Badge tone={v.signed ? "danger" : "ok"}>{v.signed ? "signed" : "refused"}</Badge>
                   {v.reason ? <span className="w-full text-xs break-words text-muted">{v.reason}</span> : null}
@@ -381,7 +381,7 @@ function OracleCard({ token }: { token: string }) {
                 onChange={(e) => setDraft(e.target.value)}
                 placeholder="40.00"
                 aria-invalid={draftError ? true : undefined}
-                className="w-full rounded-lg border border-border bg-bg px-3 py-2 tabular-nums text-text focus:border-accent"
+                className="field tabular-nums"
               />
               <Button type="submit" busy={update.busy} disabled={!cents || Boolean(draftError)}>
                 Set

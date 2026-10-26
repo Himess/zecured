@@ -261,9 +261,9 @@ describe("claims in plain words", () => {
   const view = (patch: Partial<LedgerClaim>) => claimView(claim(patch), ctx);
 
   it("each kind's label", () => {
-    expect(view({ kind: "Fee", claimant: ZERO }).label).toBe("Opening fee (to the signers' treasury)");
+    expect(view({ kind: "Fee", claimant: ZERO }).label).toBe("Opening fee, to the signers");
     expect(view({ kind: "Refund" }).label).toBe("Refund of a deposit");
-    expect(view({ kind: "CloseMarketMaker" }).label).toBe("Close: the market maker's share");
+    expect(view({ kind: "CloseMarketMaker" }).label).toBe("To the market maker, for repaying your debt");
   });
 
   it("each status, with what happens next", () => {
@@ -293,12 +293,12 @@ describe("delivery badges (section 3 of the v4 design) and dormant refunds (R-11
     expect(view({ committed: true }).detail).toMatch(/committed its payout on Base/);
     expect(view({ status: "Paid", paidAt: NOW - 60 }).badge).toEqual({
       tone: "info",
-      text: `Signers confirmed — disputable until ${formatUtc(NOW - 60 + 86_400)}`,
+      text: `Signers confirmed: disputable until ${formatUtc(NOW - 60 + 86_400)}`,
     });
     expect(view({ status: "Paid", paidAt: NOW - 86_401 }).badge).toEqual({ tone: "ok", text: "Signers confirmed" });
     // paidAt 0: the payout's inclusion proven, or (R-3, expireConfirmation) a confirmation undisputed through its window.
-    expect(view({ status: "Paid", paidAt: 0 }).badge).toEqual({ tone: "ok", text: "Final on Base ✓" });
-    expect(view({ status: "Paid", paidAt: 0 }).detail).toMatch(/delivery was proven on Base .* or the signers' confirmation stood undisputed/);
+    expect(view({ status: "Paid", paidAt: 0 }).badge).toEqual({ tone: "proof", text: "Final on Base" });
+    expect(view({ status: "Paid", paidAt: 0 }).detail).toMatch(/delivery is proven on Base in zero knowledge, or its confirmation stood undisputed/);
     expect(view({ status: "Paid", paidAt: 0 }).detail).toMatch(/final/);
     // A Fee claim stays a bookkeeping line, committed or not.
     expect(view({ kind: "Fee", claimant: ZERO, committed: true }).badge).toEqual({ tone: "neutral", text: "Pending" });

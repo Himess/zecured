@@ -7,7 +7,7 @@
 import { config, type AppConfig } from "./config";
 import { DEPLOYMENT, type DeploymentProfile } from "./deployment";
 
-/** "USDC", or "MockUSDC" on a local fork. */
+/** "USDC", or "MockUSDC" where the deployment's loan token is its own MockUSDC (testnets only). */
 export function loanTokenName(c: AppConfig = config): string {
   return c.marketLabels?.loanToken ?? "USDC";
 }
@@ -45,7 +45,7 @@ export function realAndMock(c: AppConfig = config, d: DeploymentProfile = DEPLOY
         : "The ZEC/USD price: the deployment reports no real feed yet.",
     );
   }
-  if (l?.loanTokenIsMock) mock.push("The loan token: MockUSDC (MOCK), minted by the deployer on the local fork.");
+  if (l?.loanTokenIsMock) mock.push("The loan token: MockUSDC (MOCK), minted by the deployer: test tokens with no value.");
   else real.push(testnet ? "Circle's test USDC on Base Sepolia (testnet funds, no value)." : "Circle's USDC on Base.");
   mock.push(
     testnet

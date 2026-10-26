@@ -1,7 +1,9 @@
 "use client";
 
 import Link from "next/link";
-import { Badge, Card, KeyValue, Mono, Notice, Stat } from "@/components/ui";
+import { IconSigners } from "@/components/icons";
+import { SignerRing, type SignerNode } from "@/components/seam";
+import { Badge, Card, cx, KeyValue, Mono, Notice, Stat } from "@/components/ui";
 import type { MintBlock, StatusReport, VersionView } from "@/lib/api";
 import { formatUtc } from "@/lib/calls";
 import { config } from "@/lib/config";
@@ -15,6 +17,20 @@ import { formatTaz } from "@/lib/zcash";
 
 const MODE_TONE: Record<StatusReport["nodes"][number]["mode"], "ok" | "warn" | "danger"> = {
   normal: "ok",
+  offline: "warn",
+  unreachable: "warn",
+  compromised: "danger",
+};
+
+/** A node's mode in words, and how the ring draws it. */
+const MODE_TEXT: Record<StatusReport["nodes"][number]["mode"], string> = {
+  normal: "Online",
+  offline: "Offline",
+  unreachable: "Unreachable",
+  compromised: "Compromised (DEMO)",
+};
+const MODE_NODE: Record<StatusReport["nodes"][number]["mode"], SignerNode> = {
+  normal: "on",
   offline: "warn",
   unreachable: "warn",
   compromised: "danger",
@@ -37,7 +53,7 @@ function VersionTable({ kind, list }: { kind: string; list: VersionView[] }) {
       ) : (
         <ul className="space-y-2 text-sm">
           {list.map((v) => (
-            <li key={v.versionId} className="rounded-lg border border-border p-3">
+            <li key={v.versionId} className="rounded-2xl bg-bg p-3">
               <div className="flex flex-wrap items-center justify-between gap-2">
                 <Mono>{short(v.imageId, 12, 8)}</Mono>
                 <Badge tone={v.removed ? "neutral" : v.active ? "ok" : "warn"}>
@@ -46,7 +62,7 @@ function VersionTable({ kind, list }: { kind: string; list: VersionView[] }) {
               </div>
               <p className="mt-1 text-xs text-muted">
                 Router selector <Mono>{v.selector}</Mono>
-                {v.branches.length > 0 ? ` · branch ids ${v.branches.map((b) => `0x${b.toString(16)}`).join(", ")}` : ""}
+                {v.branches.length > 0 ? `, for branch ids ${v.branches.map((b) => `0x${b.toString(16)}`).join(", ")}` : ""}
               </p>
             </li>
           ))}
@@ -90,21 +106,31 @@ export function StatusView() {
         </Notice>
       ) : null}
 
-      <Card title="Signer network">
+      <Card title="Signer network" icon={<IconSigners size={18} />} action={r ? <Badge tone="neutral">3 of 5 sign every payout</Badge> : null}>
         {r ? (
-          <div className="space-y-4">
-            <ul className="flex flex-wrap gap-2">
-              {r.nodes.map((n) => (
-                <li key={n.index}>
-                  <Badge tone={MODE_TONE[n.mode]}>
-                    Signer {n.index}: {n.mode}
-                  </Badge>
-                </li>
-              ))}
-            </ul>
+          <div className="space-y-5">
+            <div className="grid items-center gap-6 sm:grid-cols-[auto_minmax(0,1fr)]">
+              <div className="flex justify-center">
+                <SignerRing nodes={r.nodes.map((n) => MODE_NODE[n.mode])} size={176} />
+              </div>
+              <ul className="divide-y divide-hairline">
+                {r.nodes.map((n) => {
+                  const tone = MODE_TONE[n.mode];
+                  return (
+                    <li key={n.index} className="flex items-center justify-between gap-3 py-2.5 text-[14px]">
+                      <span className="font-semibold">Signer {n.index}</span>
+                      <span className={cx("inline-flex items-center gap-1.5 text-[13px] font-semibold", tone === "ok" ? "text-ok" : tone === "warn" ? "text-warn" : "text-danger")}>
+                        <span aria-hidden="true" className="size-1.5 rounded-full bg-current" />
+                        {MODE_TEXT[n.mode]}
+                      </span>
+                    </li>
+                  );
+                })}
+              </ul>
+            </div>
             <p className="text-xs text-muted">
               Three of the five signers must sign every payout; a signer switched to &quot;compromised&quot; exists only in the
-              DEMO panel of the judge deployment.
+              DEMO panel of the testnet deployment.
             </p>
             <KeyValue
               rows={[
@@ -169,7 +195,7 @@ export function StatusView() {
             <p className="text-sm text-muted">The backend reports no minting gates.</p>
           )}
           {cap ? (
-            <dl className="grid gap-3 sm:grid-cols-4">
+            <dl className="grid gap-x-6 gap-y-5 sm:grid-cols-4">
               <Stat label="Locked" value={formatTaz(cap.lockedZat)} hint={`${s!.openVaults.toString()} open vault(s)`} />
               <Stat label="Pending" value={formatTaz(cap.pendingZat)} hint="activations and refunds" />
               <Stat label="Room" value={cap.roomZat === null ? "—" : formatTaz(cap.roomZat)} hint={cap.roomZat === null ? "the cap's price is stale" : undefined} />
@@ -186,7 +212,7 @@ export function StatusView() {
       <Card title="The signers' bonds">
         {bonds ? (
           <div className="space-y-4">
-            <dl className="grid gap-3 sm:grid-cols-3">
+            <dl className="grid gap-x-6 gap-y-5 sm:grid-cols-3">
               <Stat label="ΣB (sum of the bonds)" value={`${formatUsdc(bonds.sum)} USDC`} hint={`${bonds.bonded} of ${SIGNERS} at the ${formatUsdc(bonds.minBond)} USDC minimum`} />
               <Stat label="B_eff (what the cap counts)" value={`${formatUsdc(bonds.effective)} USDC`} hint="min(ΣB, 5/3 × the three smallest)" />
               <Stat
@@ -195,10 +221,10 @@ export function StatusView() {
                 hint="B_eff over the locked collateral at the market price"
               />
             </dl>
-            <ul className="grid gap-2 text-sm sm:grid-cols-5">
+            <ul className="grid grid-cols-2 gap-x-6 gap-y-4 text-sm sm:grid-cols-5">
               {s!.bonds!.each.map((b, i) => (
-                <li key={i} className="rounded-lg border border-border p-2">
-                  <span className="block text-xs text-faint">Signer {i + 1}</span>
+                <li key={i} className="border-t border-border pt-2.5">
+                  <span className="block text-xs text-muted">Signer {i + 1}</span>
                   <span className="tabular-nums">{formatUsdc(b)} USDC</span>
                 </li>
               ))}
@@ -219,11 +245,11 @@ export function StatusView() {
       <Card title="Anonymity sets">
         {sets ? (
           <div className="space-y-3">
-            <ul className="grid gap-2 sm:grid-cols-3">
+            <ul className="grid gap-x-6 gap-y-4 sm:grid-cols-3">
               {sets.map((x) => (
-                <li key={x.amount.toString()} className="rounded-lg border border-border p-3">
-                  <span className="block text-xs text-faint">{formatTaz(x.amount)} vaults open</span>
-                  <span className="text-lg font-semibold tabular-nums">{x.open}</span>
+                <li key={x.amount.toString()} className="border-t border-border pt-3">
+                  <span className="block text-sm text-muted">{formatTaz(x.amount)} vaults open</span>
+                  <span className="text-xl font-bold tabular-nums">{x.open}</span>
                 </li>
               ))}
             </ul>

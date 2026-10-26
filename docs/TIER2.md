@@ -64,7 +64,7 @@ and payout references), never their amounts or recipients (THREAT_MODEL, "Who se
    Ironwood bundle. Its txid (ZIP 244 as modified by ZIP 229, computed from the bytes) is under B's `merkleRoot`.
 2. **B is in the history committed by T, in the witness's epoch.** The leaf's `subtree_commitment` is SHA-256d(B's
    header) and it covers a single height; the path hashes the leaf up to one of the peaks; the left fold of the peaks
-   is the history tree's root node, and BLAKE2b("ZcashBlockCommit", V3 hash of that node ‖ T's auth data root ‖
+   is the history tree's root node, and BLAKE2b("ZcashBlockCommit", V3 hash of that node || T's auth data root ||
    [0]^32) equals T's `hashBlockCommitments`. Every node hash is personalized with the witness's branch id (ZIP 221),
    so the path opens only if B and T are of that epoch (the tree restarts at every network upgrade). Only T is
    public: B stays hidden among the epoch's blocks (23,534 at the anchor below). Activate mode: B's height is at most
@@ -225,7 +225,7 @@ paid after the vault's expiry, is proven in Refund mode and lands the same way. 
 it could not authenticate the vault's owner on Base without publishing `VaultOpened`'s hashes, and an off-chain refund
 of a note a later proof could make a lineage note would look exactly like an F1 theft (I30, D42). Notes no deployed
 guest can prove (before journal v2: another amount, a late payment, or a transaction that is not Ironwood-only) are
-still refunded off-chain on the owner's signed request (P5). The judge deployment takes journal v2, so there these
+still refunded off-chain on the owner's signed request (P5). A testnet deployment takes journal v2, so there these
 notes are proven in Refund mode instead.
 
 **Why off-chain refunds stay safe while anyone can prove** (review K2, D27, I30). A proof can be made for any note
@@ -348,7 +348,7 @@ the same ids, their parity suite passing on both networks. These ids and ELF has
 `tier2/pinned-image-ids.txt`: the workflow fails when a build gives a pinned
 guest another id or ELF, so shared code cannot move them unnoticed.
 
-The judge deployment and the theft demo take journal v2 with the Testnet pair and the NU7 epoch (branch id
+Testnet deployments and the theft demo take journal v2 with the Testnet pair and the NU7 epoch (branch id
 `0x77190AD9`, D56); the local fork takes journal v2 too, with its own build's ids and the MOCK verifier.
 
 ## 9. Tier 3 directions
@@ -360,10 +360,10 @@ finality gadget such as Crosslink for confirmations.
 ## Appendix: how the history root reaches Base (verified)
 
 - ZIP 221 defines the chain history tree, a Merkle mountain range (MMR) with one leaf per block. Each node carries
-  metadata and is hashed with BLAKE2b-256, personalization `"ZcashHistory" ‖ le32(CONSENSUS_BRANCH_ID)`. The header of
+  metadata and is hashed with BLAKE2b-256, personalization `"ZcashHistory" || le32(CONSENSUS_BRANCH_ID)`. The header of
   block B_n commits to the MMR over B_x .. B_{n−1}, where x is the most recent upgrade's activation height.
 - ZIP 244 § "Block Header Changes": since NU5, `hashBlockCommitments` = BLAKE2b-256 with personalization
-  `"ZcashBlockCommit"` over hashLightClientRoot (= hashChainHistoryRoot) ‖ hashAuthDataRoot ‖ [0u8; 32].
+  `"ZcashBlockCommit"` over hashLightClientRoot (= hashChainHistoryRoot) || hashAuthDataRoot || [0u8; 32].
 - ZIP 258 § "Changes to ZIP 221" (NU6.3) adds `hashEarliestIronwoodRoot`, `hashLatestIronwoodRoot` and
   `nIronwoodTxCount` to every node (`V3`, 277–317 bytes) and leaves `hashBlockCommitments` otherwise unchanged.
 - NU7 changes nothing here (none of the ZIPs it deploys mentions the history tree); the NU7 epoch's tree starts at

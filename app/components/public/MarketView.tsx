@@ -2,18 +2,22 @@
 
 import { useId, useState } from "react";
 import type { Address, Hex } from "viem";
+import { ActionError } from "@/components/ActionError";
 import { LoanTokenName } from "@/components/client";
-import { Badge, Button, Card, KeyValue, Notice, Stat } from "@/components/ui";
+import { IconShield } from "@/components/icons";
+import { rate, TokenAmount, usd, usdc } from "@/components/loan";
+import { MorphoMark, PairMarks, UsdcMark, ZecMark, ZzecMark } from "@/components/marks";
+import { Badge, Button, Card, KeyValue, Meter, Notice, Skeleton, Stat } from "@/components/ui";
 import { publicClient } from "@/lib/chain";
 import { config, marketParams } from "@/lib/config";
 import { DEPLOYMENT } from "@/lib/deployment";
 import { useAction, useProtocol } from "@/lib/hooks";
-import { priceSourceName } from "@/lib/labels";
+import { loanTokenName, priceSourceName } from "@/lib/labels";
 import { collateralValue, formatBps, formatUsdc, formatUsdPrice, liquidationIncentiveFactor, parseUsdc } from "@/lib/morpho";
 import { formatIncentive, formatWadPercent } from "@/lib/preliq";
 import { bondNumbers, capNumbers, marketNumbers, readSupply, SIGNERS, supplyCalls, withdrawCall, type WalletCall } from "@/lib/public";
 import { COMPENSATION_SENTENCE } from "@/lib/v3";
-import { formatTaz } from "@/lib/zcash";
+import { formatZec } from "@/lib/zcash";
 import { connectWallet, ensureChain, injectedWallet, sendFromWallet } from "@/lib/wallet";
 
 /** Sends each call from the wallet in turn, waiting for its receipt through the proxy. */
@@ -95,7 +99,7 @@ function LendCard({ available, onChanged }: { available: bigint | null; onChange
             <p>Unaudited, invite only, small caps. Lend only what you can afford to lose.</p>
           </Notice>
         ) : (
-          <p className="text-xs text-muted">Testnet funds only: test USDC on Base Sepolia, which has no value.</p>
+          <p className="text-xs text-muted">Testnet funds only: {loanTokenName()} on {DEPLOYMENT.chainName}, a test token with no value.</p>
         )}
         {!wallet ? (
           <Button variant="secondary" onClick={() => void connect.run()} busy={connect.busy}>
@@ -106,14 +110,14 @@ function LendCard({ available, onChanged }: { available: bigint | null; onChange
             <KeyValue
               rows={[
                 ["Wallet", wallet],
-                ["In your wallet", supply ? `${formatUsdc(supply.balance)} USDC` : "—"],
-                ["You lend", supply ? `${formatUsdc(supply.assets)} USDC` : "—"],
-                ["Withdrawable now", available === null ? "—" : `up to ${formatUsdc(available)} USDC (what borrowers do not use)`],
+                ["In your wallet", supply ? `${formatUsdc(supply.balance)} ${loanTokenName()}` : "—"],
+                ["You lend", supply ? `${formatUsdc(supply.assets)} ${loanTokenName()}` : "—"],
+                ["Withdrawable now", available === null ? "—" : `up to ${formatUsdc(available)} ${loanTokenName()} (what borrowers do not use)`],
               ]}
             />
             <div className="space-y-2">
               <label htmlFor={amountId} className="block text-sm font-medium">
-                Amount (USDC)
+                Amount ({loanTokenName()})
               </label>
               <input
                 id={amountId}
@@ -122,7 +126,7 @@ function LendCard({ available, onChanged }: { available: bigint | null; onChange
                 value={amount}
                 onChange={(e) => setAmount(e.target.value)}
                 placeholder="25.00"
-                className="w-full max-w-xs rounded-lg border border-border bg-surface-2 px-3 py-2 tabular-nums"
+                className="field max-w-xs tabular-nums"
               />
             </div>
             <div className="flex flex-wrap gap-2">
@@ -143,21 +147,9 @@ function LendCard({ available, onChanged }: { available: bigint | null; onChange
             ) : null}
           </div>
         )}
-        {connect.error ? (
-          <Notice tone="danger" title="Not connected" live>
-            <p>{connect.error}</p>
-          </Notice>
-        ) : null}
-        {lend.error ? (
-          <Notice tone="danger" title="Nothing was lent" live>
-            <p>{lend.error}</p>
-          </Notice>
-        ) : null}
-        {withdraw.error ? (
-          <Notice tone="danger" title="Nothing was withdrawn" live>
-            <p>{withdraw.error}</p>
-          </Notice>
-        ) : null}
+        <ActionError error={connect.error} refusal={connect.refusal} title="Not connected" />
+        <ActionError error={lend.error} refusal={lend.refusal} title="Nothing was lent" />
+        <ActionError error={withdraw.error} refusal={withdraw.refusal} title="Nothing was withdrawn" />
         {lend.result ? (
           <Notice tone="ok" title="Lent" live>
             <p>Your supply is on Base (transaction {lend.result}).</p>
@@ -165,7 +157,7 @@ function LendCard({ available, onChanged }: { available: bigint | null; onChange
         ) : null}
         {withdraw.result ? (
           <Notice tone="ok" title="Withdrawn" live>
-            <p>The USDC is back in your wallet (transaction {withdraw.result}).</p>
+            <p>The tokens are back in your wallet (transaction {withdraw.result}).</p>
           </Notice>
         ) : null}
       </div>
@@ -184,6 +176,7 @@ export function MarketView() {
   const cap = s ? capNumbers(s) : null;
   const bonds = s?.bonds ? bondNumbers(s.bonds, s.lockedZat, s.price) : null;
   const labels = config.marketLabels;
+  const utilization = n ? Number((n.utilizationWad * 1000n) / 10n ** 18n) / 10 : 0;
 
   return (
     <div className="space-y-6">
@@ -192,75 +185,117 @@ export function MarketView() {
           <p>{p.error}</p>
         </Notice>
       ) : null}
-      {p.loading && !s ? <p className="text-sm text-muted">Reading the market on Base…</p> : null}
       {!config.contractsDeployed ? (
         <Notice tone="info" title="Nothing read from Base">
           <p>This build does not pin the deployment&apos;s contract addresses, so it reads nothing from Base.</p>
         </Notice>
       ) : null}
 
-      <Card
-        title="The lending market"
-        action={labels?.loanTokenIsMock ? <Badge tone="warn">MOCK loan token</Badge> : <Badge tone="neutral">Morpho Blue</Badge>}
-      >
-        {n ? (
-          <dl className="grid gap-3 sm:grid-cols-3">
-            <Stat label="Supplied" value={`${formatUsdc(n.suppliedUsdc)} USDC`} hint="by lenders" />
-            <Stat label="Borrowed" value={`${formatUsdc(n.borrowedUsdc)} USDC`} hint="against shielded ZEC" />
-            <Stat label="Utilization" value={formatWadPercent(n.utilizationWad)} hint={`${formatUsdc(n.availableUsdc)} USDC available`} />
-            <Stat label="Borrow rate" value={formatWadPercent(n.borrowApyWad)} hint="a year, compounded" />
-            <Stat label="Supply rate" value={formatWadPercent(n.supplyApyWad)} hint="what lenders earn" />
-            <Stat label="Liquidation LTV" value={formatWadPercent(config.lltv)} hint={`${formatIncentive(liquidationIncentiveFactor(config.lltv))} incentive`} />
-          </dl>
-        ) : (
-          <p className="text-sm text-muted">—</p>
-        )}
-      </Card>
-
-      <Card title="The collateral" action={labels?.oracleIsDemo ? <Badge tone="warn">DEMO price</Badge> : null}>
-        {s && cap ? (
-          <KeyValue
-            rows={[
-              ["Shielded ZEC locked", `${formatTaz(cap.lockedZat)} in ${s.openVaults.toString()} open vault(s)`],
-              ["Its value", `${formatUsdc(collateralValue(cap.lockedZat, s.price))} USDC at ${formatUsdPrice(s.price)} per ZEC`],
-              ["Price source", priceSourceName()],
-              ["Coverage cap used", cap.fillBps === null ? "—" : `${formatBps(cap.fillBps)} (pending deposits count too)`],
-            ]}
-          />
-        ) : (
-          <p className="text-sm text-muted">—</p>
-        )}
-        <p className="mt-3 text-xs text-muted">
-          The ZEC stays in shielded vaults on Zcash, controlled by five signers (three must sign each payout). Morpho holds only
-          zZEC, a token that exists while the ZEC is locked.
-        </p>
-      </Card>
-
-      <Card title="If a vault's ZEC is ever taken">
-        <div className="space-y-4">
-          <p className="text-sm">{COMPENSATION_SENTENCE}</p>
-          {bonds ? (
-            <dl className="grid gap-3 sm:grid-cols-3">
-              <Stat label="Signers' bonds (ΣB)" value={`${formatUsdc(bonds.sum)} USDC`} hint={`${bonds.bonded} of ${SIGNERS} signers at the minimum`} />
-              <Stat label="Counted for coverage (B_eff)" value={`${formatUsdc(bonds.effective)} USDC`} hint="min(ΣB, 5/3 × the three smallest)" />
-              <Stat
-                label="Bonds per dollar locked"
-                value={bonds.perCollateralWad === null ? "—" : formatWadPercent(bonds.perCollateralWad)}
-                hint={s ? `the cap keeps it at ${formatBps(BigInt(s.coverageBps))} or more` : undefined}
-              />
-            </dl>
-          ) : (
-            <p className="text-sm text-muted">
-              {!config.contractsDeployed ? "—" : p.loading ? "Reading the bonds…" : "No signer bond on this deployment."}
-            </p>
-          )}
-          <p className="text-xs text-muted">
-            For lenders: in a compensation, the market&apos;s loss is paid before any borrower&apos;s own equity, which comes last.
-          </p>
+      <section aria-labelledby="market-h" className="panel panel-lead overflow-hidden">
+        <div className="grid gap-6 p-[clamp(20px,2.6vw,32px)] lg:grid-cols-[minmax(0,1fr)_auto] lg:items-center">
+          <div className="flex items-center gap-4">
+            <PairMarks a={<ZzecMark size={46} />} b={<UsdcMark size={46} />} size={46} />
+            <div>
+              <h2 id="market-h" className="text-[26px] leading-tight font-extrabold font-stretch-118%">
+                zZEC / <LoanTokenName />
+              </h2>
+              <p className="flex flex-wrap items-center gap-2 text-[13.5px] text-muted">
+                <MorphoMark size={16} /> Morpho Blue · liquidation at {formatWadPercent(config.lltv)} LTV ·{" "}
+                {formatIncentive(liquidationIncentiveFactor(config.lltv))} liquidation incentive
+              </p>
+            </div>
+          </div>
+          <div className="flex flex-wrap gap-2">
+            {labels?.loanTokenIsMock ? <Badge tone="warn">MOCK loan token</Badge> : <Badge tone="neutral">Isolated market</Badge>}
+            {labels?.oracleIsDemo ? <Badge tone="warn">DEMO price</Badge> : null}
+          </div>
         </div>
-      </Card>
+        <dl className="grid border-t border-hairline sm:grid-cols-2 lg:grid-cols-4 [&>div]:border-hairline [&>div]:p-5 sm:[&>div]:border-r lg:[&>div:last-child]:border-r-0">
+          <div>
+            <dt className="text-[13px] font-semibold text-muted">Total supplied</dt>
+            <dd className="mt-1">{n ? <TokenAmount token="USDC" value={usdc(n.suppliedUsdc)} unit={null} size="lg" /> : <Skeleton className="h-7 w-28" />}</dd>
+          </div>
+          <div>
+            <dt className="text-[13px] font-semibold text-muted">Total borrowed</dt>
+            <dd className="mt-1">{n ? <TokenAmount token="USDC" value={usdc(n.borrowedUsdc)} unit={null} size="lg" /> : <Skeleton className="h-7 w-28" />}</dd>
+          </div>
+          <div>
+            <dt className="text-[13px] font-semibold text-muted">Borrow rate</dt>
+            <dd className="mt-1 text-[22px] font-bold tabular-nums font-stretch-112%">{n ? rate(n.borrowApyWad) : "—"}</dd>
+            <dd className="text-[12px] text-muted">a year, compounded</dd>
+          </div>
+          <div>
+            <dt className="text-[13px] font-semibold text-muted">Lenders earn</dt>
+            <dd className="mt-1 text-[22px] font-bold tabular-nums font-stretch-112%">{n ? rate(n.supplyApyWad) : "—"}</dd>
+            <dd className="text-[12px] text-muted">the supply rate</dd>
+          </div>
+        </dl>
+        <div className="border-t border-hairline px-[clamp(20px,2.6vw,32px)] pt-4 pb-2">
+          <p className="flex justify-between text-[13px]">
+            <span className="font-semibold text-muted">Utilization</span>
+            <span className="tabular-nums">
+              {n ? rate(n.utilizationWad) : "—"}
+              {n ? <span className="text-muted"> · {usdc(n.availableUsdc)} available to borrow or withdraw</span> : null}
+            </span>
+          </p>
+          <Meter value={utilization} max={100} tone="info" markers={[{ at: 90, label: "90 % target", tone: "muted" }]} />
+        </div>
+      </section>
+
+      <div className="grid gap-6 lg:grid-cols-2">
+        <Card title="The collateral behind it" icon={<ZecMark size={20} />}>
+          {s && cap ? (
+            <div className="space-y-4">
+              <div className="flex flex-wrap items-end justify-between gap-3">
+                <TokenAmount token="TAZ" value={formatZec(cap.lockedZat)} size="xl" />
+                <p className="text-[13.5px] text-muted">in {s.openVaults.toString()} open vault{s.openVaults === 1n ? "" : "s"}</p>
+              </div>
+              <KeyValue
+                rows={[
+                  ["Its value", `${usd(collateralValue(cap.lockedZat, s.price))} at ${formatUsdPrice(s.price)} per ZEC`],
+                  ["Price source", priceSourceName()],
+                  ["Coverage cap used", cap.fillBps === null ? "—" : `${formatBps(cap.fillBps)} (pending deposits count too)`],
+                ]}
+              />
+            </div>
+          ) : (
+            <p className="text-sm text-muted">—</p>
+          )}
+          <p className="mt-4 text-xs text-muted">
+            The ZEC stays in shielded vaults on Zcash, controlled by five signers (three must sign each payout). Morpho holds only
+            zZEC, a token that exists while the ZEC is locked.
+          </p>
+        </Card>
+
+        <Card title="If a vault's ZEC is ever taken" icon={<IconShield size={18} />}>
+          <div className="space-y-4">
+            <p className="text-sm text-soft">{COMPENSATION_SENTENCE}</p>
+            {bonds ? (
+              <dl className="grid gap-3 sm:grid-cols-3">
+                <Stat label="Signers' bonds" value={usdc(bonds.sum)} hint={`${loanTokenName()} · ${bonds.bonded} of ${SIGNERS} at the minimum`} />
+                <Stat label="Counted" value={usdc(bonds.effective)} hint={`${loanTokenName()} · 5/3 × the three smallest`} />
+                <Stat
+                  label="Per dollar locked"
+                  value={bonds.perCollateralWad === null ? <span className="text-[14px] font-semibold text-muted">n/a: nothing locked</span> : formatWadPercent(bonds.perCollateralWad)}
+                  hint={s ? `kept at ${formatBps(BigInt(s.coverageBps))} or more` : undefined}
+                />
+              </dl>
+            ) : (
+              <p className="text-sm text-muted">
+                {!config.contractsDeployed ? "—" : p.loading ? "Reading the bonds…" : "No signer bond on this deployment."}
+              </p>
+            )}
+            <p className="text-xs text-muted">
+              For lenders: in a compensation, the market&apos;s loss is paid before any borrower&apos;s own equity, which comes last.
+            </p>
+          </div>
+        </Card>
+      </div>
 
       {config.contractsDeployed ? <LendCard available={n?.availableUsdc ?? null} onChanged={() => void p.refresh()} /> : null}
+      <p className="flex items-center justify-end gap-2 text-[12.5px] text-muted">
+        Powered by <MorphoMark size={16} /> Morpho Blue
+      </p>
     </div>
   );
 }

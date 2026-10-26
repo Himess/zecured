@@ -67,7 +67,7 @@ export function ProtectionPresets({
             key={p.id}
             className={cx(
               "flex cursor-pointer items-start gap-2 rounded-lg border p-3 text-sm",
-              preset.id === p.id ? "border-accent bg-surface-2" : "border-border hover:border-faint",
+              preset.id === p.id ? "border-soft bg-surface-2" : "border-border hover:border-faint",
             )}
           >
             <input type="radio" name={group} checked={preset.id === p.id} onChange={() => onPreset(p)} className="mt-1" />

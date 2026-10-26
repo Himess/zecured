@@ -47,8 +47,8 @@ PayoutConfirmation(bytes32 vaultId,bytes32 payoutRef,bytes32 claimIdsHash)
 - v4 (R-1, D76): `claimIdsHash = keccak256(abi.encodePacked(claimIds))`, and the confirmation names
   the committed payout (`payoutRef`) it confirms, so it cannot be replayed for another payout or after
   a reopening. A signed confirmation is a fast first step that each claimant may dispute for
-  `disputeWindow` (D53); a payout is final on Base only once its inclusion in a Zcash block is proven
-  (proven delivery, § 3.5, docs/TIER3.md § 5).
+  `disputeWindow` (D53); a payout is final on Base once its inclusion in a Zcash block is proven
+  (proven delivery, § 3.5, docs/TIER3.md § 5), or once that window closes undisputed (R-3).
 - `depositTag` (D24), the tag every Base record names a vault note by: `BLAKE2b-256(key =
   BLAKE2b-256(personal = "Zecured_TagKey__", UFVK string), personal = "Zecured_DepTag__", cmx)`,
   what a deposit proof computes; unlinkable to any Zcash data without the vault's tag key. The
@@ -376,7 +376,7 @@ function payoutDispute(bytes32 claimId) external view returns (uint64 paidAt, ui
   I16) and only with a destination (I21). A Refund claim's destination comes from its account
   (`setRefundDestination`, which restarts its liveness clock, wakes a dormant refund and revives an
   abandoned one). A refund still without a destination `refundDormancy` after it opened (48 hours
-  on the judge deployment, 7 days on mainnet) may be marked dormant by anyone (`RefundDormant`): it
+  on testnet, 7 days on mainnet) may be marked dormant by anyone (`RefundDormant`): it
   leaves `lockedZatoshi` and the coverage cap until its account gives one (R-11). A refund nobody
   claims is written off after `refundAbandonPeriod`. `setRefundDestination`, `abandonRefund` and
   the v4 refund functions run in `ZecuredSpendLogic` (`IZecuredRefunds`), the first two through
@@ -620,12 +620,13 @@ function violationStopped() external view returns (bool);   // W-15: no violatio
 
 `IOracle.price()` for the market and `IZecuredCapPrice.priceHigh()` for the cap, from Chainlink's
 ZEC/USD (primary) and API3's ZEC/USD (secondary) on Base; `poke()`, `state()`, `lastGoodPrice()`,
-`readSources()`. Rules in docs/DECISIONS.md D55 and the contract's NatSpec. The judge deployment
+`readSources()`. Rules in docs/DECISIONS.md D55 and the contract's NatSpec. The testnet configuration
 does not use it.
 
 ### 3.8 Mocks and demo controls (labelled MOCK or DEMO)
 
-- `MockUSDC` (6 decimals, owner mint): the loan token on a local fork only.
+- `MockUSDC` (6 decimals, owner mint): the loan token on testnet, a test token with no value: the deploy script
+  mints one on a local fork, and a Base Sepolia deployment takes one as `LOAN_TOKEN`.
 - `MockZecOracle`: `price() = ZEC/USD * 1e34`; owner-only `setPrice`.
 - `DemoShockOracle` (DEMO): the testnet market's oracle, an owner-set shock on top of the base price.
 - `DemoCapPrice` (MOCK / DEMO): the testnet cap's price, the market oracle's, always fresh.
@@ -634,7 +635,7 @@ does not use it.
 
 ### 3.9 Market
 
-zZEC / USDC (Circle's testnet USDC on Base Sepolia) / `DemoShockOracle` / AdaptiveCurveIRM
+zZEC / USDC (on testnet a `MockUSDC`, MOCK) / `DemoShockOracle` / AdaptiveCurveIRM
 `0x46415998764C29aB2a25CbeA6254146D50D22687` / LLTV `0.625e18`, on Morpho Blue
 `0xBBBBBbbBBb9cC5e90e3b3Af64bdAF62C37EEFFCb`.
 
@@ -690,13 +691,13 @@ addresses, salts, viewing keys or IPs.
 |---|---|---|
 | `POST /vaults` | `{ owner, account, amount, requestId, deadline, signature, stamp, invite? }` (`OpenVault`; `stamp`: the nonce of the request's hashcash stamp, below; `invite`: a code, when openings are invite-only) | `{ vaultId, address (Ironwood-only UA), zip321, amount, expiryHeight, tagKeyHash, signatures: [{ index, signature }] }`; `signatures`: every signer's `VaultOpened` (§ 2.5), ordered by node index; the client checks all five before showing `address` and builds the payment URI itself |
 | `GET /vaults/:id` | — | `{ vaultId, status, amount, address, expiryHeight, birthdayHeight, tipHeight, outstanding, payoutInFlight, nonConforming: [{ noteId, amount, offChain }], depositSeen, claims: [{ claimId, kind, amount, paid, status, destinationSet }] }`; `kind` ∈ `Release`, `Liquidation`, `CloseUser`, `CloseMarketMaker`, `Refund` (T-02), `Fee` (T-06), `Retired` (T-04); `status` ∈ `pending`, `paid`, `written_off`, `compensated`, `disputed` (D53), `paid` being `status == "paid"`; `destinationSet`: the claim has a destination on Base (a Refund claim waits for its account's, `setRefundDestination`); v4: `proven` (the claim is final: its payout proven, or its confirmation expired undisputed), `disputableUntil` (Unix s, while a signed confirmation can be disputed), `livenessArmed` (a signer's receipt armed its liveness clock). `nonConforming`: the payments the coordinator's scan found that cannot back the loan (P1 classified them non-conforming; the vault's own deposit, while it waits for its confirmations or its proof, is not listed) and that have not landed on Base, each refunded once a proof lands it as a Refund claim (the coordinator proves those a guest of the deployment can land, when it proves deposits), or, with `offChain: true` (no guest can land it, I30), off-chain at its owner's request (`POST /vaults/:id/refund`). `depositSeen` (v4, R-11.1): the vault's conforming deposit is mined with its confirmations; its proof may still be on its way, or waiting for room under the coverage cap |
-| `POST /vaults/:id/destination` | `{ receiver (UA), salt, nonce, deadline, signature }` (`Destination`) | `{ commitment }` — validated **before** any Base tx that burns zZEC |
+| `POST /vaults/:id/destination` | `{ receiver (UA), salt, nonce, deadline, signature }` (`Destination`) | `{ commitment }`, validated **before** any Base tx that burns zZEC |
 | `POST /vaults/:id/refund` | `{ noteId, receiver, salt, nonce, deadline, signature }` (`RefundRequest`, § 2.3) | `{ accepted: true }`; only for a deposit listed with `offChain: true`, else `409 refund_on_base` (I30); the signers then refund it, net of the fee, to `receiver` |
 | `POST /vaults/:id/viewing-key` | `{ nonce, deadline, signature }` (`ViewKeyRequest`) | `{ ufvk }` |
 | `POST /vaults/:id/deposit-proof` | `{ imageId, journal, seal }` (a deposit proof made elsewhere, e.g. `zecured-wallet loan prove`; a journal of the Intake's version, in Activate mode for v2, § 3) | `{ accepted: true }` (v4: `409 cap_full` while the coverage cap has no room for a new vault) once the Intake's `attestDepositWithProof(journal, seal, imageId, openedSigs)` is mined with the vault's `VaultOpened` signatures and the coordinator's gas (Y10: proving one's own deposit needs no ETH); the coordinator then finalizes the activation (K3). Only while the vault waits for its deposit, and only for a guest image id and router selector that are an active deposit version (T-07a, D54) |
 | `POST /vaults/:id/prove-refund` | `{ nonce, deadline, signature }` (`ProveRefund`, § 2.3; v4, R-11) | `{ queued: true }`: the coordinator proves the vault's deposit in Refund mode; `409 not_blocked` (its activation can land), `already_landed`, `refund_unavailable`, `nonce_used`; `422 no_deposit`, `expired`; `403 not_owner`; `404 unknown_vault`; `503 not_configured`, `chain_unavailable` |
 | `POST /claims/:claimId/receipt` | — (public, 20 a minute) | `{ claimId, commitment, receivedAt, signer, signature }` (v4, R-5, § 2.7): the valid receipt with the earliest `receivedAt` among the nodes', for the claim's current commitment; the last three go to `SignerBondV2.armLiveness`. `404 no_receipt`, `400 bad_request`, `429 rate_limited`, `503 not_configured`, `chain_unavailable` |
-| `GET /demo/status` | — | DEMO (P-1, the judge deployment only): `{ enabled: false }`, or `{ enabled: true, returnAddress, dailyCapZat, paidTodayZat, lowBalance, stampBits }` |
+| `GET /demo/status` | — | DEMO (P-1, testnet only): `{ enabled: false }`, or `{ enabled: true, returnAddress, dailyCapZat, paidTodayZat, lowBalance, stampBits }` |
 | `POST /demo/vaults/:id/pay` | `{ owner, account, amount, expiryHeight, address, tagKeyHash, signatures: [{ index, signature }], stamp }` | DEMO: `{ txid, amount }`. The operators' demo wallet pays `address` the vault's amount (Ironwood, `ovk = None`) only when all five `VaultOpened` signatures check out and the coordinator still waits for this deposit with at least 24 blocks before its expiry; once per vault, within `DEMO_DAILY_CAP_ZAT` per UTC day; the stamp is `sha256("zecured-demo-pay-v1" \|\| vaultId \|\| stamp u64 BE)` with `stampBits` zero bits. Refusals `demo_off` (404), `bad_stamp` (422), `demo_unvouched` (403), `demo_not_awaiting`, `demo_already_paid` (409), `demo_daily_cap` (429), `demo_busy`, `demo_low_balance` (503), `demo_wallet_unavailable` (502); 6 per 10 minutes. Never on Base mainnet |
 | `GET /evidence` | — | the evidence file (`zecured-evidence/1`, `app/lib/evidence.ts`), read again at most once a minute; `404 not_configured`, `503 evidence_invalid` |
 | `GET /stats/vaults` | — | `{ byAmount: { <zat>: open vaults }, total, complete, readAt }` (the anonymity sets, from `VaultActivated` events and each vault's status, cached two minutes); `503 chain_unavailable` |
@@ -736,7 +737,7 @@ opened, and keeps accepting its deposit, as before, until its expiry height. Imp
 when its uses are spent), and `openings: false` refuses every opening (`403 openings_closed`) while
 exits, payouts, refunds and proofs go on. Only the codes' keccak256 hashes are configured, uses are
 counted in the coordinator's data directory, and a use is given back when its opening fails. Codes
-are never logged. Without an invite file (the judge deployment) openings are open to all.
+are never logged. Without an invite file (testnet) openings are open to all.
 
 ### 4.2 Demo control (header `x-admin-token`)
 
@@ -744,7 +745,7 @@ are never logged. Without an invite file (the judge deployment) openings are ope
 |---|---|---|
 | `GET /admin/nodes` | — | `{ nodes: [{ index, mode, vaults, compromisable }] }`; `compromisable`: the panel may switch this node to "compromised" (`DEMO_COMPROMISABLE_NODES`) |
 | `POST /admin/nodes/:index/mode` | `{ mode: "normal" \| "compromised" \| "offline" }` | `{ mode }` |
-| `POST /admin/vaults/:id/drain` | `{ to (UA) }` | `{ vaultId, amount, votes: [{ index, signed, reason }], thresholdReached }` — never broadcasts |
+| `POST /admin/vaults/:id/drain` | `{ to (UA) }` | `{ vaultId, amount, votes: [{ index, signed, reason }], thresholdReached }`; never broadcasts |
 | `GET /admin/oracle` | — | `{ priceUsdCents, raw, demo, basePriceUsdCents, baseIsMock, shockBps }`: the market oracle's price; `demo`: the market's oracle is the DemoShockOracle (MOCK / DEMO), else `basePriceUsdCents` and `shockBps` are `null` |
 | `POST /admin/oracle` | `{ priceUsdCents }` | `{ priceUsdCents, txHash }` (MOCK base oracle, owner key); `409 not_demo_oracle` when the market's oracle is not a DemoShockOracle (Base mainnet: the ZecuredPriceFeed itself), `409 real_price` when the base below it is a real feed |
 | `POST /admin/shock` | `{ shockBps }` | `{ shockBps, txHash }` (DEMO, owner key: `DemoShockOracle.setShock`); `409 not_demo_oracle` when the market's oracle is not a DemoShockOracle (Base mainnet), `409 shock_refused` for a step the contract refuses |

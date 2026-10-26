@@ -1,20 +1,24 @@
 "use client";
 
-import { Badge, Button, Mono, Notice } from "@/components/ui";
+import { ActionError } from "@/components/ActionError";
 import { CopyButton } from "@/components/client";
+import { IconBolt, IconCheck } from "@/components/icons";
+import { Badge, Button } from "@/components/ui";
 import { api, apiErrorCode } from "@/lib/api";
 import { config } from "@/lib/config";
 import { demoRefusal, solveDemoStamp } from "@/lib/demo";
+import { sampleTransactions } from "@/lib/explorer";
 import { notifyLoansChanged, useAction, useDemoStatus } from "@/lib/hooks";
-import { loanStore, type StoredLoan } from "@/lib/keys";
+import { loanStore, short, type StoredLoan } from "@/lib/keys";
+import { REPLAY } from "@/lib/replay/flag";
 import { formatTaz } from "@/lib/zcash";
 
 /**
- * P-1 (DEMO, judge deployment only): "Try with demo TAZ". The backend's demo wallet pays the vault
- * its full amount, once per vault, after a small proof of work in this browser. The vault is
- * described exactly as all five signers vouched for it when it opened (C-4), so the demo wallet
- * pays only a vault the signers control. Shown only in a build with the demo path and while the
- * backend's demo wallet is on.
+ * P-1 (DEMO, the testnet deployment only): "Pay it with demo TAZ". The backend's demo wallet pays the vault its
+ * full amount, once per vault, after a small proof of work in this browser. The vault is described exactly as all
+ * five signers vouched for it when it opened (C-4), so the demo wallet pays only a vault the signers control.
+ * Shown only in a build with the demo path and while the backend's demo wallet is on: a slim dashed row, its
+ * button the step's one primary.
  */
 export function DemoPayment({ loan }: { loan: StoredLoan }) {
   const demo = useDemoStatus();
@@ -47,35 +51,46 @@ export function DemoPayment({ loan }: { loan: StoredLoan }) {
   });
 
   if (!config.demoPath || !demo.data?.enabled) return null;
+  const amount = formatTaz(BigInt(loan.amount));
   return (
-    <div className="space-y-3 rounded-lg border border-dashed border-warn/60 p-4">
-      <p className="flex flex-wrap items-center gap-2 text-sm font-medium">
-        <Badge tone="warn">DEMO</Badge> No testnet ZEC at hand?
-      </p>
-      <p className="text-sm text-muted">
-        The demo wallet can pay this vault its {formatTaz(BigInt(loan.amount))} from its own Ironwood notes, once per vault. It
-        is a real Zcash testnet payment, proven on Base like any deposit. When you exit, your ZEC goes back to the demo
-        wallet unless you give an Ironwood address of your own.
-      </p>
-      {pay.result ? (
-        <Notice tone="ok" title="DEMO: the demo wallet paid your vault" live>
-          <p>
-            {formatTaz(pay.result.amount)} sent from the demo wallet. Zcash transaction <Mono>{pay.result.txid}</Mono>{" "}
-            <CopyButton value={pay.result.txid} />
+    <div className="space-y-3 rounded-2xl border border-dashed border-demo/45 bg-demo/[0.04] p-4 sm:p-5">
+      <div className="flex flex-wrap items-center justify-between gap-x-5 gap-y-3">
+        <div className="min-w-0 flex-1 basis-[18rem]">
+          <p className="flex flex-wrap items-center gap-2 text-[15px] font-bold">
+            <Badge tone="demo">DEMO</Badge>
+            No testnet ZEC at hand?
           </p>
-          <p className="text-xs">The deposit is proven on Base once it has its confirmations; this page follows it.</p>
-        </Notice>
-      ) : (
-        <Button variant="secondary" onClick={() => void pay.run()} busy={pay.busy}>
-          Try with demo TAZ (DEMO)
-        </Button>
-      )}
-      {pay.busy ? <p className="text-xs text-muted">Computing a small proof of work, then the demo wallet builds and proves the payment (up to a minute)…</p> : null}
-      {pay.error ? (
-        <Notice tone="danger" title="DEMO: no demo payment" live>
-          <p>{pay.error}</p>
-        </Notice>
+          <p className="mt-1 text-[13.5px] text-muted">
+            {REPLAY
+              ? `The demo wallet pays this vault ${amount} from its own Ironwood notes. In the live app that is a real Zcash testnet payment, proven on Base like any deposit; here the replay plays it.`
+              : `The demo wallet pays this vault ${amount} from its own Ironwood notes, once per vault: a real Zcash testnet payment, proven on Base like any deposit. When you exit, your ZEC goes back to the demo wallet unless you give an Ironwood address of your own.`}
+          </p>
+        </div>
+        {pay.result ? null : (
+          <Button size="lg" data-replay="demo-pay" onClick={() => void pay.run()} busy={pay.busy}>
+            {pay.busy ? null : <IconBolt size={17} />}
+            {pay.busy ? "Paying…" : "Pay it with demo TAZ"}
+          </Button>
+        )}
+      </div>
+      {pay.result ? (
+        <p role="status" className="flex flex-wrap items-center gap-2 text-[13.5px] text-soft">
+          <IconCheck size={16} strokeWidth={2.6} className="text-ok" />
+          The demo wallet paid {formatTaz(pay.result.amount)}.
+          {sampleTransactions() ? (
+            <span className="text-muted">Zcash transaction · sample data</span>
+          ) : (
+            <>
+              <span className="text-muted">
+                Zcash transaction <span className="font-mono text-soft">{short(pay.result.txid, 8, 6)}</span>
+              </span>
+              <CopyButton value={pay.result.txid} />
+            </>
+          )}
+        </p>
       ) : null}
+      {pay.busy ? <p className="text-xs text-muted">A small proof of work in this browser, then the demo wallet builds and proves the payment (up to a minute)…</p> : null}
+      <ActionError error={pay.error} refusal={pay.refusal} title="DEMO: no demo payment" />
       {demo.data.lowBalance ? <p className="text-xs text-warn">The demo wallet runs low; demo payments may fail.</p> : null}
     </div>
   );

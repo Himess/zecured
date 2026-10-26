@@ -1,6 +1,7 @@
 # Tests on every push to main and every pull request (review H-07, H-08): the contracts (build, EIP-170 and EIP-3860
-# sizes, every test that needs no RPC, the Halmos checks), the Rust workspace with its feature-gated suites, and the
-# app. The fork tests need a Base Sepolia RPC: they run only when the repository has a BASE_SEPOLIA_RPC_URL secret.
+# sizes, every test that needs no RPC, the Halmos checks), the Rust workspace with its feature-gated suites, the
+# app, and the showcase page (docs/SITE.md). The fork tests need a Base Sepolia RPC: they run only when the
+# repository has a BASE_SEPOLIA_RPC_URL secret.
 name: ci
 
 on:
@@ -100,3 +101,37 @@ jobs:
       - run: pnpm install --frozen-lockfile
       - run: pnpm test
       - run: pnpm typecheck
+      # The judges' replay (DEMO) as pages.yml publishes it, checked before anyone publishes it: its assets,
+      # payloads, policy and first-load scripts (scripts/check-export.mjs). Types were checked just above.
+      - run: node scripts/build-replay.mjs && node scripts/check-export.mjs
+        env:
+          NEXT_PUBLIC_BASE_PATH: /zecured/app
+          ZECURED_TYPECHECKED: "1"
+
+  # The site in a real browser: same origin only, axe, no-JS, keyboard, reduced motion, no WebGL, four widths,
+  # and the scene's bundle built from its source.
+  site:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 20
+    defaults:
+      run:
+        working-directory: site/dev
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: pnpm/action-setup@v4
+        with:
+          package_json_file: site/dev/package.json
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: pnpm
+          cache-dependency-path: site/dev/pnpm-lock.yaml
+
+      - run: pnpm install --frozen-lockfile
+
+      - name: Chromium for Playwright
+        run: pnpm exec playwright install --with-deps chromium
+
+      - run: pnpm test

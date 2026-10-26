@@ -2,6 +2,7 @@
 
 import Link from "next/link";
 import { useState } from "react";
+import { ActionError } from "./ActionError";
 import { CopyButton, MissingVaultId, useMounted } from "./client";
 import { Button, Card, Notice } from "./ui";
 import type { Vault } from "@/lib/api";
@@ -84,7 +85,7 @@ export function VerifyView() {
                 value={key.ufvk}
                 rows={5}
                 spellCheck={false}
-                className="w-full rounded-lg border border-border bg-bg px-3 py-2 font-mono text-xs break-all text-text"
+                className="field font-mono text-xs break-all"
               />
               <div className="flex flex-wrap gap-2">
                 <CopyButton value={key.ufvk} label="Copy viewing key" size="md" />
@@ -96,9 +97,7 @@ export function VerifyView() {
           )}
           {request.error ? (
             <div className="mt-4">
-              <Notice tone="danger" title="No viewing key shown" live>
-                <p>{request.error}</p>
-              </Notice>
+              <ActionError error={request.error} refusal={request.refusal} title="No viewing key shown" />
             </div>
           ) : null}
         </Card>
@@ -115,7 +114,7 @@ export function VerifyView() {
                 {from !== undefined
                   ? `--from ${from} is the vault's birthday: the Zcash height when it was opened, so nothing earlier concerns it.`
                   : "--from is the vault's birthday: the Zcash height when it was opened."}{" "}
-                Put the key in place of &lt;UFVK&gt;; your shell history then holds it, so clear that afterwards.
+                Save the key as ufvk.txt where you run the command, and delete the file afterwards.
               </p>
             </li>
             <li>Or import the key as a view-only account in an Ironwood-capable wallet that accepts a UFVK.</li>

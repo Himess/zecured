@@ -35,6 +35,12 @@ export interface DeploymentProfile {
   circleUsdc: Address;
   /** Collateral sizes before GET /config answers (its list wins), zatoshi. */
   defaultDenominations: readonly bigint[];
+  /**
+   * Where the app links a Base transaction (a block explorer's `/tx/` prefix), or null for no links. On the judge
+   * testnet the trail of a vault links its proofs, so anyone can see where Base verified them; the mainnet beta
+   * shows hashes only, since opening an explorer tells it which account one cares about.
+   */
+  baseExplorerTx: string | null;
 }
 
 /** The band of the mainnet beta (the v4 design's section 6), shown on every page. */
@@ -52,6 +58,7 @@ const TESTNET: DeploymentProfile = {
   circleUsdc: "0x036CbD53842c5426634e7929541eC2318f3dCF7e",
   // D7: 0.01 and 0.05 TAZ, and 0.125 TAZ, what the Valar testnet faucet pays (S13).
   defaultDenominations: [1_000_000n, 5_000_000n, 12_500_000n],
+  baseExplorerTx: "https://sepolia.basescan.org/tx/",
 };
 
 const MAINNET_BETA: DeploymentProfile = {
@@ -66,6 +73,7 @@ const MAINNET_BETA: DeploymentProfile = {
   circleUsdc: "0x833589fCD6eDb6E08f4c7C32D4f71b54bdA02913",
   // The beta configuration's sizes: 0.05 and 0.1 ZEC.
   defaultDenominations: [5_000_000n, 10_000_000n],
+  baseExplorerTx: null,
 };
 
 /**

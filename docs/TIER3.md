@@ -52,7 +52,7 @@ note or address. It slashes the signers' bonds and halts minting.
 > reveals which Zcash block it was in.
 >
 > **Accountable out:** Signers must commit every payout on Base before they can sign it. Taking ZEC
-> that backs loans — without a commitment or under a false one — or paying any claim to anyone but
+> that backs loans (without a commitment, or under a false one), or paying any claim to anyone but
 > its owner is provable on Base with a zero-knowledge proof that reveals no Zcash transaction, note or
 > address, and it slashes the signers' bonds; the bonds compensate the victims: liquidators and
 > lenders before the borrower's own equity. If the signers stop paying a claim, its claimant is
@@ -67,7 +67,7 @@ always in internal byte order (the ZIP 244 / ZIP 229 digest itself, not the reve
 |---|---|---|
 | `noteTag(cmx)` | `BLAKE2b-256(key K, personal "Zecured_DepTag__", cmx)`: the D24 deposit tag, used for every lineage note (deposit and change) | `derive::deposit_tag` |
 | `payoutRef(txid)` | `BLAKE2b-256(key K, personal "Zecured_PayRef__", txid)` | `derive::payout_ref` |
-| `claimRef_i` | `keccak256(salt_i ‖ txid)`, `salt_i` the salt of claim *i*'s recipient commitment `keccak256(salt_i ‖ receiver_i)` | `ledger::claim_ref` |
+| `claimRef_i` | `keccak256(salt_i \|\| txid)`, `salt_i` the salt of claim *i*'s recipient commitment `keccak256(salt_i \|\| receiver_i)` | `ledger::claim_ref` |
 
 Without K (derived from the UFVK; `VaultOpened` v2 binds it to the vault), a tag or a `payoutRef` links to
 nothing; without `salt_i`, a `claimRef` links to nothing. A claimant knows its salt but not `K`: `claimRef` is how it finds and names the payout.
@@ -233,8 +233,9 @@ a witness RPC (set by default outside the local fork).
 - Liveness (T-05): every node and the coordinator warn when a payable claim is older than half the
   bonds' `livenessPeriod`, at most every half hour per vault, naming the vault by its id prefix only.
 
-**Proven delivery (v4, D76).** A payout is final on Base only once its inclusion in a Zcash block
-is proven in zero knowledge. The coordinator proves every payout it committed: once the payout's block
+**Proven delivery (v4, D76).** A payout is final on Base once its inclusion in a Zcash block
+is proven in zero knowledge, or once its signed confirmation's dispute window closes undisputed (R-3).
+The coordinator proves every payout it committed: once the payout's block
 has `slashConfirmationWork` on top of it, it builds the `Included` witness (journal `(5, anchor, 0,
 payoutRef, 0, 0, 0, 0)`, the witness holding only K) and calls `proveInclusionBatch` for the payout's
 claims that are not final yet. Each becomes final (`Paid`, `paidAt == 0`) from whatever state it is in:
@@ -299,7 +300,7 @@ redirect the reward (`test_prove_revertsOnABadJournalOrSeal`: a seal for another
 - Private input: the claimant's salt, receiver and wallet IVK, and the claim's output index
   (`claimPayment(ref).outputIndex`).
 - The guest shows:
-  - `ref = keccak256(salt ‖ txid_X)` and `destCommitment = keccak256(salt ‖ receiver)`;
+  - `ref = keccak256(salt || txid_X)` and `destCommitment = keccak256(salt || receiver)`;
   - the IVK owns the receiver (`pk_d = [ivk] g_d`);
   - `value` is what action `outputIndex` of X pays **exactly that receiver** (E1): its note,
     decrypted under the IVK with librustzcash's checked decryption, which rebuilds the note and
@@ -316,8 +317,8 @@ redirect the reward (`test_prove_revertsOnABadJournalOrSeal`: a seal for another
 **F4 WrongClaimRef (the borrower, and every signer).**
 - Private input: the vault's tag key K, and a claim's salt and receiver. A wrong K gives a `payoutRef`
   with no record on Base.
-- The guest shows: `ref = payoutRef(txid_X)`, `noteTag = keccak256(salt ‖ txid_X)` (the reference an
-  honest commitment of X gives the claim) and `destCommitment = keccak256(salt ‖ receiver)`.
+- The guest shows: `ref = payoutRef(txid_X)`, `noteTag = keccak256(salt || txid_X)` (the reference an
+  honest commitment of X gives the claim) and `destCommitment = keccak256(salt || receiver)`.
 - Base checks: `spendRecord(ref)` exists, and `claimRefOf(ref, destCommitment)` is set and differs
   from `noteTag`.
 - Slashes the record's signers: they signed a reference that hides X from the claimant. W-1: the
@@ -371,7 +372,7 @@ redirect the reward (`test_prove_revertsOnABadJournalOrSeal`: a seal for another
   the vault's opening, encrypted on the user's side, S6), a watcher the borrower gave it to, and the
   signers themselves, so an honest minority is a natural watcher.
 - F3: every claimant, borrower or third party. A third party finds X by testing
-  `keccak256(salt ‖ txid)` against its committed `claimRef` for each new Zcash transaction.
+  `keccak256(salt || txid)` against its committed `claimRef` for each new Zcash transaction.
 - F4: whoever holds the vault's K (from its UFVK) and the claim's salt: the borrower for its own
   claims, and the signers for every claim. With three colluders, two honest signers remain to prove it.
 
@@ -381,7 +382,7 @@ redirect the reward (`test_prove_revertsOnABadJournalOrSeal`: a seal for another
 - **The borrower** adds `--claims-of <vault id>` to check its own claims:
   - its loan file keeps the salt of every destination it gave;
   - for each committed payout X, the watcher checks that the commitment names the claim by
-    `keccak256(salt ‖ txid_X)` (F4);
+    `keccak256(salt || txid_X)` (F4);
   - it then decrypts the named output with the wallet's own viewing key (F3).
 - **A signer's operator** checks every claim of a vault the same way, with
   `zecured-node export-audit` (the vault's UFVK and every claim's salt and receiver, in operator-only
@@ -420,12 +421,12 @@ or recipient.
 
 ## 7. Bonds: `SignerBondV2` (S5, S6; D43 to D47)
 
-- **Deposit.** Each of the five signers bonds USDC (100 USDC each on the judge deployment, which
+- **Deposit.** Each of the five signers bonds USDC (100 USDC each on testnet, which
   shows the mechanism, not economic security; docs/ECONOMICS.md sizes them for mainnet). What the
   bonds stand for is the effective bond, `min(sum, 5/3 x the three smallest)`, and new collateral is
   accepted only while it covers the collateral's value (the coverage cap, D44).
 - **Slash.** A slash takes the whole bond and unbonding of every signer the case names. It credits
-  the prover with a bounty of 10 %, capped (50 USDC on the judge deployment; pulled, so a reverting
+  the prover with a bounty of 10 %, capped (50 USDC on testnet; pulled, so a reverting
   beneficiary cannot block the slash). The rest goes to `ZecuredCompensator`, which pays the victims
   in layers: third parties, then the lenders, then the owners (D46).
 - **Halt.** The first slash **halts** minting for good.
@@ -449,28 +450,29 @@ or recipient.
 
 ## 8. Parameters (S4, T3-6)
 
-| Parameter | Judge deployment | Theft-demo deployment |
+| Parameter | Testnet (Base Sepolia) | Theft-demo deployment |
 |---|---|---|
 | `slashConfirmationWork` | ≥ 100 normal Testnet blocks of work (~3.8 × 10^7), the anchor rechecked at the end of the window | same |
 | Challenge window | 24 hours | 2 minutes (labelled DEMO) |
 | Bond per signer (`minBond`) | 100 USDC | 10 USDC |
 | Liveness period / commit grace | 24 hours / 2 hours | 10 minutes / 2 hours (a payout's lifetime, R-10) |
 | Dispute window / inclusion window | 24 hours / 6 hours | 10 minutes / 20 minutes |
-| Build | the judge build: no compromise mode beyond D18 | `demo-tier3` feature, its own Registry, bond and slasher, five demo keys, same relay |
+| Build | the standard build: no compromise mode beyond D18 | `demo-tier3` feature, its own Registry, bond and slasher, five demo keys, same relay |
 
-**The theft demo (T3-6)** never runs on the judge deployment. It has its own deployment
+**The theft demo (T3-6)** never runs on the lending deployment. It has its own deployment
 (`THEFT_DEMO=true`, a `DEPLOYMENT_NAME` containing `theft-demo`, a 2-minute window), its own five
 signer keys and coordinator (`THEFT_DEMO=1 scripts/signer-network.sh`), and its own build
 (`demo-tier3`, in `target/theft-demo/`). Only that build lets a third node (node 3) be compromised
 and adds `POST /admin/vaults/:id/steal`: three compromised nodes sweep the vault with no commitment
 on Base, which is an F1 violation, and the demo then proves it and slashes. The guards make a
-misconfiguration end in an error message, never in a theft on the judge network:
-- the deploy script refuses a theft-demo signer set that shares an address with the judge signers;
+misconfiguration end in an error message, never in a theft on the lending deployment:
+- the deploy script refuses a theft-demo signer set that shares an address with the lending deployment's signers;
 - that build's node and backend refuse to start if any of these holds
   (`zecured_base::theft_demo_guard`):
-  - the configured Registry is a judge Registry (a compiled-in list);
-  - a signer of the network config, or of the Registry on chain, is a judge signer;
-  - the node's own key is a judge signer.
+  - the configured Registry is the lending deployment's (a compiled-in list, `JUDGE_REGISTRIES`);
+  - a signer of the network config, or of the Registry on chain, is one of the lending deployment's
+    signers (`JUDGE_SIGNERS`);
+  - the node's own key is one of them.
   A test fails if the compiled-in lists stop matching `deployments/base-sepolia.json`;
 - outside that build, at most two nodes (4 and 5) can ever be compromised, a rule enforced by both
   the node and the backend.
@@ -487,7 +489,7 @@ misconfiguration end in an error message, never in a theft on the judge network:
 ## 10. Out of scope, said plainly (T3-7)
 
 - **Non-conforming notes** (over- or late payments) are the depositor's refund, not zZEC backing.
-  With refund proofs (journal v2's Refund mode, which the judge deployment takes) they land on Base
+  With refund proofs (journal v2's Refund mode, which testnet deployments take) they land on Base
   as Refund claims and are lineage notes like any other, so their theft is F1. The notes no guest of
   the deployment can land (without refund proofs: another amount, a late payment, other pools; with
   them: a note below `minRefundZat`; either way a note to another address of the vault) are refunded
@@ -500,8 +502,9 @@ misconfiguration end in an error message, never in a theft on the judge network:
   refusal is not theft; it is answered by the bonds (T-05, § 7), up to their size. Three related
   cases:
   - **A payout confirmed but never mined.** Three colluders can have `confirmPayout` accept a
-    committed payout that never landed, but a confirmation is not final: only a proof of the
-    payout's inclusion makes the claim final (§ 5). Its claimant disputes the confirmation (D53):
+    committed payout that never landed, but a confirmation is not final while its dispute window is
+    open: only a proof of the payout's inclusion, or the window closing undisputed (R-3), makes the
+    claim final (§ 5). Its claimant disputes the confirmation (D53):
     unless someone proves the payout's inclusion in time (the `Included` kind), the claim is payable
     again, and from the bonds on its original liveness schedule. The unspent input
     remains a lineage note: spending it without a commitment is F1, and any later commitment from it

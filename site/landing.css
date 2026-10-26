@@ -1,0 +1,1066 @@
+/* The landing page: the scene fixed behind, chapters scrolling over it. */
+
+/* Where the text column ends, as a share of the screen's width (main.js measures it); the veil darkens up to it. */
+@property --text-edge {
+  syntax: "<number>";
+  inherits: true;
+  initial-value: 0.42;
+}
+
+/* ---------------------------------------------------------------------------------------- the stage */
+
+.stage {
+  position: fixed;
+  inset: 0;
+  z-index: 0;
+  overflow: hidden;
+  background: var(--night);
+}
+
+/* The scene's first moment as an image: shown until the scene runs, and instead of it without WebGL or motion. */
+.still {
+  position: absolute;
+  inset: 0;
+  background: url("img/still.jpg") center 42% / cover no-repeat,
+    radial-gradient(120% 70% at 50% 120%, #0f3a2c 0%, rgba(4, 9, 7, 0) 60%),
+    radial-gradient(90% 40% at 50% -10%, rgba(207, 224, 242, 0.12) 0%, rgba(4, 9, 7, 0) 70%), var(--night);
+  transition: opacity 1.2s ease;
+}
+
+/* A tall screen has its own frame, rendered from the scene's tall camera: the mark above, the text below. */
+@media (max-aspect-ratio: 9/10) {
+  .still {
+    background: url("img/still-tall.jpg") center top / cover no-repeat, var(--night);
+  }
+}
+
+#scene {
+  position: absolute;
+  inset: 0;
+  width: 100%;
+  height: 100%;
+  opacity: 0;
+  transition: opacity 1.4s ease;
+}
+
+.scene-on #scene {
+  opacity: 1;
+}
+
+.scene-on .still {
+  opacity: 0;
+}
+
+/* A soft darkening where text sits, so it reads over the scene. The text's side of the screen stays dark up to
+   where its lines end (--text-edge), then clears; past the chapters, where the text runs across, all of it dims. */
+.veil {
+  position: absolute;
+  inset: 0;
+  background: linear-gradient(
+      90deg,
+      rgba(4, 9, 7, 0.86) 0%,
+      rgba(4, 9, 7, 0.8) calc(var(--text-edge) * 100%),
+      rgba(4, 9, 7, 0) calc(var(--text-edge) * 100% + 14%)
+    ),
+    linear-gradient(180deg, rgba(4, 9, 7, 0.5) 0%, rgba(4, 9, 7, 0) 18%, rgba(4, 9, 7, 0) 78%, rgba(4, 9, 7, 0.6) 100%);
+  transition: --text-edge 0.6s ease;
+}
+
+.veil::after {
+  content: "";
+  position: absolute;
+  inset: 0;
+  background: rgba(4, 9, 7, 0.55);
+  opacity: 0;
+  transition: opacity 0.8s ease;
+}
+
+.veil-wide .veil::after {
+  opacity: 1;
+}
+
+main {
+  position: relative;
+  z-index: 1;
+}
+
+/* Tags on the things of the scene: a dot where the thing is, a short line, its name. */
+.tags {
+  position: absolute;
+  inset: 0;
+  pointer-events: none;
+}
+
+.tag3d {
+  position: absolute;
+  left: 0;
+  top: 0;
+  width: 0;
+  height: 0;
+  opacity: 0;
+  color: var(--soft);
+  will-change: transform, opacity;
+}
+
+.tag3d::before {
+  content: "";
+  position: absolute;
+  left: -3px;
+  top: -3px;
+  width: 6px;
+  height: 6px;
+  border-radius: 50%;
+  background: currentColor;
+  box-shadow: 0 0 10px currentColor;
+}
+
+.tag3d::after {
+  content: "";
+  position: absolute;
+  left: 0;
+  bottom: 6px;
+  width: 1px;
+  height: 26px;
+  background: linear-gradient(0deg, currentColor, rgba(255, 255, 255, 0));
+  opacity: 0.6;
+}
+
+.tag3d.below::after {
+  top: 6px;
+  bottom: auto;
+  background: linear-gradient(180deg, currentColor, rgba(255, 255, 255, 0));
+}
+
+.tag3d span {
+  position: absolute;
+  left: 0;
+  bottom: 34px;
+  transform: translateX(-50%);
+  padding: 7px 12px;
+  border-radius: 999px;
+  border: 1px solid rgba(205, 230, 216, 0.18);
+  background: rgba(4, 9, 7, 0.78);
+  color: var(--text);
+  font-size: 13.5px;
+  font-weight: 600;
+  line-height: 1;
+  white-space: nowrap;
+}
+
+.tag3d.below span {
+  top: 34px;
+  bottom: auto;
+}
+
+@media (min-width: 1600px) {
+  .tag3d span {
+    font-size: 14.5px;
+  }
+}
+
+.t-gold {
+  color: var(--gold);
+}
+
+.t-gold span {
+  border-color: rgba(244, 183, 40, 0.5);
+  color: var(--gold-hi);
+}
+
+.t-z {
+  color: var(--teal);
+}
+
+.t-b {
+  color: var(--ice);
+}
+
+.t-red {
+  color: var(--red);
+}
+
+.t-red span {
+  border-color: rgba(255, 90, 78, 0.5);
+  color: #ffc2bc;
+}
+
+/* ---------------------------------------------------------------------------------------- reveals */
+
+.js .reveal {
+  opacity: 0;
+  transform: translateY(14px);
+  filter: blur(3px);
+  transition: opacity 0.65s cubic-bezier(0.2, 0.7, 0.2, 1), transform 0.7s cubic-bezier(0.2, 0.7, 0.2, 1),
+    filter 0.65s cubic-bezier(0.2, 0.7, 0.2, 1);
+  transition-delay: var(--delay, 0s);
+}
+
+.js .reveal.in {
+  opacity: 1;
+  transform: none;
+  filter: none;
+}
+
+.display .line {
+  display: block;
+  overflow: hidden;
+  padding-bottom: 0.06em;
+}
+
+.display .line > span {
+  display: inline-block;
+}
+
+.js .display .line > span {
+  transform: translateY(105%);
+  transition: transform 1.3s cubic-bezier(0.16, 0.84, 0.24, 1);
+}
+
+.js .display .line:nth-child(2) > span {
+  transition-delay: 0.08s;
+}
+
+.js .display .line:nth-child(3) > span {
+  transition-delay: 0.16s;
+}
+
+.js .display .line:nth-child(4) > span {
+  transition-delay: 0.24s;
+}
+
+.js .display.in .line > span {
+  transform: none;
+}
+
+/* ---------------------------------------------------------------------------------------- hero */
+
+.hero {
+  position: relative;
+  display: flex;
+  align-items: flex-end;
+  min-height: 100vh;
+  min-height: 100svh;
+  padding: 120px var(--gut) clamp(72px, 12vh, 140px);
+}
+
+/* The hero's and the chapters' text starts where the header's logo does. */
+.hero-in {
+  width: 100%;
+  max-width: calc(var(--max) - 2 * var(--gut));
+  margin: 0 auto;
+}
+
+.eyebrow {
+  display: inline-flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 4px 10px;
+  margin-bottom: 24px;
+  padding: 7px 14px;
+  border-radius: 999px;
+  border: 1px solid var(--hair-2);
+  background: rgba(4, 9, 7, 0.6);
+  color: var(--soft);
+  font-size: 14px;
+  font-weight: 500;
+}
+
+.eyebrow .dot {
+  width: 4px;
+  height: 4px;
+  border-radius: 50%;
+  background: var(--teal);
+}
+
+.display {
+  max-width: 13em;
+  font-size: clamp(42px, min(5.4vw, 9vh), 84px);
+  line-height: 0.94;
+  font-weight: 800;
+  font-stretch: 116%;
+  letter-spacing: -0.03em;
+}
+
+.display em {
+  font-style: normal;
+  color: var(--gold);
+}
+
+.lead {
+  max-width: 38rem;
+  margin-top: 26px;
+  color: var(--soft);
+  font-size: clamp(17px, 1.4vw, 20px);
+  line-height: 1.55;
+}
+
+.ctas {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 14px;
+  margin-top: 32px;
+}
+
+/* What the first button opens, beside it. */
+.cta-note {
+  max-width: 15.5rem;
+  margin-left: 6px;
+  color: var(--muted);
+  font-size: 13.5px;
+  line-height: 1.45;
+}
+
+/* Why to believe it, at the foot of the first screen. */
+.proofline {
+  max-width: 38rem;
+  margin-top: 22px;
+  padding-top: 12px;
+  border-top: 1px solid var(--hair);
+  color: var(--muted);
+  font-size: 13.5px;
+  line-height: 1.5;
+}
+
+.cue {
+  position: absolute;
+  right: max(var(--gut), calc((100% - var(--max)) / 2 + var(--gut)));
+  bottom: 40px;
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: 12px;
+  color: var(--muted);
+  font-size: 12px;
+  font-weight: 600;
+  letter-spacing: 0.08em;
+  text-decoration: none;
+}
+
+.cue-line {
+  position: relative;
+  width: 1px;
+  height: 64px;
+  overflow: hidden;
+  background: var(--hair-2);
+}
+
+.cue-line::after {
+  content: "";
+  position: absolute;
+  left: 0;
+  top: -40%;
+  width: 1px;
+  height: 40%;
+  background: var(--soft);
+  animation: cue 2.4s cubic-bezier(0.6, 0, 0.3, 1) infinite;
+}
+
+@keyframes cue {
+  to {
+    top: 110%;
+  }
+}
+
+/* Side by side with the mark (a wide screen), the hero's text column stays narrow enough to leave the mark its half,
+   down to a 1024 px window. */
+@media (min-width: 761px) and (min-aspect-ratio: 901/1000) {
+  .lead,
+  .proofline {
+    max-width: min(38rem, 48vw);
+  }
+
+  .cta-note {
+    max-width: min(15.5rem, 17vw);
+  }
+}
+
+/* A laptop's window, short for its width: the first screen keeps its buttons in view. */
+@media (min-width: 761px) and (max-height: 860px) {
+  .hero {
+    padding-top: 88px;
+    padding-bottom: 28px;
+  }
+
+  .display {
+    font-size: clamp(42px, min(5.4vw, 8.4vh), 84px);
+  }
+
+  .eyebrow {
+    margin-bottom: 14px;
+  }
+
+  .lead {
+    margin-top: 16px;
+    font-size: clamp(16px, 1.25vw, 18px);
+  }
+
+  .ctas {
+    margin-top: 20px;
+  }
+
+  .hero .ctas .btn {
+    min-height: 48px;
+  }
+
+  .proofline {
+    margin-top: 14px;
+    padding-top: 10px;
+  }
+
+  .cue {
+    display: none;
+  }
+}
+
+/* ---------------------------------------------------------------------------------------- chapters */
+
+.chapter {
+  position: relative;
+  min-height: 190vh;
+  padding: 0 var(--gut);
+}
+
+/* The swap and the theft tell the most: their scroll is longer, so each beat keeps its text beside it. */
+#swap,
+#trust {
+  min-height: 260vh;
+}
+
+.chapter .panel {
+  position: sticky;
+  top: 0;
+  display: flex;
+  flex-direction: column;
+  justify-content: center;
+  min-height: 100vh;
+  min-height: 100svh;
+  max-width: calc(var(--max) - 2 * var(--gut));
+  margin: 0 auto;
+  padding: 96px 0 64px;
+}
+
+.chapter .panel > * {
+  max-width: 33rem;
+}
+
+/* A halo of the night behind the chapters' words, for the moments the scene's white half passes under them; not
+   on what has a ground of its own. */
+.chapter .panel {
+  text-shadow: 0 0 24px rgba(4, 9, 7, 0.85), 0 1px 3px rgba(4, 9, 7, 0.55);
+}
+
+.chapter .panel .chip,
+.chapter .panel .side {
+  text-shadow: none;
+}
+
+.chapter.wide .panel > * {
+  max-width: 40rem;
+}
+
+.kicker {
+  display: flex;
+  align-items: center;
+  gap: 14px;
+  margin-bottom: 22px;
+  color: var(--soft);
+  font-size: 15px;
+  font-weight: 600;
+}
+
+.kicker-n {
+  font-family: var(--mono);
+  font-size: 13px;
+  font-weight: 500;
+  font-stretch: 100%;
+  color: var(--soft);
+  padding: 4px 9px;
+  border-radius: 999px;
+  border: 1px solid var(--hair-2);
+  background: rgba(233, 241, 236, 0.04);
+}
+
+.title {
+  font-size: clamp(34px, 4.1vw, 62px);
+  line-height: 0.98;
+  font-weight: 800;
+  font-stretch: 118%;
+  letter-spacing: -0.02em;
+  text-wrap: balance;
+}
+
+.body {
+  margin-top: 24px;
+  color: var(--soft);
+  font-size: clamp(17px, 1.3vw, 20px);
+  line-height: 1.6;
+}
+
+.seen {
+  display: grid;
+  gap: 12px;
+  margin-top: 30px;
+  color: var(--soft);
+  font-size: 15.5px;
+}
+
+.seen li {
+  display: flex;
+  align-items: center;
+  gap: 14px;
+}
+
+.seen .chip {
+  flex: none;
+  min-width: 62px;
+  justify-content: center;
+}
+
+.note {
+  margin-top: 26px;
+  color: var(--muted);
+  font-size: 14.5px;
+  line-height: 1.6;
+}
+
+.note a {
+  color: var(--text);
+}
+
+.big-stat {
+  display: grid;
+  gap: 8px;
+  margin-top: 30px;
+}
+
+.big-n {
+  font-size: clamp(30px, 3vw, 46px);
+  line-height: 1.05;
+  font-weight: 800;
+  font-stretch: 118%;
+  letter-spacing: -0.01em;
+}
+
+.big-n .mono {
+  font-weight: 500;
+}
+
+.big-cap {
+  color: var(--soft);
+  font-size: 14.5px;
+  font-weight: 600;
+}
+
+/* The comparison: both columns are what Base's ledger shows, so both are drawn as the ledger is, light and ruled. */
+.versus {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 14px;
+  margin-top: 30px;
+}
+
+.side {
+  overflow: hidden;
+  border-radius: 6px;
+  background: var(--ledger);
+  color: var(--ink);
+  box-shadow: 0 0 0 1px rgba(15, 27, 42, 0.08), 0 30px 60px -40px rgba(0, 0, 0, 0.9);
+}
+
+.side-h {
+  padding: 14px 18px 12px;
+  border-bottom: 1.5px solid var(--ink);
+  font-size: 15px;
+  font-weight: 700;
+}
+
+.side ul {
+  font-size: 15px;
+  line-height: 1.45;
+}
+
+.side li {
+  display: flex;
+  gap: 11px;
+  align-items: baseline;
+  padding: 10px 18px;
+}
+
+.side li + li {
+  border-top: 1px solid var(--rule);
+}
+
+.side li::before {
+  content: "";
+  flex: none;
+  width: 7px;
+  height: 7px;
+  border-radius: 1px;
+  background: var(--ink-muted);
+  transform: translateY(-1px);
+}
+
+.side-bad .side-h {
+  color: var(--leak-text);
+  border-bottom-color: var(--leak-line);
+}
+
+.side-bad li::before {
+  background: var(--leak-line);
+}
+
+.side-bad mark {
+  padding: 1px 4px;
+  border-radius: 3px;
+  background: var(--leak-ground);
+  color: var(--leak-text);
+  box-shadow: inset 0 -2px 0 var(--leak-line);
+}
+
+/* The one gold thing in the comparison: the proof. */
+.pi-chip {
+  display: inline-grid;
+  place-items: center;
+  flex: none;
+  width: 20px;
+  height: 20px;
+  margin-right: -3px;
+  border-radius: 4px;
+  background: var(--gold);
+  color: var(--ink);
+  font-size: 13px;
+  font-weight: 800;
+  line-height: 1;
+}
+
+.side-good li:first-child::before {
+  display: none;
+}
+
+/* The proof's picture in the Prove chapter, for readers without the scene only. */
+.still-fig {
+  display: none;
+}
+
+/* ---------------------------------------------------------------------------------------- numbers */
+
+.numbers,
+.demo,
+.more {
+  position: relative;
+  max-width: var(--max);
+  margin: 0 auto;
+  padding: clamp(110px, 16vh, 180px) var(--gut);
+}
+
+.numbers .title,
+.more .title {
+  max-width: 16em;
+}
+
+.stats {
+  display: grid;
+  grid-template-columns: repeat(4, minmax(0, 1fr));
+  gap: 28px;
+  margin-top: 64px;
+}
+
+.stat {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: baseline;
+  align-content: start;
+  gap: 4px 6px;
+  padding-top: 22px;
+  border-top: 1px solid var(--hair-2);
+}
+
+.stat-n {
+  font-size: clamp(44px, 4.4vw, 72px);
+  line-height: 1;
+  font-weight: 800;
+  font-stretch: 112%;
+  letter-spacing: -0.03em;
+  font-variant-numeric: tabular-nums;
+  white-space: nowrap;
+}
+
+.stat-u {
+  color: var(--soft);
+  font-size: clamp(22px, 2vw, 32px);
+  font-weight: 700;
+}
+
+.stat-l {
+  flex-basis: 100%;
+  margin-top: 10px;
+  color: var(--soft);
+  font-size: 15.5px;
+  line-height: 1.45;
+}
+
+/* ---------------------------------------------------------------------------------------- demo */
+
+.demo {
+  padding-bottom: clamp(48px, 7vh, 88px);
+  display: grid;
+  grid-template-columns: minmax(0, 0.8fr) minmax(0, 1.2fr);
+  gap: clamp(32px, 5vw, 80px);
+  align-items: center;
+}
+
+/* The app, framed: a picture of it that opens it. */
+.frame {
+  display: block;
+  overflow: hidden;
+  border-radius: 16px;
+  border: 1px solid var(--hair-2);
+  background: var(--deep);
+  box-shadow: 0 40px 120px -40px rgba(0, 0, 0, 0.85);
+  transition: border-color 0.3s ease, transform 0.3s cubic-bezier(0.2, 0.7, 0.2, 1);
+}
+
+.frame img {
+  width: 100%;
+  height: auto;
+  aspect-ratio: 16 / 10;
+  object-fit: cover;
+  object-position: top left;
+}
+
+a.frame:hover {
+  border-color: rgba(233, 241, 236, 0.4);
+  transform: translateY(-2px);
+}
+
+/* The demo video, once it exists, takes the same frame (docs/SITE.md, "The video"). */
+.frame video {
+  width: 100%;
+  height: auto;
+  aspect-ratio: 16 / 9;
+  background: var(--night);
+}
+
+/* ---------------------------------------------------------------------------------------- doors */
+
+.more {
+  padding-top: clamp(72px, 11vh, 128px);
+}
+
+.more-head {
+  display: grid;
+  grid-template-columns: minmax(0, 0.9fr) minmax(0, 1.1fr);
+  gap: clamp(28px, 4vw, 64px);
+  align-items: center;
+}
+
+.recap img {
+  width: 100%;
+  height: auto;
+  border-radius: 14px;
+  box-shadow: 0 40px 100px -50px rgba(0, 0, 0, 0.9);
+}
+
+.recap figcaption {
+  margin-top: 12px;
+  color: var(--muted);
+  font-size: 14px;
+}
+
+.doors {
+  display: grid;
+  grid-template-columns: repeat(3, minmax(0, 1fr));
+  gap: 14px;
+  margin-top: 56px;
+}
+
+.doors a {
+  position: relative;
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  height: 100%;
+  padding: 26px 64px 26px 26px;
+  border-radius: 20px;
+  border: 1px solid var(--hair);
+  background: rgba(10, 21, 16, 0.88);
+  text-decoration: none;
+  transition: border-color 0.3s ease, background-color 0.3s ease, transform 0.3s cubic-bezier(0.2, 0.7, 0.2, 1);
+}
+
+.doors a::after {
+  content: "→";
+  position: absolute;
+  right: 26px;
+  top: 24px;
+  color: var(--muted);
+  font-size: 20px;
+  transition: transform 0.3s cubic-bezier(0.2, 0.7, 0.2, 1), color 0.3s ease;
+}
+
+.doors a:hover {
+  border-color: rgba(244, 183, 40, 0.45);
+  background: rgba(18, 36, 28, 0.94);
+  transform: translateY(-2px);
+}
+
+.doors a:hover::after {
+  color: var(--gold);
+  transform: translateX(4px);
+}
+
+.door-t {
+  font-size: 20px;
+  font-weight: 700;
+  font-stretch: 112%;
+}
+
+.door-d {
+  color: var(--muted);
+  font-size: 15px;
+}
+
+@media (min-width: 1200px) {
+  .doors {
+    grid-template-columns: repeat(4, minmax(0, 1fr));
+  }
+}
+
+/* The page's last word: the line, and where to go from here. */
+.closer {
+  display: grid;
+  justify-items: start;
+  gap: 22px;
+  margin-top: clamp(80px, 12vh, 140px);
+  padding-top: 48px;
+  border-top: 1px solid var(--hair);
+}
+
+.closer-mark {
+  width: 48px;
+  height: 48px;
+}
+
+.closer-t {
+  max-width: 20em;
+  font-size: clamp(28px, 3vw, 44px);
+  line-height: 1;
+  font-weight: 800;
+  font-stretch: 118%;
+  letter-spacing: -0.02em;
+  text-wrap: balance;
+}
+
+.closer-t > span {
+  display: block;
+}
+
+.closer-t em {
+  font-style: normal;
+  color: var(--gold);
+}
+
+.closer .ctas {
+  margin-top: 6px;
+}
+
+/* ---------------------------------------------------------------------------------------- no scene */
+
+/* Without the scene (no script, no WebGL 2, or reduced motion) the chapters are plain sections over the still
+   image: no sticky panels, no long scroll, and the Prove chapter shows what crosses as a picture. */
+.no-scene .chapter,
+html:not(.js) .chapter,
+.no-scene #swap,
+.no-scene #trust,
+html:not(.js) #swap,
+html:not(.js) #trust {
+  min-height: 0;
+}
+
+.no-scene .chapter .panel,
+html:not(.js) .chapter .panel {
+  position: relative;
+  min-height: 0;
+  padding: clamp(88px, 14vh, 150px) 0;
+}
+
+.no-scene .still-fig,
+html:not(.js) .still-fig {
+  display: block;
+  margin-top: 30px;
+}
+
+.still-fig img {
+  width: 100%;
+  height: auto;
+  border-radius: 12px;
+}
+
+/* ---------------------------------------------------------------------------------------- narrow */
+
+@media (max-width: 1000px) {
+  .stats {
+    grid-template-columns: repeat(2, minmax(0, 1fr));
+    gap: 36px 24px;
+  }
+
+  .demo,
+  .more-head {
+    grid-template-columns: minmax(0, 1fr);
+  }
+
+  .doors {
+    grid-template-columns: repeat(2, minmax(0, 1fr));
+  }
+}
+
+@media (max-width: 760px) {
+  .veil {
+    background: linear-gradient(180deg, rgba(4, 9, 7, 0.45) 0%, rgba(4, 9, 7, 0.08) 30%, rgba(4, 9, 7, 0.55) 62%, rgba(4, 9, 7, 0.88) 100%);
+  }
+
+  /* Where the chapter's text begins, the scene behind it goes dark. */
+  .text-top .veil {
+    background: linear-gradient(
+      180deg,
+      rgba(4, 9, 7, 0.45) 0%,
+      rgba(4, 9, 7, 0.06) calc(var(--text-top) * 100% - 14%),
+      rgba(4, 9, 7, 0.8) calc(var(--text-top) * 100%),
+      rgba(4, 9, 7, 0.92) 100%
+    );
+  }
+
+  .hero {
+    padding-bottom: 72px;
+  }
+
+  .eyebrow {
+    margin-bottom: 22px;
+    font-size: 13px;
+  }
+
+  .ctas {
+    gap: 10px;
+    margin-top: 28px;
+  }
+
+  .ctas .btn {
+    min-height: 48px;
+    padding: 0 18px;
+    font-size: 15px;
+  }
+
+  .cta-note {
+    flex-basis: 100%;
+    max-width: none;
+    margin: 2px 0 0;
+  }
+
+  .proofline {
+    margin-top: 18px;
+  }
+
+  .cue {
+    display: none;
+  }
+
+  /* Above a phone's headline there is room to name the two halves, not the seam. */
+  .tag3d[data-tag="core"] {
+    display: none;
+  }
+
+  .chapter {
+    min-height: 170vh;
+  }
+
+  #swap,
+  #trust {
+    min-height: 230vh;
+  }
+
+  .chapter .panel {
+    justify-content: flex-end;
+    padding: 96px 0 48px;
+  }
+
+  .versus {
+    grid-template-columns: minmax(0, 1fr);
+    gap: 12px;
+    margin-top: 24px;
+  }
+
+  /* On a phone the doors are a ruled list, not eight cards. */
+  .doors {
+    grid-template-columns: minmax(0, 1fr);
+    gap: 0;
+    margin-top: 36px;
+    border-top: 1px solid var(--hair);
+  }
+
+  .doors a {
+    padding: 18px 48px 18px 2px;
+    border: 0;
+    border-bottom: 1px solid var(--hair);
+    border-radius: 0;
+    background: none;
+  }
+
+  .doors a::after {
+    right: 6px;
+    top: 18px;
+  }
+
+  .doors a:hover {
+    background: none;
+    transform: none;
+  }
+
+  .door-t {
+    font-size: 18px;
+  }
+}
+
+/* A phone's first screen keeps the mark above the headline: the two small lines under the buttons wait for a
+   wider screen (the numbers further down say the same). */
+@media (max-width: 520px) {
+  .cta-note,
+  .proofline {
+    display: none;
+  }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .js .reveal,
+  .js .display .line > span {
+    opacity: 1;
+    transform: none;
+    filter: none;
+  }
+}
+
+@media print {
+  .stage,
+  .top,
+  .cue {
+    display: none;
+  }
+
+  body {
+    background: #fff;
+    color: #000;
+  }
+
+  .js .reveal,
+  .js .display .line > span {
+    opacity: 1;
+    transform: none;
+    filter: none;
+  }
+
+  .chapter,
+  .chapter .panel {
+    min-height: 0;
+    position: static;
+  }
+}

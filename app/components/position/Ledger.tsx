@@ -5,7 +5,9 @@ import { useCallback, useEffect, useState } from "react";
 import type { Hex } from "viem";
 import { CopyButton } from "@/components/client";
 import { DestinationStep } from "@/components/DestinationForm";
+import { ZecMark } from "@/components/marks";
 import { PayoutNotice } from "@/components/PayoutNotice";
+import { ProofSeal, StepMark, type MarkState } from "@/components/seam";
 import { TxResult } from "@/components/TxResult";
 import { Badge, Button, Card, cx, KeyValue, Mono, Notice } from "@/components/ui";
 import { loanAccount, type SentUserOp } from "@/lib/account";
@@ -183,7 +185,7 @@ export function PendingRefundsCard({ ledger }: { ledger: VaultLedger }) {
       </p>
       <ul className="space-y-3">
         {list.map((r) => (
-          <li key={r.depositTag} className="rounded-lg border border-border p-4">
+          <li key={r.depositTag} className="rounded-2xl bg-bg p-4">
             <KeyValue
               rows={[
                 ["Deposit", formatTaz(r.amount)],
@@ -262,10 +264,11 @@ function RefundItem({
     return r;
   });
   return (
-    <li className="rounded-lg border border-border p-4">
+    <li className="rounded-2xl bg-bg p-4">
       <div className="mb-2 flex flex-wrap items-center justify-between gap-2">
         <span className="font-medium">
-          {formatTaz(claim.amount)} <span className="text-sm text-muted">· claim {short(claim.claimId, 10, 6)}</span>
+          {formatTaz(claim.amount)}
+          <span className="text-sm text-muted">, claim {short(claim.claimId, 10, 6)}</span>
         </span>
         <Badge tone={view.badge.tone}>{view.badge.text}</Badge>
       </div>
@@ -340,10 +343,17 @@ export function ClaimsCard({
   onChanged: () => void;
 }) {
   if (ledger.claims.length === 0) return null;
-  const claims = [...ledger.claims].sort((a, b) => a.sequence - b.sequence);
+  // Yours first, then the market maker's, then the fee and the rest, each kind in its order on Base.
+  const rank = (k: LedgerClaim["kind"]) => ["Release", "CloseUser", "Refund", "CloseMarketMaker", "Liquidation", "Fee"].indexOf(k);
+  const claims = [...ledger.claims].sort((a, b) => (rank(a.kind) + 7) % 7 - ((rank(b.kind) + 7) % 7) || a.sequence - b.sequence);
+  const committed = claims.some((c) => c.committed || c.status === "Paid");
   return (
-    <Card title="Zcash payouts">
-      <ul className="divide-y divide-border text-sm">
+    <Card
+      title="Payouts on Zcash"
+      icon={<ZecMark size={20} />}
+      action={committed ? <span className="text-[12.5px] text-muted">paid by 3 of 5 signers · final once proven on Base</span> : null}
+    >
+      <ul className="divide-y divide-hairline text-sm">
         {claims.map((c) => (
           <ClaimRow key={c.claimId} ledger={ledger} claim={c} loan={loan} onChanged={onChanged} />
         ))}
@@ -407,14 +417,22 @@ function ClaimRow({
     return r;
   });
   return (
-    <li className="space-y-2 py-3">
+    <li className="space-y-2.5 py-4 first:pt-1">
       <div className="flex flex-wrap items-center justify-between gap-2">
-        <span>{view.label}</span>
+        <span className="flex items-center gap-2.5 font-semibold">
+          <ZecMark size={18} />
+          {view.label}
+        </span>
         <span className="flex items-center gap-3">
-          <span className="tabular-nums">{formatTaz(claim.amount)}</span>
-          <Badge tone={view.badge.tone}>{view.badge.text}</Badge>
+          <span className="font-semibold tabular-nums">{formatTaz(claim.amount)}</span>
+          <span className="inline-flex min-w-[96px] justify-end">
+            <Badge tone={view.badge.tone} dot>
+              {view.badge.text}
+            </Badge>
+          </span>
         </span>
       </div>
+      <PayoutTrack claim={claim} />
       {view.detail ? <p className="text-xs text-muted">{view.detail}</p> : null}
       <LivenessGuarantee ledger={ledger} claim={claim} loan={mine ? loan : null} onChanged={onChanged} />
       {mine && d.canDispute ? (
@@ -508,6 +526,51 @@ function ClaimRow({
       ) : null}
       {fromBonds.result ? <TxResult result={fromBonds.result} what="Claim paid from the bonds" /> : null}
     </li>
+  );
+}
+
+/** Payouts to a committed recipient: their way on Base is committed, then confirmed, then final. */
+const TRACKED_KINDS: ReadonlySet<LedgerClaim["kind"]> = new Set(["Release", "CloseUser", "CloseMarketMaker", "Liquidation", "Refund"]);
+
+/**
+ * A payout's record on Base in the seam's language: a light strip with square marks, and the π seal
+ * once it is final (its delivery proven, or its confirmation undisputed through the window: Base
+ * keeps no trace of which). Display only, from the fields `claimView` reads; none for a claim
+ * without a destination, one the bonds paid, or one disputed, written off or compensated.
+ */
+function PayoutTrack({ claim }: { claim: LedgerClaim }) {
+  if (!TRACKED_KINDS.has(claim.kind) || claim.bondPaid) return null;
+  if (claim.status !== "Pending" && claim.status !== "Paid") return null;
+  if (claim.status === "Pending" && /^0x0{64}$/i.test(claim.commitment)) return null;
+  const paid = claim.status === "Paid";
+  const committed = paid || claim.committed === true;
+  const final = paid && claim.paidAt === 0;
+  // The seam in miniature: committed on Base (light), paid on Zcash (dark), final on Base (light, the π once proven).
+  const steps: { label: string; chain: "base" | "zcash"; state: MarkState; seal?: boolean }[] = [
+    { label: "Committed on Base", chain: "base", state: committed ? "done" : "now" },
+    { label: "Paid on Zcash, 3 of 5 signed", chain: "zcash", state: paid ? "done" : committed ? "now" : "todo" },
+    { label: "Final on Base", chain: "base", state: final ? "done" : paid ? "now" : "todo", seal: final },
+  ];
+  return (
+    <ol aria-label="Its way, on both chains" className="grid w-full overflow-hidden rounded-[6px] text-xs sm:grid-cols-3">
+      {steps.map((s) => (
+        <li
+          key={s.label}
+          aria-current={s.state === "now" ? "step" : undefined}
+          className={cx(
+            "flex min-h-9 items-center gap-2 px-3 py-2",
+            s.chain === "base" ? "paper" : "bg-[#0a1a12] shadow-[inset_0_0_0_1px_var(--color-border)]",
+            s.chain === "base" ? (s.state === "now" ? "font-semibold text-ink" : s.state === "done" ? "text-ink" : "text-ink-faint") : s.state === "now" ? "font-semibold text-text" : s.state === "done" ? "text-soft" : "text-faint",
+          )}
+        >
+          {s.seal ? <ProofSeal size="sm" stamp className="!size-[16px] !shadow-none" /> : <StepMark chain={s.chain} state={s.state} size="sm" />}
+          <span>
+            {s.label}
+            {s.state === "done" ? <span className="sr-only"> (done)</span> : null}
+          </span>
+        </li>
+      ))}
+    </ol>
   );
 }
 
@@ -667,7 +730,7 @@ function CompromisedCard({ ledger }: { ledger: VaultLedger }) {
                   data.incident === 0n
                     ? "Not registered yet"
                     : inc
-                      ? `#${data.incident} · ${inc.finalized ? "finalized" : `open until ${formatUtc(inc.closesAt)}`}`
+                      ? `#${data.incident}, ${inc.finalized ? "finalized" : `open until ${formatUtc(inc.closesAt)}`}`
                       : `#${data.incident}`,
                 ],
                 [
@@ -684,12 +747,11 @@ function CompromisedCard({ ledger }: { ledger: VaultLedger }) {
                 {data.entitlements.map((e) => (
                   <li key={e.claimId} className="flex flex-wrap items-center justify-between gap-2 py-2">
                     <span>
-                      Claim <Mono>{short(e.claimId, 10, 6)}</Mono> · {e.layer === 2 ? "third party" : "yours"} ·{" "}
-                      {formatTaz(e.zat)}
+                      Claim <Mono>{short(e.claimId, 10, 6)}</Mono> ({e.layer === 2 ? "third party" : "yours"}): {formatTaz(e.zat)}
                     </span>
                     <span className="tabular-nums">
                       {e.usdc === null ? "USDC amount fixed when the incident is finalized" : `${formatUsdc(e.usdc)} USDC`}
-                      {e.paid ? " · paid" : ""}
+                      {e.paid ? ", paid" : ""}
                     </span>
                   </li>
                 ))}

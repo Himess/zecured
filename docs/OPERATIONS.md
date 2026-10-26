@@ -42,7 +42,7 @@ number, never a user address, viewing key, salt or IP.
 | `header relay K blocks behind` | the relayers are not keeping up | check `zecured-relayer@1` and the relayer's ETH; relayer 2 takes over at its standby lag |
 | `X has … ETH (floor …)` | an operational account runs low on gas | top it up from the treasury |
 | `paymaster deposit …` | sponsored UserOps are about to stop | `depositTo` the paymaster at the EntryPoint |
-| `X has … USDC` | the market maker cannot repay debts in closes | send it USDC (Circle faucet) |
+| `X has … USDC` | the market maker cannot repay debts in closes | send it USDC (on testnet, MockUSDC the deployer mints) |
 | `a signer bond is missing` | a signer withdrew its bond: new vaults cannot activate | the signer bonds again (`scripts/bond-signers.sh`) |
 
 ## 3. Balances until 23 November (G3)
@@ -53,7 +53,7 @@ These are measured costs at Base Sepolia's usual 0.006 gwei. A higher gas price 
 |---|---|---|
 | Relayer 1 | ~590,000 gas per Zcash header, 3,456 headers a day at NU7's 25 s blocks: ~0.012 ETH a day | ~0.45 ETH, plus ~0.03 ETH to catch up from the relay's tip (4,491,413) |
 | Relayer 2 (standby) | only while relayer 1 is down | 0.05 ETH reserve |
-| Signer bonds | USDC, `minBond` each (judge: 5 × 100 USDC; theft demo: 5 × 10 USDC per run, slashed), locked until withdrawn; the signers pay gas for `deposit` and `requestUnbond` | 500 USDC (judge) + 50 USDC per theft-demo run, plus a little ETH for the signers' own transactions |
+| Signer bonds | USDC, `minBond` each (testnet: 5 × 100 USDC; theft demo: 5 × 10 USDC per run, slashed), locked until withdrawn; the signers pay gas for `deposit` and `requestUnbond` | 500 USDC (testnet) + 50 USDC per theft-demo run, plus a little ETH for the signers' own transactions |
 | Coordinator | proofs, activations, commitments, confirmations: a few cents of a cent per vault | 0.02 ETH |
 | Paymaster deposit | sponsored UserOps, including each account's deployment | 0.05 ETH |
 | Bundler executor, market maker, liquidator | their own transactions | 0.02 ETH each |
@@ -69,7 +69,7 @@ These are measured costs at Base Sepolia's usual 0.006 gwei. A higher gas price 
 | A single NU7 light wallet server (`testnet.zec.rocks`) | any time | deposits and payouts stall while it is down | our own Zebra and light wallet server on the VM as the fallback endpoint |
 | Zebra's end-of-support halt | mainnet only; testnet nodes do not halt | none for testnet | — |
 | Public Base RPC limits (200-block logs, rate limits) | any time | slower event sync | adaptive log ranges; a keyed RPC for the backend; a witness RPC per node |
-| Faucets (TAZ, USDC) for judges | any time | a judge cannot fund a vault | pre-funded demo wallets; DEMO.md fallback |
+| Faucets (TAZ) for visitors | any time | a visitor cannot fund a vault | the demo wallet ("Try with demo TAZ"); DEMO.md fallback |
 | Gas price spikes on Base Sepolia | any time | the relay costs more | watchdog balance alarms; treasury reserve |
 | RISC Zero's emergency stop of a verifier | any time | proofs under its router selector revert: deposits wait, slashing and inclusion proofs fail | keep two working violation versions, on different router selectors where RISC Zero offers them (a working one can then go only while the other works, R-22); schedule a replacement, which takes `estopDelay` while every violation verifier is stopped; drop the pending items of a removed version and prove them again |
 | Server billing, disk and logs | monthly | the server stops | prepay through 23 Nov; journald size limit |
@@ -147,7 +147,7 @@ optional `DRILL_REIMBURSE_CLAIM` and `DRILL_REIMBURSE_COMMITMENT` for a bond-pai
 ## 9. Invites (the mainnet beta)
 
 `--invites` (or `ZECURED_INVITES`) names the operator's invite file; unset, openings are open to all
-(the judge deployment). Its format: `{"openings":true,"inviteOnly":true,"codes":[{"hash":"0x<keccak256
+(testnet). Its format: `{"openings":true,"inviteOnly":true,"codes":[{"hash":"0x<keccak256
 of the code>","uses":1}]}`; hash a code with `cast keccak "<code>"` (surrounding whitespace is trimmed).
 The file is read again on every opening and every `/config`, so it changes without a restart; a
 broken file is refused at startup, and one that becomes unreadable later closes openings. Uses are

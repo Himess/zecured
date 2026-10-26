@@ -1,24 +1,72 @@
 @import "tailwindcss";
 
-/* Zecured: dark, calm, readable. Colors meet WCAG AA contrast on the background. */
+/*
+ * Zecured's look is the seam between two chains, as on the site. Zcash is dark: rounded, blurred where it is
+ * encrypted, no rules. Base is light: sharp corners, ruled ledger rows. Gold means a proof: the π seal, what a
+ * proof made final, and the one primary button of a view; what is current or selected is white. Other projects
+ * appear only with their own marks (components/marks.tsx). Text colours meet WCAG AA (4.5:1) on bg, surface and
+ * surface-2, and the ink colours on paper; the edges of controls 3:1 (--color-control).
+ */
 @theme {
-  --color-bg: #0b0e12;
-  --color-surface: #11161c;
-  --color-surface-2: #171d25;
-  --color-border: #253040;
-  --color-text: #e7ebf0;
-  --color-muted: #9aa6b5;
-  --color-faint: #7d8898;
-  --color-accent: #e9b64b;
-  --color-accent-strong: #f3c562;
-  --color-on-accent: #1b1405;
-  --color-ok: #4cc398;
-  --color-warn: #eba84a;
-  --color-danger: #f06b70;
-  --color-info: #7cb2fa;
+  /* Zcash: the dark ground, a hint of green like the site's (#040907). */
+  --color-bg: #070d0a;
+  --color-bg-2: #0a130e;
+  --color-surface: #0e1813;
+  --color-surface-2: #142219;
+  --color-surface-3: #1a2b21;
+  --color-border: #1e2f25;
+  --color-hairline: #15231b;
+  /* Outlines of tags, pills and line buttons. */
+  --color-line: #3a4d42;
+  /* The edge of a control a user must find (fields, unselected choices): 3:1 on every dark ground. */
+  --color-control: #5e7366;
+  --color-text: #e8efe9;
+  /* Secondary text and done marks. */
+  --color-soft: #c9d6cc;
+  --color-muted: #93a89a;
+  --color-faint: #82978c;
 
-  --font-sans: var(--font-geist-sans), ui-sans-serif, system-ui, -apple-system, "Segoe UI", sans-serif;
-  --font-mono: var(--font-geist-mono), ui-monospace, "SFMono-Regular", Menlo, Consolas, monospace;
+  /* Gold: the π proof seal, what a proof made final, and primary buttons; nothing else. */
+  --color-accent: #f4b728;
+  --color-accent-strong: #ffc845;
+  --color-on-accent: #0f1b2a;
+
+  /* DEMO, the judges' replay: a mode, not a hazard, in the site's ice blue. */
+  --color-demo: #cfe0f2;
+
+  /* The shielded pool's teal (the site's), for what stays private. */
+  --color-pool: #38a684;
+  --color-pool-soft: #7fd1b4;
+
+  /* Status, each at least 4.5:1 on bg, surface and surface-2. */
+  --color-ok: #5fd3a5;
+  --color-warn: #f2903a;
+  --color-danger: #f26b5e;
+  --color-info: #7fb2f0;
+
+  /* Base: the light ground, and its blue for chain marks only. */
+  --color-paper: #eef2f6;
+  --color-ink: #0f1b2a;
+  --color-ink-muted: #4c5d70;
+  --color-ink-faint: #6b7c8f;
+  --color-rule: #cfd8e2;
+  --color-base: #0052ff;
+
+  /* A leak: only on what ties a record to someone. */
+  --color-leak: #9a1f15;
+  --color-leak-ground: #fbe1dc;
+  --color-leak-line: #b42318;
+
+  /* Archivo for text, Martian Mono for chain data only (layout.tsx loads both, self-hosted). */
+  --font-sans:
+    var(--font-archivo), ui-sans-serif, system-ui, -apple-system, "Segoe UI", Roboto, "Helvetica Neue", Arial, sans-serif;
+  --font-mono: var(--font-martian-mono), ui-monospace, "SFMono-Regular", Menlo, Consolas, monospace;
+
+  --animate-rise: rise 0.5s cubic-bezier(0.2, 0.7, 0.3, 1) both;
+  --animate-stamp: stamp 0.5s cubic-bezier(0.34, 1.56, 0.64, 1) both;
+  --animate-pop: pop 0.4s cubic-bezier(0.34, 1.56, 0.64, 1) both;
+  --animate-shimmer: shimmer 1.6s linear infinite;
+  --animate-flow: flow 2.4s linear infinite;
 }
 
 @layer base {
@@ -30,35 +78,51 @@
 
   body {
     background-color: var(--color-bg);
+    /* One faint glow where the pool is: depth, no image (gold is kept for proofs). */
+    background-image: radial-gradient(60rem 40rem at 8% -10%, rgb(56 166 132 / 0.075), transparent 62%);
+    background-repeat: no-repeat;
     color: var(--color-text);
     font-family: var(--font-sans);
-    line-height: 1.6;
+    font-stretch: 100%;
+    line-height: 1.55;
     text-rendering: optimizeLegibility;
   }
 
   ::selection {
-    background: color-mix(in oklab, var(--color-accent) 35%, transparent);
+    background: color-mix(in oklab, var(--color-text) 26%, transparent);
   }
 
-  :focus-visible {
-    outline: 2px solid var(--color-accent);
-    outline-offset: 2px;
-    border-radius: 4px;
-  }
-
+  /* Plain links read as text: the light text colour (ink on paper), underlined, never gold. */
   a {
-    color: var(--color-accent);
-    text-underline-offset: 3px;
+    color: var(--link, var(--color-text));
+    text-decoration-line: underline;
+    text-decoration-thickness: 1px;
+    text-underline-offset: 4px;
   }
 
   a:hover {
-    color: var(--color-accent-strong);
+    text-decoration-thickness: 2px;
+  }
+
+  /* Its shape for elements without a radius of their own (plain links). */
+  :focus-visible {
+    border-radius: 4px;
   }
 
   code,
   kbd,
-  pre {
+  pre,
+  samp {
     font-family: var(--font-mono);
+    font-stretch: 100%;
+    letter-spacing: -0.01em;
+  }
+
+  /* What is chosen is white; gold is kept for proofs. */
+  input[type="radio"],
+  input[type="checkbox"],
+  input[type="range"] {
+    accent-color: var(--color-text);
   }
 
   @media (prefers-reduced-motion: reduce) {
@@ -72,23 +136,65 @@
   }
 }
 
+/*
+ * The fixed bars (the sticky header, the phones' tab bar, the replay's dock) never hide what has focus or what a
+ * link scrolls to (WCAG 2.2, 2.4.11): the page scrolls with their heights as padding.
+ */
+:root {
+  --header-h: 4.25rem;
+  --nav-h: 0px;
+  --dock-h: 0px;
+}
+
+@media (max-width: 860px) {
+  :root {
+    --nav-h: 58px;
+  }
+}
+
+.has-dock {
+  --dock-h: 4.5rem;
+}
+
+@media (max-width: 860px) {
+  .has-dock {
+    --dock-h: 5.75rem;
+  }
+}
+
+html {
+  scroll-padding-top: calc(var(--header-h) + 1rem);
+  scroll-padding-bottom: calc(var(--dock-h) + var(--nav-h) + 1rem);
+}
+
+/*
+ * Focus, on every ground: the gold ring of the design hugs the element and a 2px outline runs
+ * around it, in the light text colour on the dark grounds and in ink on paper (the design's ink
+ * outline alone would vanish on the dark ground). Unlayered, so no utility's own shadow or ring hides it.
+ */
+:focus-visible {
+  outline: 2px solid var(--focus-outline, var(--color-text));
+  outline-offset: 3px;
+  box-shadow: 0 0 0 3px var(--color-accent);
+}
+
 @layer components {
   .prose-calm h2 {
     font-size: 1.25rem;
-    font-weight: 600;
+    font-weight: 700;
     margin-top: 2rem;
     margin-bottom: 0.5rem;
   }
 
   .prose-calm p {
-    color: var(--color-muted);
+    color: var(--color-soft);
     margin-bottom: 0.75rem;
   }
 
   .prose-calm ul {
     list-style: disc;
     padding-left: 1.25rem;
-    color: var(--color-muted);
+    color: var(--color-soft);
   }
 
   .prose-calm li {
@@ -99,4 +205,296 @@
     color: var(--color-text);
     font-weight: 600;
   }
+
+  /* A panel of the app: the dark ground raised a step, a hairline edge and a faint top light. */
+  .panel {
+    position: relative;
+    border-radius: 22px;
+    background: linear-gradient(180deg, color-mix(in oklab, var(--color-surface-2) 70%, var(--color-surface)) 0%, var(--color-surface) 46%);
+    box-shadow:
+      inset 0 0 0 1px var(--color-border),
+      inset 0 1px 0 rgb(255 255 255 / 0.035),
+      0 24px 48px -32px rgb(0 0 0 / 0.7);
+  }
+
+  /* A panel that leads its page (the swap card, the position's summary): a faint edge of light at the top. */
+  .panel-lead::before {
+    content: "";
+    position: absolute;
+    inset: 0 18% auto;
+    height: 1px;
+    background: linear-gradient(90deg, transparent, rgb(255 255 255 / 0.22), transparent);
+  }
+
+  /* A field: the app's text inputs, one look everywhere. */
+  .field {
+    width: 100%;
+    min-height: 46px;
+    border-radius: 14px;
+    border: 1px solid var(--color-control);
+    background: var(--color-bg);
+    padding: 10px 14px;
+    color: var(--color-text);
+    font-size: 15px;
+    transition:
+      border-color 0.15s,
+      background-color 0.15s;
+  }
+
+  .field::placeholder {
+    color: var(--color-faint);
+  }
+
+  .field:hover {
+    border-color: var(--color-soft);
+  }
+
+  .field:focus-visible {
+    border-color: var(--color-soft);
+    border-radius: 14px;
+  }
+
+  .field[aria-invalid="true"] {
+    border-color: color-mix(in oklab, var(--color-danger) 70%, transparent);
+  }
+
+  /* The π proof seal: the gold mark of a proof crossing between the chains. */
+  .seal {
+    position: relative;
+    display: inline-flex;
+    flex: none;
+    align-items: center;
+    justify-content: center;
+    width: 60px;
+    height: 60px;
+    border-radius: 9999px;
+    background: var(--color-accent);
+    box-shadow:
+      0 0 0 6px color-mix(in oklab, var(--color-accent) 20%, transparent),
+      0 16px 32px -14px color-mix(in oklab, var(--color-accent) 80%, transparent);
+  }
+
+  .seal-sm {
+    width: 22px;
+    height: 22px;
+    box-shadow: 0 0 0 3px color-mix(in oklab, var(--color-accent) 20%, transparent);
+  }
+
+  /* While a proof is being made: one of the few motions the app makes on its own. */
+  .seal-pulse {
+    position: absolute;
+    inset: -2px;
+    border: 2px solid var(--color-accent);
+    border-radius: 9999px;
+    opacity: 0;
+    animation: seal-pulse 2.2s cubic-bezier(0.2, 0.7, 0.3, 1) infinite;
+  }
+
+  /* A notice's status dot, in the colour of `--dot`, with a soft halo. */
+  .dot {
+    flex: none;
+    width: 12px;
+    height: 12px;
+    border-radius: 9999px;
+    background: var(--dot, var(--color-text));
+    box-shadow: 0 0 0 4px color-mix(in oklab, var(--dot, var(--color-text)) 14%, transparent);
+  }
+
+  /* A live indicator: the dot breathes while something is under way. */
+  .dot-live {
+    animation: breathe 1.8s ease-in-out infinite;
+  }
+
+  /* What leaks: only on what ties a record to someone. */
+  .leak {
+    padding: 2px 5px;
+    border-radius: 3px;
+    background: var(--color-leak-ground);
+    color: var(--color-leak);
+    box-shadow: inset 0 -2px 0 var(--color-leak-line);
+    -webkit-box-decoration-break: clone;
+    box-decoration-break: clone;
+  }
+
+  /* Encrypted: what the pool hides, drawn as a soft blur over its placeholder. */
+  .cipher {
+    filter: blur(3.5px);
+    user-select: none;
+  }
+
+  /* A loading placeholder's sheen. */
+  .skeleton {
+    border-radius: 10px;
+    background: linear-gradient(
+      90deg,
+      var(--color-surface-2) 0%,
+      color-mix(in oklab, var(--color-surface-3) 80%, var(--color-soft)) 50%,
+      var(--color-surface-2) 100%
+    );
+    background-size: 200% 100%;
+    animation: shimmer 1.6s linear infinite;
+  }
+
+  /* The flow line between the chains: dashes running from Zcash to Base while a proof travels. */
+  .flow-line {
+    background-image: linear-gradient(90deg, var(--color-accent) 50%, transparent 50%);
+    background-size: 12px 2px;
+    background-repeat: repeat-x;
+    animation: flow 1.2s linear infinite;
+  }
+
+  /* The seam of a tracker: a dashed hairline until a proof lands, then a line of gold lit from its middle. */
+  .seam-line {
+    height: 1px;
+    background-image: linear-gradient(90deg, rgb(205 230 216 / 0.3) 50%, transparent 50%);
+    background-size: 8px 1px;
+  }
+
+  .seam-line-lit {
+    height: 2px;
+    background: linear-gradient(90deg, transparent, var(--color-accent) 20%, var(--color-accent) 80%, transparent);
+    transform-origin: 50% 50%;
+    animation: seam-light 0.6s cubic-bezier(0.16, 0.84, 0.24, 1) both;
+  }
+
+  /* A row Base just recorded because of a proof: stamped once, its ground fading from gold. */
+  .stamp-row {
+    animation: tint-fade 0.9s ease-out both;
+  }
+
+  /* DEMO: the control the replay's next step needs (components/replay/ReplayDock.tsx). */
+  [data-spotlight] {
+    outline: 2px dashed var(--color-demo);
+    outline-offset: 5px;
+    animation: spotlight 1.6s ease-in-out infinite;
+  }
+
+  @media (prefers-reduced-motion: reduce) {
+    .seal-pulse,
+    .dot-live,
+    .skeleton,
+    .flow-line,
+    .seam-line-lit,
+    .stamp-row,
+    [data-spotlight] {
+      animation: none;
+    }
+  }
+}
+
+@keyframes seal-pulse {
+  0% {
+    transform: scale(0.95);
+    opacity: 0.85;
+  }
+  100% {
+    transform: scale(1.9);
+    opacity: 0;
+  }
+}
+
+@keyframes breathe {
+  0%,
+  100% {
+    opacity: 1;
+  }
+  50% {
+    opacity: 0.45;
+  }
+}
+
+@keyframes rise {
+  from {
+    opacity: 0;
+    transform: translateY(8px);
+  }
+  to {
+    opacity: 1;
+    transform: none;
+  }
+}
+
+@keyframes stamp {
+  from {
+    opacity: 0;
+    transform: scale(1.8);
+  }
+  to {
+    opacity: 1;
+    transform: none;
+  }
+}
+
+@keyframes pop {
+  from {
+    opacity: 0;
+    transform: scale(0.6);
+  }
+  to {
+    opacity: 1;
+    transform: none;
+  }
+}
+
+@keyframes seam-light {
+  from {
+    transform: scaleX(0);
+  }
+  to {
+    transform: scaleX(1);
+  }
+}
+
+@keyframes tint-fade {
+  from {
+    background-color: rgb(244 183 40 / 0.22);
+  }
+  to {
+    background-color: transparent;
+  }
+}
+
+@keyframes spotlight {
+  0%,
+  100% {
+    outline-color: var(--color-demo);
+  }
+  50% {
+    outline-color: rgb(207 224 242 / 0.35);
+  }
+}
+
+@keyframes shimmer {
+  from {
+    background-position: 200% 0;
+  }
+  to {
+    background-position: -200% 0;
+  }
+}
+
+@keyframes flow {
+  from {
+    background-position: 0 0;
+  }
+  to {
+    background-position: 24px 0;
+  }
+}
+
+/* The page's column, as the design sets it. */
+@utility wrap {
+  width: 100%;
+  max-width: 1240px;
+  margin-inline: auto;
+  padding-inline: clamp(16px, 4vw, 40px);
+}
+
+/* Base's light ground: ink text, ink links and chain data, and an ink focus outline. */
+@utility paper {
+  background-color: var(--color-paper);
+  color: var(--color-ink);
+  --link: var(--color-ink);
+  --strong-color: var(--color-ink);
+  --focus-outline: var(--color-ink);
 }

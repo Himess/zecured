@@ -23,6 +23,8 @@ import {
 } from "./config";
 import type { CloseRequestMessage } from "./eip712";
 import { parseEvidence, type Evidence } from "./evidence";
+import { replayFetch } from "./replay/fetch";
+import { REPLAY, REPLAY_BASE_URL } from "./replay/flag";
 import { STAMP_MAX_BITS } from "./stamp";
 
 // ------------------------------------------------------------------ types
@@ -1320,8 +1322,11 @@ export function createApi(options: ApiOptions = {}) {
 
 export type Api = ReturnType<typeof createApi>;
 
-/** The app's client, bound to NEXT_PUBLIC_BACKEND_URL. */
-export const api: Api = createApi();
+/**
+ * The app's client, bound to NEXT_PUBLIC_BACKEND_URL. In a replay build (DEMO, lib/replay) it is
+ * bound to the replay's backend, which answers in the page: nothing is fetched from the network.
+ */
+export const api: Api = createApi(REPLAY ? { baseUrl: REPLAY_BASE_URL, fetch: replayFetch } : {});
 
 /**
  * Fetches GET /config once (memoized), checks it against the build's pinned addresses and

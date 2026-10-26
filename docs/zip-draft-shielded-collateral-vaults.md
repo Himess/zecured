@@ -25,7 +25,7 @@ when, and only when, they appear in all capitals.
   any time it is a single unspent note.
 - **Claim**: a right, created by an event on the settlement chain, to be paid an amount from a
   vault: a release to the owner, a liquidation, or the two parts of a close.
-- **Recipient commitment**: `keccak256(salt ‖ receiver)`, a claim's recipient as the settlement
+- **Recipient commitment**: `keccak256(salt || receiver)`, a claim's recipient as the settlement
   chain sees it.
 - **Tag key**, **deposit tag**, **payout reference** and **claim reference**: the keyed or salted
   values the settlement chain uses in place of Zcash data (§ Tags and references).
@@ -45,7 +45,7 @@ commitment or address ever appears on the settlement chain.
 # Motivation
 
 Shielded ZEC is the asset Zcash users most want to keep private, and the one they can least use
-elsewhere. Every bridge or swap that takes ZEC to another chain today goes through a transparent
+elsewhere. Bridges and swaps that take ZEC to another chain typically go through a transparent
 address or a pool crossing, which reveals amounts and links the user's history. Lending does not
 need ZEC to move: a loan needs collateral that can be seized if the loan goes bad, and that can
 be returned when it is repaid.
@@ -139,8 +139,8 @@ With `UFVK` the vault's unified full viewing key string and `cmx` a note commitm
 | tag key `K` | `BLAKE2b-256(personal = "Zecured_TagKey__", UFVK)` |
 | deposit tag, lineage tag | `BLAKE2b-256(key = K, personal = "Zecured_DepTag__", cmx)` |
 | payout reference | `BLAKE2b-256(key = K, personal = "Zecured_PayRef__", txid)` |
-| recipient commitment | `keccak256(salt ‖ receiver)`, `salt` 32 random bytes, `receiver` the raw 43-byte Orchard-protocol receiver |
-| claim reference | `keccak256(salt ‖ txid)`, with the salt of the claim's recipient commitment |
+| recipient commitment | `keccak256(salt \|\| receiver)`, `salt` 32 random bytes, `receiver` the raw 43-byte Orchard-protocol receiver |
+| claim reference | `keccak256(salt \|\| txid)`, with the salt of the claim's recipient commitment |
 
 A txid is the ZIP 244 digest as modified for v6 transactions by ZIP 229, in internal byte order.
 
@@ -244,7 +244,7 @@ A payment proof MUST show, in zero knowledge:
   it;
 - that the note's memo starts with a 4-byte tag and the 32-byte order id, so that one note pays
   one order even when two orders share a recipient;
-- that `keccak256(salt ‖ receiver)` of the note's recipient equals the order's recipient
+- that `keccak256(salt || receiver)` of the note's recipient equals the order's recipient
   commitment;
 - that the transaction is in a block committed, through the epoch's ZIP 221 history tree, by a
   later header the settlement chain has verified (§ Activation).

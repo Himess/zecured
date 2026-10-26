@@ -8,6 +8,7 @@ import { DEPLOYMENT } from "@/lib/deployment";
 import { notifyLoansChanged, useAction, useDemoStatus } from "@/lib/hooks";
 import { loanStore, short, type StoredLoan } from "@/lib/keys";
 import { submitDestination } from "@/lib/owner";
+import { ActionError } from "./ActionError";
 import { Badge, Button, Mono, Notice } from "./ui";
 
 /** Validates a destination as the user types; returns an error message or null. */
@@ -45,7 +46,7 @@ export function IronwoodAddressInput({
   }
   return (
     <div className="space-y-2">
-      <label htmlFor={id} className="block text-sm font-medium">
+      <label htmlFor={id} className="block text-[14px] font-semibold text-soft">
         {label}
       </label>
       <textarea
@@ -60,9 +61,9 @@ export function IronwoodAddressInput({
         placeholder={DEPLOYMENT.zcashNetwork === "test" ? "utest1…" : "u1…"}
         aria-invalid={error ? true : undefined}
         aria-describedby={`${id}-hint`}
-        className="w-full rounded-lg border border-border bg-bg px-3 py-2 font-mono text-sm break-all text-text placeholder:text-faint focus:border-accent"
+        className="field font-mono text-sm break-all"
       />
-      <p id={`${id}-hint`} className={error ? "text-sm text-danger" : "text-xs text-muted"} aria-live="polite">
+      <p id={`${id}-hint`} className={error ? "text-sm text-danger" : "text-xs text-muted"}>
         {error ??
           (other ? "Valid. This address has other receivers too; only its Ironwood (Orchard-protocol) receiver will be paid." : hint)}
       </p>
@@ -94,12 +95,34 @@ export function DestinationStep({
   const demo = useDemoStatus();
   const demoReturn = loan.demo && config.demoPath && demo.data?.enabled ? demo.data.returnAddress : null;
 
+  const demoBox = demoReturn ? (
+    <div className="flex flex-wrap items-center justify-between gap-3 rounded-2xl border border-dashed border-demo/45 bg-demo/[0.04] p-4">
+      <div className="min-w-0 flex-1 basis-[16rem] text-sm">
+        <p className="flex flex-wrap items-center gap-2 font-semibold">
+          <Badge tone="demo">DEMO</Badge> No Ironwood address of your own?
+        </p>
+        <p className="mt-1 text-muted">The demo wallet funded this vault: your ZEC can go back to it.</p>
+      </div>
+      <Button
+        data-replay="demo-destination"
+        onClick={async () => {
+          const c = await submit.run(demoReturn);
+          if (c) onDone(c);
+        }}
+        busy={submit.busy}
+      >
+        Send my ZEC back to the demo wallet
+      </Button>
+    </div>
+  ) : null;
+
   return (
     <div className="space-y-4">
       <p className="text-sm text-muted">
         Before anything happens on Base, the signers check and record where your ZEC will go. Base only ever sees a salted
         commitment to this address; the salt stays with you and the signers.
       </p>
+      {demoBox}
       {loan.destinationCommitment ? (
         <Notice tone="info" title="You already validated a destination for this loan">
           <p>
@@ -111,8 +134,13 @@ export function DestinationStep({
           </Button>
         </Notice>
       ) : null}
-      <IronwoodAddressInput value={ua} onChange={setUa} />
+      <IronwoodAddressInput
+        value={ua}
+        onChange={setUa}
+        label={demoReturn ? "Or a fresh Ironwood address of your own (unified address)" : "Ironwood destination (unified address)"}
+      />
       <Button
+        variant={demoReturn ? "secondary" : "primary"}
         onClick={async () => {
           const c = await submit.run(ua);
           if (c) onDone(c);
@@ -120,31 +148,9 @@ export function DestinationStep({
         busy={submit.busy}
         disabled={!ua.trim() || destinationError(ua) !== null}
       >
-        Validate destination with the signers
+        Check this address with the signers
       </Button>
-      {demoReturn ? (
-        <div className="space-y-2 rounded-lg border border-dashed border-warn/60 p-3 text-sm">
-          <p className="flex flex-wrap items-center gap-2">
-            <Badge tone="warn">DEMO</Badge> No Ironwood address of your own?
-          </p>
-          <p className="text-muted">This vault was funded by the demo wallet: its ZEC can go back there instead.</p>
-          <Button
-            variant="secondary"
-            onClick={async () => {
-              const c = await submit.run(demoReturn);
-              if (c) onDone(c);
-            }}
-            busy={submit.busy}
-          >
-            Send it back to the demo wallet (DEMO)
-          </Button>
-        </div>
-      ) : null}
-      {submit.error ? (
-        <Notice tone="danger" title="The destination was not accepted" live>
-          <p>{submit.error}</p>
-        </Notice>
-      ) : null}
+      <ActionError error={submit.error} refusal={submit.refusal} title="The destination was not accepted" />
     </div>
   );
 }

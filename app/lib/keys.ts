@@ -15,6 +15,8 @@ import { generatePrivateKey, privateKeyToAccount } from "viem/accounts";
 import type { VaultSignature } from "./api";
 import { config } from "./config";
 import { randomBytes32 } from "./eip712";
+import { REPLAY } from "./replay/flag";
+import { createReplayLoan, replayLoanIdentity, replayStorage } from "./replay/loans";
 import { predictAccountAddress } from "./safe";
 import { DENOMINATIONS } from "./zcash";
 
@@ -76,8 +78,12 @@ export interface KeyValueStorage {
   removeItem(key: string): void;
 }
 
-/** localStorage, or null when it is unavailable (server render, privacy mode, blocked). */
+/**
+ * localStorage, or null when it is unavailable (server render, privacy mode, blocked). In a replay
+ * build (DEMO): this tab's sessionStorage, under `zecured:replay:` keys (lib/replay/loans.ts).
+ */
 export function browserStorage(): KeyValueStorage | null {
+  if (REPLAY) return replayStorage();
   try {
     if (typeof window === "undefined" || !window.localStorage) return null;
     const probe = "zecured:probe";
@@ -99,13 +105,20 @@ export function parseLoan(raw: unknown): StoredLoan {
   const r = raw as Record<string, unknown>;
   if (!isBytes32(r.ownerKey)) throw new Error("missing or malformed owner key");
   const ownerKey = r.ownerKey.toLowerCase() as Hex;
-  const owner = privateKeyToAccount(ownerKey).address;
-  if (typeof r.owner === "string" && isAddress(r.owner, { strict: false }) && getAddress(r.owner) !== owner) {
-    throw new Error("owner address does not match the owner key");
-  }
-  const account = predictAccountAddress(owner);
-  if (typeof r.account === "string" && isAddress(r.account, { strict: false }) && getAddress(r.account) !== account) {
-    throw new Error("account address does not match the owner key (different Safe configuration?)");
+  let owner: Address;
+  let account: Address;
+  if (REPLAY) {
+    // DEMO: the replay's loan carries a dummy key with the recorded owner and account (lib/replay/loans.ts).
+    ({ owner, account } = replayLoanIdentity(ownerKey, r));
+  } else {
+    owner = privateKeyToAccount(ownerKey).address;
+    if (typeof r.owner === "string" && isAddress(r.owner, { strict: false }) && getAddress(r.owner) !== owner) {
+      throw new Error("owner address does not match the owner key");
+    }
+    account = predictAccountAddress(owner);
+    if (typeof r.account === "string" && isAddress(r.account, { strict: false }) && getAddress(r.account) !== account) {
+      throw new Error("account address does not match the owner key (different Safe configuration?)");
+    }
   }
   const amount = typeof r.amount === "string" && /^\d+$/.test(r.amount) ? r.amount : undefined;
   // A size the signers accept now (GET /config) or a D7 testnet size, so older backups stay importable.
@@ -164,6 +177,8 @@ export function parseLoan(raw: unknown): StoredLoan {
 /** A new loan: fresh owner key, its Safe address, a random OpenVault request id (any size the signers accept). */
 export function createLoan(amount: bigint, now: number = Date.now()): StoredLoan {
   if (!config.denominations.includes(amount)) throw new Error("unsupported collateral amount");
+  // DEMO: a replay build's loan is the recorded one, with a dummy owner key (lib/replay/loans.ts).
+  if (REPLAY) return createReplayLoan(amount, now);
   const ownerKey = generatePrivateKey();
   const owner = privateKeyToAccount(ownerKey).address;
   const requestId = randomBytes32();

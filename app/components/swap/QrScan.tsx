@@ -30,6 +30,9 @@ export function QrScan({ onAddress }: { onAddress: (address: string) => void }) 
   const video = useRef<HTMLVideoElement | null>(null);
   const [scanning, setScanning] = useState(false);
   const [error, setError] = useState<string | null>(null);
+  // The latest callback, without restarting the camera when the parent renders again.
+  const found = useRef(onAddress);
+  found.current = onAddress;
 
   useEffect(() => {
     if (!scanning || !Ctor) return;
@@ -39,13 +42,17 @@ export function QrScan({ onAddress }: { onAddress: (address: string) => void }) 
     void (async () => {
       try {
         stream = await navigator.mediaDevices.getUserMedia({ video: { facingMode: "environment" } });
-        if (stop || !video.current) return;
+        // Stopped (or gone) while the browser asked for the camera: turn it off again at once.
+        if (stop || !video.current) {
+          stream.getTracks().forEach((t) => t.stop());
+          return;
+        }
         video.current.srcObject = stream;
         await video.current.play();
         while (!stop && video.current) {
-          const found = await detector.detect(video.current).catch(() => []);
-          if (found[0]?.rawValue) {
-            onAddress(addressFromQr(found[0].rawValue));
+          const codes = await detector.detect(video.current).catch(() => []);
+          if (codes[0]?.rawValue) {
+            found.current(addressFromQr(codes[0].rawValue));
             setScanning(false);
             return;
           }
@@ -60,7 +67,7 @@ export function QrScan({ onAddress }: { onAddress: (address: string) => void }) 
       stop = true;
       stream?.getTracks().forEach((t) => t.stop());
     };
-  }, [scanning, Ctor, onAddress]);
+  }, [scanning, Ctor]);
 
   if (!Ctor) return null;
   return (
@@ -86,7 +93,7 @@ export function QrScan({ onAddress }: { onAddress: (address: string) => void }) 
                 setError("That picture could not be read.");
               }
             }}
-            className="text-xs file:mr-2 file:rounded-md file:border file:border-border file:bg-surface-2 file:px-2 file:py-1 file:text-text"
+            className="text-xs file:mr-2 file:rounded-full file:border file:border-line file:bg-transparent file:font-semibold file:px-2 file:py-1 file:text-text"
           />
         </label>
       </div>

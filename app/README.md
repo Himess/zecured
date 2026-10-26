@@ -1,6 +1,6 @@
 # Zecured app
 
-Next.js front end of Zecured: **borrow against shielded ZEC. Sell nothing. Reveal nothing.**
+Next.js front end of Zecured: **borrow against shielded ZEC. Only the proof crosses.**
 Testnet only (Zcash testnet TAZ, Base Sepolia, MockUSDC). Not a financial product.
 
 There is no browser wallet. For each loan the app generates a fresh owner key in the browser,
@@ -24,6 +24,34 @@ pnpm typecheck        # tsc --noEmit (app + tests)
 Requires Node.js ≥ 20.9 and pnpm 10. The backend is optional for browsing: every page renders
 without it and says what is unavailable.
 
+## The judges' replay (DEMO)
+
+No server of ours runs through the judging (D82), so the app also builds as a **replay**: the same pages as a
+static site, in which an in-browser simulator (`lib/replay/`) plays the backend, the Base reads, the loan account and
+the swap's wallet from a recording (`lib/replay/recording.json`, schema `zecured-replay/1`). The judge presses the
+real buttons (open a vault, pay it with demo TAZ, watch its proof land, borrow, close from collateral, buy shielded
+ZEC); each action must be the recording's next step. A dock at the bottom of every page says what to do next and
+where: "Show me" outlines the control on the page (`components/replay/spotlight.ts`), "Go there" opens its page and
+outlines it there. An action the run did not take is answered by a DEMO note naming the next step, never an error.
+Every page carries a DEMO band.
+
+```bash
+node scripts/build-replay.mjs --dev --port 3001            # next dev in replay mode
+NEXT_PUBLIC_BASE_PATH=/zecured/app node scripts/build-replay.mjs   # static export to out/
+NEXT_PUBLIC_BASE_PATH=/zecured/app node scripts/check-export.mjs   # its assets, payloads, policy and budget
+```
+
+On a machine short of memory, `ZECURED_TYPECHECKED=1` (after `pnpm typecheck`) and `ZECURED_BUILD_CPUS=1` (one
+static-generation worker) keep the build within a few hundred megabytes.
+
+The replay never publishes a private key, a salt or a viewing key: its loan carries a dummy key that controls
+nothing, the viewing-key route answers `replay_unavailable`, and a destination the judge types stays in the browser.
+Every hook point tests the replay flag (`lib/replay/flag.ts`, `NEXT_PUBLIC_REPLAY=1`); a live build, where the
+variable is unset, never takes a replay path at runtime (`lib/replay/hooks.test.ts`), although the simulator's code
+still ships in its bundle. Until a public run on Base Sepolia is recorded, the recording is sample data: dummy hashes,
+no explorer links, and five DEMO signer keys that sign its vault. A recording of a real run carries its real
+transaction hashes, and the dock then links each on-chain step to its explorer.
+
 ## Configuration
 
 Every address the app signs for or sends calls to is **pinned in the build** (security review
@@ -41,15 +69,15 @@ values that carry no authority.
 | `NEXT_PUBLIC_ADAPTER` | none (pin) | `SettlementAdapter`; EIP-712 domain of `CloseRequest`. |
 | `NEXT_PUBLIC_INTAKE` | none (pin) | `ZecuredIntake` (v3): pending activations, and the account's `refundPending`. Must be the Intake the Registry names. |
 | `NEXT_PUBLIC_MARKET_ID` | none (pin) | Morpho market id; must equal `marketIdOf` of the pinned market parameters. |
-| `NEXT_PUBLIC_USDC` | none (pin) | The loan token: Circle's testnet USDC on Base Sepolia, a MockUSDC on a local fork. |
+| `NEXT_PUBLIC_USDC` | none (pin) | The loan token: on testnet a MockUSDC we mint (MOCK: no value), on a local fork and on Base Sepolia alike; on mainnet Circle's USDC. |
 | `NEXT_PUBLIC_ORACLE` | none (pin) | The market's oracle (price = ZEC/USD × 1e34): on testnets the DemoShockOracle (MOCK / DEMO) around a MockZecOracle (MOCK). |
 | `NEXT_PUBLIC_ZZEC` | none (pin) | zZEC (collateral token). |
 | `NEXT_PUBLIC_SIGNERS` | none (pin) | The five signer addresses, comma-separated (to verify signer signatures in the app). |
 | `NEXT_PUBLIC_MORPHO` | `0xBBBBBbbBBb9cC5e90e3b3Af64bdAF62C37EEFFCb` | Morpho Blue on Base Sepolia (the default is a pin too). |
 | `NEXT_PUBLIC_IRM` | `0x46415998764C29aB2a25CbeA6254146D50D22687` | AdaptiveCurveIRM (the default is a pin too). |
-| `NEXT_PUBLIC_ZECURED_DEPLOYMENT` | `testnet` | v4: `testnet` (the judge deployment: Base Sepolia, Zcash testnet, TAZ) or `mainnet-beta` (Base 8453, Zcash mainnet, ZEC): the band "Mainnet beta — unaudited — invite only — small caps" on every page, an invite code sent with `POST /vaults`, the demo path off, the evidence page's mainnet section first. Any other value keeps Base disabled. |
+| `NEXT_PUBLIC_ZECURED_DEPLOYMENT` | `testnet` | v4: `testnet` (Base Sepolia, Zcash testnet, TAZ) or `mainnet-beta` (Base 8453, Zcash mainnet, ZEC): the band "Mainnet beta — unaudited — invite only — small caps" on every page, an invite code sent with `POST /vaults`, the demo path off, the evidence page's mainnet section first. Any other value keeps Base disabled. |
 | `NEXT_PUBLIC_SWAP` | none | v4: ZecuredSwap, pinned like the other contracts (the user's own wallet sends `open` and `refund` to it); empty: the Buy page says the build has no swap. |
-| `NEXT_PUBLIC_DEMO_PATH` | off | v4, P-1 (DEMO, judge deployment only): `1` shows "Try with demo TAZ" while the backend's demo wallet is on (`GET /demo/status`). Ignored on the mainnet beta. |
+| `NEXT_PUBLIC_DEMO_PATH` | off | v4, P-1 (DEMO, testnet only): `1` shows "Try with demo TAZ" while the backend's demo wallet is on (`GET /demo/status`). Ignored on the mainnet beta. |
 
 All values are public (inlined into the bundle at build time). Rebuild after changing them.
 
@@ -92,8 +120,9 @@ NEXT_PUBLIC_IRM=\(.market.irm)
 NEXT_PUBLIC_SIGNERS=\(.signers | join(","))"' ../contracts/deployments/anvil.json >> .env.local
 ```
 
-(`base-sepolia.json` once deployed publicly.) Review the result before building: these
-addresses are what the app trusts.
+(`base-sepolia.json` once deployed publicly.) Or, with the swap contract and the demo path too (testnet only), without
+jq: `node scripts/pin-deployment.mjs base-sepolia http://127.0.0.1:8080 > .env.local`. Review the result before
+building: these addresses are what the app trusts.
 
 ## Pages
 
@@ -171,9 +200,11 @@ v3 (contracts/src/interfaces/v3, docs/DECISIONS.md D40 to D54):
 
 - **Only our backend.** A Content Security Policy (next.config.ts) limits `connect-src` to the
   app and the backend origin, so the page cannot reach an RPC, bundler, paymaster or any third
-  party even by mistake. Fonts are self-hosted (`geist`), the QR code is drawn locally, there
-  are no analytics, and the app links to no block explorer (opening one would tell it which
-  account you care about).
+  party even by mistake. Fonts are self-hosted (Archivo and Martian Mono, OFL, from `app/fonts/`
+  through `next/font/local`), the QR code is drawn locally, and there are no analytics. The app
+  fetches nothing from a block explorer. On testnet it links a vault's Base transactions to
+  Basescan, a link you choose to open; the mainnet beta links none, since opening one would tell the
+  explorer which account you care about.
 - **Keys stay local.** The owner key lives in `localStorage` (every access wrapped in
   try/catch) and leaves the device only in a backup the user downloads. Salts and destination
   addresses are sent to the signers and never stored; only the resulting commitment is kept to
@@ -247,7 +278,8 @@ the version-matched docs in `node_modules/next/dist/docs/`.
 
 ## Tests
 
-`pnpm test` runs about 335 offline unit tests (vitest, no network). Cross-checks against independent sources:
+`pnpm test` runs the offline unit tests (vitest, no network; the count is in docs/TESTING.md § 1). Cross-checks
+against independent sources:
 
 - **v3 contracts:** every ABI fragment the app encodes or decodes (Registry, the dispute path,
   Intake, slasher, bond, compensator) against the compiled ABIs in `contracts/abi`, the enums it
@@ -295,11 +327,14 @@ the version-matched docs in `node_modules/next/dist/docs/`.
 
 | Real | Mock / not live yet |
 |---|---|
-| Owner keys, EIP-712 signing, Safe address derivation, UA decoding, commitments | The market's price on testnets: the DemoShockOracle (MOCK / DEMO) around a MockZecOracle (MOCK), labelled in the UI; MockUSDC as the loan token on a local fork only (Base Sepolia uses Circle's testnet USDC) |
-| Coordinator API client (against the running backend's shapes) | Sponsored UserOps, the v3 ones (refund destination, pending refund, dispute, reopen, claim from the bonds) included: wired and tested against a fake bundler / paymaster; not yet run against a live bundler (`TODO(live)` in lib/account.ts) |
-| Base reads through `/proxy/rpc` (unit-tested against a mocked node; the running proxy answered live Base Sepolia reads in a manual check), the v3 ledger, refund reasons and compensation included | The v3 reads and pages are unit-tested against a mocked node only: no v3 deployment existed on Base Sepolia when they were written |
-| The minting banner and the borrow gate (GET /status, read by the backend from the Intake and the bond) | Demo panel: the oracle it sets is the MOCK MockZecOracle; bot status is a placeholder |
-| Demo panel price control (`GET` / `POST /admin/oracle`, the backend holds the owner key; refused where the market's oracle is a real feed, as on Base mainnet) | Close from collateral: needs the market-maker bot behind `GET /quotes/close` / `POST /closes` |
+| Owner keys, EIP-712 signing, Safe address derivation, UA decoding, commitments | The market's price on testnets: the DemoShockOracle (MOCK / DEMO) around a MockZecOracle (MOCK), labelled in the UI; MockUSDC (MOCK) as the loan token on testnet |
+| Coordinator API client (against the running backend's shapes) | Sponsorship on a local fork: Pimlico's mock paymaster (MOCK, `tools/local-aa`), which sponsors whatever the backend's allowlist lets through |
+| Sponsored UserOps, the v3 ones (refund destination, pending refund, dispute, reopen, claim from the bonds) included: run in the browser on local forks of Base Sepolia, through the backend proxy and a local alto bundler (docs/TESTING.md § 2), and tested against a fake bundler and paymaster | Demo panel: the oracle it sets is the MOCK MockZecOracle; bot status is a placeholder |
+| Base reads through `/proxy/rpc`, the v3 ledger, refund reasons and compensation included: unit-tested against a mocked node, and run in the browser against the v4 deployments on local forks (no deployment is kept on Base Sepolia, D82) | DEMO: the judges' replay (`lib/replay/`, `NEXT_PUBLIC_REPLAY=1`), a simulator that plays a recording in the browser; sample data (dummy hashes, no explorer links) until a public run is recorded |
+| The minting banner and the borrow gate (GET /status, read by the backend from the Intake and the bond) | |
+| Demo panel price control (`GET` / `POST /admin/oracle`, the backend holds the owner key; refused where the market's oracle is a real feed, as on Base mainnet) | |
+| Close from collateral and deleverage: signed in the browser (the Safe's ERC-1271) and executed by the market-maker bot behind `GET /quotes/close` / `POST /closes` (docs/TESTING.md § 2) | |
+| A vault's proof trail (`lib/journey.ts`): its own events on Base, read through the proxy | |
 
 ## Open points
 

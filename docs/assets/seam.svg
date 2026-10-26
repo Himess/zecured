@@ -1,0 +1,110 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 1000 600" width="1000" height="600" role="img" aria-labelledby="seam-title seam-desc">
+  <title id="seam-title">What crosses from Zcash to Base</title>
+  <desc id="seam-desc">Zcash, shielded, on the left; Base, public, on the right. Four zero-knowledge proofs cross the seam between them: a deposit proof mints zZEC, an inclusion proof makes a payout final, a violation proof slashes the signers' bonds, a payment proof releases a swap's USDC. Besides them only salted commitments and keyed tags reach Base; never a Zcash transaction, note or address.</desc>
+  <defs>
+    <clipPath id="frame"><rect width="1000" height="600" rx="18"/></clipPath>
+    <clipPath id="left"><rect width="500" height="600"/></clipPath>
+    <clipPath id="right"><rect x="500" width="500" height="600"/></clipPath>
+    <filter id="soft" x="-50%" y="-50%" width="200%" height="200%"><feGaussianBlur stdDeviation="1.2"/></filter>
+    <filter id="enc" x="-10%" y="-60%" width="120%" height="220%"><feGaussianBlur stdDeviation="3.2"/></filter>
+    <linearGradient id="trail" x1="0" x2="1" y1="0" y2="0">
+      <stop offset="0" stop-color="#F4B728" stop-opacity="0"/>
+      <stop offset="1" stop-color="#F4B728"/>
+    </linearGradient>
+    <g id="pi">
+      <path d="M3 6.5h22" stroke="#0F1B2A" stroke-width="3.4" stroke-linecap="round"/>
+      <path d="M9.5 6.5v14.5" stroke="#0F1B2A" stroke-width="3.4" stroke-linecap="round"/>
+      <path d="M18.2 6.5v10.6c0 2.5 1.3 3.9 3.8 3.9" stroke="#0F1B2A" stroke-width="3.4" stroke-linecap="round" fill="none"/>
+    </g>
+  </defs>
+  <style>
+    text { font-family: Archivo, "Helvetica Neue", Helvetica, Arial, ui-sans-serif, system-ui, sans-serif; }
+    .mono { font-family: "Martian Mono", ui-monospace, SFMono-Regular, Menlo, Consolas, monospace; }
+    .title { font-size: 34px; font-weight: 800; letter-spacing: -0.01em; }
+    .lab { font-size: 15px; }
+    .what { font-size: 17px; font-weight: 600; }
+    .sub { font-size: 14px; }
+    .pill { font-size: 12.5px; font-weight: 700; }
+    .note { font-size: 13.5px; }
+  </style>
+  <g clip-path="url(#frame)">
+    <rect width="500" height="600" fill="#0D1611"/>
+    <rect x="500" width="500" height="600" fill="#EEF2F6"/>
+
+    <!-- The title, split by the seam like the site's headline. -->
+    <g clip-path="url(#left)"><text class="title" x="500" y="74" text-anchor="middle" fill="#E4ECE6">What crosses from Zcash to Base</text></g>
+    <g clip-path="url(#right)"><text class="title" x="500" y="74" text-anchor="middle" fill="#0F1B2A">What crosses from Zcash to Base</text></g>
+
+    <circle cx="48" cy="118" r="4.5" fill="#93A89A" filter="url(#soft)"/>
+    <text class="lab" x="62" y="123" fill="#93A89A">Zcash, shielded</text>
+    <rect x="543.5" y="113.5" width="9" height="9" fill="#4C5D70"/>
+    <text class="lab" x="562" y="123" fill="#4C5D70">Base, public</text>
+
+    <!-- Ledger rules on the Base side. -->
+    <path d="M540 150h420" stroke="#0F1B2A" stroke-width="1.5"/>
+    <path d="M540 244h420M540 338h420M540 432h420" stroke="#CFD8E2"/>
+
+    <!-- 1. Deposit -->
+    <text class="what" x="48" y="186" fill="#E4ECE6">A deposit to a fresh vault</text>
+    <text class="sub" x="48" y="210" fill="#93A89A">its note is in a block, under a later header</text>
+    <rect x="48" y="221" width="150" height="10" rx="5" fill="#C9D6CC" opacity="0.55" filter="url(#enc)"/>
+    <text class="what" x="562" y="186" fill="#0F1B2A">zZEC minted into Morpho</text>
+    <text class="sub" x="562" y="210" fill="#4C5D70">vault id, amount, a keyed tag, a later header</text>
+
+    <!-- 2. Inclusion -->
+    <text class="what" x="48" y="280" fill="#E4ECE6">A payout to a claimant</text>
+    <text class="sub" x="48" y="304" fill="#93A89A">committed on Base before it was signed</text>
+    <rect x="48" y="315" width="122" height="10" rx="5" fill="#C9D6CC" opacity="0.55" filter="url(#enc)"/>
+    <text class="what" x="562" y="280" fill="#0F1B2A">The payout is final</text>
+    <text class="sub" x="562" y="304" fill="#4C5D70">its keyed reference, its claims settled</text>
+
+    <!-- 3. Violation -->
+    <text class="what" x="48" y="374" fill="#E4ECE6">ZEC moved without a commitment</text>
+    <text class="sub" x="48" y="398" fill="#93A89A">read with the vault's viewing key</text>
+    <rect x="48" y="409" width="170" height="10" rx="5" fill="#C9D6CC" opacity="0.55" filter="url(#enc)"/>
+    <text class="what" x="562" y="374" fill="#0F1B2A">The signers' bonds are slashed</text>
+    <text class="sub" x="562" y="398" fill="#4C5D70">and the victims repaid from them</text>
+
+    <!-- 4. Payment -->
+    <text class="what" x="48" y="468" fill="#E4ECE6">A swap's shielded payment</text>
+    <text class="sub" x="48" y="492" fill="#93A89A">the order id at the start of its memo</text>
+    <rect x="48" y="503" width="136" height="10" rx="5" fill="#C9D6CC" opacity="0.55" filter="url(#enc)"/>
+    <text class="what" x="562" y="468" fill="#0F1B2A">The order's USDC is released</text>
+    <text class="sub" x="562" y="492" fill="#4C5D70">to the maker, out of escrow</text>
+
+    <!-- The four proofs crossing the seam. -->
+    <g>
+      <path d="M392 197h80" stroke="url(#trail)" stroke-width="2"/>
+      <circle cx="500" cy="197" r="27" fill="#F4B728" stroke="#F4B728" stroke-opacity="0.25" stroke-width="10"/>
+      <use href="#pi" x="486" y="185"/>
+      <rect x="380" y="222" width="104" height="24" rx="12" fill="#F4B728"/>
+      <text class="pill" x="432" y="238.5" text-anchor="middle" fill="#0F1B2A">Deposit proof</text>
+    </g>
+    <g>
+      <path d="M392 291h80" stroke="url(#trail)" stroke-width="2"/>
+      <circle cx="500" cy="291" r="27" fill="#F4B728" stroke="#F4B728" stroke-opacity="0.25" stroke-width="10"/>
+      <use href="#pi" x="486" y="279"/>
+      <rect x="374" y="316" width="116" height="24" rx="12" fill="#F4B728"/>
+      <text class="pill" x="432" y="332.5" text-anchor="middle" fill="#0F1B2A">Inclusion proof</text>
+    </g>
+    <g>
+      <path d="M392 385h80" stroke="url(#trail)" stroke-width="2"/>
+      <circle cx="500" cy="385" r="27" fill="#F4B728" stroke="#F4B728" stroke-opacity="0.25" stroke-width="10"/>
+      <use href="#pi" x="486" y="373"/>
+      <rect x="374" y="410" width="116" height="24" rx="12" fill="#F4B728"/>
+      <text class="pill" x="432" y="426.5" text-anchor="middle" fill="#0F1B2A">Violation proof</text>
+    </g>
+    <g>
+      <path d="M392 479h80" stroke="url(#trail)" stroke-width="2"/>
+      <circle cx="500" cy="479" r="27" fill="#F4B728" stroke="#F4B728" stroke-opacity="0.25" stroke-width="10"/>
+      <use href="#pi" x="486" y="467"/>
+      <rect x="376" y="504" width="112" height="24" rx="12" fill="#F4B728"/>
+      <text class="pill" x="432" y="520.5" text-anchor="middle" fill="#0F1B2A">Payment proof</text>
+    </g>
+
+    <!-- What else reaches Base, and what never does. -->
+    <text class="note" x="48" y="566" fill="#93A89A">Addresses, amounts and the deposit's block stay encrypted.</text>
+    <text class="note" x="562" y="556" fill="#0F1B2A">Otherwise only <tspan class="mono" font-size="12">keccak256(salt || receiver)</tspan> and keyed tags.</text>
+    <text class="note" x="562" y="577" fill="#4C5D70">Never a Zcash transaction, note or address.</text>
+  </g>
+</svg>

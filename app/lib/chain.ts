@@ -50,10 +50,15 @@ import { config as appConfig, marketParams, ZERO_BYTES32, type AppConfig } from 
 import { viemChain } from "./deployment";
 import { borrowAssets, expectedMarket, mulDivDown, type MarketState, type PositionState } from "./morpho";
 import type { PreLiquidationTerms } from "./preliq";
+import { replayFetch } from "./replay/fetch";
+import { REPLAY } from "./replay/flag";
 
 let defaultClient: PublicClient | null = null;
 
-/** viem public client bound to the backend proxy (Base Sepolia, or Base on the mainnet beta). */
+/**
+ * viem public client bound to the backend proxy (Base Sepolia, or Base on the mainnet beta). In a
+ * replay build (DEMO) the replay's Base answers it in the page (lib/replay/rpc.ts).
+ */
 export function publicClient(): PublicClient {
   defaultClient ??= createPublicClient({
     chain: viemChain(),
@@ -61,6 +66,7 @@ export function publicClient(): PublicClient {
       timeout: 15_000,
       retryCount: 1,
       fetchOptions: { credentials: "omit", referrerPolicy: "no-referrer", cache: "no-store" },
+      ...(REPLAY ? { fetchFn: replayFetch } : {}),
     }),
   }) as PublicClient;
   return defaultClient;

@@ -133,19 +133,19 @@ export function PartialRelease({
                 placeholder={formatZec(max)}
                 aria-invalid={amountError ? true : undefined}
                 aria-describedby={`${amountId}-hint`}
-                className="w-full rounded-lg border border-border bg-bg px-3 py-2 tabular-nums text-text focus:border-accent"
+                className="field tabular-nums"
               />
               <Button variant="secondary" onClick={() => setInput(formatZec(max))}>
                 Max
               </Button>
             </div>
-            <p id={`${amountId}-hint`} className={amountError ? "text-sm text-danger" : "text-xs text-muted"} aria-live="polite">
+            <p id={`${amountId}-hint`} className={amountError ? "text-sm text-danger" : "text-xs text-muted"}>
               {amountError ??
                 `Up to ${formatTaz(max)} of ${formatTaz(collateral)}, minus the Zcash network fee when it is paid out.`}
             </p>
           </div>
           {remaining !== null ? (
-            <div aria-live="polite">
+            <div>
               <KeyValue
                 rows={[
                   ["Collateral after", `${formatTaz(remaining)} (≈ ${formatUsdc(collateralValue(remaining, price))} USDC)`],

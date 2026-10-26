@@ -2,11 +2,12 @@
 
 ## Before the demo
 
-1. `scripts/signer-network.sh start` — 5 signer nodes + backend; check `scripts/signer-network.sh status`.
+1. `scripts/signer-network.sh start`: 5 signer nodes + backend; check `scripts/signer-network.sh status`.
 2. Bots: `zecured-bots market-maker` and `zecured-bots liquidator` (MockUSDC minted to both).
 3. A borrower wallet pre-funded in Ironwood (`zecured-wallet balance`); a second vault already
    active for the liquidation scene (liquidation needs a few minutes of confirmations).
-4. Oracle price at $40 (the deployment default; the demo control panel sets it).
+4. The MOCK oracle's price: the deploy script starts it at $1,265 (`ZEC_USD_PRICE_CENTS`, near ZEC's price in
+   October 2026); the demo control panel moves it.
 5. The treasury's receiver and salt behind the deployment's `FEE_COMMITMENT` registered with the
    signers like a market maker's (`POST /recipients`): without it the vaults' opening-fee claims are
    never paid and their vaults never settle.
@@ -61,7 +62,7 @@ On a testnet deployment the deposit step offers "Try with demo TAZ" to a visitor
 the operators' demo wallet pays the vault its exact amount from its own Ironwood notes. It is a real
 Zcash testnet payment, proven on Base like any deposit. Each vault gets one demo payment, within a
 daily budget, after a second of proof of work in the browser. When the loan is closed its ZEC goes
-back to the demo wallet, unless the judge gives an Ironwood address of their own (the destination
+back to the demo wallet, unless the visitor gives an Ironwood address of their own (the destination
 form offers the demo wallet's address).
 
 Operators: run `zecured-wallet --wallet data/demo/wallet.json init`, fund the address it prints with
@@ -77,18 +78,13 @@ fill, the bonds (ΣB, B_eff), the anonymity sets, the proof versions and the run
 market's size and rates, the collateral, the bonds, the compensation order, and optional lending.
 `/buy`: the swap's Buy side.
 
-## Two-minute video
+## Recording the video
 
-| Time | Scene | Narration |
-|---|---|---|
-| 0:00–0:10 | Title | "Using ZEC in DeFi today usually means taking it out of the shielded pool. Zecured doesn't." |
-| 0:10–0:28 | Deposit by QR from Ironwood | "Pay a fresh 3-of-5 threshold vault from your Ironwood notes. No pool crossing, nothing revealed." |
-| 0:28–0:45 | Mint and borrow | "A non-transferable collateral receipt is minted straight into a Morpho position for a brand-new, gasless account. Borrow USDC." |
-| 0:45–1:02 | What the world sees | "Here's what the world sees: an anonymous account and a loan. No wallet, no balance, no history." |
-| 1:02–1:22 | Close from collateral | "No need to bring USDC back. A market maker closes the debt, takes ZEC for it, and the rest returns to a new shielded address — in one transaction." |
-| 1:22–1:35 | Liquidation | "If the price drops, a liquidator repays and receives ZEC — shielded." |
-| 1:35–1:52 | Threshold demo + UFVK | "Two signers can't move anything; if three collude, the theft is provable and their bonds pay the victims. And you can watch your vault yourself with its viewing key." |
-| 1:52–2:00 | Close | "Sell nothing. Reveal nothing. Zecured." |
+The submitted video runs about two minutes and follows the build being submitted. Rules for the recording:
 
-Rules for the recording: testnet only; no real personal addresses on screen; only features
-that work in the build being submitted.
+- Testnet only, and only features that work in the build being submitted.
+- No real personal addresses on screen, and never a viewing key, a salt, an owner-key backup, the admin token,
+  `.env`, a server's address or a terminal's history.
+- The DEMO and MOCK labels stay visible in every shot.
+- Every cut in time is marked with the real time that passed (for example "+4 min, real time").
+- 1080p, captions burned in and also as a `.vtt` file.

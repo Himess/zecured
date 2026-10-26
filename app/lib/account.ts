@@ -13,10 +13,7 @@
  * borrow in the first UserOp, then a partial release, the account never holding ETH or zZEC.
  */
 import { createClient, getAddress, http, HttpRequestError, type Address, type Hex, type PublicClient, type Transport } from "viem";
-import { createBundlerClient, createPaymasterClient } from "viem/account-abstraction";
 import { privateKeyToAccount } from "viem/accounts";
-import { toSafeSmartAccount } from "permissionless/accounts";
-import { getUserOperationGasPrice } from "permissionless/actions/pimlico";
 import { api as defaultApi, type Api } from "./api";
 import { assertAllowlisted, pinnedTargets, type Call, type NamedTargets } from "./calls";
 import { ContractsNotDeployedError, isDeployedAt, publicClient, readLinks, type ChainDeps } from "./chain";
@@ -28,6 +25,8 @@ import {
   type CloseRequestMessage,
   type DeleverageRequestMessage,
 } from "./eip712";
+import { replayLoanAccount } from "./replay/account";
+import { REPLAY } from "./replay/flag";
 import { predictAccountAddress, SAFE } from "./safe";
 
 export interface SentUserOp {
@@ -121,6 +120,8 @@ export interface AccountDeps {
 }
 
 export function loanAccount(ownerKey: Hex, deps: AccountDeps = {}): LoanAccount {
+  // DEMO: a replay build sends no UserOp; the recorded run's account answers (lib/replay/account.ts).
+  if (REPLAY) return replayLoanAccount(ownerKey);
   const config = deps.config ?? defaultConfig;
   const api = deps.api ?? defaultApi;
   const owner = privateKeyToAccount(ownerKey);
@@ -161,6 +162,13 @@ export function loanAccount(ownerKey: Hex, deps: AccountDeps = {}): LoanAccount 
       assertAllowlisted(calls, address, config, await namedTargets(calls, chain()));
 
       const client = chain().client; // reads through /proxy/rpc
+      // Loaded on the first UserOp only: permissionless pulls in all of `ox` (~150 KB gzip) when it loads, which
+      // the pages need neither to render nor in a replay build (which never sends a UserOp).
+      const [{ toSafeSmartAccount }, { getUserOperationGasPrice }, { createBundlerClient, createPaymasterClient }] = await Promise.all([
+        import("permissionless/accounts"),
+        import("permissionless/actions/pimlico"),
+        import("viem/account-abstraction"),
+      ]);
       const account = await toSafeSmartAccount({
         client,
         owners: [owner],
