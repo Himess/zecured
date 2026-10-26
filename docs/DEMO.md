@@ -38,7 +38,7 @@ Setup, once:
 1. `THEFT_DEMO=1 scripts/signer-network.sh init`: five fresh node identities in
    `signer/data-theft-demo/` (and the `demo-tier3` build in `target/theft-demo/`).
 2. `scripts/deploy-theft-demo.sh` (a simulation), then `scripts/deploy-theft-demo.sh --broadcast`:
-   the v3 contracts with a 2-minute challenge window and no opening fee
+   the v4.1 contracts with a 2-minute challenge window and no opening fee
    (`contracts/deployments/base-sepolia-theft-demo.json`).
 3. `THEFT_DEMO=1 scripts/signer-network.sh init` again (the network config now names the
    deployment), `THEFT_DEMO=1 scripts/bond-signers.sh`, `THEFT_DEMO=1 scripts/signer-network.sh start`.

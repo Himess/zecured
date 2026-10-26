@@ -98,7 +98,7 @@
 
 <section class="hero" id="top" data-scene="hero" aria-labelledby="hero-h">
   <div class="hero-in">
-    <p class="eyebrow reveal">ZECATHON 2026<span class="dot" aria-hidden="true"></span>Cross-Chain track<span class="dot" aria-hidden="true"></span>testnet</p>
+    <p class="eyebrow reveal">ZECATHON 2026 <span class="dot" aria-hidden="true"></span> Cross-Chain track <span class="dot" aria-hidden="true"></span> testnet</p>
     <h1 id="hero-h" class="display">
       <span class="line"><span>Borrow against</span></span>
       <span class="line"><span>shielded ZEC.</span></span>
@@ -118,24 +118,25 @@
 
 <section class="chapter" id="how" data-scene="deposit" aria-labelledby="c-deposit">
   <div class="panel">
-    <p class="kicker reveal"><span class="kicker-n">01</span>Deposit</p>
+    <p class="kicker reveal"><span class="kicker-n">01</span> Deposit</p>
     <h2 id="c-deposit" class="title reveal">Pay a vault no one holds alone.</h2>
     <p class="body reveal">Five signers create a fresh <span class="nb">3-of-5</span> FROST vault for your loan. You pay it from Ironwood like any shielded payment: no amount and no address go public.</p>
     <ul class="seen reveal" aria-label="What each chain records">
-      <li><span class="chip chip-z">Zcash</span>an encrypted payment</li>
-      <li><span class="chip chip-b">Base</span>nothing at all</li>
+      <li><span class="chip chip-z">Zcash</span> an encrypted payment</li>
+      <li><span class="chip chip-b">Base</span> nothing at all</li>
     </ul>
+    <p class="note reveal">On testnet we run all five signers, so their bonds show the mechanism, not independent security; mainnet needs five independent operators. <a href="docs/#trust">Who you trust</a></p>
   </div>
 </section>
 
 <section class="chapter" data-scene="prove" aria-labelledby="c-prove">
   <div class="panel">
-    <p class="kicker reveal"><span class="kicker-n">02</span>Prove</p>
+    <p class="kicker reveal"><span class="kicker-n">02</span> Prove</p>
     <h2 id="c-prove" class="title reveal">Base checks Zcash itself.</h2>
     <p class="body reveal">Base verifies Zcash’s block headers and their proof of work on its own. A zero-knowledge proof then shows your deposit is in one of those blocks, without saying which. zZEC, a collateral receipt nobody can transfer, is minted on that proof alone: no signer vouches for it.</p>
     <ul class="seen reveal" aria-label="What each chain records">
-      <li><span class="chip chip-z">Zcash</span>nothing new</li>
-      <li><span class="chip chip-b">Base</span>a vault id, a standard amount, a keyed tag</li>
+      <li><span class="chip chip-z">Zcash</span> nothing new</li>
+      <li><span class="chip chip-b">Base</span> a vault id, a standard amount, a keyed tag</li>
     </ul>
     <p class="note reveal">Together, the header relay and the proofs are a Zcash light client on Base: any contract can use them to check a shielded Zcash payment, without a bridge.</p>
     <figure class="still-fig">
@@ -146,7 +147,7 @@
 
 <section class="chapter" data-scene="borrow" aria-labelledby="c-borrow">
   <div class="panel">
-    <p class="kicker reveal"><span class="kicker-n">03</span>Borrow</p>
+    <p class="kicker reveal"><span class="kicker-n">03</span> Borrow</p>
     <h2 id="c-borrow" class="title reveal">Borrow from a <span class="nb">brand-new</span> account.</h2>
     <p class="body reveal">A fresh smart account borrows USDC on Morpho Blue against your zZEC. Its gas is sponsored, so it never holds ETH, and nothing on Base points back to your wallet.</p>
     <p class="note reveal">Lenders on Morpho Blue supply the USDC and earn the interest, in a new market backed by Zcash collateral.</p>
@@ -155,7 +156,7 @@
 
 <section class="chapter" data-scene="close" aria-labelledby="c-close">
   <div class="panel">
-    <p class="kicker reveal"><span class="kicker-n">04</span>Close</p>
+    <p class="kicker reveal"><span class="kicker-n">04</span> Close</p>
     <h2 id="c-close" class="title reveal">Leave without unshielding.</h2>
     <p class="body reveal">Repay, or let a market maker repay for you out of your collateral. Your ZEC, or what is left of it, returns to a new Ironwood address, and every payout is recorded on Base before the signers sign it.</p>
     <p class="note reveal">If ZEC falls too far, a liquidator repays part of the debt and is paid in shielded ZEC too, which even your viewing key cannot see; the rest stays yours. You can also opt in to gentler, earlier partial liquidations.</p>
@@ -164,12 +165,12 @@
 
 <section class="chapter" id="swap" data-scene="swap" aria-labelledby="c-swap">
   <div class="panel">
-    <p class="kicker reveal"><span class="kicker-n">05</span>Swap</p>
+    <p class="kicker reveal"><span class="kicker-n">05</span> Swap</p>
     <h2 id="c-swap" class="title reveal">Buy shielded ZEC with USDC.</h2>
     <p class="body reveal">The same light client settles a swap. A market maker fills your order from its own ZEC and USDC, at a price it signs for you alone. Your USDC waits in escrow on Base until a zero-knowledge proof shows the maker paid your shielded address for that very order.</p>
     <ul class="seen reveal" aria-label="What each chain records">
-      <li><span class="chip chip-b">Base</span>the order and a salted hash, never your address</li>
-      <li><span class="chip chip-z">Zcash</span>a shielded payment to you</li>
+      <li><span class="chip chip-b">Base</span> the order and a salted hash, never your address</li>
+      <li><span class="chip chip-z">Zcash</span> a shielded payment to you</li>
     </ul>
     <p class="note reveal">No liquidity pool, no bridge: anyone with ZEC and USDC can run a market maker. In the demo the market maker is ours and sets its price by hand (MOCK); on mainnet it would quote Chainlink’s ZEC/USD, checked against API3’s.</p>
   </div>
@@ -177,7 +178,7 @@
 
 <section class="chapter wide" id="privacy" data-scene="privacy" aria-labelledby="c-privacy">
   <div class="panel">
-    <p class="kicker reveal"><span class="kicker-n">06</span>Privacy</p>
+    <p class="kicker reveal"><span class="kicker-n">06</span> Privacy</p>
     <h2 id="c-privacy" class="title reveal">A bridge leaves four links to you. Zecured leaves none of them.</h2>
     <div class="versus">
       <div class="side side-bad reveal">
@@ -205,7 +206,7 @@
 
 <section class="chapter" id="trust" data-scene="trust" aria-labelledby="c-trust">
   <div class="panel">
-    <p class="kicker reveal"><span class="kicker-n">07</span>Trust</p>
+    <p class="kicker reveal"><span class="kicker-n">07</span> Trust</p>
     <h2 id="c-trust" class="title reveal">We let three signers steal.</h2>
     <p class="body reveal">On a separate DEMO deployment, three of five signers swept a vault. The borrower’s watchtower caught it two minutes later; a zero-knowledge proof of the theft slashed all five bonds (FROST hides which three signed), and the victim was made whole.</p>
     <p class="big-stat reveal"><span class="big-n"><span class="mono">3 → 12.65</span> USDC</span><span class="big-cap">the victim’s account, before and after</span></p>
@@ -297,7 +298,7 @@
         </ul>
       </div>
     </nav>
-    <p class="foot-note">This page loads nothing from anyone else: no analytics, no third-party fonts or scripts.</p>
+    <p class="foot-note">This page loads nothing from anyone else: no analytics, no third-party fonts or scripts. The ZEC, USDC and Morpho marks belong to their owners and only name the asset or protocol.</p>
   </div>
 </footer>
 </body>

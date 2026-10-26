@@ -16,16 +16,28 @@ The code: https://github.com/Himess/zecured.
 Zcash's shielded pool, or swap USDC into shielded ZEC. Base sees zero-knowledge proofs, never your Zcash address,
 transaction or balance. The ZEC sits in a fresh 3-of-5 FROST vault; Base verifies Zcash's headers itself and mints
 a non-transferable collateral receipt on a RISC Zero proof of the deposit; a brand-new, gasless account borrows on
-Morpho Blue. Testnet only; the signers are run by the team; the price oracle is mocked.
+Morpho Blue. Testnet only: the five signers are run by the team, and the ZEC price, the loan token (MockUSDC) and
+the verifier in our end-to-end runs are mocks; a real proof of a real deposit passes RISC Zero's live router in one
+command.
 
 ## For judges (5 minutes)
 
 - **Watch** the two-minute video. Its link goes here as soon as it is published.
 - **Click through** the app as a guided replay in your browser, with sample data in place of our servers (DEMO):
   https://himess.github.io/zecured/app/
-- **Check a real proof:** `cd contracts && forge test --match-path test/fork/RealSealsV2.t.sol --isolate` runs the
-  real Groth16 proofs of every guest through RISC Zero's verifier router as deployed on Base Sepolia, on a fork read
-  over the public RPC.
+- **Check a real proof in one command** (Foundry's `cast`, nothing to clone): RISC Zero's verifier router as deployed
+  on Base Sepolia accepts the Groth16 proof of a real Zcash testnet deposit (the TEST-ONLY vault 9, block 4,488,543):
+
+  ```bash
+  cast call 0x0b144E07A0826182B6b59788c34b32Bfa86Fb711 "verify(bytes,bytes32,bytes32)" \
+    $(curl -sL https://himess.github.io/zecured/evidence/deposit-test.seal) \
+    0x406c6d268f29270226c775db1fe4bec04acf51ba919e250078125d71c10bff41 \
+    0x1a9dcbc10182a251b4e24fdc01740df36a90f7eb9397cb89be1a9316d35867f4 \
+    --rpc-url https://sepolia.base.org && echo "accepted by RISC Zero's router"
+  ```
+
+  Change one digit of the last hash and the router reverts. Every guest, with minting and slashing through the real
+  router, on a fork: `cd contracts && forge test --match-path test/fork/RealSealsV2.t.sol --isolate`.
 - **Real and mock:** Zcash testnet transactions, the FROST vaults, the on-chain Zcash header relay, the RISC Zero
   proofs and Morpho Blue are real; the ZEC price, the loan token (MockUSDC), the verifier inside the end-to-end runs
   and the signers' independence are not.
@@ -120,8 +132,9 @@ like any claim. What the design cannot stop: all five signers colluding
 **Public**, which we state as scope rather than leave for you to find:
 - the Morpho position on Base: a fresh account's collateral and debt, its interest and any
   liquidation;
-- the timing between a commitment on Base and its payout on Zcash, narrowed by a random delay;
-- the testnet's small anonymity set;
+- the timing between a commitment on Base and its payout on Zcash, blurred by a random delay;
+- the anonymity sets, which are small on testnet: a deposit's proof places it among the Ironwood transactions of
+  about 3 blocks (a random 0 to 2 extra confirmations), a payout or a swap payment among those of 8 blocks;
 - what the signers see: the vault's notes and the destinations it pays (they are run by us in
   this demo).
 
@@ -131,11 +144,12 @@ like any claim. What the design cannot stop: all five signers colluding
 - Zcash testnet (NU7) Ironwood transactions;
 - 3-of-5 FROST threshold signing (re-randomized FROST over RedPallas, ZIP 2005 keys);
 - every signer's per-payout policy checks;
-- the Zcash header relay, which verifies Equihash on Base;
+- the Zcash header relay, which verifies Equihash on Base (an earlier version took real Testnet headers on public
+  Base Sepolia in 274 transactions, the last on 12 October 2026: 0xab07317f7B9390394271D9c03FE2E912C0E58FA5);
 - the deposit, violation and payment statements, run in the RISC Zero zkVM, and the guests'
   reproducible image ids;
 - real Groth16 seals of every pinned guest, accepted by RISC Zero's deployed verifier router on Base Sepolia and
-  Base mainnet forks;
+  Base mainnet forks, and the deposit's seal by the live router itself (the one-command check above);
 - `ZecuredSwap` and its market maker;
 - Morpho Blue's own deployment on Base Sepolia (on forks);
 - our own RPC proxy, bundler and paymaster with a sponsorship allowlist;

@@ -75,12 +75,12 @@
     <header class="doc-head">
       <p class="doc-kicker">Docs</p>
       <h1 class="doc-title">How Zecured works</h1>
-      <p class="doc-lead">Every id, height and timing on this page comes from our recorded runs on Zcash testnet and Base Sepolia forks, written down in <a href="https://github.com/Himess/zecured/blob/main/docs/TESTING.md">docs/TESTING.md</a>. Amounts are testnet ZEC (TAZ); 1 ZEC is 100,000,000 zatoshi (zat).</p>
+      <p class="doc-lead">Every txid, vault id, block height and timing on this page comes from our recorded runs on Zcash testnet and Base Sepolia forks, written down in <a href="https://github.com/Himess/zecured/blob/main/docs/TESTING.md">docs/TESTING.md</a>. The addresses are shortened examples. Amounts are testnet ZEC (TAZ); 1 ZEC is 100,000,000 zatoshi (zat).</p>
     </header>
 
     <!-- Overview -->
     <section id="overview" class="doc-sec" aria-labelledby="overview-h">
-      <h2 id="overview-h" class="doc-h2"><span class="doc-n">01</span>Overview</h2>
+      <h2 id="overview-h" class="doc-h2"><span class="doc-n">01</span> Overview</h2>
       <p>Zecured lets you use shielded ZEC on Base without unshielding it. Your ZEC stays in Ironwood, Zcash’s newest shielded pool. Base sees zero-knowledge proofs, salted commitments and a standard-size position, never a Zcash address, transaction or note.</p>
       <div class="two">
         <div class="card">
@@ -101,7 +101,7 @@
 
     <!-- Why -->
     <section id="problem" class="doc-sec" aria-labelledby="problem-h">
-      <h2 id="problem-h" class="doc-h2"><span class="doc-n">02</span>Why it matters</h2>
+      <h2 id="problem-h" class="doc-h2"><span class="doc-n">02</span> Why it matters</h2>
       <p>Using ZEC in DeFi usually means taking it out of the shielded pool, and three steps then leave four links back to you.</p>
       <div class="leaks">
         <div class="leak-card">
@@ -125,8 +125,8 @@
 
     <!-- The loan -->
     <section id="loan" class="doc-sec" aria-labelledby="loan-h">
-      <h2 id="loan-h" class="doc-h2"><span class="doc-n">03</span>How a loan works</h2>
-      <p>Five steps, seen from both chains at once. The dark panel is the shielded pool, blurred where it is encrypted: switch on the viewing key to read what the borrower can. The light panel is every event Base records, as a block explorer shows it. Gold marks the only things that cross: proofs. The ids, blocks and timings are real, from several recorded runs (TESTING.md), so they do not all belong to one vault.</p>
+      <h2 id="loan-h" class="doc-h2"><span class="doc-n">03</span> How a loan works</h2>
+      <p>Five steps, seen from both chains at once. The dark panel is the shielded pool, blurred where it is encrypted: switch on the viewing key to read what the borrower can. The light panel is what Base records about the vault, as a block explorer shows it. Gold marks the only things that cross: proofs. The ids, blocks and timings are real, from several recorded runs (TESTING.md), so they do not all belong to one vault or one version of the contracts.</p>
 
       <div class="loan-body" id="loan-body">
         <div class="rail" role="group" aria-label="Steps of a loan">
@@ -163,7 +163,7 @@
             <h3 class="panel-t">Nothing yet</h3>
             <p>The vault is opened off-chain. Base first hears of it when your deposit’s proof lands, so no transaction on Base comes before your deposit.</p>
             <p class="empty">No transaction about this vault</p>
-            <p class="note"><b>Shown live:</b> with one signer offline, opening a vault was refused within a second. A vault needs all five.</p>
+            <p class="note"><b>In a recorded run:</b> with one signer offline, opening a vault was refused within a second. A vault needs all five.</p>
           </div>
         </div>
 
@@ -223,7 +223,7 @@
             <p>The header relay has already checked that header’s Equihash on Base. The Intake verifies the proof, waits a few headers, then mints zZEC, a receipt nobody can transfer, straight into your account’s Morpho position.</p>
             <ol class="ledger" aria-label="Base events in this step">
               <li><span class="ev">HeaderAdded</span><span class="fv">a later Zcash header, Equihash checked on-chain</span></li>
-              <li><span class="ev">ActivationPending</span><span class="fv"><span class="fld">vault <span class="mono">0x59d5e63e…</span></span><span class="fld">amount <span class="mono">1,000,000</span></span><span class="fld">depositTag <span class="mono">0xe43d283f…</span></span></span></li>
+              <li><span class="ev">ActivationPending</span><span class="fv"><span class="fld">a vault id</span><span class="fld">amount <span class="mono">1,000,000</span></span><span class="fld">a keyed depositTag</span></span></li>
               <li><span class="ev">VaultActivated</span><span class="fv">zZEC supplied to Morpho for the account</span></li>
             </ol>
             <p class="note"><b>Measured</b> in the browser, on a fork with the MOCK verifier: the proof was on Base 4 min 25 s after the broadcast, and the loan active 7 min 56 s after it. A real deposit proof passes RISC Zero’s router in the fork tests.</p>
@@ -254,7 +254,7 @@
             <h3 class="panel-t">Borrow from a fresh account</h3>
             <p>Your first UserOp deploys a fresh Safe, authorizes Zecured on Morpho Blue and borrows USDC. Our paymaster sponsors the gas, so the account never receives ETH and leaves no funding trail. The USDC comes from lenders on Morpho Blue, who earn its interest: a new market backed by Zcash collateral.</p>
             <ol class="ledger" aria-label="Base events in this step">
-              <li><span class="ev">UserOperation</span><span class="fv"><span class="fld">deploy, authorize, borrow</span><span class="fld">gas <span class="mono">sponsored</span></span></span></li>
+              <li><span class="ev">UserOperationEvent</span><span class="fv"><span class="fld">deploy, authorize, borrow</span><span class="fld">gas <span class="mono">sponsored</span></span></span></li>
               <li><span class="ev">Borrow</span><span class="fv"><span class="fld">assets <span class="mono">4 USDC</span></span><span class="fld">market <span class="mono">zZEC/USDC</span>, liquidation LTV <span class="mono">62.5 %</span></span></span></li>
             </ol>
             <p class="note"><b>Measured:</b> deploying, authorizing, borrowing and setting pre-liquidation terms took one sponsored UserOp of 729,131 gas.</p>
@@ -290,7 +290,7 @@
               <li><span class="ev">SpendCommitted</span><span class="fv"><span class="fld">payoutRef <span class="mono">0xcdf694fd…</span></span><span class="fld">inputTag <span class="mono">0xe43d283f…</span></span></span></li>
               <li><span class="ev">PayoutInclusionProven</span><span class="fv">under a header planned in advance</span></li>
             </ol>
-            <p class="note"><b>Measured:</b> the market maker and the borrower were paid in one Zcash transaction, block 4,488,453.</p>
+            <p class="note"><b>Measured:</b> after a 0.004 ZEC partial release of that 0.01 TAZ vault, the market maker and the borrower were paid in one Zcash transaction, block 4,488,453.</p>
           </div>
         </div>
       </div>
@@ -301,7 +301,7 @@
 
     <!-- What Base sees -->
     <section id="privacy" class="doc-sec" aria-labelledby="privacy-h">
-      <h2 id="privacy-h" class="doc-h2"><span class="doc-n">04</span>What Base sees</h2>
+      <h2 id="privacy-h" class="doc-h2"><span class="doc-n">04</span> What Base sees</h2>
       <p>The same loan, once through a typical bridge and once through Zecured, as a block explorer shows it. Red marks what ties it to you.</p>
       <div class="seg" role="group" aria-label="Show the loan through">
         <button type="button" aria-pressed="true" aria-controls="sees-bridge" data-view="bridge">A typical bridge</button>
@@ -340,7 +340,7 @@
 
     <!-- Swap -->
     <section id="swap" class="doc-sec" aria-labelledby="swap-h">
-      <h2 id="swap-h" class="doc-h2"><span class="doc-n">05</span>The swap</h2>
+      <h2 id="swap-h" class="doc-h2"><span class="doc-n">05</span> The swap</h2>
       <p>No custodian, no signer, no wrapped ZEC. Your USDC waits in escrow on Base and moves only on a zero-knowledge proof that a shielded payment for that very order is in the Zcash chain.</p>
       <p><b>Where the liquidity comes from.</b> No liquidity pool and no bridge: a market maker fills each order from its own inventory, ZEC in its shielded wallet and USDC on Base. It quotes the ZEC/USD oracle price plus its spread and signs the quote under EIP-712 for one taker, so nobody else can take it. Anyone with ZEC and USDC can run one (<span class="mono">swap/maker</span>); on testnet it is ours, and the price is set by hand (MOCK). On mainnet the price would be Chainlink’s ZEC/USD, checked against API3’s. An order is capped at 200 USDC on testnet and 250 USDC in the mainnet beta.</p>
       <ol class="lanes">
@@ -370,7 +370,7 @@
 
     <!-- Trust -->
     <section id="trust" class="doc-sec" aria-labelledby="trust-h">
-      <h2 id="trust-h" class="doc-h2"><span class="doc-n">06</span>Who you trust</h2>
+      <h2 id="trust-h" class="doc-h2"><span class="doc-n">06</span> Who you trust</h2>
       <p>Base never takes the signers’ word. Deposits are proven, payouts are proven, and misbehaviour is proven.</p>
       <ul class="ladder">
         <li>
@@ -402,14 +402,14 @@
 
       <div class="theft" id="theft">
         <h3 class="doc-h3">The theft demonstration</h3>
-        <p>We let three signers steal, on a separate deployment labelled DEMO, with its own five signers and a 2-minute challenge window instead of 24 hours. Times are UTC, from the run of October 21.</p>
+        <p>We let three signers steal, on a separate deployment labelled DEMO, with its own five signers and a 2-minute challenge window instead of 24 hours. Times are UTC, from the run of October 21, which went past midnight.</p>
         <ol class="tl">
           <li class="tl-z"><span class="tl-m mono">sweep 43ea5e91, block 4,523,730</span><p>Signers 3, 4 and 5 sweep the vault to a wallet of ours. Nothing is committed on Base.</p></li>
           <li class="tl-z"><span class="tl-m">Two minutes later</span><p>The borrower’s watchtower reads the vault with its viewing key and finds its note spent by a transaction no commitment names: violation F1.</p></li>
           <li class="tl-z"><span class="tl-m">64 s</span><p>The violation’s witness is built from the chain and the viewing key.</p></li>
-          <li class="tl-b tl-proof"><span class="tl-m mono">00:04:40</span><p><span class="mono">proveViolation</span> lands. Its journal holds no Zcash transaction, note or address, and the vault freezes at once.</p></li>
-          <li class="tl-b"><span class="tl-m mono">00:06:47</span><p><span class="mono">executeSlash</span>, once the 2-minute window is over: all five bonds are slashed.</p></li>
-          <li class="tl-b"><span class="tl-m mono">00:16:53</span><p>The incident closes at $1,265 per ZEC. The slashed bonds repay the victim’s debt and retire its zZEC.</p></li>
+          <li class="tl-b tl-proof"><span class="tl-m mono">00:04:40 UTC</span><p><span class="mono">proveViolation</span> lands. Its journal holds no Zcash transaction, note or address, and the vault freezes at once.</p></li>
+          <li class="tl-b"><span class="tl-m mono">00:06:47 UTC</span><p><span class="mono">executeSlash</span>, once the 2-minute window is over: all five bonds are slashed.</p></li>
+          <li class="tl-b"><span class="tl-m mono">00:16:53 UTC</span><p>The incident closes at $1,265 per ZEC. The slashed bonds repay the victim’s debt and retire its zZEC.</p></li>
           <li class="tl-b tl-end"><span class="tl-big"><span class="mono">3 → 12.65</span> USDC</span><p>The victim’s account after it withdrew its equity: the full value of its 0.01 ZEC.</p></li>
         </ol>
         <p class="note">On this fork the violation’s seal came from the MOCK verifier; a real F1 seal passes RISC Zero’s router in the fork tests. On Zcash testnet one Equihash ASIC out-mines the whole network about 40 times over, so every guarantee here that rests on proof of work is demonstrative. The five demo signers are run by us: the bonds show the mechanism, not independent economic security.</p>
@@ -418,7 +418,7 @@
 
     <!-- The judge's questions -->
     <section id="faq" class="doc-sec" aria-labelledby="faq-h">
-      <h2 id="faq-h" class="doc-h2"><span class="doc-n">07</span>A judge’s questions</h2>
+      <h2 id="faq-h" class="doc-h2"><span class="doc-n">07</span> A judge’s questions</h2>
       <dl class="faq">
         <dt>Isn’t this just a multisig?</dt>
         <dd>It’s a FROST threshold vault: one shielded address whose signatures look like a single signer’s, and every signer enforces a written policy on every payout. Two compromised signers can’t move funds (see <a href="#trust">Who you trust</a>).</dd>
@@ -436,15 +436,16 @@
 
     <!-- Evidence -->
     <section id="evidence" class="doc-sec" aria-labelledby="evidence-h">
-      <h2 id="evidence-h" class="doc-h2"><span class="doc-n">08</span>Evidence</h2>
+      <h2 id="evidence-h" class="doc-h2"><span class="doc-n">08</span> Evidence</h2>
       <p>Every number on this page comes from a run you can repeat, on testnets and local forks.</p>
       <div class="table" role="table" aria-label="Test results">
         <div class="tr th" role="row"><span role="columnheader">What</span><span role="columnheader">Result</span><span role="columnheader">How to run it</span></div>
         <div class="tr" role="row"><span role="cell">Contract tests</span><span role="cell"><b>804 pass</b>, 6 skipped without a Base mainnet RPC</span><span role="cell" class="mono">forge test --isolate</span></div>
         <div class="tr" role="row"><span role="cell">Invariant campaigns</span><span role="cell"><b>4 campaigns, 35 invariants</b>, 12,800 calls each, no reverts</span><span role="cell" class="mono">forge test --isolate</span></div>
         <div class="tr" role="row"><span role="cell">Symbolic checks</span><span role="cell"><b>22 of 22</b> hold for every input of a single call (Halmos)</span><span role="cell" class="mono">FOUNDRY_PROFILE=halmos halmos</span></div>
-        <div class="tr" role="row"><span role="cell">Real Groth16 seals</span><span role="cell"><b>4 kinds</b> of real seal (deposit, F1, inclusion, payment) pass RISC Zero’s router, in 12 tests</span><span role="cell" class="mono">forge test --match-path test/fork/RealSealsV2.t.sol --isolate</span></div>
-        <div class="tr" role="row"><span role="cell">On a Base mainnet fork</span><span role="cell"><b>533 pass</b>, the v3 suites, against mainnet’s Morpho Blue and RISC Zero router</span><span role="cell" class="mono">ZECURED_FORK_NETWORK=base-mainnet forge test --isolate</span></div>
+        <div class="tr" role="row"><span role="cell">Real Groth16 seals</span><span role="cell"><b>4 kinds</b> of real seal (deposit, F1, inclusion, and a payment on a synthetic fixture) pass RISC Zero’s router, in 12 tests</span><span role="cell" class="mono">forge test --match-path test/fork/RealSealsV2.t.sol --isolate</span></div>
+        <div class="tr" role="row"><span role="cell">The live router</span><span role="cell"><b>Accepts</b> the Groth16 proof of a real Zcash testnet deposit on Base Sepolia today, by <span class="mono">eth_call</span>; one changed digit and it reverts</span><span role="cell" class="mono">cast call, the README’s “Check a real proof”</span></div>
+        <div class="tr" role="row"><span role="cell">On a Base mainnet fork</span><span role="cell"><b>533 pass</b>, the v3 suites (not yet re-run on v4), against mainnet’s Morpho Blue and RISC Zero router</span><span role="cell" class="mono">ZECURED_FORK_NETWORK=base-mainnet ZECURED_FORK_BLOCK=52688338 forge test --isolate</span></div>
         <div class="tr" role="row"><span role="cell">Rust workspace</span><span role="cell"><b>600 pass</b> in CI on Linux</span><span role="cell" class="mono">cargo test --workspace --locked</span></div>
         <div class="tr" role="row"><span role="cell">App</span><span role="cell"><b>451 pass</b></span><span role="cell" class="mono">pnpm test</span></div>
         <div class="tr" role="row"><span role="cell">GPU proofs</span><span role="cell"><b>28.1 s</b> for a deposit, 36.9 s for an F1 violation, on one RTX 4090 (the STARK; the Groth16 wrap runs on a CPU)</span><span role="cell" class="mono">scripts/gpu-prove.sh</span></div>
@@ -468,15 +469,16 @@
             <li>Shielded Ironwood transactions on Zcash testnet (NU7)</li>
             <li>3-of-5 FROST vaults: re-randomized FROST over RedPallas, keys per ZIP 2005</li>
             <li>Every signer’s policy checks on every payout</li>
-            <li>The Zcash header relay, verifying Equihash on Base</li>
+            <li>The Zcash header relay, verifying Equihash on Base; an earlier version took real Testnet headers on public Base Sepolia in October</li>
             <li>The deposit, violation and payment statements in the RISC Zero zkVM, with reproducible image ids; real Groth16 seals of the pinned guests pass RISC Zero’s router</li>
-            <li>Morpho Blue on Base Sepolia; the v3 contract suites (533 tests) also pass against mainnet’s Morpho Blue and RISC Zero router on a fork</li>
+            <li>Morpho Blue’s own deployment on Base Sepolia (on forks); the v3 contract suites (533 tests) also pass against mainnet’s Morpho Blue and RISC Zero router on a fork</li>
             <li>The contracts: zZEC, the Registry and its spend logic, the Intake, the settlement adapter, the bonds, the slasher, the compensator and the version registry; and the mainnet price feed, tested on the live Chainlink and API3 feeds</li>
             <li>Liquidation, close from collateral and refunds of non-conforming deposits</li>
             <li>Every payout committed on Base before it is signed; bonds, slashing, compensation, the liveness penalty and disputes; the watchtower</li>
             <li>Zecured Swap: the contract, the payment statement and the market maker</li>
             <li>Our own RPC, bundler and paymaster proxy, with a sponsorship allowlist</li>
-            <li>An onion service configuration for the app and its API</li>
+            <li>The app’s pages, the same in the live build and in the judges’ replay</li>
+            <li>An onion service configuration for the app and its API (configured, not deployed)</li>
           </ul>
         </div>
         <div>
@@ -501,12 +503,12 @@
 
     <!-- Mainnet -->
     <section id="mainnet" class="doc-sec" aria-labelledby="mainnet-h">
-      <h2 id="mainnet-h" class="doc-h2"><span class="doc-n">09</span>Toward mainnet</h2>
+      <h2 id="mainnet-h" class="doc-h2"><span class="doc-n">09</span> Toward mainnet</h2>
       <p>The mainnet beta changes configuration, not code. Full mainnet also needs the designs not yet built (a dispute bond, per-signer reimbursement, the fixes in <a href="https://github.com/Himess/zecured/blob/main/docs/MAINNET.md#7-known-limitations-and-their-designs">Known limitations</a>), and what code can’t bring: independent operators, real bonds and liquidity, and an audit.</p>
       <ol class="stages">
         <li class="stage done"><p class="stage-m">Done</p><h3 class="stage-t">Checked against mainnet</h3><p>The v3 suites’ 533 contract tests on mainnet’s Morpho Blue and RISC Zero router, the real seals verified there, the relay run on 1,600 real Mainnet headers, the price feed read from live Chainlink and API3.</p></li>
         <li class="stage"><p class="stage-m">About November 5, 2026</p><h3 class="stage-t">NU7 on Zcash Mainnet</h3><p>The relay’s activation height, the guests’ branch ids and the off-chain stack follow the upgrade.</p></li>
-        <li class="stage"><p class="stage-m">Then</p><h3 class="stage-t">An invite-only beta</h3><p>Unaudited and labelled so: a 1 ZEC cap, vaults of 0.05 and 0.1 ZEC, five bonds of 300 USDC, and exits that never stop.</p></li>
+        <li class="stage"><p class="stage-m">Then</p><h3 class="stage-t">An invite-only beta</h3><p>Unaudited and labelled so: a 1 ZEC cap, vaults of 0.05 and 0.1 ZEC, bonds of at least 300 USDC (five of about 510 open the whole cap at today’s price), and exits that never stop.</p></li>
         <li class="stage"><p class="stage-m">After an audit</p><h3 class="stage-t">Mainnet</h3><p>Five independent operators with bonds of 50,000 USDC each, a 100 ZEC cap and 72-hour windows, after an audit of the contracts, the guests and the signer policy.</p></li>
       </ol>
       <p>The vault design is written up as a draft ZIP, <a href="https://github.com/Himess/zecured/blob/main/docs/zip-draft-shielded-collateral-vaults.md">Shielded Collateral Vaults</a>, for any wallet or chain to build on. What is still open, and how each gap would close, is in <a href="https://github.com/Himess/zecured/blob/main/docs/MAINNET.md#7-known-limitations-and-their-designs">Known limitations and their designs</a>.</p>
@@ -514,7 +516,7 @@
 
     <!-- Run -->
     <section id="run" class="doc-sec" aria-labelledby="run-h">
-      <h2 id="run-h" class="doc-h2"><span class="doc-n">10</span>Run it yourself</h2>
+      <h2 id="run-h" class="doc-h2"><span class="doc-n">10</span> Run it yourself</h2>
       <p>No deployment is kept running through the judging period. Two ways to see it: the app’s replay plays a whole loan and a swap in your browser, with sample data and nothing to install; or run everything on your machine (five signer processes, the coordinator, the contracts on a local fork of Base Sepolia and the app, paying real Zcash testnet notes from the faucet). Plan an afternoon for the local run; the README walks through it.</p>
       <p class="ctas"><a class="btn btn-gold" href="../app/">Try the replay</a><a class="btn btn-line" href="https://github.com/Himess/zecured#running-it">Run it on a local fork<svg class="ext" width="11" height="11" viewBox="0 0 12 12" aria-hidden="true" focusable="false"><path d="M3.5 2.5h6v6M9.5 2.5 2.5 9.5" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round"/></svg></a><a class="btn btn-line" href="https://github.com/Himess/zecured">Read the code<svg class="ext" width="11" height="11" viewBox="0 0 12 12" aria-hidden="true" focusable="false"><path d="M3.5 2.5h6v6M9.5 2.5 2.5 9.5" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round"/></svg></a></p>
       <ul class="refs">
@@ -563,7 +565,7 @@
         </ul>
       </div>
     </nav>
-    <p class="foot-note">This page loads nothing from anyone else: no analytics, no third-party fonts or scripts.</p>
+    <p class="foot-note">This page loads nothing from anyone else: no analytics, no third-party fonts or scripts. The ZEC, USDC and Morpho marks belong to their owners and only name the asset or protocol.</p>
   </div>
 </footer>
 </body>

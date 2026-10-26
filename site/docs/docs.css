@@ -1224,7 +1224,17 @@ html:not(.js) .sees[hidden] {
     grid-template-columns: minmax(0, 1fr);
   }
 
+  /* Contents above the text on tablets and phones: the ten sections in two columns, no sub-entries. */
   .toc {
+    position: static;
+  }
+
+  .toc > ol {
+    grid-template-columns: repeat(2, minmax(0, 1fr));
+    column-gap: 12px;
+  }
+
+  .toc ol ol {
     display: none;
   }
 

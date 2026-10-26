@@ -75,7 +75,7 @@ consensus change.
     deposit's block.
 - **What remains linkable.** The loan itself is public on the settlement chain: its size,
   interest and any liquidation. So is the timing between a commitment and its payout on Zcash
-  (see Commit before share; a random delay narrows it). A small anonymity set (Testnet) weakens
+  (see Commit before share; a random delay blurs it). A small anonymity set (Testnet) weakens
   every timing argument.
 - **The signers see the vault.** They see its notes and the destinations it pays. This is
   inherent: they verify every payout against those notes. Third-party outputs (liquidators,

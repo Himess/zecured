@@ -1,10 +1,12 @@
 # Judges' FAQ
 
 **Can I try it?**
-Yes, three ways. Watch the two-minute video (linked from the README as soon as it is published). Open the app as a
+Yes, four ways. Watch the two-minute video (linked from the README as soon as it is published). Open the app as a
 guided replay (https://himess.github.io/zecured/app/, DEMO): the same app in your browser, with a simulator and
-sample data in place of our servers; you press the real buttons. Or run the whole system on a local fork of Base
-Sepolia with real Zcash testnet ([README](../README.md#running-it)). No hosted deployment runs through judging
+sample data in place of our servers; you press the real buttons. Check a real proof with one `cast call`: RISC
+Zero's router on Base Sepolia accepts the Groth16 proof of a real Zcash testnet deposit
+([README](../README.md#for-judges-5-minutes), item 3). Or run the whole system on a local fork of Base Sepolia with
+real Zcash testnet ([README](../README.md#running-it)). No hosted deployment runs through judging
 ([D82](DECISIONS.md)): it would need five signer nodes, a coordinator and a GPU prover for 25 days.
 [TESTING.md](TESTING.md) records the end-to-end runs (txids and timings) and the real Groth16 seals of every
 pinned guest, checked by RISC Zero's router.
@@ -131,6 +133,17 @@ A 5-party FROST DKG per vault (re-randomized FROST over RedPallas). Following ZI
 `use_qsk = true`, so the vault stays quantum-recoverable. Our derivation matches 8 independent
 test vectors.
 
+**Does every signer hold the vault's key?**
+Each holds a FROST share of the spend authorizing key, which no node ever assembles, and the shared `sk` that ZIP
+2005's FROST usage requires for the viewing keys: all five can see the vault, none can sign alone. The same `sk`
+gives each signer the vault's quantum spending key `qsk`, so a quantum-recovery spend, if a future network upgrade
+enables one, would need only one of them: an open point for the mainnet design.
+
+**Who chooses FROST's randomizer?**
+The PCZT fixes each spend's `alpha` (`rk = ak + [alpha]G` is in the sighash), and every signer verifies the PCZT
+against its own plan before it draws its round-one nonces (`signer/crates/node/src/signing.rs`, `commit`), so a
+coordinator cannot choose `alpha` after seeing the commitments ([D6](DECISIONS.md)).
+
 **Can the coordinator cheat?**
 It holds no key material. Every signer recomputes the payout plan from its own view of Zcash
 and Base and verifies the coordinator's transaction against it: recipients, amounts, inputs,
@@ -139,8 +152,28 @@ be reused for another action. DKG secrets travel node-to-node encrypted.
 
 **What exactly leaks?**
 Loan size, collateral denomination, interest, liquidation events and the amount returned to
-you at close, on Base, none of it linked to you. Zcash recipients appear on Base only as salted
-commitments. Full table in [THREAT_MODEL.md](THREAT_MODEL.md).
+you at close, on Base: none of it names you or your wallet. Zcash recipients appear on Base only as salted
+commitments. On testnet the anonymity sets are small: a deposit hides among the Ironwood transactions of about 3
+blocks, a payout or a swap payment among those of 8. Full table in [THREAT_MODEL.md](THREAT_MODEL.md).
+
+**Who liquidates, and when are they paid?**
+Anyone, through the SettlementAdapter (zZEC cannot leave Morpho for an outside address). The liquidator repays USDC on
+Morpho at once and receives the seized collateral, with Morpho's incentive (about 12.7 % at the 62.5 % LLTV), in
+shielded ZEC by the vault's next payout. If the signers stall once one of them acknowledged its destination, the
+bonds pay the claim's value plus 5 %, in USDC, after the liveness period (24 hours; 72 on mainnet).
+
+**Did anything run on a public chain?**
+Yes, twice. An earlier version of our Zcash header relay took real Testnet headers on public Base Sepolia, Equihash
+checked on-chain, in 274 transactions up to Zcash height 4,491,413, the last on 12 October 2026
+([0xab07…8FA5](https://sepolia.basescan.org/address/0xab07317f7B9390394271D9c03FE2E912C0E58FA5)). And RISC Zero's
+router on Base Sepolia accepts the Groth16 proof of a real Zcash testnet deposit today: the one-command check in the
+[README](../README.md#for-judges-5-minutes). The loans, the swap and the theft demonstration ran on Base Sepolia forks
+([TESTING.md](TESTING.md)).
+
+**Why wait for NU7 on mainnet?**
+Nothing in the design needs NU7: the mainnet deposit guest proves NU6.3's and NU7's epochs. The beta waits for NU7's
+Mainnet height so that the relay is deployed once with both block spacings (75 s, then 25 s) and ZIP 221's history
+tree restarting at the activation ([MAINNET.md](MAINNET.md)).
 
 **What's mocked?**
 The ZEC price (`MockZecOracle`, behind `DemoShockOracle`, whose owner-set shock shows a liquidation); the loan token

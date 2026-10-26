@@ -1,6 +1,6 @@
 # Zecured
 
-![Zecured: the shielded pool on the left, Base on the right, and a gold proof crossing the seam between them](docs/assets/hero.png)
+[![Zecured: the shielded pool on the left, Base on the right, and a gold proof crossing the seam between them](docs/assets/hero.png)](https://himess.github.io/zecured/)
 
 > **Borrow against shielded ZEC. Only the proof crosses.**
 >
@@ -16,10 +16,23 @@
 1. **Watch** the two-minute video. Its link goes here as soon as it is published.
 2. **Click through** [the app as a guided replay](https://himess.github.io/zecured/app/): the real app in your
    browser, with a simulator and sample data in place of our servers (DEMO). Nothing to install.
-3. **Check a real proof:** `cd contracts && forge test --match-path test/fork/RealSealsV2.t.sol --isolate`
-   (Foundry 1.8.5) runs real Groth16 proofs of every guest (a Zcash testnet deposit and vault spend, a payout's
-   inclusion, a synthetic swap payment) through RISC Zero's verifier router as deployed on Base Sepolia, on a
-   fork read over the public RPC.
+3. **Check a real proof in one command** (Foundry's `cast`, nothing to clone): RISC Zero's verifier router as
+   deployed on Base Sepolia accepts the Groth16 proof of a real Zcash testnet deposit (the TEST-ONLY vault 9,
+   0.01 TAZ at block 4,488,543):
+
+   ```bash
+   cast call 0x0b144E07A0826182B6b59788c34b32Bfa86Fb711 "verify(bytes,bytes32,bytes32)" \
+     $(curl -sL https://himess.github.io/zecured/evidence/deposit-test.seal) \
+     0x406c6d268f29270226c775db1fe4bec04acf51ba919e250078125d71c10bff41 \
+     0x1a9dcbc10182a251b4e24fdc01740df36a90f7eb9397cb89be1a9316d35867f4 \
+     --rpc-url https://sepolia.base.org && echo "accepted by RISC Zero's router"
+   ```
+
+   The second hash is the deposit guest's image id, the third the SHA-256 of the proof's journal
+   (`_journal` in `contracts/test/fork/RealSealsV2.t.sol`): change one digit and the router reverts. Every guest
+   (a deposit and a vault spend, a payout's inclusion, a synthetic swap payment), with minting and slashing through
+   the real router, on a fork: `cd contracts && forge test --match-path test/fork/RealSealsV2.t.sol --isolate`
+   (Foundry 1.8.5).
 4. **Real and mock, in one line:** Zcash testnet transactions, the FROST vaults, the on-chain Zcash header relay,
    the RISC Zero proofs and Morpho Blue are real; the ZEC price, the loan token (MockUSDC), the verifier inside
    the end-to-end runs and the signers' independence are not ([the full list](#what-is-real-and-what-is-a-mock)).
@@ -315,8 +328,8 @@ passing ([docs/TIER2.md](docs/TIER2.md) § 8.1 lists the ELFs' hashes):
 | payment-test (swap, 2026-10-17) | `0x199bf772d0780413a07081b4889f0473c8ae558c6d8c4dca96eef49b5e486134` |
 | payment-main (swap, 2026-10-17) | `0x1c2def3eb121bd3240700ca554ab455e03420981856fda3f580b930f731038b2` |
 
-The ids of a deployment's network must equal the deployed ones (`deployments/base-sepolia.json` for
-Testnet). A build without
+The ids of a deployment's network must equal the deployed ones (the deployment's record in
+`contracts/deployments/`, such as `anvil.json` on a local fork). A build without
 `ZECURED_DOCKER_GUESTS` uses the local risc0 toolchain and gives machine-dependent ids; provers
 then run the pinned ELFs (`ZECURED_DEPOSIT_ELF`, `ZECURED_VIOLATION_ELF`, docs/TIER2.md § 8.1).
 
