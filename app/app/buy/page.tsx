@@ -18,7 +18,7 @@ export default function BuyPage() {
         </>
       }
       title="Buy shielded ZEC"
-      lead="Swap USDC into shielded ZEC with no custodian: the maker pays your Ironwood address and proves it on Base before your USDC is released."
+      lead="No custodian: your USDC waits on Base until the maker proves, in zero knowledge, that it paid your Ironwood address."
     >
       <BuyZec />
     </Page>

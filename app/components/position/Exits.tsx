@@ -2,14 +2,16 @@
 
 import { useId, useState, type ReactNode } from "react";
 import { getAddress, isAddress, type Hex } from "viem";
+import { ActionError } from "@/components/ActionError";
 import { DestinationStep } from "@/components/DestinationForm";
 import { IconArrowRight, IconCheck, IconRefresh } from "@/components/icons";
-import { TokenAmount, usdc, zec } from "@/components/loan";
+import { SplitBar, usdc } from "@/components/loan";
 import { TxResult } from "@/components/TxResult";
-import { Button, cx, KeyValue, Mono, Notice } from "@/components/ui";
+import { Button, cx, Disclosure, Hint, KeyValue, Mono, Notice } from "@/components/ui";
 import { loanAccount } from "@/lib/account";
 import { api, type CloseQuote, type Vault } from "@/lib/api";
 import { authorizeAdapterCalls, invalidateNonceCalls, releaseCalls, repayAndReleaseCalls, transferUsdcCalls } from "@/lib/calls";
+import { formatUtc } from "@/lib/calls";
 import { isNonceUsed, type PositionSnapshot } from "@/lib/chain";
 import { CLOSE_TTL_SECONDS, deadlineIn, randomNonce128, type CloseRequestMessage } from "@/lib/eip712";
 import { notifyLoansChanged, useAction } from "@/lib/hooks";
@@ -39,17 +41,18 @@ export function Exits({
   onChanged: () => void;
 }) {
   const hasDebt = snapshot.position.borrowShares > 0n;
+  const token = loanTokenName();
   const options: { kind: ExitKind; title: string; body: string }[] = hasDebt
     ? [
         {
           kind: "close",
           title: "Close from collateral (recommended)",
-          body: "A market maker repays your debt and takes the equivalent ZEC from the vault; the rest returns to a new Ironwood address. No outside funds touch your account.",
+          body: `A market maker repays your debt and takes its value in ZEC from the vault; the rest returns to a new Ironwood address. You keep the ${token} you borrowed, and no outside funds touch your account.`,
         },
         {
           kind: "repay",
-          title: "Repay with USDC, then release",
-          body: "Repay the debt with USDC held by your loan account and take all your ZEC back. Topping the account up from an exchange or your main wallet links them publicly.",
+          title: `Repay with ${token}, then release`,
+          body: `Repay the debt with ${token} held by your loan account and take all your ZEC back. Topping the account up from an exchange or your main wallet links them publicly.`,
         },
       ]
     : [
@@ -67,15 +70,15 @@ export function Exits({
   return (
     <div className="space-y-5">
       <fieldset className="grid gap-2 md:grid-cols-2">
-        <legend className="mb-2 text-[14px] font-semibold text-soft">Choose how to exit</legend>
+        <legend className="mb-2 text-[14px] font-semibold text-soft">How do you want to {hasDebt ? "close" : "exit"}?</legend>
         {options.map((o) => (
           <label
             key={o.kind}
             className={cx(
               "flex cursor-pointer items-start gap-3 rounded-2xl px-4 py-3.5 transition-[box-shadow,background-color]",
               kind === o.kind
-                ? "bg-[linear-gradient(180deg,rgb(244_183_40/0.08),transparent)] shadow-[inset_0_0_0_2px_var(--color-accent)]"
-                : "bg-bg/70 shadow-[inset_0_0_0_1px_var(--color-border)] hover:shadow-[inset_0_0_0_1px_var(--color-line)]",
+                ? "bg-surface-3 shadow-[inset_0_0_0_2px_var(--color-text)]"
+                : "bg-bg/70 shadow-[inset_0_0_0_1px_var(--color-control)] hover:bg-surface-2",
             )}
           >
             <input
@@ -105,14 +108,13 @@ export function Exits({
             Where should your ZEC go?
           </h3>
           {commitment ? (
-            <Notice tone="ok" title="Destination validated by the signers">
-              <p>
-                Commitment <Mono>{short(commitment, 10, 8)}</Mono>.{" "}
-                <button type="button" className="underline" onClick={() => setCommitment(null)}>
-                  Change
-                </button>
-              </p>
-            </Notice>
+            <p className="flex flex-wrap items-center gap-2 text-[14px] text-soft">
+              <IconCheck size={16} strokeWidth={2.6} className="text-ok" />
+              Validated by the signers · Base will only see its salted commitment <Mono>{short(commitment, 8, 6)}</Mono>
+              <button type="button" className="min-h-8 font-semibold text-text underline underline-offset-4" onClick={() => setCommitment(null)}>
+                Change
+              </button>
+            </p>
           ) : (
             <DestinationStep loan={loan} vaultId={vault.vaultId} onDone={setCommitment} />
           )}
@@ -166,11 +168,7 @@ function ReleaseFlow({ loan, vault, snapshot, commitment, onChanged }: FlowProps
       <Button onClick={() => release.run()} busy={release.busy}>
         Release {formatTaz(snapshot.position.collateral)}
       </Button>
-      {release.error ? (
-        <Notice tone="danger" title="Release failed" live>
-          <p>{release.error}</p>
-        </Notice>
-      ) : null}
+      <ActionError error={release.error} refusal={release.refusal} title="Release failed" />
       {release.result ? <TxResult result={release.result} what="Release requested" /> : null}
     </div>
   );
@@ -200,21 +198,19 @@ function RepayFlow({ loan, vault, snapshot, commitment, onChanged }: FlowProps) 
   });
   return (
     <div className="space-y-3">
-      <Notice tone="warn" title="Outside USDC can link this account">
-        <p>
-          If you top up the loan account with USDC from an exchange or your main wallet, that transfer is public and links
-          the two. Closing from collateral avoids it.
-        </p>
-      </Notice>
+      <Hint>
+        Topping the loan account up with {loanTokenName()} from an exchange or your main wallet is public and links the two.
+        Closing from collateral avoids it.
+      </Hint>
       <KeyValue
         rows={[
-          ["Debt now", `${formatUsdc(snapshot.debt)} USDC (+ interest until inclusion)`],
-          ["USDC in your loan account", `${formatUsdc(snapshot.usdcBalance)} USDC`],
-          ["Needed in the account", `${formatUsdc(needed)} USDC`],
+          ["Debt now", `${formatUsdc(snapshot.debt)} ${loanTokenName()} (+ interest until inclusion)`],
+          [`${loanTokenName()} in your loan account`, `${formatUsdc(snapshot.usdcBalance)} ${loanTokenName()}`],
+          ["Needed in the account", `${formatUsdc(needed)} ${loanTokenName()}`],
         ]}
       />
       {!enough ? (
-        <Notice tone="info" title="Not enough USDC in the loan account">
+        <Notice tone="info" title={`Not enough ${loanTokenName()} in the loan account`}>
           <p>
             Send at least {formatUsdc(needed - snapshot.usdcBalance)} more {loanTokenName()} to <Mono>{loan.account}</Mono>, then
             refresh. That transfer is public: send it from an address with no link to you, or close from collateral
@@ -223,13 +219,9 @@ function RepayFlow({ loan, vault, snapshot, commitment, onChanged }: FlowProps) 
         </Notice>
       ) : null}
       <Button onClick={() => repay.run()} busy={repay.busy} disabled={!enough}>
-        Repay {formatUsdc(snapshot.debt)} USDC and release {formatTaz(snapshot.position.collateral)}
+        Repay {formatUsdc(snapshot.debt)} {loanTokenName()} and release {formatTaz(snapshot.position.collateral)}
       </Button>
-      {repay.error ? (
-        <Notice tone="danger" title="Repay failed" live>
-          <p>{repay.error}</p>
-        </Notice>
-      ) : null}
+      <ActionError error={repay.error} refusal={repay.refusal} title="Repay failed" />
       {repay.result ? <TxResult result={repay.result} what="Repaid and release requested" /> : null}
     </div>
   );
@@ -298,62 +290,51 @@ function CloseFlow({ loan, vault, snapshot, commitment, onChanged }: FlowProps) 
           {authorize.error ? <p className="text-danger">{authorize.error}</p> : null}
         </Notice>
       ) : null}
-      <Button variant="secondary" onClick={() => getQuote.run()} busy={getQuote.busy}>
+      <Button variant={quote ? "ghost" : "secondary"} size={quote ? "sm" : "md"} data-replay="get-quote" onClick={() => getQuote.run()} busy={getQuote.busy}>
         {getQuote.busy ? null : <IconRefresh size={16} />}
-        {quote ? "Refresh quote" : "Get a market maker's quote"}
+        {quote ? "Refresh the quote" : "Get a market maker's quote"}
       </Button>
-      {getQuote.error ? (
-        <Notice tone="danger" title="No quote" live>
-          <p>{getQuote.error}</p>
-        </Notice>
-      ) : null}
+      <ActionError error={getQuote.error} refusal={getQuote.refusal} title="No quote" />
       {quote ? (
-        <div className="space-y-4">
-          <div className="grid gap-3 sm:grid-cols-3">
-            <div className="rounded-2xl bg-bg/80 p-4 shadow-[inset_0_0_0_1px_var(--color-border)]">
-              <p className="text-[12.5px] text-muted">The market maker repays</p>
-              <TokenAmount token="USDC" value={usdc(quote.repayAssets)} unit={loanTokenName()} size="lg" />
-              <p className="mt-1 text-[12px] text-muted">your whole debt, on Morpho</p>
-            </div>
-            <div className="rounded-2xl bg-bg/80 p-4 shadow-[inset_0_0_0_1px_var(--color-border)]">
-              <p className="text-[12.5px] text-muted">and takes from the vault</p>
-              <TokenAmount token="TAZ" value={zec(quote.mmAmount)} size="lg" />
-              <p className="mt-1 text-[12px] text-muted">margin {quote.marginBps / 100} %, shielded</p>
-            </div>
-            <div className="rounded-2xl bg-ok/[0.06] p-4 shadow-[inset_0_0_0_1px_color-mix(in_oklab,var(--color-ok)_35%,transparent)]">
-              <p className="text-[12.5px] text-muted">You receive</p>
-              <TokenAmount token="TAZ" value={zec(quote.userAmount)} size="lg" />
-              <p className="mt-1 text-[12px] text-muted">at your new Ironwood address, less the network fee</p>
-            </div>
+        <div className="animate-rise space-y-4">
+          <div className="space-y-3 rounded-2xl bg-bg/70 p-5 shadow-[inset_0_0_0_1px_var(--color-border)]">
+            <p className="text-[14px] font-semibold">
+              Your {formatTaz(quote.mmAmount + quote.userAmount)} splits in two
+            </p>
+            <SplitBar
+              mm={quote.mmAmount}
+              user={quote.userAmount}
+              mmFor={`repays your ${usdc(quote.repayAssets)} ${loanTokenName()} debt on Morpho (margin ${quote.marginBps / 100} %)`}
+              userTo="to your new Ironwood address, shielded, less the network fee"
+            />
           </div>
-          <KeyValue
-            rows={[
-              ["Minimum you accept", formatTaz((quote.userAmount * (10_000n - CLOSE_SLIPPAGE_BPS)) / 10_000n)],
-              ["Executor", <Mono key="e">{quote.executor}</Mono>],
-              ["Quote valid until", new Date(quote.expiresAt * 1000).toLocaleTimeString()],
-            ]}
-          />
-          <p className="text-xs text-muted">
-            Signing authorizes only this executor, this margin and at least the minimum amount, for about 10 minutes. You can
-            cancel until it executes.
-          </p>
+          <Disclosure summary="The terms you sign">
+            <KeyValue
+              rows={[
+                ["Minimum you accept", formatTaz((quote.userAmount * (10_000n - CLOSE_SLIPPAGE_BPS)) / 10_000n)],
+                ["Market maker", <Mono key="e">{quote.executor}</Mono>],
+                ["Quote valid until", formatUtc(quote.expiresAt)],
+              ]}
+            />
+            <p className="text-xs text-muted">
+              Signing authorizes only this market maker, this margin and at least the minimum amount, for about 10 minutes. You can
+              cancel until it executes.
+            </p>
+          </Disclosure>
           <Button
             size="lg"
+            data-replay="sign-close"
             onClick={() => submit.run(quote)}
             busy={submit.busy}
             disabled={quoteExpired || !snapshot.accountDeployed || !snapshot.adapterAuthorized}
           >
-            Sign and send to the market maker
+            {submit.busy ? "Signing…" : "Sign and send to the market maker"}
             {submit.busy ? null : <IconArrowRight size={18} />}
           </Button>
           {quoteExpired ? <p className="text-sm text-warn">This quote expired. Refresh it.</p> : null}
         </div>
       ) : null}
-      {submit.error ? (
-        <Notice tone="danger" title="Close request not sent" live>
-          <p>{submit.error}</p>
-        </Notice>
-      ) : null}
+      <ActionError error={submit.error} refusal={submit.refusal} title="Close request not sent" />
     </div>
   );
 }
@@ -392,8 +373,8 @@ export function PendingClose({ loan, vault, onChanged }: { loan: StoredLoan; vau
                   ? "Expired without execution"
                   : "Waiting for the market maker",
           ],
-          ["Executor", <Mono key="e">{pending.executor}</Mono>],
-          ["Valid until", new Date(Number(pending.deadline) * 1000).toLocaleString()],
+          ["Market maker", <Mono key="e">{pending.executor}</Mono>],
+          ["Valid until", formatUtc(Number(pending.deadline))],
           ["Nonce", <Mono key="n">{short(pending.nonce, 8, 6)}</Mono>],
           ...(pending.txHash
             ? ([["Market maker's transaction", <Mono key="t">{pending.txHash}</Mono>]] as [string, ReactNode][])
@@ -402,13 +383,13 @@ export function PendingClose({ loan, vault, onChanged }: { loan: StoredLoan; vau
       />
       {executed ? (
         <Notice tone="ok" title="Closed from collateral">
-          <p>The debt is repaid and the vault is closing. The signers now pay your remainder to your Ironwood destination.</p>
+          <p>The debt is repaid and the vault is paying out. The signers now pay your remainder to your Ironwood destination.</p>
         </Notice>
       ) : (
         <div className="flex flex-wrap gap-2">
           {!expired ? (
             <Button variant="danger" onClick={() => cancel.run()} busy={cancel.busy}>
-              Cancel request (invalidate nonce)
+              Cancel this close request
             </Button>
           ) : (
             <Button variant="secondary" onClick={forget}>
@@ -416,20 +397,16 @@ export function PendingClose({ loan, vault, onChanged }: { loan: StoredLoan; vau
             </Button>
           )}
           <Button variant="ghost" onClick={() => check.run()} busy={check.busy}>
-            Check nonce on Base
+            Check whether it executed
           </Button>
         </div>
       )}
       {check.result !== undefined ? (
         <p className="text-sm text-muted" role="status">
-          Nonce {check.result ? "used or cancelled" : "still open"} on the Settlement Adapter.
+          {check.result ? "Executed or cancelled on Base (its nonce is used)." : "Still open on Base: not executed, not cancelled."}
         </p>
       ) : null}
-      {cancel.error ? (
-        <Notice tone="danger" title="Cancel failed" live>
-          <p>{cancel.error}</p>
-        </Notice>
-      ) : null}
+      <ActionError error={cancel.error} refusal={cancel.refusal} title="Cancel failed" />
       {cancel.result ? <TxResult result={cancel.result} what="Close request cancelled" /> : null}
     </div>
   );
@@ -448,7 +425,7 @@ export function SendUsdcForm({ loan, snapshot, onChanged }: { loan: StoredLoan; 
     try {
       units = parseUsdc(amount);
       if (units === 0n) amountError = "Enter an amount above zero.";
-      else if (units > snapshot.usdcBalance) amountError = `The account holds ${formatUsdc(snapshot.usdcBalance)} USDC.`;
+      else if (units > snapshot.usdcBalance) amountError = `The account holds ${formatUsdc(snapshot.usdcBalance)} ${loanTokenName()}.`;
     } catch (e) {
       amountError = e instanceof Error ? e.message : "Invalid amount";
     }
@@ -461,12 +438,10 @@ export function SendUsdcForm({ loan, snapshot, onChanged }: { loan: StoredLoan; 
   });
   return (
     <div className="space-y-3">
-      <Notice tone="warn" title="Where the USDC goes is public">
-        <p>
-          Sending borrowed USDC straight to an exchange account (KYC) links the loan to your identity: the transfer from this
-          account is public.
-        </p>
-      </Notice>
+      <Hint>
+        Where it goes is public: sending borrowed {loanTokenName()} straight to an exchange account (KYC) links the loan to your
+        identity.
+      </Hint>
       <div className="grid gap-3 sm:grid-cols-[1fr_10rem]">
         <div className="space-y-1">
           <label htmlFor={toId} className="block text-sm font-medium">
@@ -484,7 +459,7 @@ export function SendUsdcForm({ loan, snapshot, onChanged }: { loan: StoredLoan; 
         </div>
         <div className="space-y-1">
           <label htmlFor={amountId} className="block text-sm font-medium">
-            Amount (USDC)
+            Amount ({loanTokenName()})
           </label>
           <input
             id={amountId}
@@ -499,14 +474,11 @@ export function SendUsdcForm({ loan, snapshot, onChanged }: { loan: StoredLoan; 
       {amountError ? <p className="text-sm text-danger">{amountError}</p> : null}
       {to.trim() && !toValid ? <p className="text-sm text-danger">Not a Base (EVM) address.</p> : null}
       <Button onClick={() => send.run()} busy={send.busy} disabled={!units || Boolean(amountError) || !toValid}>
-        Send USDC (sponsored)
+        Send {units && !amountError ? `${formatUsdc(units)} ` : ""}
+        {loanTokenName()} (sponsored)
       </Button>
-      {send.error ? (
-        <Notice tone="danger" title="Transfer failed" live>
-          <p>{send.error}</p>
-        </Notice>
-      ) : null}
-      {send.result ? <TxResult result={send.result} what="USDC sent" /> : null}
+      <ActionError error={send.error} refusal={send.refusal} title="Transfer failed" />
+      {send.result ? <TxResult result={send.result} what={`${loanTokenName()} sent`} /> : null}
     </div>
   );
 }

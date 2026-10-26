@@ -14,3 +14,8 @@ export function baseTxUrl(hash: string): string | null {
   }
   return DEPLOYMENT.baseExplorerTx ? `${DEPLOYMENT.baseExplorerTx}${hash}` : null;
 }
+
+/** DEMO: the replay plays sample data, whose hashes are dummies: the app names no transaction then. */
+export function sampleTransactions(): boolean {
+  return REPLAY && recording().placeholder;
+}

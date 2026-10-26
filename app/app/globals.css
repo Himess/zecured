@@ -2,9 +2,10 @@
 
 /*
  * Zecured's look is the seam between two chains, as on the site. Zcash is dark: rounded, blurred where it is
- * encrypted, no rules. Base is light: sharp corners, ruled ledger rows. Gold marks only the π proof seal and
- * primary buttons. Other projects appear only with their own marks (components/marks.tsx). Text colours meet
- * WCAG AA (4.5:1) on bg, surface and surface-2, and the ink colours on paper.
+ * encrypted, no rules. Base is light: sharp corners, ruled ledger rows. Gold means a proof: the π seal, what a
+ * proof made final, and the one primary button of a view; what is current or selected is white. Other projects
+ * appear only with their own marks (components/marks.tsx). Text colours meet WCAG AA (4.5:1) on bg, surface and
+ * surface-2, and the ink colours on paper; the edges of controls 3:1 (--color-control).
  */
 @theme {
   /* Zcash: the dark ground, a hint of green like the site's (#040907). */
@@ -17,16 +18,21 @@
   --color-hairline: #15231b;
   /* Outlines of tags, pills and line buttons. */
   --color-line: #3a4d42;
+  /* The edge of a control a user must find (fields, unselected choices): 3:1 on every dark ground. */
+  --color-control: #5e7366;
   --color-text: #e8efe9;
   /* Secondary text and done marks. */
   --color-soft: #c9d6cc;
   --color-muted: #93a89a;
   --color-faint: #82978c;
 
-  /* Gold: the π proof seal and primary buttons, nothing else. */
+  /* Gold: the π proof seal, what a proof made final, and primary buttons; nothing else. */
   --color-accent: #f4b728;
   --color-accent-strong: #ffc845;
   --color-on-accent: #0f1b2a;
+
+  /* DEMO, the judges' replay: a mode, not a hazard, in the site's ice blue. */
+  --color-demo: #cfe0f2;
 
   /* The shielded pool's teal (the site's), for what stays private. */
   --color-pool: #38a684;
@@ -57,6 +63,8 @@
   --font-mono: var(--font-martian-mono), ui-monospace, "SFMono-Regular", Menlo, Consolas, monospace;
 
   --animate-rise: rise 0.5s cubic-bezier(0.2, 0.7, 0.3, 1) both;
+  --animate-stamp: stamp 0.5s cubic-bezier(0.34, 1.56, 0.64, 1) both;
+  --animate-pop: pop 0.4s cubic-bezier(0.34, 1.56, 0.64, 1) both;
   --animate-shimmer: shimmer 1.6s linear infinite;
   --animate-flow: flow 2.4s linear infinite;
 }
@@ -70,10 +78,8 @@
 
   body {
     background-color: var(--color-bg);
-    /* Two faint glows, gold where proofs cross and teal where the pool is: depth, no image. */
-    background-image:
-      radial-gradient(60rem 36rem at 12% -8%, rgb(244 183 40 / 0.07), transparent 60%),
-      radial-gradient(54rem 40rem at 100% 0%, rgb(56 166 132 / 0.08), transparent 62%);
+    /* One faint glow where the pool is: depth, no image (gold is kept for proofs). */
+    background-image: radial-gradient(60rem 40rem at 8% -10%, rgb(56 166 132 / 0.075), transparent 62%);
     background-repeat: no-repeat;
     color: var(--color-text);
     font-family: var(--font-sans);
@@ -112,13 +118,11 @@
     letter-spacing: -0.01em;
   }
 
+  /* What is chosen is white; gold is kept for proofs. */
   input[type="radio"],
-  input[type="checkbox"] {
-    accent-color: var(--color-accent);
-  }
-
+  input[type="checkbox"],
   input[type="range"] {
-    accent-color: var(--color-accent);
+    accent-color: var(--color-text);
   }
 
   @media (prefers-reduced-motion: reduce) {
@@ -130,6 +134,37 @@
       transition-duration: 0.01ms !important;
     }
   }
+}
+
+/*
+ * The fixed bars (the sticky header, the phones' tab bar, the replay's dock) never hide what has focus or what a
+ * link scrolls to (WCAG 2.2, 2.4.11): the page scrolls with their heights as padding.
+ */
+:root {
+  --header-h: 4.25rem;
+  --nav-h: 0px;
+  --dock-h: 0px;
+}
+
+@media (max-width: 860px) {
+  :root {
+    --nav-h: 58px;
+  }
+}
+
+.has-dock {
+  --dock-h: 4.5rem;
+}
+
+@media (max-width: 860px) {
+  .has-dock {
+    --dock-h: 5.75rem;
+  }
+}
+
+html {
+  scroll-padding-top: calc(var(--header-h) + 1rem);
+  scroll-padding-bottom: calc(var(--dock-h) + var(--nav-h) + 1rem);
 }
 
 /*
@@ -182,13 +217,13 @@
       0 24px 48px -32px rgb(0 0 0 / 0.7);
   }
 
-  /* A panel that leads its page (the swap card, the position's summary): a gold edge of light at the top. */
+  /* A panel that leads its page (the swap card, the position's summary): a faint edge of light at the top. */
   .panel-lead::before {
     content: "";
     position: absolute;
     inset: 0 18% auto;
     height: 1px;
-    background: linear-gradient(90deg, transparent, rgb(244 183 40 / 0.55), transparent);
+    background: linear-gradient(90deg, transparent, rgb(255 255 255 / 0.22), transparent);
   }
 
   /* A field: the app's text inputs, one look everywhere. */
@@ -196,7 +231,7 @@
     width: 100%;
     min-height: 46px;
     border-radius: 14px;
-    border: 1px solid var(--color-border);
+    border: 1px solid var(--color-control);
     background: var(--color-bg);
     padding: 10px 14px;
     color: var(--color-text);
@@ -211,7 +246,7 @@
   }
 
   .field:hover {
-    border-color: var(--color-line);
+    border-color: var(--color-soft);
   }
 
   .field:focus-visible {
@@ -245,7 +280,7 @@
     box-shadow: 0 0 0 3px color-mix(in oklab, var(--color-accent) 20%, transparent);
   }
 
-  /* While a deposit is being proven: the only motion the app makes on its own. */
+  /* While a proof is being made: one of the few motions the app makes on its own. */
   .seal-pulse {
     position: absolute;
     inset: -2px;
@@ -308,11 +343,40 @@
     animation: flow 1.2s linear infinite;
   }
 
+  /* The seam of a tracker: a dashed hairline until a proof lands, then a line of gold lit from its middle. */
+  .seam-line {
+    height: 1px;
+    background-image: linear-gradient(90deg, rgb(205 230 216 / 0.3) 50%, transparent 50%);
+    background-size: 8px 1px;
+  }
+
+  .seam-line-lit {
+    height: 2px;
+    background: linear-gradient(90deg, transparent, var(--color-accent) 20%, var(--color-accent) 80%, transparent);
+    transform-origin: 50% 50%;
+    animation: seam-light 0.6s cubic-bezier(0.16, 0.84, 0.24, 1) both;
+  }
+
+  /* A row Base just recorded because of a proof: stamped once, its ground fading from gold. */
+  .stamp-row {
+    animation: tint-fade 0.9s ease-out both;
+  }
+
+  /* DEMO: the control the replay's next step needs (components/replay/ReplayDock.tsx). */
+  [data-spotlight] {
+    outline: 2px dashed var(--color-demo);
+    outline-offset: 5px;
+    animation: spotlight 1.6s ease-in-out infinite;
+  }
+
   @media (prefers-reduced-motion: reduce) {
     .seal-pulse,
     .dot-live,
     .skeleton,
-    .flow-line {
+    .flow-line,
+    .seam-line-lit,
+    .stamp-row,
+    [data-spotlight] {
       animation: none;
     }
   }
@@ -347,6 +411,56 @@
   to {
     opacity: 1;
     transform: none;
+  }
+}
+
+@keyframes stamp {
+  from {
+    opacity: 0;
+    transform: scale(1.8);
+  }
+  to {
+    opacity: 1;
+    transform: none;
+  }
+}
+
+@keyframes pop {
+  from {
+    opacity: 0;
+    transform: scale(0.6);
+  }
+  to {
+    opacity: 1;
+    transform: none;
+  }
+}
+
+@keyframes seam-light {
+  from {
+    transform: scaleX(0);
+  }
+  to {
+    transform: scaleX(1);
+  }
+}
+
+@keyframes tint-fade {
+  from {
+    background-color: rgb(244 183 40 / 0.22);
+  }
+  to {
+    background-color: transparent;
+  }
+}
+
+@keyframes spotlight {
+  0%,
+  100% {
+    outline-color: var(--color-demo);
+  }
+  50% {
+    outline-color: rgb(207 224 242 / 0.35);
   }
 }
 

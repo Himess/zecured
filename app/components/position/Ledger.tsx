@@ -343,9 +343,16 @@ export function ClaimsCard({
   onChanged: () => void;
 }) {
   if (ledger.claims.length === 0) return null;
-  const claims = [...ledger.claims].sort((a, b) => a.sequence - b.sequence);
+  // Yours first, then the market maker's, then the fee and the rest, each kind in its order on Base.
+  const rank = (k: LedgerClaim["kind"]) => ["Release", "CloseUser", "Refund", "CloseMarketMaker", "Liquidation", "Fee"].indexOf(k);
+  const claims = [...ledger.claims].sort((a, b) => (rank(a.kind) + 7) % 7 - ((rank(b.kind) + 7) % 7) || a.sequence - b.sequence);
+  const committed = claims.some((c) => c.committed || c.status === "Paid");
   return (
-    <Card title="Zcash payouts" icon={<ZecMark size={20} />}>
+    <Card
+      title="Payouts on Zcash"
+      icon={<ZecMark size={20} />}
+      action={committed ? <span className="text-[12.5px] text-muted">paid by 3 of 5 signers · final once proven on Base</span> : null}
+    >
       <ul className="divide-y divide-hairline text-sm">
         {claims.map((c) => (
           <ClaimRow key={c.claimId} ledger={ledger} claim={c} loan={loan} onChanged={onChanged} />
@@ -418,9 +425,11 @@ function ClaimRow({
         </span>
         <span className="flex items-center gap-3">
           <span className="font-semibold tabular-nums">{formatTaz(claim.amount)}</span>
-          <Badge tone={view.badge.tone} dot>
-            {view.badge.text}
-          </Badge>
+          <span className="inline-flex min-w-[96px] justify-end">
+            <Badge tone={view.badge.tone} dot>
+              {view.badge.text}
+            </Badge>
+          </span>
         </span>
       </div>
       <PayoutTrack claim={claim} />
@@ -536,23 +545,25 @@ function PayoutTrack({ claim }: { claim: LedgerClaim }) {
   const paid = claim.status === "Paid";
   const committed = paid || claim.committed === true;
   const final = paid && claim.paidAt === 0;
-  const steps: { label: string; state: MarkState; seal?: boolean }[] = [
-    { label: "Committed on Base", state: committed ? "done" : "now" },
-    { label: "Confirmed by the signers", state: paid ? "done" : committed ? "now" : "todo" },
-    { label: "Final on Base", state: final ? "done" : paid ? "now" : "todo", seal: final },
+  // The seam in miniature: committed on Base (light), paid on Zcash (dark), final on Base (light, the π once proven).
+  const steps: { label: string; chain: "base" | "zcash"; state: MarkState; seal?: boolean }[] = [
+    { label: "Committed on Base", chain: "base", state: committed ? "done" : "now" },
+    { label: "Paid on Zcash, 3 of 5 signed", chain: "zcash", state: paid ? "done" : committed ? "now" : "todo" },
+    { label: "Final on Base", chain: "base", state: final ? "done" : paid ? "now" : "todo", seal: final },
   ];
   return (
-    <ol
-      aria-label="Its record on Base"
-      className="paper flex w-fit max-w-full flex-wrap items-center gap-x-5 gap-y-2 rounded-[3px] px-3.5 py-2.5 text-xs"
-    >
+    <ol aria-label="Its way, on both chains" className="grid w-full overflow-hidden rounded-[6px] text-xs sm:grid-cols-3">
       {steps.map((s) => (
         <li
           key={s.label}
           aria-current={s.state === "now" ? "step" : undefined}
-          className={cx("flex items-center gap-2", s.state === "now" ? "font-semibold text-ink" : "text-ink-muted")}
+          className={cx(
+            "flex min-h-9 items-center gap-2 px-3 py-2",
+            s.chain === "base" ? "paper" : "bg-[#0a1a12] shadow-[inset_0_0_0_1px_var(--color-border)]",
+            s.chain === "base" ? (s.state === "now" ? "font-semibold text-ink" : s.state === "done" ? "text-ink" : "text-ink-faint") : s.state === "now" ? "font-semibold text-text" : s.state === "done" ? "text-soft" : "text-faint",
+          )}
         >
-          {s.seal ? <ProofSeal size="sm" /> : <StepMark chain="base" state={s.state} size="sm" />}
+          {s.seal ? <ProofSeal size="sm" stamp className="!size-[16px] !shadow-none" /> : <StepMark chain={s.chain} state={s.state} size="sm" />}
           <span>
             {s.label}
             {s.state === "done" ? <span className="sr-only"> (done)</span> : null}

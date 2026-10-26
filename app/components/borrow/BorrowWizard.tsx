@@ -1,20 +1,22 @@
 "use client";
 
 import Link from "next/link";
-import { useEffect, useId, useState, type ReactNode } from "react";
+import { useEffect, useId, useRef, useState, type ReactNode } from "react";
+import { ActionError } from "@/components/ActionError";
 import { BorrowForm } from "@/components/BorrowForm";
-import { CopyButton, Qr, useMounted } from "@/components/client";
-import { IconAlert, IconArrowRight, IconCheck, IconClock, IconEyeOff, IconKey, IconShield, IconSigners, IconVault } from "@/components/icons";
+import { clock, CopyButton, CountUp, Qr, useElapsed, useMounted } from "@/components/client";
+import { IconArrowRight, IconClock, IconEyeOff, IconShield } from "@/components/icons";
 import { KeyBackup } from "@/components/KeyBackup";
 import { ProofTrail } from "@/components/ProofTrail";
-import { TokenAmount, usdc } from "@/components/loan";
-import { BaseMark, MorphoMark, UsdcMark, ZecMark, ZzecMark } from "@/components/marks";
-import { ChainLabel, ProofSeal, StepMark, type Chain, type MarkState } from "@/components/seam";
-import { Badge, Button, buttonClass, Card, cx, Mono, Notice, Steps } from "@/components/ui";
+import { TokenAmount, usd, usdc } from "@/components/loan";
+import { UsdcMark } from "@/components/marks";
+import { SeamTracker, SignerRing, type TrackerRow } from "@/components/seam";
+import { Badge, Button, buttonClass, Card, cx, Disclosure, Hint, Mono, Notice, Steps } from "@/components/ui";
 import { apiErrorCode, type Vault } from "@/lib/api";
 import { config } from "@/lib/config";
 import { DEPLOYMENT } from "@/lib/deployment";
 import { REPLAY } from "@/lib/replay/flag";
+import { recording } from "@/lib/replay/recording";
 import {
   notifyLoansChanged,
   useAction,
@@ -34,12 +36,14 @@ import { collateralValue, maxBorrowAtTargetLtv } from "@/lib/morpho";
 import { checkVaultAddress, openVault, requestRefundProof } from "@/lib/owner";
 import { vaultHref } from "@/lib/routes";
 import { vaultCheckUnavailable, VaultProofError, type VaultCheck } from "@/lib/signers";
-import { feeNotice, formatPeriod, openGate } from "@/lib/v3";
+import { formatPeriod, openGate, openingFee } from "@/lib/v3";
 import { awaitingDeposit, capWait, openingsNotice, openRefusal, refundProofRefusal } from "@/lib/v4";
-import { blocksToDuration, formatTaz, formatZec, TICKER } from "@/lib/zcash";
+import { blocksToDuration, formatTaz, formatZec } from "@/lib/zcash";
 import { DemoPayment } from "./DemoPayment";
 
-const STEPS = ["Amount", "Back up key", "Deposit", "Borrow"];
+/** The flow in five chapters, as the site tells it; the π of "Prove" turns gold once the deposit is proven. */
+const STEPS = ["Vault", "Key", "Deposit", "Prove", "Borrow"];
+const PROVE = 3;
 
 type Phase = "amount" | "backup" | "deposit" | "borrow" | "done";
 
@@ -58,6 +62,8 @@ function persist(loan: StoredLoan): StoredLoan {
   return loan;
 }
 
+const reducedMotion = () => typeof window !== "undefined" && window.matchMedia("(prefers-reduced-motion: reduce)").matches;
+
 export function BorrowWizard() {
   const mounted = useMounted();
   const { loans, storageAvailable } = useLoans();
@@ -66,7 +72,11 @@ export function BorrowWizard() {
   const [continueToBorrow, setContinueToBorrow] = useState(false);
   const vault = useVault(loan?.vaultId, 10_000);
   const phase = phaseOf(loan, skippedBackup, vault.data);
-  const stepIndex = { amount: 0, backup: 1, deposit: 2, borrow: 3, done: 4 }[phase];
+  // The deposit chapter ends once the signers see the deposit; its proof is the next one's.
+  const seen = Boolean(vault.data && (vault.data.depositSeen || vault.data.status !== "awaiting_deposit"));
+  const stepIndex =
+    phase === "amount" ? 0 : phase === "backup" ? 1 : phase === "deposit" ? (seen ? PROVE : 2) : phase === "borrow" ? (continueToBorrow ? 4 : PROVE) : 5;
+  const proven = phase === "borrow" || phase === "done";
 
   // Keep the in-memory loan in sync with storage changes made elsewhere (e.g. backup flag).
   useEffect(() => {
@@ -80,83 +90,84 @@ export function BorrowWizard() {
   useEffect(() => {
     if (REPLAY && !loan && loans.length === 1 && loans[0]!.vaultId) setLoan(loans[0]!);
   }, [loan, loans]);
-  // Each step starts at the top of the page, where its progress is.
+  // Each chapter starts at the top of the page, its heading focused, so keyboards and screen readers keep their place.
+  const heading = useRef<HTMLHeadingElement>(null);
+  const first = useRef(true);
   useEffect(() => {
-    if (mounted) window.scrollTo({ top: 0, behavior: "smooth" });
-    // eslint-disable-next-line react-hooks/exhaustive-deps -- only when the step changes
-  }, [phase, continueToBorrow]);
+    if (!mounted) return;
+    if (first.current) {
+      first.current = false;
+      return;
+    }
+    window.scrollTo({ top: 0, behavior: reducedMotion() ? "auto" : "smooth" });
+    heading.current?.focus({ preventScroll: true });
+  }, [stepIndex, mounted]);
 
   return (
     <div className="space-y-6">
-      <div className="panel px-5 py-4 sm:px-6">
-        <Steps steps={STEPS} current={stepIndex} />
-      </div>
+      <Steps steps={STEPS} current={stepIndex} proof={{ index: PROVE, proven }} />
+      <h2 ref={heading} tabIndex={-1} className="sr-only">
+        {stepIndex < STEPS.length ? `Step ${stepIndex + 1} of ${STEPS.length}: ${STEPS[stepIndex]}` : "This loan is closed"}
+      </h2>
       {mounted && !storageAvailable ? (
         <Notice tone="danger" title="This browser cannot store your loan key">
           <p>Local storage is blocked (private mode or site settings). You can continue, but you must download the key backup before closing this tab.</p>
         </Notice>
       ) : null}
 
-      {phase === "amount" ? (
-        <AmountStep
-          loan={loan}
-          onLoan={(l) => setLoan(persist(l))}
-          onDiscard={() => {
-            if (loan) loanStore().remove(loan.id);
-            notifyLoansChanged();
-            setLoan(null);
-          }}
-        />
-      ) : null}
-
-      {phase === "backup" && loan ? (
-        <Card lead title="Back up your loan key before you deposit" icon={<IconKey size={18} />}>
-          <KeyBackup
+      <div key={stepIndex} className="animate-rise space-y-6">
+        {phase === "amount" ? (
+          <AmountStep
             loan={loan}
-            onConfirmed={(backedUp) =>
-              // DEMO: the replay's key is a dummy; skipping its backup is remembered, so a reload does not ask again.
-              backedUp ? setLoan({ ...loan, backedUp: true }) : REPLAY ? setLoan(persist({ ...loan, backedUp: true })) : setSkippedBackup(true)
-            }
+            onLoan={(l) => setLoan(persist(l))}
+            onDiscard={() => {
+              if (loan) loanStore().remove(loan.id);
+              notifyLoansChanged();
+              setLoan(null);
+            }}
           />
-        </Card>
-      ) : null}
+        ) : null}
 
-      {phase === "deposit" && loan ? <DepositStep loan={loan} vault={vault.data} vaultError={vault.error} /> : null}
+        {phase === "backup" && loan ? (
+          <Card lead title="Save the key that controls this loan" className="mx-auto max-w-[52rem]">
+            <KeyBackup
+              loan={loan}
+              onConfirmed={(backedUp) =>
+                // DEMO: the replay's key is a dummy; skipping its backup is remembered, so a reload does not ask again.
+                backedUp ? setLoan({ ...loan, backedUp: true }) : REPLAY ? setLoan(persist({ ...loan, backedUp: true })) : setSkippedBackup(true)
+              }
+            />
+          </Card>
+        ) : null}
 
-      {phase === "done" && loan ? (
-        <Card title="This loan is already closed" icon={<IconVault size={18} />}>
-          <p className="mb-4 text-sm text-muted">Its vault no longer accepts deposits. Start a new loan for new collateral.</p>
-          <div className="flex flex-wrap gap-2">
-            <Link href={vaultHref("position", loan.vaultId!)} prefetch={false} className={buttonClass("secondary")}>
-              See its position
-            </Link>
-            <Button onClick={() => setLoan(null)}>Start a new loan</Button>
-          </div>
-        </Card>
-      ) : null}
+        {phase === "deposit" && loan ? <DepositStep loan={loan} vault={vault.data} vaultError={vault.error} /> : null}
 
-      {phase === "borrow" && loan ? (
-        continueToBorrow ? (
-          <BorrowStep loan={loan} />
-        ) : (
-          <ActiveCard loan={loan} onContinue={() => setContinueToBorrow(true)} />
-        )
-      ) : null}
+        {phase === "done" && loan ? (
+          <Card title="This loan is already closed">
+            <p className="mb-4 text-sm text-muted">Its vault no longer accepts deposits. Start a new loan for new collateral.</p>
+            <div className="flex flex-wrap gap-2">
+              <Link href={vaultHref("position", loan.vaultId!)} prefetch={false} className={buttonClass("secondary")}>
+                See its position
+              </Link>
+              <Button onClick={() => setLoan(null)}>Start a new loan</Button>
+            </div>
+          </Card>
+        ) : null}
+
+        {phase === "borrow" && loan ? continueToBorrow ? <BorrowStep loan={loan} /> : <ProvenStep loan={loan} onContinue={() => setContinueToBorrow(true)} /> : null}
+      </div>
 
       {mounted && phase === "amount" && !loan && inProgress.length > 0 ? (
         <Card title="Continue a loan" icon={<IconClock size={18} />}>
-          <ul className="space-y-2">
+          <ul className="divide-y divide-hairline">
             {inProgress.map((l) => (
-              <li
-                key={l.id}
-                className="flex flex-wrap items-center justify-between gap-3 rounded-2xl bg-bg/70 px-4 py-3 text-sm shadow-[inset_0_0_0_1px_var(--color-hairline)]"
-              >
+              <li key={l.id} className="flex flex-wrap items-center justify-between gap-3 py-3 text-sm">
                 <span className="flex flex-wrap items-center gap-3">
                   <TokenAmount token="TAZ" value={formatZec(BigInt(l.amount))} size="sm" />
                   <span className="text-muted">
                     account <Mono>{short(l.account)}</Mono>
                   </span>
-                  {l.vaultId ? null : <Badge tone="warn">vault not opened</Badge>}
+                  {l.vaultId ? null : <Badge tone="warn">Vault not opened</Badge>}
                 </span>
                 <span className="flex gap-2">
                   {l.vaultId ? (
@@ -177,17 +188,26 @@ export function BorrowWizard() {
   );
 }
 
-// ------------------------------------------------------------------ step 1
+// ------------------------------------------------------------------ 01 Vault
 
-/** One line of what happens next, with its icon. */
-function Fact({ icon, children }: { icon: ReactNode; children: ReactNode }) {
+/** A line of what opening a vault means, with a dot. */
+function Fact({ children }: { children: ReactNode }) {
   return (
-    <li className="flex gap-3 text-[14px] text-soft">
-      <span className="mt-0.5 inline-flex size-7 flex-none items-center justify-center rounded-lg bg-surface-3 text-soft">{icon}</span>
+    <li className="flex gap-2.5 text-[13.5px] text-soft">
+      <span aria-hidden="true" className="mt-[7px] size-1.5 flex-none rounded-full bg-pool-soft" />
       <span className="min-w-0">{children}</span>
     </li>
   );
 }
+
+type Stage = "work" | "keygen" | "check" | "signed";
+
+const STAGE_TEXT: Record<Stage, string> = {
+  work: "This browser computes a small proof of work, which keeps vault openings from being spammed…",
+  keygen: "The five signer nodes generate the vault's key together (FROST): each keeps one share, and none ever holds the whole key…",
+  check: "This browser checks the five signers' signatures on the vault's Ironwood address…",
+  signed: "Signed by all 5 signers, checked in this browser.",
+};
 
 function AmountStep({
   loan,
@@ -200,11 +220,13 @@ function AmountStep({
 }) {
   const groupId = useId();
   const [amount, setAmount] = useState<bigint>(loan ? BigInt(loan.amount) : config.denominations[0]!);
-  const [ready, setReady] = useState(false);
+  // DEMO: the demo wallet pays from its own Ironwood notes, which is what the box asserts.
+  const [ready, setReady] = useState(REPLAY);
+  const [stage, setStage] = useState<Stage | null>(null);
   // T-01, T-03, R-11: a vault whose deposit would only come back as a refund, or wait for room under the cap, is not opened.
   const minting = useMintingStatus();
   const gate = openGate(minting.data, amount);
-  const fee = feeNotice(amount, config.v3);
+  const fee = config.v3 ? openingFee(amount, config.v3) : 0n;
   // What each size is worth and lends at the market's price, and how many open vaults share it (its anonymity set).
   const protocol = useProtocol(60_000);
   const stats = useVaultStats(120_000);
@@ -220,22 +242,30 @@ function AmountStep({
   const open = useAction(async (current: StoredLoan | null) => {
     setUnvouched(false);
     setRefusalCode(null);
+    setStage(null);
     // The key is saved *before* the backend is contacted, so a crash never loses it.
     const l = current ?? createLoan(amount);
     if (!current) onLoan(l);
     try {
-      const res = await openVault(l, invitesOn ? { invite } : {});
-      // Stored as payable only now that every signer vouches for the address (lib/signers.ts).
-      onLoan({
+      const res = await openVault(l, { ...(invitesOn ? { invite } : {}), onStage: setStage });
+      // Stored as payable only now that every signer vouches for the address (lib/signers.ts): at once, and the page
+      // holds the five signatures in view a moment before the next chapter.
+      const opened = {
         ...l,
         vaultId: res.vaultId,
         vaultAddress: res.address,
         expiryHeight: res.expiryHeight,
         tagKeyHash: res.tagKeyHash,
         vaultSignatures: res.signatures,
-      });
+      };
+      loanStore().save(opened);
+      notifyLoansChanged();
+      setStage("signed");
+      await new Promise((r) => setTimeout(r, reducedMotion() ? 300 : 1_400));
+      onLoan(opened);
       return res;
     } catch (e) {
+      setStage(null);
       if (e instanceof VaultProofError) setUnvouched(true);
       setRefusalCode(apiErrorCode(e));
       throw e;
@@ -247,254 +277,192 @@ function AmountStep({
   // P-8: the operator's switch on new vaults (never on existing vaults' exits and payouts).
   const openings = openingsNotice(config.openings);
   const openingsClosed = config.openings?.open === false;
+  const single = config.denominations.length === 1;
+  const collateral = amount - fee;
+  const peers = stats.data?.byAmount.get(amount);
+  const working = open.busy || stage === "signed";
 
   return (
-    <Card lead title="How much ZEC do you want to lock?" icon={<ZecMark size={20} />}>
-      <fieldset className="space-y-3" disabled={Boolean(loan) || open.busy}>
-        <legend className="sr-only">Collateral amount</legend>
-        <div className={cx("grid gap-3", config.denominations.length >= 3 ? "md:grid-cols-3" : "sm:grid-cols-2")}>
-          {config.denominations.map((d) => {
-            const selected = amount === d;
-            const blocked = !openGate(minting.data, d).allowed;
-            const peers = stats.data?.byAmount.get(d);
-            return (
-              <label
-                key={d.toString()}
-                className={cx(
-                  "relative flex cursor-pointer flex-col gap-3 rounded-[20px] p-5 transition-[box-shadow,background-color]",
-                  selected
-                    ? "bg-[linear-gradient(180deg,rgb(244_183_40/0.10),rgb(244_183_40/0.02))] shadow-[inset_0_0_0_2px_var(--color-accent)]"
-                    : "bg-bg/70 shadow-[inset_0_0_0_1px_var(--color-border)] hover:shadow-[inset_0_0_0_1px_var(--color-line)]",
-                )}
-              >
-                <input type="radio" name={groupId} checked={selected} onChange={() => setAmount(d)} className="sr-only" />
-                <span className="flex items-center justify-between">
-                  <ZecMark size={34} />
-                  <span
-                    aria-hidden="true"
+    <div className="grid items-start gap-6 lg:grid-cols-[minmax(0,1fr)_minmax(0,22rem)] [&>*]:min-w-0">
+      <Card lead title="How much ZEC do you lock?">
+        <fieldset className="space-y-4" disabled={Boolean(loan) || working}>
+          <legend className="sr-only">Collateral amount</legend>
+          {single ? (
+            <div>
+              <p className="text-[13px] font-semibold text-muted">Every vault holds</p>
+              <div className="mt-2">
+                <TokenAmount token="TAZ" value={formatZec(amount)} size="hero" />
+              </div>
+              <p className="mt-3 text-[14px] text-soft">
+                testnet ZEC
+                {price !== null ? (
+                  <>
+                    {" "}
+                    · {usd(collateralValue(amount, price))} · borrow up to{" "}
+                    <strong className="font-semibold text-text tabular-nums">{usdc(maxBorrowAtTargetLtv(collateral, price))}</strong> {loanTokenName()} at
+                    40 %
+                  </>
+                ) : null}
+              </p>
+            </div>
+          ) : (
+            <div className={cx("grid gap-3", config.denominations.length >= 3 ? "md:grid-cols-3" : "sm:grid-cols-2")}>
+              {config.denominations.map((d) => {
+                const selected = amount === d;
+                const blocked = !openGate(minting.data, d).allowed;
+                const dFee = config.v3 ? openingFee(d, config.v3) : 0n;
+                return (
+                  <label
+                    key={d.toString()}
                     className={cx(
-                      "inline-flex size-6 items-center justify-center rounded-full",
-                      selected ? "bg-accent text-on-accent" : "shadow-[inset_0_0_0_1.5px_var(--color-line)]",
+                      "relative flex cursor-pointer flex-col gap-2.5 rounded-[18px] p-4 transition-[box-shadow,background-color]",
+                      selected ? "bg-surface-3 shadow-[inset_0_0_0_2px_var(--color-text)]" : "bg-bg/70 shadow-[inset_0_0_0_1px_var(--color-control)] hover:bg-surface-2",
                     )}
                   >
-                    {selected ? <IconCheck size={14} strokeWidth={3} /> : null}
-                  </span>
-                </span>
-                <span>
-                  <span className="block text-[30px] leading-none font-extrabold tabular-nums font-stretch-118%">
-                    {formatZec(d)} <span className="text-[17px] font-bold text-muted">{TICKER}</span>
-                  </span>
-                  <span className="mt-1.5 block text-[13.5px] text-muted">
-                    {price !== null ? `≈ $${usdc(collateralValue(d, price))} at the market's price` : "Standard vault size"}
-                  </span>
-                </span>
-                <span className="flex items-center gap-2 border-t border-hairline pt-3 text-[13.5px]">
-                  <UsdcMark size={16} />
-                  {price !== null ? (
-                    <span>
-                      Borrow up to <strong className="tabular-nums">{usdc(maxBorrowAtTargetLtv(d, price))}</strong> {loanTokenName()}
+                    <input type="radio" name={groupId} checked={selected} onChange={() => setAmount(d)} className="sr-only" />
+                    <TokenAmount token="TAZ" value={formatZec(d)} size="lg" />
+                    <span className="text-[13px] text-muted">
+                      {price !== null ? `${usd(collateralValue(d, price))} · borrow up to ${usdc(maxBorrowAtTargetLtv(d - dFee, price))} ${loanTokenName()}` : "Standard vault size"}
                     </span>
-                  ) : (
-                    <span className="text-muted">Borrow up to 40 % of its value</span>
-                  )}
-                </span>
-                {peers !== undefined ? (
-                  <span className="flex items-center gap-2 text-[12.5px] text-muted">
-                    <IconEyeOff size={14} />
-                    {peers === 0 ? "No other open vault of this size yet" : `Hides among ${peers} open vault${peers === 1 ? "" : "s"} of this size`}
-                  </span>
-                ) : null}
-                {blocked ? <span className="text-xs font-semibold text-warn">A deposit of this size cannot back a loan right now.</span> : null}
-              </label>
-            );
-          })}
-        </div>
-        <p className="text-[13px] text-muted">
-          Fixed sizes are what hide your amount: every vault holds one of these, so your position on Base cannot be told apart
-          from the others of the same size. A custom amount would single you out.
-        </p>
-      </fieldset>
+                    {blocked ? <span className="text-xs font-semibold text-warn">A deposit of this size cannot back a loan right now.</span> : null}
+                  </label>
+                );
+              })}
+            </div>
+          )}
+          <Hint icon={<IconEyeOff size={15} />}>
+            {peers === undefined
+              ? "Fixed sizes hide your amount: on Base, your position looks like every other vault of this size."
+              : `Fixed sizes hide your amount: on Base, your position looks like every other vault of this size (${peers === 0 ? "none open yet" : `${peers} open now`}).`}
+          </Hint>
+        </fieldset>
 
-      <ul className="mt-6 grid gap-3 md:grid-cols-2">
-        <Fact icon={<ZecMark size={16} />}>You pay exactly this amount from Ironwood notes, plus the network fee.</Fact>
-        <Fact icon={<IconKey size={16} />}>
-          A fresh owner key and a fresh smart account are created in this browser for this loan only. No wallet connection, no
-          ETH.
-        </Fact>
-        <Fact icon={<IconEyeOff size={16} />}>
-          Opening the vault happens off-chain: nothing touches Base until your deposit is proven there.
-        </Fact>
-        <Fact icon={<IconSigners size={16} />}>
-          Five independent signer nodes generate the vault&apos;s key together; any three are needed to move it.
-        </Fact>
-        {fee ? <Fact icon={<IconAlert size={16} />}>{fee}</Fact> : null}
-      </ul>
+        <div className="mt-5 space-y-3">
+          {gate.message ? (
+            <Notice tone={gate.allowed ? "info" : "danger"} title={gate.allowed ? "Your deposit would wait" : "Not now"}>
+              <p>{gate.message}</p>
+            </Notice>
+          ) : null}
+          {openings ? (
+            <Notice tone={openingsClosed ? "warn" : "info"} title={openings.title}>
+              <p>{openings.body}</p>
+            </Notice>
+          ) : null}
+        </div>
 
-      <div className="mt-6 space-y-3">
-        {gate.message ? (
-          <Notice tone={gate.allowed ? "info" : "danger"} title={gate.allowed ? "Your deposit would wait" : "Not now"}>
-            <p>{gate.message}</p>
-          </Notice>
-        ) : null}
-        {openings ? (
-          <Notice tone={openingsClosed ? "warn" : "info"} title={openings.title}>
-            <p>{openings.body}</p>
-          </Notice>
-        ) : null}
-        <Notice tone="warn" title="Get your ZEC into Ironwood well before this step">
-          <p>
-            Moving exactly {formatTaz(amount)} into Ironwood and depositing right away links the two: the move into Ironwood is
-            public. Move a different amount, and wait hours or days.
-            {config.vaultExpiryBlocks !== null
-              ? ` Once open, the vault accepts the deposit for ${blocksToDuration(config.vaultExpiryBlocks)} (${config.vaultExpiryBlocks} Zcash blocks).`
-              : null}
-          </p>
-        </Notice>
-      </div>
-
-      <label
-        className={cx(
-          "mt-5 flex cursor-pointer items-start gap-3 rounded-2xl px-4 py-3.5 text-[14px] transition-colors",
-          ready ? "bg-ok/[0.07] shadow-[inset_0_0_0_1px_color-mix(in_oklab,var(--color-ok)_35%,transparent)]" : "bg-bg/70 shadow-[inset_0_0_0_1px_var(--color-border)]",
-        )}
-      >
-        <input type="checkbox" checked={ready} onChange={(e) => setReady(e.target.checked)} className="mt-1 size-4" />
-        <span className="text-soft">
-          My ZEC is already in the Ironwood pool, and I deposit in one Ironwood → Ironwood payment (
-          <Link href="/prepare">why this matters</Link>).
-        </span>
-      </label>
-      {invitesOn ? (
-        <div className="mt-4 space-y-1.5">
-          <label htmlFor={inviteId} className="block text-sm font-semibold text-soft">
-            Invite code
-          </label>
-          <input id={inviteId} value={invite} onChange={(e) => setInvite(e.target.value)} autoComplete="off" spellCheck={false} className="field max-w-sm" />
-          <p className="text-xs text-muted">The mainnet beta opens vaults by invitation only; each code opens one vault.</p>
-        </div>
-      ) : null}
-      {!config.ownerSigning ? (
-        <div className="mt-4">
-          <Notice tone="danger" title="Opening a vault is disabled">
-            <p>This build cannot sign owner requests right now: see the configuration notice at the top of the page.</p>
-          </Notice>
-        </div>
-      ) : cannotCheck ? (
-        <div className="mt-4">
-          <Notice tone="danger" title="Opening a vault is disabled">
-            <p>{cannotCheck}</p>
-          </Notice>
-        </div>
-      ) : null}
-      <div className="mt-6 flex flex-wrap items-center gap-3">
-        <Button
-          size="lg"
-          onClick={() => open.run(loan)}
-          busy={open.busy}
-          disabled={(!ready && !loan) || !config.ownerSigning || cannotCheck !== null || !gate.allowed || needsInvite || openingsClosed}
+        <label
+          className={cx(
+            "mt-5 flex cursor-pointer items-start gap-3 rounded-2xl px-4 py-3.5 text-[14px] transition-colors",
+            ready ? "bg-surface-2/80 shadow-[inset_0_0_0_1px_var(--color-soft)]" : "bg-bg/70 shadow-[inset_0_0_0_1px_var(--color-control)]",
+          )}
         >
-          {open.busy ? "Opening the vault…" : loan ? "Retry opening the vault" : `Open a ${formatTaz(amount)} vault`}
-          {open.busy ? null : <IconArrowRight size={18} />}
-        </Button>
-        {loan ? (
-          <Button variant="ghost" onClick={onDiscard} disabled={open.busy}>
-            Discard this key and start over
-          </Button>
-        ) : null}
-      </div>
-      {open.busy ? <OpeningProgress /> : null}
-      {open.error && refusal ? (
-        <div className="mt-4">
-          <Notice tone={refusal.openingsClosed ? "info" : "warn"} title={refusal.title} live>
-            <p>{refusal.body}</p>
-            <p>Your new key is saved in this browser; you can retry.</p>
-          </Notice>
-        </div>
-      ) : open.error ? (
-        <div className="mt-4">
-          <Notice tone="danger" title="The vault could not be opened" live>
-            <p>{open.error}</p>
-            {unvouched ? (
-              <p>
-                Nothing was kept for this vault. Discard this key and start over; if it happens again, the backend may be
-                compromised.
-              </p>
-            ) : alreadyBound ? (
-              <p>This key already opened a vault whose details were lost. Discard it and start over with a new key.</p>
-            ) : (
-              <p>Your new key is saved in this browser; you can retry.</p>
-            )}
-          </Notice>
-        </div>
-      ) : null}
-    </Card>
-  );
-}
-
-/** While the vault opens: the browser's proof of work, then the five signers' key generation, as they happen. */
-function OpeningProgress() {
-  const [t, setT] = useState(0);
-  useEffect(() => {
-    const timer = setInterval(() => setT((x) => x + 1), 900);
-    return () => clearInterval(timer);
-  }, []);
-  const lit = Math.min(5, Math.max(0, t - 2));
-  return (
-    <div className="mt-5 grid gap-4 rounded-2xl bg-bg/70 p-5 shadow-[inset_0_0_0_1px_var(--color-border)] sm:grid-cols-[auto_minmax(0,1fr)] sm:items-center" aria-live="polite">
-      <div aria-hidden="true" className="flex items-center gap-2">
-        {[0, 1, 2, 3, 4].map((i) => (
-          <span
-            key={i}
-            className={cx(
-              "inline-flex size-9 items-center justify-center rounded-full text-[12px] font-bold transition-colors duration-500",
-              i < lit ? "bg-pool/25 text-pool-soft shadow-[inset_0_0_0_1.5px_var(--color-pool)]" : "bg-surface-3 text-faint",
-            )}
-          >
-            {i + 1}
+          <input
+            type="checkbox"
+            data-replay="ironwood-ready"
+            checked={ready}
+            disabled={working}
+            onChange={(e) => setReady(e.target.checked)}
+            className="mt-1 size-4"
+          />
+          <span>
+            <span className="font-semibold text-text">
+              {REPLAY ? "DEMO: the demo wallet pays from its own Ironwood notes" : "My ZEC already sits in Ironwood, and I pay in one Ironwood → Ironwood payment."}
+            </span>
+            <span className="mt-0.5 block text-[13px] text-muted">
+              Moving exactly {formatTaz(amount)} into Ironwood right before you pay links the two: that move is public. Move a
+              different amount, and wait (<Link href="/prepare">why this matters</Link>).
+            </span>
           </span>
-        ))}
-      </div>
-      <p className="text-[14px] text-soft">
-        {t < 3 ? (
-          <>This browser computes a small proof of work, which keeps vault openings from being spammed…</>
-        ) : (
-          <>
-            The five signer nodes are generating your vault&apos;s threshold key together (FROST key generation). Each holds
-            one share; none ever sees the whole key. This can take a little while.
-          </>
-        )}
-      </p>
+        </label>
+        {invitesOn ? (
+          <div className="mt-4 space-y-1.5">
+            <label htmlFor={inviteId} className="block text-sm font-semibold text-soft">
+              Invite code
+            </label>
+            <input id={inviteId} value={invite} onChange={(e) => setInvite(e.target.value)} autoComplete="off" spellCheck={false} className="field max-w-sm" />
+            <p className="text-xs text-muted">The mainnet beta opens vaults by invitation only; each code opens one vault.</p>
+          </div>
+        ) : null}
+        {!config.ownerSigning ? (
+          <div className="mt-4">
+            <Notice tone="danger" title="Opening a vault is disabled">
+              <p>This build cannot sign owner requests right now: see the configuration notice at the top of the page.</p>
+            </Notice>
+          </div>
+        ) : cannotCheck ? (
+          <div className="mt-4">
+            <Notice tone="danger" title="Opening a vault is disabled">
+              <p>{cannotCheck}</p>
+            </Notice>
+          </div>
+        ) : null}
+        <div className="mt-5 flex flex-wrap items-center gap-3">
+          <Button
+            size="lg"
+            data-replay="open-vault"
+            onClick={() => open.run(loan)}
+            busy={working}
+            disabled={(!ready && !loan) || !config.ownerSigning || cannotCheck !== null || !gate.allowed || needsInvite || openingsClosed}
+          >
+            {stage === "signed" ? "Vault opened" : open.busy ? "Opening the vault…" : loan ? "Retry opening the vault" : `Open a ${formatTaz(amount)} vault`}
+            {working ? null : <IconArrowRight size={18} />}
+          </Button>
+          {loan && !working ? (
+            <Button variant="ghost" onClick={onDiscard}>
+              Discard this key and start over
+            </Button>
+          ) : null}
+        </div>
+        <div className="mt-4 space-y-3">
+          {open.error && refusal ? (
+            <Notice tone={refusal.openingsClosed ? "info" : "warn"} title={refusal.title} live>
+              <p>{refusal.body}</p>
+              <p>Your new key is saved in this browser; you can retry.</p>
+            </Notice>
+          ) : (
+            <ActionError error={open.error} refusal={open.refusal} title="The vault could not be opened">
+              {unvouched ? (
+                <p>Nothing was kept for this vault. Discard this key and start over; if it happens again, the backend may be compromised.</p>
+              ) : alreadyBound ? (
+                <p>This key already opened a vault whose details were lost. Discard it and start over with a new key.</p>
+              ) : (
+                <p>Your new key is saved in this browser; you can retry.</p>
+              )}
+            </ActionError>
+          )}
+        </div>
+      </Card>
+
+      {/* The vault itself: five signer nodes around it, lit as their signatures arrive. */}
+      <aside aria-label="Your vault" className="panel space-y-5 p-6">
+        <div className="flex justify-center pt-1">
+          <SignerRing state={stage === "signed" ? "signed" : open.busy ? "working" : "idle"} />
+        </div>
+        <p className="text-center text-[14px] font-semibold" aria-live="polite">
+          {stage ? STAGE_TEXT[stage] : "Five signer nodes make its key together; any three move it, none alone."}
+        </p>
+        <ul className="space-y-2 border-t border-hairline pt-4">
+          <Fact>A fresh key and a fresh account, made in this browser, for this loan only: no wallet, no ETH.</Fact>
+          <Fact>Nothing touches Base until your deposit is proven there.</Fact>
+          {fee > 0n ? <Fact>Opening fee {formatTaz(fee)} (0.5 %), paid to the signers from the vault&apos;s first payout.</Fact> : null}
+          {config.vaultExpiryBlocks !== null ? (
+            <Fact>
+              Pay within {blocksToDuration(config.vaultExpiryBlocks)} ({config.vaultExpiryBlocks} Zcash blocks) of opening it.
+            </Fact>
+          ) : null}
+        </ul>
+      </aside>
     </div>
   );
 }
 
-// ------------------------------------------------------------------ step 3
+// ------------------------------------------------------------------ 03 Deposit and 04 Prove
 
-/** "2 of 3", or the signers' requirement from GET /config while the vault reports none. */
+/** "2 / 3", or the signers' requirement from GET /config while the vault reports none. */
 function confirmationsText(seen: number | undefined): string {
   const needed = config.confirmations;
-  if (seen !== undefined) return needed !== null ? `${seen} of ${needed}` : String(seen);
-  return needed !== null ? `${needed} needed` : "—";
-}
-
-const STATUS_STEPS = [
-  { status: "awaiting_deposit", label: "Waiting for your Ironwood deposit", duration: null },
-  { status: "deposit_seen", label: "Deposit on Zcash; its zero-knowledge proof is being made for Base", duration: "deposit-to-proof" },
-  { status: "pending", label: "Proven on Base; waiting to be activated", duration: "proof-to-activation" },
-  { status: "active", label: "zZEC minted into your Morpho position", duration: null },
-] as const;
-
-/**
- * Where the deposit is: the signers' status, and Base's own word: its pending activation (K3) between proof and mint,
- * then the active vault (the backend follows Base's events a little later).
- */
-function statusStep(vault: Vault | null, basePending: boolean, baseActive: boolean): number {
-  if (vault?.status === "active" || baseActive) return 3;
-  if (basePending) return 2;
-  // The deposit is mined with its confirmations; its proof is not on Base yet.
-  if (vault?.status === "awaiting_deposit" && vault.depositSeen) return 1;
-  const i = vault ? STATUS_STEPS.findIndex((s) => s.status === vault.status) : 0;
-  return Math.max(0, i);
+  if (seen !== undefined) return needed !== null ? `${Math.min(seen, needed)} / ${needed}` : String(seen);
+  return needed !== null ? `0 / ${needed}` : "—";
 }
 
 /** What the address label says about the signers' signatures (C-4). */
@@ -504,21 +472,17 @@ const VOUCHED: Record<VaultCheck, string> = {
   unchecked: "Ironwood-only, NOT checked against any signer set (development build)",
 };
 
-/** The status rows' text, by chain and state: dim once done, bright while current. */
-const STATUS_TEXT: Record<Chain, Record<MarkState, string>> = {
-  zcash: { done: "text-muted", now: "text-text", todo: "text-faint" },
-  base: { done: "text-ink-muted", now: "text-ink", todo: "text-ink-muted" },
-};
-
-/** A figure under the payment request: a label and its value. */
-function DepositFact({ label, children }: { label: string; children: ReactNode }) {
-  return (
-    <div className="min-w-0 rounded-2xl bg-bg/70 px-4 py-3 shadow-[inset_0_0_0_1px_var(--color-hairline)]">
-      <p className="text-[12.5px] text-muted">{label}</p>
-      <div className="mt-1 text-[14.5px] font-semibold">{children}</div>
-    </div>
-  );
-}
+/** What Base learns from a deposit, under every tracker. */
+const BASE_SEES = (
+  <>
+    <span className="block">
+      <strong className="font-semibold text-ink">Base sees</strong> the vault id, the amount, a keyed tag and a later Zcash header.
+    </span>
+    <span className="block">
+      <strong className="font-semibold text-ink">Never</strong> your deposit&apos;s block, transaction or address.
+    </span>
+  </>
+);
 
 function DepositStep({ loan, vault, vaultError }: { loan: StoredLoan; vault: Vault | null; vaultError: string | null }) {
   const amount = BigInt(loan.amount);
@@ -529,7 +493,8 @@ function DepositStep({ loan, vault, vaultError }: { loan: StoredLoan; vault: Vau
   // Base: a proven deposit waiting to be activated, or one that came back as a refund (T-02).
   const ledger = useVaultLedger(loan.vaultId, 20_000);
   const l = ledger.data;
-  const statusIndex = statusStep(vault, Boolean(l?.pending), l?.status === "Active");
+  const basePending = Boolean(l?.pending);
+  const baseActive = l?.status === "Active" || vault?.status === "active";
   const refunded = Boolean(l && l.claims.some((c) => c.kind === "Refund"));
   // R-12: proven as a refund, its claim not open yet.
   const refundPending = (l?.pendingRefunds?.length ?? 0) > 0;
@@ -537,7 +502,7 @@ function DepositStep({ loan, vault, vaultError }: { loan: StoredLoan; vault: Vau
   const awaiting = awaitingDeposit({
     vaultStatus: vault?.status,
     depositSeen: vault?.depositSeen,
-    pending: Boolean(l?.pending),
+    pending: basePending,
     refunding: refunded || refundPending,
   });
   const expiry = vault?.expiryHeight ?? loan.expiryHeight;
@@ -548,7 +513,7 @@ function DepositStep({ loan, vault, vaultError }: { loan: StoredLoan; vault: Vau
     vaultStatus: vault?.status,
     depositSeen: vault?.depositSeen,
     baseStatus: l?.status,
-    pending: Boolean(l?.pending),
+    pending: basePending,
     refunding: refunded || refundPending,
     mintBlock: minting.data?.mintBlock.get(amount),
   });
@@ -564,36 +529,204 @@ function DepositStep({ loan, vault, vaultError }: { loan: StoredLoan; vault: Vau
   });
   // P-8: typical durations measured on the deployment (the evidence file), when published.
   const durations = useTypicalDurations();
-  const statusId = useId();
+  const seen = Boolean(vault && (vault.status === "deposit_seen" || vault.depositSeen));
+  const needed = config.confirmations;
+  const confirmed = seen && (needed === null || (vault?.confirmations ?? 0) >= needed);
   // The seal pulses, and says so, while the deposit's proof is being made (not while the coverage cap holds it back).
-  const proving = statusIndex === 1 && cap === "none";
-  const statusRow = (s: (typeof STATUS_STEPS)[number], i: number, chain: Chain) => {
-    const state: MarkState = i < statusIndex ? "done" : i === statusIndex ? "now" : "todo";
-    return (
-      <li key={s.status} aria-current={state === "now" ? "step" : undefined} className="grid grid-cols-[22px_minmax(0,1fr)] items-start gap-3">
-        <StepMark chain={chain} state={state} className="mt-[3px]" />
-        <span className={cx("text-[15px] leading-[1.45]", STATUS_TEXT[chain][state], state === "now" && "font-semibold")}>
-          {s.label}
-          {state === "done" ? <span className="sr-only"> (done)</span> : null}
-          {s.duration && durations.get(s.duration) !== undefined ? (
-            <span className={cx("mt-1 block text-[13px] font-normal", chain === "zcash" ? "text-muted" : "text-ink-muted")}>
-              Typically {formatPeriod(durations.get(s.duration)!)} (measured)
-            </span>
-          ) : null}
-        </span>
-      </li>
-    );
-  };
+  const proving = confirmed && !basePending && !baseActive && cap === "none";
+  const provingFor = useElapsed(proving);
+  const activatingFor = useElapsed(basePending && !baseActive);
+  const typicalProof = durations.get("deposit-to-proof");
+  const typicalActivation = durations.get("proof-to-activation");
 
+  const zcashRows: TrackerRow[] = [
+    { key: "opened", label: "Vault opened, signed by 5 of 5", state: "done" },
+    {
+      key: "paid",
+      label: seen ? `Paid ${formatTaz(amount)}, Ironwood → Ironwood` : `Waiting for your ${formatTaz(amount)}`,
+      state: seen ? "done" : awaiting ? "now" : "todo",
+    },
+    {
+      key: "confirmations",
+      label: "Confirmed on Zcash",
+      detail: seen ? confirmationsText(vault?.confirmations) : undefined,
+      state: confirmed || basePending || baseActive ? "done" : seen ? "now" : "todo",
+    },
+    {
+      key: "prove",
+      label: "Proven in zero knowledge (RISC Zero)",
+      detail: proving ? clock(provingFor) : undefined,
+      note: proving && typicalProof !== undefined ? `usually ${formatPeriod(typicalProof)} from the deposit` : undefined,
+      state: basePending || baseActive ? "done" : proving ? "now" : "todo",
+    },
+  ];
+  const baseRows: TrackerRow[] = [
+    { key: "attest", label: "Proof verified on Base", proof: true, note: "No signer vouches for the deposit", state: basePending || baseActive ? "done" : "todo" },
+    {
+      key: "activation",
+      label: "Activated, a few Zcash blocks later",
+      detail: basePending && !baseActive ? clock(activatingFor) : undefined,
+      note: basePending && !baseActive && typicalActivation !== undefined ? `usually ${formatPeriod(typicalActivation)}` : undefined,
+      state: baseActive ? "done" : basePending ? "now" : "todo",
+    },
+    { key: "minted", label: "zZEC minted into your Morpho position", state: baseActive ? "done" : "todo" },
+  ];
+  const seam = basePending || baseActive ? "proven" : proving ? "proving" : "idle";
+  const zcashExtra = (
+    <>
+      {vault?.status === "expired" ? (
+        <div className="mt-5">
+          <Notice tone="warn" title="This vault expired without a valid deposit">
+            <p>
+              Start a new loan. Anything you sent comes back only as a refund proven on Base: see the vault&apos;s{" "}
+              <Link href={vaultHref("refund", loan.vaultId!)} prefetch={false}>
+                refunds
+              </Link>
+              .
+            </p>
+          </Notice>
+        </div>
+      ) : null}
+      {vault && vault.nonConforming.length > 0 ? (
+        <div className="mt-5">
+          <Notice tone="warn" title="A payment did not follow the rules">
+            <p>
+              {vault.nonConforming.length} payment(s) to this vault cannot back the loan. They come back only as refunds proven
+              on Base:{" "}
+              <Link href={vaultHref("refund", loan.vaultId!)} prefetch={false}>
+                see the refunds
+              </Link>
+              .
+            </p>
+          </Notice>
+        </div>
+      ) : null}
+      {vaultError ? (
+        <p className="mt-5 text-sm text-danger" role="status">
+          Status unavailable: {vaultError}
+        </p>
+      ) : null}
+    </>
+  );
+  // One sentence for screen readers, changing only with the stage (the tracker's rows are not announced).
+  const stageText = baseActive
+    ? "zZEC minted into your Morpho position."
+    : basePending
+      ? "Proven on Base; activation in a few Zcash blocks."
+      : proving
+        ? "Confirmed on Zcash; its zero-knowledge proof is being made."
+        : seen
+          ? "Deposit seen on Zcash; confirmations coming in."
+          : "Waiting for your payment.";
+
+  const notices = (
+    <>
+      {cap !== "none" ? (
+        <Notice tone="warn" title={cap === "confirmed" ? "Your deposit waits for room under the coverage cap" : "The coverage cap is full right now"} live>
+          <p>
+            {cap === "confirmed" ? "Your deposit is on Zcash, but the" : "If you already paid this vault, your deposit is on Zcash, but the"} signers&apos;
+            bonds cover no more collateral right now, so its proof cannot land yet. Nothing is lost and the vault stays yours: the
+            proof is sent again once there is room, and zZEC is minted then.
+          </p>
+          {cap === "possible" ? <p>If you have not paid yet, wait until there is room before you pay.</p> : null}
+          {refundInstead.result ? (
+            <p>
+              Refund requested: the coordinator proves your deposit as a refund instead. It then appears on the{" "}
+              <Link href={vaultHref("refund", loan.vaultId!)} prefetch={false}>
+                refunds page
+              </Link>
+              , pending for a few Zcash blocks until its claim opens; you then give it an Ironwood destination there (the
+              payout&apos;s network fee is deducted).
+            </p>
+          ) : (
+            <>
+              <p>If you would rather not wait, have it proven as a refund: it then comes back to an Ironwood address you give.</p>
+              <Button variant="secondary" onClick={() => void refundInstead.run()} busy={refundInstead.busy}>
+                Refund my deposit instead
+              </Button>
+            </>
+          )}
+          {refundInstead.error ? <p className="text-danger">{refundInstead.error}</p> : null}
+        </Notice>
+      ) : null}
+      {refundPending && !refunded ? (
+        <Notice tone="info" title="Your deposit was proven as a refund" live>
+          <p>
+            Its proof is on Base and waits a few Zcash blocks, like an activation, before its refund opens (pending until then).
+            The backend&apos;s keeper opens it; you then give it an Ironwood destination on the{" "}
+            <Link href={vaultHref("refund", loan.vaultId!)} prefetch={false}>
+              refunds page
+            </Link>
+            .
+          </p>
+        </Notice>
+      ) : null}
+      {refunded ? (
+        <Notice tone="warn" title="A deposit came back as a refund" live>
+          <p>
+            A deposit to this vault could not back the loan and was proven on Base as a refund.{" "}
+            <Link href={vaultHref("refund", loan.vaultId!)} prefetch={false}>
+              Give it a destination
+            </Link>{" "}
+            to get it back.
+          </p>
+        </Notice>
+      ) : null}
+      {!awaiting && vault?.status === "expired" ? (
+        <Notice tone="warn" title="This vault no longer accepts deposits">
+          <p>Its deposit deadline passed. Do not pay this address; start a new loan instead.</p>
+        </Notice>
+      ) : null}
+    </>
+  );
+
+  // 04 Prove: once the deposit is seen, the crossing is the page.
+  if (!awaiting) {
+    return (
+      <div className="mx-auto max-w-[46rem] space-y-5">
+        <p className="sr-only" aria-live="polite">
+          {stageText}
+        </p>
+        <SeamTracker
+          title="Your deposit, from Zcash to Base"
+          size="hero"
+          zcash={zcashRows}
+          base={baseRows}
+          seam={seam}
+          provingLabel={`Proving your deposit · ${clock(provingFor)}`}
+          zcashExtra={zcashExtra}
+          footer={BASE_SEES}
+        />
+        {seen && !basePending && !baseActive && cap === "none" ? (
+          <Hint>Paid. Do not pay again: a second payment does not back the loan, it only comes back as a refund.</Hint>
+        ) : null}
+        {basePending && !baseActive ? (
+          <Hint>
+            Proven on Base. zZEC is minted after a short safety delay (a few more Zcash blocks): our keeper finalizes it, and anyone
+            could.{REPLAY ? " The replay runs it in seconds." : ""}
+          </Hint>
+        ) : null}
+        {notices}
+        {basePending || baseActive ? (
+          <section aria-label="What Base saw" className="space-y-3">
+            <h3 className="text-[15px] font-bold">What Base saw</h3>
+            <ProofTrail vaultId={loan.vaultId!} account={loan.account} since={loan.createdAt} compact />
+          </section>
+        ) : null}
+        <Hint icon={<IconClock size={15} />}>Updates every 10 seconds. You can close this page and come back from Loans.</Hint>
+      </div>
+    );
+  }
+
+  // 03 Deposit: the payment request, with the tracker beside it.
+  const sampleVault = REPLAY && recording().placeholder;
   return (
     <div className="grid items-start gap-6 min-[980px]:grid-cols-[minmax(0,1fr)_minmax(0,24rem)] [&>*]:min-w-0">
-      <Card
-        lead
-        title={awaiting ? `Pay ${formatTaz(amount)} from Ironwood` : "Your deposit"}
-        icon={<ZecMark size={20} />}
-        action={vault ? <Badge tone={awaiting ? "info" : "ok"} dot>{awaiting ? "Waiting for your payment" : "Deposit received"}</Badge> : null}
-      >
-        <div className="space-y-4">
+      <p className="sr-only" aria-live="polite">
+        {stageText}
+      </p>
+      <Card lead title={`Pay exactly ${formatTaz(amount)} from Ironwood`} action={vault ? <Badge tone="info" dot>Waiting for your payment</Badge> : null}>
+        <div className="space-y-5">
           {check && !check.ok ? (
             <Notice tone="danger" title="Do not pay this address">
               {check.problems.map((p) => (
@@ -601,112 +734,29 @@ function DepositStep({ loan, vault, vaultError }: { loan: StoredLoan; vault: Vau
               ))}
             </Notice>
           ) : null}
-          {awaiting && proof.state === "refused" ? (
+          {proof.state === "refused" ? (
             <Notice tone="danger" title="Do not pay this vault" live>
               <p>{proof.message}</p>
               <p>The signers do not vouch for this address. Discard this loan and start a new one.</p>
             </Notice>
           ) : null}
-          {awaiting && proof.state === "legacy" ? (
+          {proof.state === "legacy" ? (
             <Notice tone="danger" title="This vault's address cannot be checked">
               <p>
-                It was opened by an earlier version of Zecured, whose vault signatures this app does not check, so nothing
-                shows that the signers control it. Do not pay it: let it expire and start a new loan.
+                It was opened by an earlier version of Zecured, whose vault signatures this app does not check, so nothing shows
+                that the signers control it. Do not pay it: let it expire and start a new loan.
               </p>
             </Notice>
           ) : null}
-          {awaiting && proof.state === "checking" ? (
+          {proof.state === "checking" ? (
             <p className="text-sm text-muted" aria-live="polite">
               Checking the signers&apos; signatures on this vault…
             </p>
           ) : null}
-          {!awaiting && (vault?.status === "deposit_seen" || vault?.depositSeen) && !l?.pending && cap === "none" ? (
+          {notices}
+          {vouched && check?.ok && check.uri ? (
             <>
-              <ProofPipeline confirmations={vault?.confirmations} />
-              <Notice tone="ok" title="Deposit received on Zcash" live>
-                <p>
-                  A zero-knowledge proof that your deposit is in a Zcash block is being made and sent to Base; nothing is minted
-                  on anyone&apos;s word. Do not pay again: a second payment does not back the loan (it can only come back as a
-                  refund).
-                </p>
-              </Notice>
-            </>
-          ) : null}
-          {cap !== "none" ? (
-            <Notice
-              tone="warn"
-              title={cap === "confirmed" ? "Your deposit waits for room under the coverage cap" : "The coverage cap is full right now"}
-              live
-            >
-              <p>
-                {cap === "confirmed" ? "Your deposit is on Zcash, but the" : "If you already paid this vault, your deposit is on Zcash, but the"}{" "}
-                signers&apos; bonds cover no more collateral right now, so its proof cannot land yet. Nothing is lost and the vault
-                stays yours: the proof is sent again once there is room, and zZEC is minted then.
-              </p>
-              {cap === "possible" ? <p>If you have not paid yet, wait until there is room before you pay.</p> : null}
-              {refundInstead.result ? (
-                <p>
-                  Refund requested: the coordinator proves your deposit as a refund instead. It then appears on the{" "}
-                  <Link href={vaultHref("refund", loan.vaultId!)} prefetch={false}>
-                    refunds page
-                  </Link>
-                  , pending for a few Zcash blocks until its claim opens; you then give it an Ironwood destination there (the
-                  payout&apos;s network fee is deducted).
-                </p>
-              ) : (
-                <>
-                  <p>If you would rather not wait, have it proven as a refund: it then comes back to an Ironwood address you give.</p>
-                  <Button variant="secondary" onClick={() => void refundInstead.run()} busy={refundInstead.busy}>
-                    Refund my deposit instead
-                  </Button>
-                </>
-              )}
-              {refundInstead.error ? <p className="text-danger">{refundInstead.error}</p> : null}
-            </Notice>
-          ) : null}
-          {l?.pending ? (
-            <Notice tone="ok" title="Deposit proven on Base" live>
-              <p>
-                It waits a few Zcash blocks before anyone can activate it; the backend&apos;s keeper does, and zZEC is minted into
-                your position.{" "}
-                <Link href={vaultHref("position", loan.vaultId!)} prefetch={false}>
-                  See when
-                </Link>
-                .
-              </p>
-            </Notice>
-          ) : null}
-          {refundPending && !refunded ? (
-            <Notice tone="info" title="Your deposit was proven as a refund" live>
-              <p>
-                Its proof is on Base and waits a few Zcash blocks, like an activation, before its refund opens (pending until
-                then). The backend&apos;s keeper opens it; you then give it an Ironwood destination on the{" "}
-                <Link href={vaultHref("refund", loan.vaultId!)} prefetch={false}>
-                  refunds page
-                </Link>
-                .
-              </p>
-            </Notice>
-          ) : null}
-          {refunded ? (
-            <Notice tone="warn" title="A deposit came back as a refund" live>
-              <p>
-                A deposit to this vault could not back the loan and was proven on Base as a refund.{" "}
-                <Link href={vaultHref("refund", loan.vaultId!)} prefetch={false}>
-                  Give it a destination
-                </Link>{" "}
-                to get it back.
-              </p>
-            </Notice>
-          ) : null}
-          {!awaiting && vault?.status === "expired" ? (
-            <Notice tone="warn" title="This vault no longer accepts deposits">
-              <p>Its deposit deadline passed. Do not pay this address; start a new loan instead.</p>
-            </Notice>
-          ) : null}
-          {awaiting && vouched && check?.ok && check.uri ? (
-            <div className="space-y-5">
-              <DemoPayment loan={loan} />
+              {REPLAY ? <DemoPayment loan={loan} /> : null}
               {vouched !== "pinned" ? (
                 <Notice tone="warn" title="Development build: the signer set is not pinned">
                   <p>
@@ -720,18 +770,26 @@ function DepositStep({ loan, vault, vaultError }: { loan: StoredLoan; vault: Vau
               <div className="grid gap-5 sm:grid-cols-[auto_minmax(0,1fr)]">
                 <div className="flex flex-col items-center gap-2">
                   <div className="rounded-[20px] bg-white p-3 shadow-[0_20px_40px_-24px_rgb(0_0_0/0.9)]">
-                    <Qr value={check.uri} label={`ZIP 321 payment request for ${formatTaz(amount)} to the vault`} size={208} />
+                    <Qr value={check.uri} label={`ZIP 321 payment request for ${formatTaz(amount)} to the vault`} size={196} />
                   </div>
-                  <p className="text-[12px] text-muted">Scan with an Ironwood-capable wallet</p>
+                  <p className="max-w-[13rem] text-center text-[12px] text-muted">
+                    {REPLAY
+                      ? sampleVault
+                        ? "The replay's sample vault: it accepts nothing. Use “Pay it with demo TAZ”."
+                        : "The recorded run's vault: it no longer accepts deposits. Use “Pay it with demo TAZ”."
+                      : "Scan with an Ironwood-capable wallet"}
+                  </p>
                 </div>
                 <div className="min-w-0 space-y-4">
                   <div>
                     <p className="text-[12.5px] font-semibold text-muted">Send exactly</p>
-                    <TokenAmount token="TAZ" value={formatZec(amount)} size="xl" />
-                    <p className="mt-1 text-[13px] text-muted">in a single payment, plus the network fee</p>
+                    <div className="mt-1.5">
+                      <TokenAmount token="TAZ" value={formatZec(amount)} size="xl" />
+                    </div>
+                    <p className="mt-1.5 text-[13px] text-muted">in one payment, plus the network fee</p>
                   </div>
                   <div>
-                    <p className="flex items-center gap-1.5 text-[12.5px] font-semibold text-muted">
+                    <p className="flex flex-wrap items-center gap-x-2 gap-y-1 text-[12.5px] font-semibold text-muted">
                       To the vault
                       <span className={cx("inline-flex items-center gap-1", vouched === "pinned" ? "text-ok" : "text-warn")}>
                         <IconShield size={14} />
@@ -748,249 +806,111 @@ function DepositStep({ loan, vault, vaultError }: { loan: StoredLoan; vault: Vau
                   </div>
                 </div>
               </div>
-              <div className="grid gap-3 sm:grid-cols-3">
-                <DepositFact label="Deposit deadline">
-                  {expiry !== undefined ? (
-                    <>
-                      <span className="tabular-nums">Block #{expiry.toLocaleString("en-US")}</span>
-                      {blocksLeft !== null ? (
-                        <span className="block text-[12.5px] font-normal text-muted">
-                          {blocksLeft > 0 ? `${blocksLeft} blocks left (${blocksToDuration(blocksLeft)})` : "already passed"}
-                        </span>
-                      ) : null}
-                    </>
-                  ) : (
-                    "—"
-                  )}
-                </DepositFact>
-                <DepositFact label="Confirmations">
-                  <span className="tabular-nums">{confirmationsText(vault?.confirmations)}</span>
-                </DepositFact>
-                <DepositFact label="Vault id">
-                  <span className="flex items-center gap-2">
-                    <Mono>{short(loan.vaultId!, 8, 6)}</Mono>
-                    <CopyButton value={loan.vaultId!} label="Copy" />
+              {REPLAY ? null : <DemoPayment loan={loan} />}
+              <p className="flex flex-wrap items-center gap-x-3 gap-y-1 text-[13px] text-muted">
+                <span>
+                  Vault <Mono>{short(loan.vaultId!, 8, 6)}</Mono>
+                </span>
+                <CopyButton value={loan.vaultId!} label="Copy id" />
+                {expiry !== undefined ? (
+                  <span className="tabular-nums">
+                    · pay before Zcash block #{expiry.toLocaleString("en-US")}
+                    {blocksLeft !== null ? (blocksLeft > 0 ? ` (${blocksToDuration(blocksLeft)} left)` : " (passed)") : ""}
                   </span>
-                </DepositFact>
-              </div>
-              <ul className="space-y-2 rounded-2xl bg-warn/[0.05] p-4 text-[13.5px] text-soft shadow-[inset_0_0_0_1px_color-mix(in_oklab,var(--color-warn)_30%,transparent)]">
-                <li className="flex gap-2.5">
-                  <IconAlert size={16} className="mt-0.5 text-warn" />
-                  <span>
-                    <strong className="text-text">Pay from notes that have waited in Ironwood.</strong> Paying right after moving exactly{" "}
-                    {formatTaz(amount)} into Ironwood links that public move to this loan. If your ZEC is not in Ironwood yet, let this
-                    vault expire and start a new loan later.
-                  </span>
-                </li>
-                <li className="flex gap-2.5">
-                  <IconAlert size={16} className="mt-0.5 text-warn" />
-                  <span>
-                    <strong className="text-text">Only an exact Ironwood → Ironwood payment counts.</strong> Paying from transparent,
-                    Sapling or Orchard funds, a different amount, or after the deadline does not back the loan: such a payment comes
-                    back only as a refund proven on Base, minus the payout&apos;s network fee.
-                  </span>
-                </li>
-              </ul>
-            </div>
+                ) : null}
+              </p>
+              <Disclosure summary="Before you pay · 2 rules">
+                <p>
+                  <strong className="text-text">Pay from notes that have waited in Ironwood.</strong> Paying right after moving exactly{" "}
+                  {formatTaz(amount)} into Ironwood links that public move to this loan. If your ZEC is not in Ironwood yet, let this
+                  vault expire and start a new loan later.
+                </p>
+                <p>
+                  <strong className="text-text">Only an exact Ironwood → Ironwood payment counts.</strong> Paying from transparent,
+                  Sapling or Orchard funds, a different amount, or after the deadline does not back the loan: such a payment comes back
+                  only as a refund proven on Base, minus the payout&apos;s network fee.
+                </p>
+              </Disclosure>
+            </>
           ) : null}
         </div>
       </Card>
 
-      {/* The seam: the deposit's way from Zcash (dark, round marks) through its proof (the π seal) to Base (light, square marks). */}
-      <div className="space-y-3 min-[980px]:sticky min-[980px]:top-24">
-        <aside aria-labelledby={statusId} className="overflow-hidden rounded-[22px] shadow-[0_0_0_1px_var(--color-border),0_30px_60px_-36px_rgb(0_0_0/0.9)]">
-          <h2 id={statusId} className="sr-only">
-            Status
-          </h2>
-          <div className="bg-[radial-gradient(120%_90%_at_20%_0%,#123224_0%,#0a1a12_45%,#060d09_100%)] px-[26px] pt-[24px] pb-11">
-            <div className="flex items-center justify-between">
-              <ChainLabel chain="zcash">On Zcash</ChainLabel>
-              <ZecMark size={20} />
-            </div>
-            <ol className="mt-[18px] flex flex-col gap-4" aria-live="polite">
-              {STATUS_STEPS.slice(0, 2).map((s, i) => statusRow(s, i, "zcash"))}
-            </ol>
-            {vault?.status === "expired" ? (
-              <div className="mt-5">
-                <Notice tone="warn" title="This vault expired without a valid deposit">
-                  <p>
-                    Start a new loan. Anything you sent comes back only as a refund proven on Base: see the vault&apos;s{" "}
-                    <Link href={vaultHref("refund", loan.vaultId!)} prefetch={false}>
-                      refunds
-                    </Link>
-                    .
-                  </p>
-                </Notice>
-              </div>
-            ) : null}
-            {vault && vault.nonConforming.length > 0 ? (
-              <div className="mt-5">
-                <Notice tone="warn" title="A payment did not follow the rules">
-                  <p>
-                    {vault.nonConforming.length} payment(s) to this vault cannot back the loan. They come back only as refunds
-                    proven on Base:{" "}
-                    <Link href={vaultHref("refund", loan.vaultId!)} prefetch={false}>
-                      see the refunds
-                    </Link>
-                    .
-                  </p>
-                </Notice>
-              </div>
-            ) : null}
-            {vaultError ? (
-              <p className="mt-5 text-sm text-danger" role="status">
-                Status unavailable: {vaultError}
-              </p>
-            ) : null}
-          </div>
-          <div aria-hidden="true" className="relative z-[2] h-0">
-            <ProofSeal pulse={proving} className="absolute top-[-30px] left-[22px]" />
-            {proving ? (
-              <span className="absolute top-[-13px] left-24 inline-flex min-h-[26px] items-center rounded-full bg-accent px-3 text-[12.5px] font-bold whitespace-nowrap text-on-accent">
-                Proving your deposit
-              </span>
-            ) : null}
-          </div>
-          <div className="paper px-[26px] pt-11 pb-[24px]">
-            <div className="flex items-center justify-between">
-              <ChainLabel chain="base">On Base</ChainLabel>
-              <BaseMark size={18} />
-            </div>
-            <ol start={3} className="mt-[18px] flex flex-col gap-4" aria-live="polite">
-              {STATUS_STEPS.slice(2).map((s, i) => statusRow(s, i + 2, "base"))}
-            </ol>
-            <p className="mt-5 border-t border-rule pt-4 text-[13.5px] leading-[1.55] text-ink-muted">
-              Base will see your vault id, the amount, a keyed tag and a later Zcash header. Never your deposit&apos;s block,
-              transaction or address.
-            </p>
-          </div>
-        </aside>
-        {l?.pending || l?.status === "Active" ? (
-          <div className="panel p-5">
-            <p className="mb-3 flex items-center gap-2 text-[13px] font-semibold text-muted">
-              <BaseMark size={14} /> On Base, with its transactions
-            </p>
-            <ProofTrail vaultId={loan.vaultId!} account={loan.account} since={loan.createdAt} compact />
-          </div>
-        ) : null}
-        <p className="flex items-center gap-2 text-xs text-muted">
-          <IconClock size={14} />
-          Updates every 10 seconds. You can close this page and come back from My loans.
-        </p>
+      <div className="space-y-3">
+        <SeamTracker title="Your deposit, from Zcash to Base" zcash={zcashRows} base={baseRows} seam={seam} zcashExtra={zcashExtra} footer={BASE_SEES} />
+        <Hint icon={<IconClock size={15} />}>Updates every 10 seconds. You can close this page and come back from Loans.</Hint>
       </div>
     </div>
   );
 }
 
-/**
- * The deposit's way to Base while it is proven: its confirmations on Zcash, the zero-knowledge proof made of it, and
- * Base's check of that proof. The second stage runs while the confirmations are in; the third is the proof's landing.
- */
-function ProofPipeline({ confirmations }: { confirmations: number | undefined }) {
-  const needed = config.confirmations;
-  const confirmed = needed !== null && confirmations !== undefined && confirmations >= needed;
-  const stages = [
-    {
-      icon: <ZecMark size={20} />,
-      title: "Confirmed on Zcash",
-      body: needed !== null ? `${Math.min(confirmations ?? 0, needed)} of ${needed} confirmations` : "Its confirmations come in",
-      state: confirmed ? "done" : "now",
-    },
-    {
-      icon: <ProofSeal size="sm" className="!size-[20px]" />,
-      title: "Proven in zero knowledge",
-      body: "The RISC Zero zkVM proves the deposit is in a Zcash block whose header Base already verified",
-      state: confirmed ? "now" : "todo",
-    },
-    {
-      icon: <BaseMark size={18} />,
-      title: "Verified on Base",
-      body: "The Intake checks the proof: no signer vouches for the deposit",
-      state: "todo",
-    },
-  ] as const;
-  return (
-    <ol className="grid gap-2 sm:grid-cols-3" aria-label="Your deposit's proof">
-      {stages.map((s) => (
-        <li
-          key={s.title}
-          aria-current={s.state === "now" ? "step" : undefined}
-          className={cx(
-            "rounded-2xl p-4",
-            s.state === "now"
-              ? "bg-accent/[0.07] shadow-[inset_0_0_0_1.5px_rgb(244_183_40/0.6)]"
-              : s.state === "done"
-                ? "bg-ok/[0.06] shadow-[inset_0_0_0_1px_color-mix(in_oklab,var(--color-ok)_35%,transparent)]"
-                : "bg-bg/60 shadow-[inset_0_0_0_1px_var(--color-hairline)]",
-          )}
-        >
-          <p className="flex items-center justify-between">
-            <span className="inline-flex size-8 items-center justify-center rounded-lg bg-bg">{s.icon}</span>
-            {s.state === "done" ? (
-              <IconCheck size={16} strokeWidth={2.6} className="text-ok" />
-            ) : s.state === "now" ? (
-              <span aria-hidden="true" className="dot-live size-2 rounded-full bg-accent" />
-            ) : null}
-          </p>
-          <p className={cx("mt-2.5 text-[14px] font-bold", s.state === "todo" && "text-muted")}>{s.title}</p>
-          <p className="mt-0.5 text-[12.5px] text-muted">{s.body}</p>
-        </li>
-      ))}
-    </ol>
-  );
-}
+// ------------------------------------------------------------------ 04 Prove, done: the deposit is active
 
-// ------------------------------------------------------------------ the deposit is active
-
-function ActiveCard({ loan, onContinue }: { loan: StoredLoan; onContinue: () => void }) {
+function ProvenStep({ loan, onContinue }: { loan: StoredLoan; onContinue: () => void }) {
   // The collateral as Morpho holds it: the deposit less the opening fee, if any.
   const position = usePosition(loan.account, 30_000);
-  const collateral = position.data?.position.collateral ?? BigInt(loan.amount);
+  const collateral = position.data?.position.collateral ?? (config.v3 ? BigInt(loan.amount) - openingFee(BigInt(loan.amount), config.v3) : BigInt(loan.amount));
+  const done = (key: string, label: string, extra: Partial<TrackerRow> = {}): TrackerRow => ({ key, label, state: "done", ...extra });
   return (
-    <Card lead>
-      <div className="grid items-center gap-6 md:grid-cols-[minmax(0,1fr)_auto]">
-        <div className="space-y-3">
-          <span className="inline-flex size-12 items-center justify-center rounded-2xl bg-ok/15 text-ok shadow-[inset_0_0_0_1px_color-mix(in_oklab,var(--color-ok)_40%,transparent)]">
-            <IconCheck size={26} strokeWidth={2.6} />
-          </span>
-          <h2 className="text-[26px] leading-tight font-extrabold font-stretch-118%">Your deposit is proven and active</h2>
-          <p className="max-w-xl text-[15px] text-soft">
-            A zero-knowledge proof of your Ironwood deposit was verified on Base, and zZEC was minted straight into your
-            account&apos;s Morpho position. No signer vouched for it.
-          </p>
-          <Button size="lg" onClick={onContinue}>
-            Continue to borrow
-            <IconArrowRight size={18} />
-          </Button>
+    <div className="space-y-8">
+      <div className="grid items-start gap-6 lg:grid-cols-[minmax(0,1fr)_minmax(0,24rem)] [&>*]:min-w-0">
+      <SeamTracker
+        title="Your deposit, from Zcash to Base"
+        zcash={[
+          done("opened", "Vault opened, signed by 5 of 5"),
+          done("paid", `Paid ${formatTaz(BigInt(loan.amount))}, Ironwood → Ironwood`),
+          done("confirmations", "Confirmed on Zcash"),
+          done("prove", "Proven in zero knowledge (RISC Zero)"),
+        ]}
+        base={[
+          done("attest", "Proof verified on Base", { proof: true, note: "No signer vouches for the deposit" }),
+          done("activation", "Activated, a few Zcash blocks later"),
+          done("minted", "zZEC minted into your Morpho position"),
+        ]}
+        seam="proven"
+        footer={BASE_SEES}
+      />
+      <div className="panel panel-lead space-y-5 p-6 max-lg:order-first">
+        <h3 className="text-[length:clamp(24px,2.4vw,30px)] leading-tight font-extrabold font-stretch-116%">Proven on Base. zZEC minted.</h3>
+        <div className="space-y-1.5">
+          <TokenAmount token="zZEC" value={<CountUp value={formatZec(collateral)} />} unit="zZEC" size="xl" className="animate-pop" />
+          <p className="text-[13px] text-muted">collateral in your Morpho position</p>
         </div>
-        <div className="flex items-center gap-3 rounded-2xl bg-bg/70 px-5 py-4 shadow-[inset_0_0_0_1px_var(--color-border)]">
-          <ZzecMark size={40} />
-          <div>
-            <p className="text-[12.5px] text-muted">Collateral in Morpho</p>
-            <p className="text-[20px] font-bold tabular-nums">
-              {formatZec(collateral)} <span className="text-[14px] text-muted">zZEC</span>
-            </p>
-          </div>
-          <MorphoMark size={30} className="ml-2" />
-        </div>
-      </div>
-      <div className="mt-6 border-t border-hairline pt-5">
-        <p className="mb-3 flex items-center gap-2 text-[13px] font-semibold text-muted">
-          <BaseMark size={14} /> Where Base verified it
+        <p className="text-[14.5px] text-soft">
+          A zero-knowledge proof of your Ironwood deposit was verified on Base, and zZEC was minted straight into your
+          account&apos;s Morpho position on that proof alone.
         </p>
-        <ProofTrail vaultId={loan.vaultId!} account={loan.account} since={loan.createdAt} compact />
+        <Button size="lg" className="w-full" data-replay="continue-to-borrow" onClick={onContinue}>
+          Borrow against it
+          <IconArrowRight size={18} />
+        </Button>
       </div>
-    </Card>
+      </div>
+      <section aria-label="What Base saw" className="space-y-3">
+        <h3 className="text-[15px] font-bold">What Base saw</h3>
+        <ProofTrail vaultId={loan.vaultId!} account={loan.account} since={loan.createdAt} compact />
+      </section>
+    </div>
   );
 }
 
-// ------------------------------------------------------------------ step 4
+// ------------------------------------------------------------------ 05 Borrow
 
 function BorrowStep({ loan }: { loan: StoredLoan }) {
   const position = usePosition(loan.account, 30_000);
   const [done, setDone] = useState(false);
   return (
-    <Card lead title={`Borrow ${loanTokenName()}`} icon={<UsdcMark size={20} />}>
+    <Card
+      lead
+      title={`Borrow ${loanTokenName()}`}
+      icon={<UsdcMark size={20} />}
+      action={
+        <Link href={vaultHref("position", loan.vaultId!)} prefetch={false} className={buttonClass(done ? "primary" : "ghost", undefined, done ? "md" : "sm")}>
+          Go to your loan
+          <IconArrowRight size={16} />
+        </Link>
+      }
+    >
       {position.error && config.contractsDeployed ? (
         <div className="mb-4">
           <Notice tone="danger" title="Could not read your position" live>
@@ -1006,12 +926,6 @@ function BorrowStep({ loan }: { loan: StoredLoan }) {
           void position.refresh();
         }}
       />
-      <div className="mt-6 flex flex-wrap gap-2">
-        <Link href={vaultHref("position", loan.vaultId!)} prefetch={false} className={buttonClass(done ? "primary" : "secondary")}>
-          Go to your position
-          <IconArrowRight size={16} />
-        </Link>
-      </div>
     </Card>
   );
 }

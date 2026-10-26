@@ -5,7 +5,7 @@ export const STATUS_LABEL: Record<Vault["status"], { text: string; tone: "info" 
   awaiting_deposit: { text: "Awaiting deposit", tone: "info" },
   deposit_seen: { text: "Deposit seen", tone: "info" },
   active: { text: "Active", tone: "ok" },
-  closing: { text: "Closing", tone: "warn" },
+  closing: { text: "Paying out", tone: "info" },
   closed: { text: "Closed", tone: "neutral" },
   expired: { text: "Expired", tone: "warn" },
   cancelled: { text: "Cancelled", tone: "neutral" },

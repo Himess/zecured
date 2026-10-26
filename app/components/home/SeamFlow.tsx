@@ -3,6 +3,7 @@
  * notes encrypted), a zero-knowledge proof crossing the seam (the gold π), and on Base (light, square) a collateral
  * receipt in a Morpho market and USDC in a brand-new account. Server-safe and decorative except for its words.
  */
+import { LoanTokenName } from "../client";
 import { MorphoMark, UsdcMark, ZecMark, ZzecMark } from "../marks";
 import { ProofSeal } from "../seam";
 
@@ -11,7 +12,7 @@ export function SeamFlow() {
     <figure className="overflow-hidden rounded-[22px] shadow-[0_0_0_1px_var(--color-border),0_30px_60px_-36px_rgb(0_0_0/0.9)]">
       <figcaption className="sr-only">
         Your ZEC stays in a 3-of-5 threshold vault in Zcash&apos;s Ironwood pool; a zero-knowledge proof of the deposit
-        crosses to Base, where a collateral receipt backs a Morpho Blue loan in USDC to a brand-new account.
+        crosses to Base, where a collateral receipt backs a Morpho Blue loan to a brand-new account.
       </figcaption>
       <div className="relative bg-[radial-gradient(120%_90%_at_20%_0%,#123224_0%,#0a1a12_45%,#060d09_100%)] px-6 pt-6 pb-12">
         <p className="flex items-center gap-2 text-[12.5px] font-semibold text-pool-soft">
@@ -24,7 +25,7 @@ export function SeamFlow() {
           </span>
           <div className="min-w-0">
             <p className="text-[17px] font-extrabold font-stretch-118%">Your ZEC, still shielded</p>
-            <p className="text-[13px] text-muted">In a 3-of-5 FROST vault no single party controls</p>
+            <p className="text-[13px] text-muted">In a 3-of-5 FROST vault no single signer controls</p>
           </div>
         </div>
         <div aria-hidden="true" className="mt-4 flex flex-wrap gap-1.5">
@@ -36,7 +37,7 @@ export function SeamFlow() {
         </div>
       </div>
       <div aria-hidden="true" className="relative z-[2] h-0">
-        <ProofSeal pulse className="absolute top-[-30px] left-[22px]" />
+        <ProofSeal className="absolute top-[-30px] left-[22px]" />
         <span className="absolute top-[-13px] left-24 inline-flex min-h-[26px] items-center rounded-full bg-accent px-3 text-[12.5px] font-bold whitespace-nowrap text-on-accent">
           Zero-knowledge proof
         </span>
@@ -58,7 +59,9 @@ export function SeamFlow() {
           <li className="flex items-center gap-3 border-t border-rule pt-3">
             <UsdcMark size={34} />
             <div className="min-w-0 flex-1">
-              <p className="text-[15px] font-bold">USDC to a brand-new account</p>
+              <p className="text-[15px] font-bold">
+                <LoanTokenName /> to a brand-new account
+              </p>
               <p className="text-[12.5px] text-ink-muted">Gas sponsored: it never held ETH</p>
             </div>
           </li>

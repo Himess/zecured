@@ -81,7 +81,7 @@ export function MorphoMark({ size = 20, className, title }: MarkProps) {
 export function BaseMark({ size = 20, className, title }: MarkProps) {
   return (
     <svg viewBox="0 0 20 20" {...svgProps(size, title, className)}>
-      <rect x="1" y="1" width="18" height="18" rx="4.5" fill="#0052FF" />
+      <rect x="1" y="1" width="18" height="18" rx="1.5" fill="#0052FF" />
     </svg>
   );
 }
@@ -123,8 +123,24 @@ export function PairMarks({ a, b, size = 28 }: { a: ReactNode; b: ReactNode; siz
   );
 }
 
-/** The two chains the app works across, as one pill: "Zcash testnet ↔ Base Sepolia" (names hidden when narrow). */
-export function NetworkPill({ zcash, base, className }: { zcash: string; base: string; className?: string }) {
+/**
+ * The two chains the app works across, as one pill: "Zcash testnet | Base Sepolia", the hairline between them a
+ * seam (not a bridge), names hidden below 1600 px; `status` ends it (the backend's dot, or the replay's mark).
+ */
+export function NetworkPill({
+  zcash,
+  base,
+  short,
+  status,
+  className,
+}: {
+  zcash: string;
+  base: string;
+  /** What the pill says while the names are hidden ("Testnet"). */
+  short?: string;
+  status?: ReactNode;
+  className?: string;
+}) {
   return (
     <span
       className={cx(
@@ -133,12 +149,21 @@ export function NetworkPill({ zcash, base, className }: { zcash: string; base: s
       )}
     >
       <ZecMark size={16} />
-      <span className="max-[1380px]:sr-only">{zcash}</span>
-      <span aria-hidden="true" className="text-faint">
-        ↔
-      </span>
-      <BaseMark size={15} />
-      <span className="max-[1380px]:sr-only">{base}</span>
+      <span className="max-[1600px]:sr-only">{zcash}</span>
+      <span aria-hidden="true" className="h-3.5 w-px bg-line" />
+      <BaseMark size={14} />
+      <span className="max-[1600px]:sr-only">{base}</span>
+      {short ? (
+        <span aria-hidden="true" className="text-muted min-[1601px]:hidden">
+          {short}
+        </span>
+      ) : null}
+      {status ? (
+        <>
+          <span aria-hidden="true" className="h-3.5 w-px bg-line" />
+          {status}
+        </>
+      ) : null}
     </span>
   );
 }

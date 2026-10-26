@@ -5,14 +5,14 @@ import { usePosition, useVault } from "@/lib/hooks";
 import { short, type StoredLoan } from "@/lib/keys";
 import { vaultHref } from "@/lib/routes";
 import { IconArrowRight } from "./icons";
-import { HealthRing, healthOf, TokenAmount, usdc, zec } from "./loan";
+import { fallBeforeLiquidation, HealthRunway, healthOf, TokenAmount, usdc, zec } from "./loan";
 import { STATUS_LABEL } from "./status";
 import { Badge, buttonClass, cx, Skeleton } from "./ui";
 
 /**
- * One loan of this browser, live: its vault's status (the signers' word), its collateral and debt on Base, and its
- * health. Requests for several loans are staggered (hooks.ts `createStagger`), so the backend does not get this
- * browser's vault ids as one burst.
+ * One loan of this browser, live, in a row: its collateral and the vault's status (the signers' word), its debt on
+ * Base, and its health. Requests for several loans are staggered (hooks.ts `createStagger`), so the backend does
+ * not get this browser's vault ids as one burst.
  */
 export function LoanCard({ loan, compact = false }: { loan: StoredLoan; compact?: boolean }) {
   const vault = useVault(loan.vaultId, 30_000, { staggered: true });
@@ -21,15 +21,22 @@ export function LoanCard({ loan, compact = false }: { loan: StoredLoan; compact?
   const p = position.data;
   const status = vault.data ? STATUS_LABEL[vault.data.status] : null;
   const health = p ? healthOf(p) : null;
+  const fall = health ? fallBeforeLiquidation(health) : null;
   // A loan that is over (closed, expired, cancelled) shows what it locked; a live one what is locked now.
   const over = vault.data ? ["closed", "expired", "cancelled"].includes(vault.data.status) : false;
   const collateral = over ? BigInt(loan.amount) : (p?.position.collateral ?? vault.data?.outstanding ?? BigInt(loan.amount));
   const opened = Boolean(loan.vaultId);
   const href = opened && (active || over) ? vaultHref("position", loan.vaultId!) : "/borrow";
+  const showFigures = !over && (!compact || p);
 
   return (
-    <li className="panel flex flex-wrap items-center gap-x-6 gap-y-4 px-5 py-4 sm:px-6">
-      <div className="min-w-0 flex-1 space-y-1.5">
+    <li
+      className={cx(
+        "panel grid items-center gap-x-6 gap-y-3 px-5 py-4 sm:px-6",
+        showFigures ? "md:grid-cols-[minmax(0,1.3fr)_minmax(0,0.8fr)_minmax(0,1.1fr)_auto]" : "md:grid-cols-[minmax(0,1fr)_auto]",
+      )}
+    >
+      <div className="min-w-0 space-y-1.5">
         <div className="flex flex-wrap items-center gap-2">
           <TokenAmount token="TAZ" value={zec(collateral)} size="lg" />
           {status ? (
@@ -41,10 +48,10 @@ export function LoanCard({ loan, compact = false }: { loan: StoredLoan; compact?
           ) : (
             <Badge tone="warn">Vault not opened</Badge>
           )}
-          {loan.demo ? <Badge tone="neutral">Demo TAZ</Badge> : null}
+          {loan.demo ? <Badge tone="demo">Demo TAZ</Badge> : null}
         </div>
-        <p className="text-[13px] text-muted">
-          Account <span className="font-mono text-soft">{short(loan.account)}</span>
+        <p className="text-[12.5px] text-muted">
+          shielded · account <span className="font-mono text-soft">{short(loan.account)}</span>
           {loan.vaultId ? (
             <>
               {" · "}vault <span className="font-mono text-soft">{short(loan.vaultId, 8, 6)}</span>
@@ -52,16 +59,28 @@ export function LoanCard({ loan, compact = false }: { loan: StoredLoan; compact?
           ) : null}
         </p>
       </div>
-      {!over && (!compact || p) ? (
-        <div className="flex items-center gap-5">
-          <div className="space-y-0.5 text-right">
+      {showFigures ? (
+        <>
+          <div className="space-y-1">
             <p className="text-[12px] font-semibold text-muted">Debt</p>
             {p ? <TokenAmount token="USDC" value={usdc(p.debt)} size="md" /> : <p className="text-[15px] font-bold text-faint">—</p>}
           </div>
-          <HealthRing health={health} size={64} />
-        </div>
+          <div className="space-y-1">
+            <p className="text-[12px] font-semibold text-muted">Health</p>
+            {health ? (
+              <>
+                <HealthRunway health={health} size="s" />
+                <p className="text-[12px] text-muted">
+                  {fall === null ? "no debt" : fall === 0n ? "liquidatable now" : `ZEC can fall ${fall / 100n} %`}
+                </p>
+              </>
+            ) : (
+              <p className="text-[15px] font-bold text-faint">—</p>
+            )}
+          </div>
+        </>
       ) : null}
-      <Link href={href} prefetch={false} className={cx(buttonClass(active || over ? "secondary" : "primary", undefined, "sm"), "gap-1.5")}>
+      <Link href={href} prefetch={false} className={cx(buttonClass(active || over ? "secondary" : "primary", undefined, "sm"), "gap-1.5 justify-self-start md:justify-self-end")}>
         {active ? "Open" : over ? "View" : opened ? "Continue the deposit" : "Open the vault"}
         <IconArrowRight size={15} />
       </Link>

@@ -15,7 +15,6 @@ export default function PositionPage() {
         </>
       }
       title="Your loan"
-      lead="Collateral, debt and health, read from Base through our proxy, and the ways out: close from collateral, repay, release, or withdraw part of your ZEC."
     >
       <PositionView />
     </Page>

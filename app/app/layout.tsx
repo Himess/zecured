@@ -2,7 +2,7 @@ import type { Metadata, Viewport } from "next";
 import localFont from "next/font/local";
 import Link from "next/link";
 import type { ReactNode } from "react";
-import { BackendStatus, BottomNav, Nav } from "@/components/client";
+import { BackendDot, BackendStatus, BottomNav, Nav } from "@/components/client";
 import { ConfigGate } from "@/components/ConfigGate";
 import { NetworkPill } from "@/components/marks";
 import { ReplayBand, ReplayDock } from "@/components/replay/ReplayDock";
@@ -65,7 +65,7 @@ export const viewport: Viewport = {
 export default function RootLayout({ children }: { children: ReactNode }) {
   return (
     <html lang="en" className={`${archivo.variable} ${martianMono.variable}`}>
-      <body className="min-h-dvh antialiased">
+      <body className={REPLAY ? "has-dock min-h-dvh antialiased" : "min-h-dvh antialiased"}>
         {/* A static replay build has no server to send headers: its policy rides in the page (lib/replay/flag.ts). */}
         {REPLAY ? (
           <meta
@@ -86,28 +86,31 @@ export default function RootLayout({ children }: { children: ReactNode }) {
             {DEPLOYMENT.band}
           </div>
         ) : null}
-        <header className="sticky top-0 z-40 border-b border-hairline bg-bg/80 backdrop-blur-xl">
-          <div className="wrap flex min-h-16 items-center gap-x-5 py-2.5">
+        <header className="sticky top-0 z-40 border-b border-hairline bg-bg/85 backdrop-blur-xl">
+          <div className="wrap flex min-h-16 items-center gap-x-6 py-2.5">
             <div className="flex items-center gap-3">
               <Link href="/" className="inline-flex items-center gap-[10px] text-text no-underline">
                 <SeamMark size={28} />
                 <span className="text-[19px] font-extrabold font-stretch-125%">Zecured</span>
               </Link>
-              <Badge tone="neutral">{TESTNET ? "Testnet" : "Mainnet beta"}</Badge>
+              {TESTNET ? null : <Badge tone="neutral">Mainnet beta</Badge>}
             </div>
-            <div className="flex flex-1 justify-center">
-              <Nav />
-            </div>
-            <div className="flex items-center gap-2 max-[560px]:hidden">
-              <NetworkPill zcash={TESTNET ? "Zcash testnet" : "Zcash"} base={DEPLOYMENT.chainName} className="max-[960px]:hidden" />
-              <BackendStatus compact />
+            <Nav />
+            <div className="ml-auto flex items-center">
+              <NetworkPill
+                zcash={TESTNET ? "Zcash testnet" : "Zcash"}
+                base={DEPLOYMENT.chainName}
+                short={TESTNET ? "Testnet" : undefined}
+                status={<BackendDot />}
+              />
             </div>
           </div>
         </header>
-        <main id="main" className={`wrap pt-8 sm:pt-10 ${REPLAY ? "pb-56 min-[861px]:pb-36" : "pb-32 min-[861px]:pb-20"}`}>
+        {/* Clear of the fixed bars below: the phones' tab bar and, in the replay, its dock (globals.css). */}
+        <main id="main" className="wrap pt-7 pb-[calc(var(--dock-h)+var(--nav-h)+4rem)] sm:pt-9">
           <ConfigGate>{children}</ConfigGate>
         </main>
-        <footer className="border-t border-hairline pb-24 min-[861px]:pb-0">
+        <footer className="border-t border-hairline pb-[calc(var(--dock-h)+var(--nav-h))]">
           <div className="wrap grid gap-x-10 gap-y-8 py-10 text-[13.5px] text-muted md:grid-cols-[minmax(0,1.4fr)_repeat(2,minmax(0,1fr))]">
             <div className="space-y-3">
               <p className="inline-flex items-center gap-2.5 text-text">
@@ -135,7 +138,7 @@ export default function RootLayout({ children }: { children: ReactNode }) {
                 <li><Link href="/borrow" className="text-soft no-underline hover:text-text hover:underline">Borrow against ZEC</Link></li>
                 <li><Link href="/buy" className="text-soft no-underline hover:text-text hover:underline">Buy shielded ZEC</Link></li>
                 <li><Link href="/prepare" className="text-soft no-underline hover:text-text hover:underline">Prepare your ZEC</Link></li>
-                <li><Link href="/loans" className="text-soft no-underline hover:text-text hover:underline">My loans and key backups</Link></li>
+                <li><Link href="/loans" className="text-soft no-underline hover:text-text hover:underline">Your loans and key backups</Link></li>
               </ul>
             </nav>
             <nav aria-label="Proof" className="space-y-2.5">

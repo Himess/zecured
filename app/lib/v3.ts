@@ -245,26 +245,26 @@ export function abandonableAt(c: LedgerClaim, refundAbandonPeriod: number): numb
 // ------------------------------------------------------------------ claims
 
 export const CLAIM_KIND_LABEL: Record<LedgerClaim["kind"], string> = {
-  Release: "Release to you",
+  Release: "To you: your collateral",
   Liquidation: "Repaid debt (paid to a liquidator or market maker)",
-  CloseUser: "Close: your remainder",
-  CloseMarketMaker: "Close: the market maker's share",
+  CloseUser: "To you: the rest of your ZEC",
+  CloseMarketMaker: "To the market maker, for repaying your debt",
   Refund: "Refund of a deposit",
-  Fee: "Opening fee (to the signers' treasury)",
+  Fee: "Opening fee, to the signers",
   Retired: "Retired by the compensator",
   Unknown: "Payout",
 };
 
 export interface ClaimView {
   label: string;
-  badge: { tone: "info" | "ok" | "warn" | "danger" | "neutral"; text: string };
+  badge: { tone: "info" | "ok" | "warn" | "danger" | "neutral" | "proof"; text: string };
   /** One plain sentence on what it means and what happens next. */
   detail: string;
 }
 
 /**
  * A claim of the vault, in plain words. Section 3 of the v4 design: a pending claim whose payout
- * the signers committed on Base is "Sent"; one they confirmed paid is "Signers confirmed —
+ * the signers committed on Base is "Sent"; one they confirmed paid is "Signers confirmed:
  * disputable until …" (`disputeWindow` after the confirmation, when known); a final one (`paidAt`
  * 0: its delivery proven on Base, or its confirmation undisputed through the window) is "Final on
  * Base ✓". R-11: a Refund claim without a destination may be set aside as dormant.
@@ -325,15 +325,14 @@ export function claimView(
       if (c.paidAt === 0) {
         return {
           label,
-          badge: { tone: "ok", text: "Final on Base ✓" },
-          detail:
-            "Its delivery was proven on Base (a zero-knowledge proof that the payout is in a Zcash block, which the coordinator makes for every payout), or the signers' confirmation stood undisputed through its dispute window: this claim is final.",
+          badge: { tone: "proof", text: "Final on Base" },
+          detail: "This claim is final: its delivery is proven on Base in zero knowledge, or its confirmation stood undisputed through the dispute window.",
         };
       }
       if (ctx.disputeWindow !== undefined && ctx.nowSeconds <= c.paidAt + ctx.disputeWindow) {
         return {
           label,
-          badge: { tone: "info", text: `Signers confirmed — disputable until ${formatUtc(c.paidAt + ctx.disputeWindow)}` },
+          badge: { tone: "info", text: `Signers confirmed: disputable until ${formatUtc(c.paidAt + ctx.disputeWindow)}` },
           detail:
             "The signers confirmed on Base that they paid it on Zcash. The coordinator proves every payout's delivery on Base; until then, its claimant can dispute the confirmation.",
         };

@@ -2,16 +2,17 @@
 
 import { useId, useState } from "react";
 import type { Address, Hex } from "viem";
+import { ActionError } from "@/components/ActionError";
 import { LoanTokenName } from "@/components/client";
 import { IconShield } from "@/components/icons";
-import { TokenAmount, usdc } from "@/components/loan";
+import { rate, TokenAmount, usd, usdc } from "@/components/loan";
 import { MorphoMark, PairMarks, UsdcMark, ZecMark, ZzecMark } from "@/components/marks";
 import { Badge, Button, Card, KeyValue, Meter, Notice, Skeleton, Stat } from "@/components/ui";
 import { publicClient } from "@/lib/chain";
 import { config, marketParams } from "@/lib/config";
 import { DEPLOYMENT } from "@/lib/deployment";
 import { useAction, useProtocol } from "@/lib/hooks";
-import { priceSourceName } from "@/lib/labels";
+import { loanTokenName, priceSourceName } from "@/lib/labels";
 import { collateralValue, formatBps, formatUsdc, formatUsdPrice, liquidationIncentiveFactor, parseUsdc } from "@/lib/morpho";
 import { formatIncentive, formatWadPercent } from "@/lib/preliq";
 import { bondNumbers, capNumbers, marketNumbers, readSupply, SIGNERS, supplyCalls, withdrawCall, type WalletCall } from "@/lib/public";
@@ -98,7 +99,7 @@ function LendCard({ available, onChanged }: { available: bigint | null; onChange
             <p>Unaudited, invite only, small caps. Lend only what you can afford to lose.</p>
           </Notice>
         ) : (
-          <p className="text-xs text-muted">Testnet funds only: test USDC on Base Sepolia, which has no value.</p>
+          <p className="text-xs text-muted">Testnet funds only: {loanTokenName()} on {DEPLOYMENT.chainName}, a test token with no value.</p>
         )}
         {!wallet ? (
           <Button variant="secondary" onClick={() => void connect.run()} busy={connect.busy}>
@@ -109,14 +110,14 @@ function LendCard({ available, onChanged }: { available: bigint | null; onChange
             <KeyValue
               rows={[
                 ["Wallet", wallet],
-                ["In your wallet", supply ? `${formatUsdc(supply.balance)} USDC` : "—"],
-                ["You lend", supply ? `${formatUsdc(supply.assets)} USDC` : "—"],
-                ["Withdrawable now", available === null ? "—" : `up to ${formatUsdc(available)} USDC (what borrowers do not use)`],
+                ["In your wallet", supply ? `${formatUsdc(supply.balance)} ${loanTokenName()}` : "—"],
+                ["You lend", supply ? `${formatUsdc(supply.assets)} ${loanTokenName()}` : "—"],
+                ["Withdrawable now", available === null ? "—" : `up to ${formatUsdc(available)} ${loanTokenName()} (what borrowers do not use)`],
               ]}
             />
             <div className="space-y-2">
               <label htmlFor={amountId} className="block text-sm font-medium">
-                Amount (USDC)
+                Amount ({loanTokenName()})
               </label>
               <input
                 id={amountId}
@@ -125,7 +126,7 @@ function LendCard({ available, onChanged }: { available: bigint | null; onChange
                 value={amount}
                 onChange={(e) => setAmount(e.target.value)}
                 placeholder="25.00"
-                className="w-full max-w-xs rounded-lg border border-border bg-surface-2 px-3 py-2 tabular-nums"
+                className="field max-w-xs tabular-nums"
               />
             </div>
             <div className="flex flex-wrap gap-2">
@@ -146,21 +147,9 @@ function LendCard({ available, onChanged }: { available: bigint | null; onChange
             ) : null}
           </div>
         )}
-        {connect.error ? (
-          <Notice tone="danger" title="Not connected" live>
-            <p>{connect.error}</p>
-          </Notice>
-        ) : null}
-        {lend.error ? (
-          <Notice tone="danger" title="Nothing was lent" live>
-            <p>{lend.error}</p>
-          </Notice>
-        ) : null}
-        {withdraw.error ? (
-          <Notice tone="danger" title="Nothing was withdrawn" live>
-            <p>{withdraw.error}</p>
-          </Notice>
-        ) : null}
+        <ActionError error={connect.error} refusal={connect.refusal} title="Not connected" />
+        <ActionError error={lend.error} refusal={lend.refusal} title="Nothing was lent" />
+        <ActionError error={withdraw.error} refusal={withdraw.refusal} title="Nothing was withdrawn" />
         {lend.result ? (
           <Notice tone="ok" title="Lent" live>
             <p>Your supply is on Base (transaction {lend.result}).</p>
@@ -168,7 +157,7 @@ function LendCard({ available, onChanged }: { available: bigint | null; onChange
         ) : null}
         {withdraw.result ? (
           <Notice tone="ok" title="Withdrawn" live>
-            <p>The USDC is back in your wallet (transaction {withdraw.result}).</p>
+            <p>The tokens are back in your wallet (transaction {withdraw.result}).</p>
           </Notice>
         ) : null}
       </div>
@@ -232,12 +221,12 @@ export function MarketView() {
           </div>
           <div>
             <dt className="text-[13px] font-semibold text-muted">Borrow rate</dt>
-            <dd className="mt-1 text-[22px] font-bold tabular-nums font-stretch-112%">{n ? formatWadPercent(n.borrowApyWad) : "—"}</dd>
+            <dd className="mt-1 text-[22px] font-bold tabular-nums font-stretch-112%">{n ? rate(n.borrowApyWad) : "—"}</dd>
             <dd className="text-[12px] text-muted">a year, compounded</dd>
           </div>
           <div>
             <dt className="text-[13px] font-semibold text-muted">Lenders earn</dt>
-            <dd className="mt-1 text-[22px] font-bold text-ok tabular-nums font-stretch-112%">{n ? formatWadPercent(n.supplyApyWad) : "—"}</dd>
+            <dd className="mt-1 text-[22px] font-bold tabular-nums font-stretch-112%">{n ? rate(n.supplyApyWad) : "—"}</dd>
             <dd className="text-[12px] text-muted">the supply rate</dd>
           </div>
         </dl>
@@ -245,7 +234,7 @@ export function MarketView() {
           <p className="flex justify-between text-[13px]">
             <span className="font-semibold text-muted">Utilization</span>
             <span className="tabular-nums">
-              {n ? formatWadPercent(n.utilizationWad) : "—"}
+              {n ? rate(n.utilizationWad) : "—"}
               {n ? <span className="text-muted"> · {usdc(n.availableUsdc)} available to borrow or withdraw</span> : null}
             </span>
           </p>
@@ -263,7 +252,7 @@ export function MarketView() {
               </div>
               <KeyValue
                 rows={[
-                  ["Its value", `${formatUsdc(collateralValue(cap.lockedZat, s.price))} USDC at ${formatUsdPrice(s.price)} per ZEC`],
+                  ["Its value", `${usd(collateralValue(cap.lockedZat, s.price))} at ${formatUsdPrice(s.price)} per ZEC`],
                   ["Price source", priceSourceName()],
                   ["Coverage cap used", cap.fillBps === null ? "—" : `${formatBps(cap.fillBps)} (pending deposits count too)`],
                 ]}
@@ -283,11 +272,11 @@ export function MarketView() {
             <p className="text-sm text-soft">{COMPENSATION_SENTENCE}</p>
             {bonds ? (
               <dl className="grid gap-3 sm:grid-cols-3">
-                <Stat label="Signers' bonds" value={`${formatUsdc(bonds.sum)}`} hint={`USDC · ${bonds.bonded} of ${SIGNERS} at the minimum`} />
-                <Stat label="Counted (B_eff)" value={`${formatUsdc(bonds.effective)}`} hint="USDC · 5/3 × the three smallest" />
+                <Stat label="Signers' bonds" value={usdc(bonds.sum)} hint={`${loanTokenName()} · ${bonds.bonded} of ${SIGNERS} at the minimum`} />
+                <Stat label="Counted" value={usdc(bonds.effective)} hint={`${loanTokenName()} · 5/3 × the three smallest`} />
                 <Stat
                   label="Per dollar locked"
-                  value={bonds.perCollateralWad === null ? "—" : formatWadPercent(bonds.perCollateralWad)}
+                  value={bonds.perCollateralWad === null ? <span className="text-[14px] font-semibold text-muted">n/a: nothing locked</span> : formatWadPercent(bonds.perCollateralWad)}
                   hint={s ? `kept at ${formatBps(BigInt(s.coverageBps))} or more` : undefined}
                 />
               </dl>
@@ -304,6 +293,9 @@ export function MarketView() {
       </div>
 
       {config.contractsDeployed ? <LendCard available={n?.availableUsdc ?? null} onChanged={() => void p.refresh()} /> : null}
+      <p className="flex items-center justify-end gap-2 text-[12.5px] text-muted">
+        Powered by <MorphoMark size={16} /> Morpho Blue
+      </p>
     </div>
   );
 }

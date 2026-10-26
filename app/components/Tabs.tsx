@@ -8,6 +8,8 @@ export interface TabItem {
   label: ReactNode;
   icon?: ReactNode;
   content: ReactNode;
+  /** A hairline after this tab: it stands apart from the ones that follow (the way out, before the adjustments). */
+  divider?: boolean;
 }
 
 /**
@@ -32,12 +34,16 @@ export function Tabs({ items, initial, label }: { items: TabItem[]; initial?: st
 
   return (
     <div className="space-y-5">
-      <div role="tablist" aria-label={label} className="flex gap-1 overflow-x-auto rounded-full bg-bg/80 p-1 shadow-[inset_0_0_0_1px_var(--color-border)] [scrollbar-width:none]">
+      <div
+        role="tablist"
+        aria-label={label}
+        className="flex gap-1 overflow-x-auto rounded-full bg-bg/80 p-1 shadow-[inset_0_0_0_1px_var(--color-border)] [mask-image:linear-gradient(90deg,#000_88%,transparent)] [scrollbar-width:none] sm:[mask-image:none]"
+      >
         {items.map((t, i) => {
           const selected = t.id === current.id;
           return (
+            <span key={t.id} className="flex flex-none items-center">
             <button
-              key={t.id}
               ref={(el) => {
                 refs.current[i] = el;
               }}
@@ -54,9 +60,11 @@ export function Tabs({ items, initial, label }: { items: TabItem[]; initial?: st
                 selected ? "bg-surface-3 text-text shadow-[inset_0_0_0_1px_var(--color-line)]" : "text-muted hover:text-text",
               )}
             >
-              {t.icon ? <span className={selected ? "text-accent" : undefined}>{t.icon}</span> : null}
+              {t.icon ? <span className={selected ? "text-text" : "text-muted"}>{t.icon}</span> : null}
               {t.label}
             </button>
+            {t.divider && i < items.length - 1 ? <span aria-hidden="true" className="mx-1.5 h-5 w-px bg-line" /> : null}
+            </span>
           );
         })}
       </div>

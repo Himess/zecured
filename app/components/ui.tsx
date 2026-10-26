@@ -1,16 +1,29 @@
 /**
  * Small, server-safe UI primitives (no hooks). Interactive pieces live in components/client.tsx, the seam's
- * marks (the π seal, chain labels, chips) in components/seam.tsx, other projects' marks in components/marks.tsx
- * and the line icons in components/icons.tsx.
+ * marks (the π seal, chain labels, chips, trackers) in components/seam.tsx, other projects' marks in
+ * components/marks.tsx and the line icons in components/icons.tsx.
  */
 import type { ButtonHTMLAttributes, ReactNode } from "react";
-import { IconAlert, IconCheck, IconInfo } from "./icons";
+import { IconAlert, IconCheck, IconChevronDown, IconInfo, IconPlay } from "./icons";
 
 export function cx(...classes: (string | false | null | undefined)[]): string {
   return classes.filter(Boolean).join(" ");
 }
 
-/** A page's head: an eyebrow, the title, a lead and the page's own actions, then its content. */
+/** A small π in ink, for gold grounds (seam.tsx draws the seal itself; this file must not import it). */
+function PiGlyph({ size = 10, color = "#0F1B2A" }: { size?: number; color?: string }) {
+  return (
+    <svg width={size} height={(size * 24) / 28} viewBox="0 0 28 24" aria-hidden="true" className="flex-none">
+      <path d="M3 6.5h22M9.5 6.5v14.5" stroke={color} strokeWidth="3.6" strokeLinecap="round" />
+      <path d="M18.2 6.5v10.6c0 2.5 1.3 3.9 3.8 3.9" stroke={color} strokeWidth="3.6" strokeLinecap="round" fill="none" />
+    </svg>
+  );
+}
+
+/**
+ * A page's head: an eyebrow, the title, a line of lead and the page's own actions, then its content. Kept short, so
+ * the page's first control is in view.
+ */
 export function Page({
   title,
   lead,
@@ -25,14 +38,14 @@ export function Page({
   children: ReactNode;
 }) {
   return (
-    <div className="space-y-8">
-      <header className="flex flex-wrap items-end justify-between gap-x-8 gap-y-4">
-        <div className="min-w-0 space-y-3">
-          {eyebrow ? <p className="flex items-center gap-2 text-[13.5px] font-semibold text-muted">{eyebrow}</p> : null}
-          <h1 className="max-w-[24em] text-[length:clamp(28px,3vw,40px)] leading-[1.04] font-extrabold tracking-[-0.012em] text-balance font-stretch-125%">
+    <div className="space-y-7">
+      <header className="flex flex-wrap items-end justify-between gap-x-8 gap-y-3">
+        <div className="min-w-0 space-y-2">
+          {eyebrow ? <p className="flex items-center gap-2 text-[13px] font-semibold text-muted">{eyebrow}</p> : null}
+          <h1 className="max-w-[24em] text-[length:clamp(26px,2.4vw,34px)] leading-[1.04] font-extrabold tracking-[-0.02em] text-balance font-stretch-116%">
             {title}
           </h1>
-          {lead ? <p className="max-w-2xl text-[15.5px] text-soft">{lead}</p> : null}
+          {lead ? <p className="max-w-2xl text-[15px] text-soft">{lead}</p> : null}
         </div>
         {actions ? <div className="flex flex-wrap items-center gap-2">{actions}</div> : null}
       </header>
@@ -41,7 +54,7 @@ export function Page({
   );
 }
 
-/** A panel: the dark ground raised a step. `lead` gives it the gold edge of the page's main panel. */
+/** A panel: the dark ground raised a step. `lead` marks the page's main panel with a faint edge of light. */
 export function Card({
   title,
   action,
@@ -60,16 +73,12 @@ export function Card({
   as?: "section" | "div" | "article";
 }) {
   return (
-    <Tag className={cx("panel p-[clamp(20px,2.6vw,32px)]", lead && "panel-lead", className)}>
+    <Tag className={cx("panel p-[clamp(18px,2.4vw,28px)]", lead && "panel-lead", className)}>
       {title || action ? (
         <div className="mb-5 flex flex-wrap items-center justify-between gap-3">
           {title ? (
-            <h2 className="flex items-center gap-3 text-[20px] leading-[1.15] font-extrabold tracking-[-0.006em] font-stretch-118%">
-              {icon ? (
-                <span className="inline-flex size-9 flex-none items-center justify-center rounded-xl bg-surface-3 text-soft shadow-[inset_0_0_0_1px_var(--color-border)]">
-                  {icon}
-                </span>
-              ) : null}
+            <h2 className="flex items-center gap-2.5 text-[19px] leading-[1.15] font-extrabold tracking-[-0.006em] font-stretch-116%">
+              {icon ? <span className="inline-flex flex-none text-muted">{icon}</span> : null}
               <span className="min-w-0">{title}</span>
             </h2>
           ) : (
@@ -85,25 +94,30 @@ export function Card({
 
 type Tone = "info" | "warn" | "danger" | "ok";
 
-const toneGround: Record<Tone, string> = {
-  info: "bg-[color-mix(in_oklab,var(--color-info)_6%,var(--color-bg))] shadow-[inset_0_0_0_1px_color-mix(in_oklab,var(--color-info)_22%,transparent)]",
-  ok: "bg-[color-mix(in_oklab,var(--color-ok)_6%,var(--color-bg))] shadow-[inset_0_0_0_1px_color-mix(in_oklab,var(--color-ok)_24%,transparent)]",
-  warn: "bg-[color-mix(in_oklab,var(--color-warn)_7%,var(--color-bg))] shadow-[inset_0_0_0_1px_color-mix(in_oklab,var(--color-warn)_38%,transparent)]",
-  danger: "bg-[color-mix(in_oklab,var(--color-danger)_8%,var(--color-bg))] shadow-[inset_0_0_0_1px_color-mix(in_oklab,var(--color-danger)_50%,transparent)]",
+/** A callout's ground: a quiet panel with a bar of its tone at the left (warnings and errors tinted a little). */
+const toneGround: Record<Tone | "demo", string> = {
+  info: "bg-surface-2/60 shadow-[inset_3px_0_0_var(--color-info),inset_0_0_0_1px_var(--color-border)]",
+  ok: "bg-surface-2/60 shadow-[inset_3px_0_0_var(--color-ok),inset_0_0_0_1px_var(--color-border)]",
+  warn: "bg-[color-mix(in_oklab,var(--color-warn)_5%,var(--color-surface))] shadow-[inset_3px_0_0_var(--color-warn),inset_0_0_0_1px_color-mix(in_oklab,var(--color-warn)_24%,transparent)]",
+  danger:
+    "bg-[color-mix(in_oklab,var(--color-danger)_7%,var(--color-surface))] shadow-[inset_3px_0_0_var(--color-danger),inset_0_0_0_1px_color-mix(in_oklab,var(--color-danger)_36%,transparent)]",
+  demo: "bg-[rgb(207_224_242/0.045)] shadow-[inset_3px_0_0_var(--color-demo),inset_0_0_0_1px_rgb(207_224_242/0.22)]",
 };
 
-const toneLabel: Record<Tone, string> = { info: "Note", warn: "Warning", danger: "Danger", ok: "Done" };
-const toneText: Record<Tone, string> = { info: "text-info", warn: "text-warn", danger: "text-danger", ok: "text-ok" };
+const toneLabel: Record<Tone | "demo", string> = { info: "Note", warn: "Warning", danger: "Error", ok: "Done", demo: "DEMO" };
+const toneText: Record<Tone | "demo", string> = { info: "text-info", warn: "text-warn", danger: "text-danger", ok: "text-ok", demo: "text-demo" };
 
-function ToneIcon({ tone }: { tone: Tone }) {
-  if (tone === "ok") return <IconCheck size={18} strokeWidth={2.2} />;
-  if (tone === "info") return <IconInfo size={18} />;
-  return <IconAlert size={18} />;
+function ToneIcon({ tone }: { tone: Tone | "demo" }) {
+  if (tone === "ok") return <IconCheck size={17} strokeWidth={2.2} />;
+  if (tone === "info") return <IconInfo size={17} />;
+  if (tone === "demo") return <IconPlay size={16} />;
+  return <IconAlert size={17} />;
 }
 
 /**
- * A callout: the tone's icon, the title, the text. Static notices are plain notes; `live` ones (results and errors
- * that appear after an action) are announced to screen readers.
+ * A callout: the tone's icon, the title, the text. Use it for results, errors and at most one standing warning per
+ * step (guidance is a Hint, rules a Disclosure). Static notices are plain notes; `live` ones (results and errors
+ * that appear after an action) are announced to screen readers. `demo`: what only the judges' replay does.
  */
 export function Notice({
   tone = "info",
@@ -111,41 +125,77 @@ export function Notice({
   children,
   live = false,
 }: {
-  tone?: Tone;
+  tone?: Tone | "demo";
   title?: ReactNode;
   children?: ReactNode;
   live?: boolean;
 }) {
   const role = live ? (tone === "danger" ? "alert" : "status") : "note";
   return (
-    <div
-      role={role}
-      className={cx("grid grid-cols-[auto_minmax(0,1fr)] gap-x-3 rounded-2xl px-4 py-3.5 text-[14.5px] sm:px-5 sm:py-4", toneGround[tone])}
-    >
+    <div role={role} className={cx("grid grid-cols-[auto_minmax(0,1fr)] gap-x-3 rounded-2xl py-3.5 pr-4 pl-5 text-[14px] sm:pr-5", toneGround[tone])}>
       <span aria-hidden="true" className={cx("mt-[2px]", toneText[tone])}>
         <ToneIcon tone={tone} />
       </span>
       <div className="min-w-0">
-        <p className="text-[15px] leading-[1.4] font-bold text-text">
+        <p className="text-[14.5px] leading-[1.4] font-bold text-text">
           <span className="sr-only">{toneLabel[tone]}: </span>
           {title ?? toneLabel[tone]}
         </p>
-        {children ? <div className="mt-1.5 space-y-2 text-soft">{children}</div> : null}
+        {children ? <div className="mt-1 space-y-2 text-soft">{children}</div> : null}
       </div>
     </div>
   );
 }
 
-type Variant = "primary" | "secondary" | "ghost" | "danger";
+/** Guidance in a line: a small icon and muted text, no box. */
+export function Hint({ icon, children, className }: { icon?: ReactNode; children: ReactNode; className?: string }) {
+  return (
+    <p className={cx("flex items-start gap-2 text-[13.5px] text-muted", className)}>
+      <span aria-hidden="true" className="mt-[2px] flex-none">
+        {icon ?? <IconInfo size={15} />}
+      </span>
+      <span className="min-w-0">{children}</span>
+    </p>
+  );
+}
+
+/** Standing rules and details, closed by default: a 44 px row that opens. */
+export function Disclosure({ summary, children, className, open }: { summary: ReactNode; children: ReactNode; className?: string; open?: boolean }) {
+  return (
+    <details
+      open={open}
+      className={cx("group rounded-2xl bg-bg/50 shadow-[inset_0_0_0_1px_var(--color-hairline)] [&>summary::-webkit-details-marker]:hidden", className)}
+    >
+      <summary className="flex min-h-11 cursor-pointer list-none items-center justify-between gap-3 rounded-2xl px-4 text-[14px] font-semibold text-soft hover:text-text">
+        <span className="flex min-w-0 items-center gap-2">{summary}</span>
+        <IconChevronDown size={16} className="text-muted transition-transform group-open:rotate-180" />
+      </summary>
+      <div className="space-y-2 px-4 pb-4 text-[14px] text-soft">{children}</div>
+    </details>
+  );
+}
+
+type Variant = "primary" | "secondary" | "ghost" | "danger" | "demo";
 type Size = "sm" | "md" | "lg";
 
-/** Gold only on primary buttons; the others are raised, quiet or red-lined pills. */
+/**
+ * Gold only on the one primary button of a view; it turns gold the moment its action becomes possible (a disabled
+ * primary is neutral). The others are raised, quiet, red-lined or, for the judges' replay, dashed ice pills.
+ */
 const variantClasses: Record<Variant, string> = {
   primary:
-    "bg-[linear-gradient(180deg,#ffc845,#f4b728)] font-bold text-on-accent shadow-[inset_0_1px_0_rgb(255_255_255/0.45),0_14px_30px_-16px_rgb(244_183_40/0.85)] hover:brightness-[1.06]",
-  secondary: "bg-surface-2 font-semibold text-text shadow-[inset_0_0_0_1px_var(--color-line)] hover:bg-surface-3",
-  ghost: "font-semibold text-muted hover:bg-surface-2 hover:text-text",
-  danger: "font-semibold text-danger shadow-[inset_0_0_0_1px_color-mix(in_oklab,var(--color-danger)_60%,transparent)] hover:bg-danger/10",
+    "bg-accent font-bold text-on-accent hover:bg-accent-strong disabled:bg-surface-2 disabled:font-semibold disabled:text-muted disabled:shadow-[inset_0_0_0_1px_var(--color-border)]",
+  secondary: "bg-surface-2 font-semibold text-text shadow-[inset_0_0_0_1px_var(--color-control)] hover:bg-surface-3 disabled:opacity-50",
+  ghost: "font-semibold text-muted hover:bg-surface-2 hover:text-text disabled:opacity-50",
+  danger: "font-semibold text-danger shadow-[inset_0_0_0_1px_color-mix(in_oklab,var(--color-danger)_60%,transparent)] hover:bg-danger/10 disabled:opacity-50",
+  demo: "border border-dashed border-demo/60 bg-demo/[0.05] font-semibold text-demo hover:bg-demo/[0.1] disabled:opacity-50",
+};
+
+/** The primary's shadow: an edge of light, and a glow except on small buttons. */
+const primaryShadow: Record<Size, string> = {
+  sm: "shadow-[inset_0_0_0_1px_rgb(255_255_255/0.18)]",
+  md: "shadow-[inset_0_0_0_1px_rgb(255_255_255/0.18),0_14px_30px_-16px_rgb(244_183_40/0.45)]",
+  lg: "shadow-[inset_0_0_0_1px_rgb(255_255_255/0.18),0_16px_34px_-16px_rgb(244_183_40/0.45)]",
 };
 
 const sizeClasses: Record<Size, string> = {
@@ -156,14 +206,18 @@ const sizeClasses: Record<Size, string> = {
 
 export function buttonClass(variant: Variant = "primary", className?: string, size: Size = "md"): string {
   return cx(
-    "inline-flex items-center justify-center gap-2 rounded-full py-2 leading-tight transition-[background-color,filter,color] no-underline",
-    "disabled:cursor-not-allowed disabled:opacity-50 disabled:hover:brightness-100",
+    "inline-flex items-center justify-center gap-2 rounded-full py-2 leading-tight no-underline transition-[background-color,color,box-shadow] disabled:cursor-not-allowed aria-busy:cursor-progress",
     sizeClasses[size],
     variantClasses[variant],
+    variant === "primary" && primaryShadow[size],
     className,
   );
 }
 
+/**
+ * A button. While `busy`, it keeps its look and its focus (no `disabled`: a disabled button drops focus) and
+ * ignores clicks; screen readers hear it as busy.
+ */
 export function Button({
   variant = "primary",
   size = "md",
@@ -172,14 +226,17 @@ export function Button({
   children,
   disabled,
   type = "button",
+  onClick,
   ...rest
 }: ButtonHTMLAttributes<HTMLButtonElement> & { variant?: Variant; size?: Size; busy?: boolean }) {
   return (
     <button
       type={type}
       className={buttonClass(variant, className, size)}
-      disabled={disabled || busy}
+      disabled={disabled && !busy}
+      aria-disabled={busy || undefined}
       aria-busy={busy || undefined}
+      onClick={busy ? (e) => e.preventDefault() : onClick}
       {...rest}
     >
       {busy ? <Spinner /> : null}
@@ -207,26 +264,37 @@ const toneBadge: Record<Tone, string> = {
   danger: "text-danger bg-danger/[0.09] shadow-[inset_0_0_0_1px_color-mix(in_oklab,var(--color-danger)_50%,transparent)]",
 };
 
-/** A sentence-case tag, its text in the tone's colour (neutral: soft, on a line ring); `dot` adds a status dot. */
-export function Badge({ tone = "info", dot = false, children }: { tone?: Tone | "neutral"; dot?: boolean; children: ReactNode }) {
-  const cls = tone === "neutral" ? "text-soft shadow-[inset_0_0_0_1px_var(--color-line)]" : toneBadge[tone];
+/**
+ * A sentence-case tag, its text in the tone's colour (neutral: soft, on a line ring); `dot` adds a status dot.
+ * `proof`: solid gold with a π, for what a proof made final. `demo`: what only the judges' replay shows.
+ */
+export function Badge({ tone = "info", dot = false, children }: { tone?: Tone | "neutral" | "proof" | "demo"; dot?: boolean; children: ReactNode }) {
+  const cls =
+    tone === "neutral"
+      ? "text-soft shadow-[inset_0_0_0_1px_var(--color-line)]"
+      : tone === "proof"
+        ? "bg-accent text-on-accent"
+        : tone === "demo"
+          ? "border border-dashed border-demo/60 bg-demo/[0.06] text-demo"
+          : toneBadge[tone];
   return (
-    <span className={cx("inline-flex min-h-[24px] items-center gap-1.5 rounded-full px-2.5 py-[3px] text-xs leading-tight font-semibold", cls)}>
-      {dot ? <span aria-hidden="true" className="size-1.5 rounded-full bg-current" /> : null}
+    <span className={cx("inline-flex min-h-[24px] items-center gap-1.5 rounded-full px-2.5 py-[3px] text-xs leading-tight font-semibold whitespace-nowrap", cls)}>
+      {tone === "proof" ? <PiGlyph size={10} /> : tone === "demo" ? <IconPlay size={11} strokeWidth={2.2} /> : null}
+      {dot && tone !== "proof" && tone !== "demo" ? <span aria-hidden="true" className="size-1.5 rounded-full bg-current" /> : null}
       {children}
     </span>
   );
 }
 
-/** A figure: its label, the value large, a hint below. */
+/** A figure in a ruled strip, as the site sets its numbers: a hairline above, the label, the value, a hint. */
 export function Stat({ label, value, hint, icon }: { label: ReactNode; value: ReactNode; hint?: ReactNode; icon?: ReactNode }) {
   return (
-    <div className="min-w-0 rounded-2xl bg-bg/60 px-4 py-3.5 shadow-[inset_0_0_0_1px_var(--color-hairline)]">
-      <dt className="flex items-center gap-2 text-[13px] text-muted">
+    <div className="min-w-0 border-t border-line/80 pt-3">
+      <dt className="flex items-center gap-2 text-[12.5px] font-semibold text-muted">
         {icon}
         {label}
       </dt>
-      <dd className="mt-1 truncate text-[21px] leading-tight font-bold tabular-nums font-stretch-112%">{value}</dd>
+      <dd className="mt-1 truncate text-[21px] leading-tight font-bold tabular-nums font-stretch-110%">{value}</dd>
       {hint ? <dd className="mt-1 text-xs text-muted">{hint}</dd> : null}
     </div>
   );
@@ -264,42 +332,74 @@ export function KeyValue({ rows }: { rows: [ReactNode, ReactNode][] }) {
   );
 }
 
-/** Wizard progress: a check once done, a gold ring for the current step, a line joining them. */
-export function Steps({ steps, current }: { steps: string[]; current: number }) {
+const pad2 = (n: number) => String(n).padStart(2, "0");
+
+/**
+ * A flow's chapters, inline: a mono number in a pill (a white ring for the current one, a check once done), the
+ * name, hairlines between. `proof`: the chapter a proof ends, whose π turns gold once `proven`. Phones get
+ * "03 of 05 · Deposit" over a bar of segments.
+ */
+export function Steps({
+  steps,
+  current,
+  proof,
+}: {
+  steps: string[];
+  current: number;
+  proof?: { index: number; proven: boolean };
+}) {
+  const n = steps.length;
   return (
-    <ol className="flex flex-wrap items-center gap-x-2 gap-y-3" aria-label="Progress">
-      {steps.map((s, i) => (
-        <li
-          key={s}
-          aria-current={i === current ? "step" : undefined}
-          className={cx(
-            "flex items-center gap-2.5 text-[14.5px]",
-            i === current ? "font-semibold text-text" : i < current ? "text-soft" : "text-faint",
-          )}
-        >
-          <span
-            aria-hidden="true"
-            className={cx(
-              "inline-flex size-7 flex-none items-center justify-center rounded-full text-[13px] font-bold",
-              i === current
-                ? "bg-accent/10 text-accent shadow-[inset_0_0_0_2px_var(--color-accent)]"
-                : i < current
-                  ? "bg-ok/15 text-ok"
-                  : "shadow-[inset_0_0_0_1.5px_var(--color-line)]",
-            )}
-          >
-            {i < current ? <IconCheck size={15} strokeWidth={2.6} /> : i + 1}
-          </span>
-          <span>
-            {s}
-            {i < current ? <span className="sr-only"> (done)</span> : null}
-          </span>
-          {i < steps.length - 1 ? (
-            <span aria-hidden="true" className={cx("mx-1.5 hidden h-px w-8 sm:block", i < current ? "bg-ok/50" : "bg-line")} />
-          ) : null}
-        </li>
-      ))}
-    </ol>
+    <div>
+      <ol aria-label="Progress" className="hidden flex-wrap items-center gap-y-2 sm:flex">
+        {steps.map((s, i) => {
+          const done = i < current;
+          const now = i === current;
+          return (
+            <li key={s} aria-current={now ? "step" : undefined} className="flex items-center">
+              <span
+                aria-hidden="true"
+                className={cx(
+                  "inline-flex h-[22px] min-w-[30px] items-center justify-center rounded-full px-1.5 font-mono text-[11.5px] font-medium",
+                  now ? "text-text shadow-[inset_0_0_0_1.5px_var(--color-text)]" : done ? "bg-surface-3 text-soft" : "text-faint shadow-[inset_0_0_0_1px_var(--color-line)]",
+                )}
+              >
+                {done ? <IconCheck size={12} strokeWidth={2.8} /> : pad2(i + 1)}
+              </span>
+              <span className={cx("ml-2 text-[14px]", now ? "font-semibold text-text" : done ? "text-soft" : "text-faint")}>
+                {s}
+                {done ? <span className="sr-only"> (done)</span> : null}
+              </span>
+              {proof?.index === i ? (
+                <span
+                  aria-hidden="true"
+                  className={cx(
+                    "ml-1.5 inline-flex size-[18px] items-center justify-center rounded-full",
+                    proof.proven ? "bg-accent" : "shadow-[inset_0_0_0_1px_var(--color-line)]",
+                  )}
+                >
+                  <PiGlyph size={9} color={proof.proven ? "#0F1B2A" : "#82978C"} />
+                </span>
+              ) : null}
+              {i < n - 1 ? <span aria-hidden="true" className={cx("mx-3 h-px w-6", done ? "bg-soft/50" : "bg-line")} /> : null}
+            </li>
+          );
+        })}
+      </ol>
+      <div className="sm:hidden">
+        <p className="text-[13.5px] font-semibold" aria-label={`Step ${current + 1} of ${n}: ${steps[current] ?? ""}`}>
+          <span className="font-mono text-[12px] text-muted">
+            {pad2(Math.min(current + 1, n))} of {pad2(n)}
+          </span>{" "}
+          · {steps[Math.min(current, n - 1)]}
+        </p>
+        <div aria-hidden="true" className="mt-2 grid gap-1" style={{ gridTemplateColumns: `repeat(${n}, minmax(0, 1fr))` }}>
+          {steps.map((s, i) => (
+            <span key={s} className={cx("h-1 rounded-full", i < current ? "bg-soft/60" : i === current ? "bg-text" : "bg-surface-3")} />
+          ))}
+        </div>
+      </div>
+    </div>
   );
 }
 
@@ -331,8 +431,8 @@ export function Field({
 }
 
 /**
- * A horizontal meter: `value` of `max`, with optional markers (a target, a limit) on the track. Used for LTV against
- * its limits and the market's utilization. Decorative: the caller states the numbers in text.
+ * A horizontal meter: `value` of `max`, with optional markers (a target, a limit) on the track. Used for the market's
+ * utilization. Decorative: the caller states the numbers in text.
  */
 export function Meter({
   value,
@@ -374,46 +474,6 @@ export function Meter({
   );
 }
 
-/**
- * A ring gauge: `value` from 0 to 1 around the circle, the figure and its label in the middle. The health factor's
- * dial. Decorative SVG; the figure is real text.
- */
-export function Ring({
-  value,
-  size = 132,
-  tone = "ok",
-  children,
-}: {
-  value: number;
-  size?: number;
-  tone?: "ok" | "warn" | "danger" | "muted";
-  children: ReactNode;
-}) {
-  const r = 52;
-  const c = 2 * Math.PI * r;
-  const v = Math.max(0, Math.min(1, value));
-  const stroke = { ok: "var(--color-ok)", warn: "var(--color-warn)", danger: "var(--color-danger)", muted: "var(--color-line)" }[tone];
-  return (
-    <div className="relative inline-flex flex-none items-center justify-center" style={{ width: size, height: size }}>
-      <svg width={size} height={size} viewBox="0 0 120 120" aria-hidden="true" className="-rotate-90">
-        <circle cx="60" cy="60" r={r} fill="none" stroke="var(--color-surface-3)" strokeWidth="9" />
-        <circle
-          cx="60"
-          cy="60"
-          r={r}
-          fill="none"
-          stroke={stroke}
-          strokeWidth="9"
-          strokeLinecap="round"
-          strokeDasharray={`${c * v} ${c}`}
-          className="transition-[stroke-dasharray] duration-700"
-        />
-      </svg>
-      <div className="absolute inset-0 flex flex-col items-center justify-center text-center">{children}</div>
-    </div>
-  );
-}
-
 /** A loading placeholder of the given size. */
 export function Skeleton({ className }: { className?: string }) {
   return <span aria-hidden="true" className={cx("skeleton block", className ?? "h-5 w-24")} />;
@@ -422,15 +482,15 @@ export function Skeleton({ className }: { className?: string }) {
 /** What a list shows while it is empty: an icon, a sentence, an action. */
 export function EmptyState({ icon, title, children, action }: { icon?: ReactNode; title: ReactNode; children?: ReactNode; action?: ReactNode }) {
   return (
-    <div className="flex flex-col items-center gap-3 rounded-[20px] border border-dashed border-line/70 px-6 py-10 text-center">
+    <div className="flex flex-col items-center gap-3 rounded-[20px] border border-dashed border-line/70 px-6 py-9 text-center">
       {icon ? (
-        <span className="inline-flex size-12 items-center justify-center rounded-2xl bg-surface-2 text-soft shadow-[inset_0_0_0_1px_var(--color-border)]">
+        <span className="inline-flex size-11 items-center justify-center rounded-2xl bg-surface-2 text-soft shadow-[inset_0_0_0_1px_var(--color-border)]">
           {icon}
         </span>
       ) : null}
-      <p className="text-[17px] font-bold">{title}</p>
+      <p className="text-[16.5px] font-bold">{title}</p>
       {children ? <div className="max-w-md text-sm text-muted">{children}</div> : null}
-      {action ? <div className="mt-2">{action}</div> : null}
+      {action ? <div className="mt-1">{action}</div> : null}
     </div>
   );
 }
@@ -440,7 +500,7 @@ export function SectionTitle({ id, title, sub, action }: { id?: string; title: R
   return (
     <div className="flex flex-wrap items-end justify-between gap-3">
       <div className="space-y-1">
-        <h2 id={id} className="text-[length:clamp(21px,2vw,26px)] leading-[1.1] font-extrabold tracking-[-0.008em] font-stretch-118%">
+        <h2 id={id} className="text-[length:clamp(20px,1.8vw,24px)] leading-[1.1] font-extrabold tracking-[-0.01em] font-stretch-116%">
           {title}
         </h2>
         {sub ? <p className="text-sm text-muted">{sub}</p> : null}

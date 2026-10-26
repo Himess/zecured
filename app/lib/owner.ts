@@ -39,6 +39,11 @@ export interface OwnerContext {
   stampBits?: number;
   /** The mainnet beta's invite code, sent with the opening (lib/deployment.ts). */
   invite?: string;
+  /**
+   * Where an opening is (for the page to show it): this browser's proof of work, the signers' key generation (the
+   * backend's answer), then this browser's check of their signatures.
+   */
+  onStage?: (stage: "work" | "keygen" | "check") => void;
 }
 
 /** The configuration forbids owner signatures (H-6: pins and backend disagree, or no Registry pin). */
@@ -118,13 +123,16 @@ export async function openVault(loan: StoredLoan, ctx: OwnerContext = {}): Promi
   // The stamp binds the request id and the owner key: a retry of the same loan finds the same
   // one, which the backend accepts again unless a vault opened with it. Computed first, so the
   // work does not eat into the request's deadline.
+  ctx.onStage?.("work");
   const stamp = await solveStamp(loan.requestId, loan.owner, ctx.stampBits ?? c.openVaultStampBits ?? STAMP_DEFAULT_BITS);
   const deadline = deadlineIn(REQUEST_TTL_SECONDS, ctx.now);
   const message = { owner: loan.owner, account: loan.account, amount, requestId: loan.requestId, deadline };
   const signature = await signWithOwnerKey(loan.ownerKey, openVaultTypedData(registry, message));
   const invite = ctx.invite?.trim();
+  ctx.onStage?.("keygen");
   const res = await a.openVault({ ...message, signature, stamp, ...(invite ? { invite } : {}) });
   if (res.amount !== amount) throw new Error("The backend opened a vault for a different amount.");
+  ctx.onStage?.("check");
   const check = await verifyVaultOpened(
     {
       vaultId: res.vaultId,
