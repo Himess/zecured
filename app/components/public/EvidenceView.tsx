@@ -183,7 +183,7 @@ export function EvidenceView() {
       {sampleTransactions() ? (
         <Notice tone="demo" title="DEMO: sample data">
           <p>
-            The replay shows the evidence file in its real shape, with sample data. The live run&apos;s file names its commit, its
+            The replay shows the evidence file in its real shape, with sample data. A real evidence file names its commit, its
             deployment block, every transaction of every flow, and its leak scan.
           </p>
         </Notice>

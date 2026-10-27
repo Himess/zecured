@@ -107,6 +107,12 @@ jobs:
         env:
           NEXT_PUBLIC_BASE_PATH: /zecured/app
           ZECURED_TYPECHECKED: "1"
+      # The live build too, as a deployment makes it: scripts/pin-deployment.mjs writes its pins from a deployment
+      # record. Deployment records are not committed, so here it reads the tests' dry run (a TEST FIXTURE).
+      - run: |
+          cp lib/__fixtures__/deployment.dry-run.json ../contracts/deployments/ci-dry-run.json
+          node scripts/pin-deployment.mjs ci-dry-run http://127.0.0.1:8080 > .env.local
+          pnpm build
 
   # The site in a real browser: same origin only, axe, no-JS, keyboard, reduced motion, no WebGL, four widths,
   # and the scene's bundle built from its source.

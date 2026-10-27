@@ -64,8 +64,8 @@ export const viewport: Viewport = {
 
 export default function RootLayout({ children }: { children: ReactNode }) {
   return (
-    <html lang="en" className={`${archivo.variable} ${martianMono.variable}`}>
-      <body className={REPLAY ? "has-dock min-h-dvh antialiased" : "min-h-dvh antialiased"}>
+    <html lang="en" className={`${archivo.variable} ${martianMono.variable}${REPLAY ? " has-dock" : ""}`}>
+      <body className="min-h-dvh antialiased">
         {/* A static replay build has no server to send headers: its policy rides in the page (lib/replay/flag.ts). */}
         {REPLAY ? (
           <meta
@@ -86,7 +86,7 @@ export default function RootLayout({ children }: { children: ReactNode }) {
             {DEPLOYMENT.band}
           </div>
         ) : null}
-        <header className="sticky top-0 z-40 border-b border-hairline bg-bg/85 backdrop-blur-xl">
+        <header className="sticky top-0 z-40 border-b border-hairline bg-bg/95 backdrop-blur-xl">
           <div className="wrap flex min-h-16 items-center gap-x-6 py-2.5">
             <div className="flex items-center gap-3">
               <Link href="/" className="inline-flex items-center gap-[10px] text-text no-underline">
@@ -101,7 +101,7 @@ export default function RootLayout({ children }: { children: ReactNode }) {
                 zcash={TESTNET ? "Zcash testnet" : "Zcash"}
                 base={DEPLOYMENT.chainName}
                 short={TESTNET ? "Testnet" : undefined}
-                status={<BackendDot />}
+                status={REPLAY ? undefined : <BackendDot />}
               />
             </div>
           </div>
@@ -150,7 +150,7 @@ export default function RootLayout({ children }: { children: ReactNode }) {
             <nav aria-label="Proof" className="space-y-2.5">
               <p className="text-xs font-bold tracking-[0.08em] text-faint uppercase">Check it</p>
               <ul className="space-y-2">
-                <li><Link href="/evidence" className="text-soft no-underline hover:text-text hover:underline">Evidence of real transactions</Link></li>
+                <li><Link href="/evidence" className="text-soft no-underline hover:text-text hover:underline">{REPLAY ? "Evidence (sample data in this replay)" : "Evidence of real transactions"}</Link></li>
                 <li><Link href="/status" className="text-soft no-underline hover:text-text hover:underline">System status</Link></li>
                 <li><Link href="/world" className="text-soft no-underline hover:text-text hover:underline">What the world sees</Link></li>
                 <li><a href={SITE_URL} className="text-soft no-underline hover:text-text hover:underline">The site</a> · <a href={`${SITE_URL}docs/`} className="text-soft no-underline hover:text-text hover:underline">the docs</a></li>

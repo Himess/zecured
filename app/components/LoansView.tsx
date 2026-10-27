@@ -6,7 +6,7 @@ import { useMounted } from "./client";
 import { IconArrowRight, IconDownload, IconKey, IconUpload, IconVault } from "./icons";
 import { downloadBackup } from "./KeyBackup";
 import { TokenAmount } from "./loan";
-import { STATUS_LABEL } from "./status";
+import { statusOf } from "./status";
 import { Badge, Button, buttonClass, Card, EmptyState, Mono, Notice } from "./ui";
 import { notifyLoansChanged, useLoans, useVault } from "@/lib/hooks";
 import { importLoan, loanStore, short, type StoredLoan } from "@/lib/keys";
@@ -86,7 +86,7 @@ function LoanRow({ loan }: { loan: StoredLoan }) {
   // Staggered: the backend should not receive every vault of this browser in one burst (L-11).
   const vault = useVault(loan.vaultId, 0, { staggered: true });
   const [confirmForget, setConfirmForget] = useState(false);
-  const status = vault.data ? STATUS_LABEL[vault.data.status] : null;
+  const status = vault.data ? statusOf(vault.data) : null;
   return (
     <li className="panel p-5 sm:p-6">
       <div className="flex flex-wrap items-start justify-between gap-4">

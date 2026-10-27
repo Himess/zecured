@@ -110,7 +110,7 @@ async function windowSteps(c: PublicClient, vaultId: Hex, account: Address | nul
         };
         switch (l.eventName) {
           case "VaultActivated":
-            return { ...base, kind: "activated", label: JOURNEY_LABEL.activated, detail: `${formatTaz(l.args.amount)} of collateral` };
+            return { ...base, kind: "activated", label: JOURNEY_LABEL.activated, detail: `for a ${formatTaz(l.args.amount)} deposit` };
           case "CloseRelease":
             return {
               ...base,
@@ -298,15 +298,21 @@ export function useJourney(
       return;
     }
     let stop = false;
+    let first = true;
+    let inFlight = false;
     let timer: ReturnType<typeof setTimeout> | undefined;
     // DEMO: the replay's steps come seconds apart, as the other polls (hooks.ts) follow them.
     const every = REPLAY ? Math.min(intervalMs, 2_500) : intervalMs;
+    // As usePolling (hooks.ts): the first read always runs (a page opened in a background tab must still load); later
+    // reads pause while the tab is hidden, and one runs at once when it is shown. One read at a time.
     const tick = async () => {
-      // A hidden tab reads nothing; it catches up on the first tick after it is shown.
-      if (typeof document !== "undefined" && document.hidden) {
+      if (inFlight) return;
+      if (!first && typeof document !== "undefined" && document.hidden) {
         timer = setTimeout(tick, every);
         return;
       }
+      first = false;
+      inFlight = true;
       try {
         const j = await readJourney(vaultId, account ?? null, { since: sinceRef.current });
         if (!stop) {
@@ -316,16 +322,25 @@ export function useJourney(
       } catch (e) {
         if (!stop) setError(describeError(e));
       } finally {
+        inFlight = false;
         if (!stop) {
           setLoading(false);
+          clearTimeout(timer);
           timer = setTimeout(tick, every);
         }
       }
     };
+    const onVisible = () => {
+      if (stop || document.visibilityState !== "visible") return;
+      clearTimeout(timer);
+      void tick();
+    };
+    document.addEventListener("visibilitychange", onVisible);
     void tick();
     return () => {
       stop = true;
       clearTimeout(timer);
+      document.removeEventListener("visibilitychange", onVisible);
     };
   }, [vaultId, account, intervalMs]);
   return { data, error, loading };

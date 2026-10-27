@@ -12,7 +12,7 @@ import type { LoanAccount, SentUserOp } from "../account";
 import type { Call } from "../calls";
 import { formatUsdc } from "../morpho";
 import { buildModel } from "./model";
-import { OffScriptError, world, type ReplayWorld } from "./world";
+import { loanTokenOf, OffScriptError, world, type ReplayWorld } from "./world";
 
 /** What the replay hands back where a Safe's ERC-1271 signature would be (never checked). */
 export const REPLAY_SIGNATURE: Hex = `0x${"00".repeat(64)}1b`;
@@ -78,7 +78,7 @@ export function replayLoanAccount(_ownerKey: Hex, w: ReplayWorld = world()): Loa
       const recorded = BigInt(r.loan.borrow.assets);
       if (assets !== recorded) {
         throw new OffScriptError(
-          `This replay borrows exactly ${formatUsdc(recorded)} USDC, what the recorded run borrowed: enter ${formatUsdc(recorded)}.`,
+          `This replay borrows exactly ${formatUsdc(recorded)} ${loanTokenOf(r)}, what the recorded run borrowed: press “DEMO: fill in ${formatUsdc(recorded)}”.`,
         );
       }
       if (!same(onBehalf, account)) throw new OffScriptError("The recorded run borrowed on behalf of its own account.");

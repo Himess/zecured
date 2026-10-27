@@ -35,8 +35,11 @@ export const BASE_BLOCK_MS = 2_000;
 const ZCASH_BLOCK_MS = 25_000;
 /** In the replay, after the deposit, Zcash blocks come faster (accelerated): one every this many ms. */
 const FAST_BLOCK_MS = 3_000;
-/** Confirmations appear one every this many ms once the deposit is seen. */
-const CONFIRMATION_MS = 1_500;
+/**
+ * After the payment, its confirmations come in within this many ms (one every CONFIRMATIONS_MS / N), before the
+ * signers report the deposit as seen: as live, where `depositSeen` means the deposit has its confirmations.
+ */
+const CONFIRMATIONS_MS = 3_000;
 
 /** Registry `VaultStatus` and `ClaimStatus` indices (lib/abi.ts ONCHAIN_VAULT_STATUS, CLAIM_STATUS). */
 const VAULT = { None: 0, Active: 1, Closed: 2, Pending: 4 } as const;
@@ -164,6 +167,7 @@ export function buildModel(w: ReplayWorld, t: number = w.now()): Model {
   const fee = feeRaw < BigInt(v3.minFeeZat) ? 0n : feeRaw;
   const collateral = amount - fee;
   const N = r.config.confirmations;
+  const confirmationMs = Math.max(1, Math.floor(CONFIRMATIONS_MS / Math.max(1, N)));
 
   const tOpened = at("opened");
   const tPaid = at("deposit-paid");
@@ -182,14 +186,16 @@ export function buildModel(w: ReplayWorld, t: number = w.now()): Model {
   // ---------------------------------------------------------------- Zcash heights
   const baseTip = (ms: number) => r.chain.zcashTip + Math.max(0, Math.floor((ms - epochMs) / ZCASH_BLOCK_MS));
   const depositHeight = tPaid !== null ? baseTip(tPaid) + 1 : null;
-  const confirmations = tSeen !== null ? Math.min(N, 1 + Math.floor((t - tSeen) / CONFIRMATION_MS)) : tPaid !== null ? 0 : null;
+  /** The deposit's confirmations at `ms`: climbing after the payment, all N once the signers see it. */
+  const confirmationsAt = (ms: number): number | null =>
+    tSeen !== null && tSeen <= ms ? N : tPaid !== null && tPaid <= ms ? Math.min(N - 1, Math.floor((ms - tPaid) / confirmationMs)) : null;
+  const confirmations = confirmationsAt(t);
   const anchorTip = depositHeight !== null ? depositHeight + N - 1 : 0;
   /** The Zcash tip at `ms` (≤ t): the clock's, pushed ahead by the deposit's confirmations and, accelerated, by the steps that wait for blocks. */
   const tipAt = (ms: number): number => {
     let tip = baseTip(ms);
-    if (depositHeight !== null && tSeen !== null && tSeen <= ms) {
-      tip = Math.max(tip, depositHeight + Math.min(N, 1 + Math.floor((ms - tSeen) / CONFIRMATION_MS)) - 1);
-    }
+    const c = confirmationsAt(ms);
+    if (depositHeight !== null && c !== null) tip = Math.max(tip, depositHeight + c - 1);
     if (tProven !== null && tProven <= ms) {
       const until = tActivated !== null ? Math.min(ms, tActivated + 60_000) : ms;
       tip = Math.max(tip, anchorTip + Math.floor((until - tProven) / FAST_BLOCK_MS));

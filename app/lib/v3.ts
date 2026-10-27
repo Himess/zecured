@@ -42,17 +42,6 @@ export function openingFee(amount: bigint, p: Pick<V3Params, "feeBps" | "minFeeZ
   return fee < p.minFeeZat ? 0n : fee;
 }
 
-/** What to say about the fee before a deposit of `amount` (null when the deployment charges none). */
-export function feeNotice(amount: bigint, p: V3Params | null): string | null {
-  if (!p || p.feeBps === 0) return null;
-  const fee = openingFee(amount, p);
-  const rate = `${(p.feeBps / 100).toLocaleString("en-US", { maximumFractionDigits: 2 })} %`;
-  if (fee === 0n) {
-    return `No opening fee for ${formatTaz(amount)}: the ${rate} fee would be under ${formatTaz(p.minFeeZat)}, so it is waived.`;
-  }
-  return `Opening fee: ${formatTaz(fee)} (${rate} of the deposit), owed to the signers' treasury and paid out of the vault with its first payout. The vault's collateral is ${formatTaz(amount - fee)}.`;
-}
-
 // ------------------------------------------------------------------ the minting gates (banner)
 
 export interface MintingNotice {
@@ -318,7 +307,7 @@ export function claimView(
           detail: "The signers committed its payout on Base and are sending it on Zcash. It is final once its delivery is proven on Base.",
         };
       }
-      return { label, badge: { tone: "warn", text: "Pending" }, detail: "The signers pay it in their payout queue." };
+      return { label, badge: { tone: "neutral", text: "Pending" }, detail: "The signers pay it in their payout queue." };
     case "Paid":
       // `paidAt` 0: a proof of the payout's inclusion, or `expireConfirmation` once a confirmation
       // stood undisputed through its window (R-3); Base keeps no trace of which in the claim itself.

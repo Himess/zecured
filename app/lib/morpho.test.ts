@@ -261,6 +261,7 @@ describe("formatting", () => {
   it("prices, ratios and percentages", () => {
     expect(formatUsdPrice(PRICE_40)).toBe("$40.00");
     expect(formatUsdPrice(2_550n * 10n ** 32n)).toBe("$25.50");
+    expect(formatUsdPrice(oraclePriceFromCents(126_500n))).toBe("$1,265.00");
     expect(formatBps(4_000n)).toBe("40.0 %");
     expect(formatBps(6_275n)).toBe("62.7 %");
   });

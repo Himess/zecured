@@ -12,6 +12,7 @@ import { loanAccount } from "@/lib/account";
 import { api, type CloseQuote, type Vault } from "@/lib/api";
 import { authorizeAdapterCalls, invalidateNonceCalls, releaseCalls, repayAndReleaseCalls, transferUsdcCalls } from "@/lib/calls";
 import { formatUtc } from "@/lib/calls";
+import { sampleTransactions } from "@/lib/explorer";
 import { isNonceUsed, type PositionSnapshot } from "@/lib/chain";
 import { CLOSE_TTL_SECONDS, deadlineIn, randomNonce128, type CloseRequestMessage } from "@/lib/eip712";
 import { notifyLoansChanged, useAction } from "@/lib/hooks";
@@ -290,17 +291,23 @@ function CloseFlow({ loan, vault, snapshot, commitment, onChanged }: FlowProps) 
           {authorize.error ? <p className="text-danger">{authorize.error}</p> : null}
         </Notice>
       ) : null}
-      <Button variant={quote ? "ghost" : "secondary"} size={quote ? "sm" : "md"} data-replay="get-quote" onClick={() => getQuote.run()} busy={getQuote.busy}>
-        {getQuote.busy ? null : <IconRefresh size={16} />}
-        {quote ? "Refresh the quote" : "Get a market maker's quote"}
-      </Button>
+      {quote ? null : (
+        <Button variant="secondary" data-replay="get-quote" onClick={() => getQuote.run()} busy={getQuote.busy}>
+          {getQuote.busy ? null : <IconRefresh size={16} />}
+          Get a market maker&apos;s quote
+        </Button>
+      )}
       <ActionError error={getQuote.error} refusal={getQuote.refusal} title="No quote" />
       {quote ? (
         <div className="animate-rise space-y-4">
           <div className="space-y-3 rounded-2xl bg-bg/70 p-5 shadow-[inset_0_0_0_1px_var(--color-border)]">
-            <p className="text-[14px] font-semibold">
-              Your {formatTaz(quote.mmAmount + quote.userAmount)} splits in two
-            </p>
+            <div className="flex flex-wrap items-center justify-between gap-2">
+              <p className="text-[14px] font-semibold">Your {formatTaz(quote.mmAmount + quote.userAmount)} splits in two</p>
+              <Button variant="ghost" size="sm" onClick={() => getQuote.run()} busy={getQuote.busy}>
+                {getQuote.busy ? null : <IconRefresh size={15} />}
+                Refresh
+              </Button>
+            </div>
             <SplitBar
               mm={quote.mmAmount}
               user={quote.userAmount}
@@ -377,7 +384,12 @@ export function PendingClose({ loan, vault, onChanged }: { loan: StoredLoan; vau
           ["Valid until", formatUtc(Number(pending.deadline))],
           ["Nonce", <Mono key="n">{short(pending.nonce, 8, 6)}</Mono>],
           ...(pending.txHash
-            ? ([["Market maker's transaction", <Mono key="t">{pending.txHash}</Mono>]] as [string, ReactNode][])
+            ? ([
+                [
+                  "Market maker's transaction",
+                  sampleTransactions() ? <span key="t" className="text-muted">sample data</span> : <Mono key="t">{short(pending.txHash, 10, 8)}</Mono>,
+                ],
+              ] as [string, ReactNode][])
             : []),
         ]}
       />

@@ -27,7 +27,7 @@ export function IronwoodAddressInput({
   value,
   onChange,
   label = "Ironwood destination (unified address)",
-  hint = "Use a fresh address from an Ironwood-capable wallet. Only its Ironwood (Orchard-protocol) receiver is used.",
+  hint = "Use a fresh address from an Ironwood-capable wallet. Only its Ironwood receiver is used.",
 }: {
   value: string;
   onChange: (v: string) => void;
@@ -65,7 +65,7 @@ export function IronwoodAddressInput({
       />
       <p id={`${id}-hint`} className={error ? "text-sm text-danger" : "text-xs text-muted"}>
         {error ??
-          (other ? "Valid. This address has other receivers too; only its Ironwood (Orchard-protocol) receiver will be paid." : hint)}
+          (other ? "Valid. This address has other receivers too; only its Ironwood receiver will be paid." : hint)}
       </p>
     </div>
   );

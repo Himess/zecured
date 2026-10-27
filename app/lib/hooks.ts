@@ -133,12 +133,22 @@ export function useVaultProof(loan: StoredLoan | null): VaultProofState {
  * The URL fragment without its "#" ("" when there is none); undefined until mounted, since the
  * server never sees it. Vault pages read their vault id here (lib/routes.ts, M-6). Follows
  * hashchange and popstate; in-app links to a vault page always change the path, so they mount
- * the page afresh.
+ * the page afresh. A jump to an in-page anchor (the skip link's #main, a section's id) keeps the
+ * fragment it had: the URL gets the vault id back, and the page its vault.
  */
 export function useUrlFragment(): string | undefined {
   const [fragment, setFragment] = useState<string | undefined>(undefined);
+  const last = useRef<string | undefined>(undefined);
   useEffect(() => {
-    const read = () => setFragment(window.location.hash.replace(/^#/, ""));
+    const read = () => {
+      const h = window.location.hash.replace(/^#/, "");
+      if (h && last.current && h !== last.current && document.getElementById(h)) {
+        history.replaceState(history.state, "", `${window.location.pathname}${window.location.search}#${last.current}`);
+        return;
+      }
+      last.current = h;
+      setFragment(h);
+    };
     read();
     window.addEventListener("hashchange", read);
     window.addEventListener("popstate", read);
@@ -174,7 +184,8 @@ const staggerDelay = createStagger();
 /** In a replay build (DEMO) its steps come seconds apart: no poll waits longer than this. */
 const REPLAY_POLL_MS = 2_000;
 
-function usePolling(fn: () => Promise<void>, requestedMs: number, enabled: boolean, staggered = false) {
+/** `restartKey`: a new key (another vault, another account) loads at once instead of at the next tick. */
+function usePolling(fn: () => Promise<void>, requestedMs: number, enabled: boolean, staggered = false, restartKey?: string) {
   const intervalMs = REPLAY && requestedMs > 0 ? Math.min(requestedMs, REPLAY_POLL_MS) : requestedMs;
   const fnRef = useRef(fn);
   fnRef.current = fn;
@@ -211,7 +222,7 @@ function usePolling(fn: () => Promise<void>, requestedMs: number, enabled: boole
       clearTimeout(visibleTimer);
       document.removeEventListener("visibilitychange", onVisible);
     };
-  }, [intervalMs, enabled, staggered]);
+  }, [intervalMs, enabled, staggered, restartKey]);
 }
 
 export interface Remote<T> {
@@ -229,19 +240,30 @@ export function useVault(vaultId: Hex | undefined, intervalMs = 10_000, { stagge
   const [data, setData] = useState<Vault | null>(null);
   const [error, setError] = useState<string | null>(null);
   const [loading, setLoading] = useState(Boolean(vaultId));
+  // A new vault id starts empty: the last vault's status never stands in for this one's (E-04).
+  const [readFor, setReadFor] = useState(vaultId);
+  const current = useRef(vaultId);
+  current.current = vaultId;
+  if (readFor !== vaultId) {
+    setReadFor(vaultId);
+    setData(null);
+    setError(null);
+    setLoading(Boolean(vaultId));
+  }
   const refresh = useCallback(async () => {
     if (!vaultId) return;
     try {
       const v = await api.getVault(vaultId);
+      if (current.current !== vaultId) return;
       setData(v);
       setError(null);
     } catch (e) {
-      setError(describeError(e));
+      if (current.current === vaultId) setError(describeError(e));
     } finally {
-      setLoading(false);
+      if (current.current === vaultId) setLoading(false);
     }
   }, [vaultId]);
-  usePolling(refresh, intervalMs, Boolean(vaultId), staggered);
+  usePolling(refresh, intervalMs, Boolean(vaultId), staggered, vaultId);
   return { data, error, loading, refresh };
 }
 

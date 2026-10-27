@@ -3,7 +3,8 @@
 // every page carries one Content-Security-Policy that keeps its connections same-origin; no page's first scripts
 // carry the live account-abstraction stack (it loads on the first UserOp, which a replay never sends); and each
 // page's first-load JavaScript stays within its budget.
-//   NEXT_PUBLIC_BASE_PATH=/zecured/app node scripts/check-export.mjs     (the base path the export was built with)
+//   NEXT_PUBLIC_BASE_PATH=/zecured/app node scripts/check-export.mjs     (the base path the export was built with;
+//   from Git Bash on Windows, prefix MSYS_NO_PATHCONV=1, or MSYS rewrites the path)
 import { existsSync, readFileSync, readdirSync, statSync } from "node:fs";
 import { dirname, join, relative } from "node:path";
 import { fileURLToPath } from "node:url";
@@ -34,12 +35,16 @@ const pages = files.filter((f) => f.endsWith(".html"));
 
 // 1. Every asset named by a page or a payload exists.
 const asset = new RegExp(`${base.replace(/[.*+?^${}()|[\]\\/]/g, "\\$&")}/_next/[^"'\\s)\\\\]+`, "g");
+let named = 0;
 for (const f of files.filter((f) => f.endsWith(".html") || f.endsWith(".txt"))) {
   for (const [ref] of readFileSync(f, "utf8").matchAll(asset)) {
+    named += 1;
     const path = ref.slice(base.length + 1).split(/[?#]/)[0];
     if (!existsSync(join(out, path))) problems.push(`${rel(f)} names ${ref}, which is not in the export`);
   }
 }
+// A check that found nothing to check fails: a wrong base path would otherwise pass, on 0 KB everywhere.
+if (named === 0) problems.push(`nothing names an asset under ${base}/_next/: was out/ built with NEXT_PUBLIC_BASE_PATH=${base || '""'}?`);
 
 // 2. Payloads: each page's index.txt, and each segment payload under the name the router asks for.
 // (404/index.html is a copy of 404.html, which has none.)
@@ -62,6 +67,7 @@ for (const page of pages) {
   else if (!/(^|;)\s*connect-src 'self'\s*(;|$)/.test(csp[0])) problems.push(`${rel(page)}: its policy does not keep connections same-origin`);
 
   const scripts = [...text.matchAll(/<script[^>]+src="([^"]+)"/g)].map((m) => m[1]).filter((src) => src.startsWith(`${base}/_next/`));
+  if (scripts.length === 0) problems.push(`${rel(page)}: no script under ${base}/_next/ (another base path, or a page this check cannot read)`);
   let gzip = 0;
   for (const src of scripts) {
     const path = join(out, src.slice(base.length + 1));

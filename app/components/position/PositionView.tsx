@@ -1,11 +1,12 @@
 "use client";
 
 import Link from "next/link";
+import { useRef } from "react";
 import type { Address } from "viem";
 import { BorrowForm } from "@/components/BorrowForm";
 import { CopyButton, MissingVaultId, useMounted } from "@/components/client";
 import { IconArrowDown, IconEye, IconKey, IconLayers, IconPlus, IconShield, IconSwap } from "@/components/icons";
-import { HealthRunway, healthOf, rate as ratePct, SplitBar, TokenAmount, usd, usdc, zec } from "@/components/loan";
+import { HealthRunway, healthOf, rate as ratePct, SplitBar, TokenAmount, usd, usdc, zec, zec5 } from "@/components/loan";
 import { UsdcMark, ZecMark } from "@/components/marks";
 import { PayoutNotice } from "@/components/PayoutNotice";
 import { ProofTrail } from "@/components/ProofTrail";
@@ -19,13 +20,13 @@ import { DEPLOYMENT } from "@/lib/deployment";
 import { REPLAY } from "@/lib/replay/flag";
 import { useLoanByVault, usePosition, useProtocol, useUrlFragment, useVault, useVaultLedger } from "@/lib/hooks";
 import { short } from "@/lib/keys";
-import { loanTokenName, priceSourceName } from "@/lib/labels";
+import { loanTokenName, priceLineName } from "@/lib/labels";
 import { collateralValue, formatUsdPrice, maxBorrowAtTargetLtv, WAD } from "@/lib/morpho";
 import { marketNumbers } from "@/lib/public";
 import { vaultHref, vaultIdFromFragment } from "@/lib/routes";
 import { CLAIM_KIND_LABEL, feeClaim, refundsToClaim } from "@/lib/v3";
-import { formatTaz } from "@/lib/zcash";
-import { STATUS_LABEL } from "../status";
+import { formatTaz, TICKER } from "@/lib/zcash";
+import { statusOf } from "../status";
 import { Exits, PendingClose, SendUsdcForm } from "./Exits";
 import { Deleverage } from "./Deleverage";
 import { ClaimsCard, PendingActivationCard, PendingRefundsCard, RefundsCard, TheftNotice } from "./Ledger";
@@ -56,6 +57,13 @@ const BASE_STATUS: Partial<Record<string, { tone: "info" | "neutral" | "warn"; t
   Cancelled: { tone: "neutral", text: "Refunds only" },
 };
 
+/** Scrolls to the payouts and focuses them, leaving the URL's fragment (the vault id) as it is. */
+function showPayouts() {
+  const el = document.getElementById("payouts");
+  el?.scrollIntoView({ behavior: window.matchMedia("(prefers-reduced-motion: reduce)").matches ? "auto" : "smooth", block: "start" });
+  el?.focus({ preventScroll: true });
+}
+
 /** The vault comes from the URL fragment (`/position#0x…`), never the path (M-6). */
 export function PositionView() {
   const mounted = useMounted();
@@ -68,13 +76,15 @@ export function PositionView() {
   const account: Address | undefined = loan?.account ?? (l && l.account !== ZERO_ACCOUNT ? l.account : undefined);
   const position = usePosition(account, 30_000);
   const protocol = useProtocol(60_000);
+  // A tab that appeared keeps its place: a borrow that uses up the room, or a send of the whole balance, keeps its receipt (E-06).
+  const shownTabs = useRef(new Set<string>());
 
   if (fragment === undefined) return <p className="text-sm text-muted">Loading…</p>;
   if (!vaultId) return <MissingVaultId fragment={fragment} />;
 
   const v = vault.data;
   const p = position.data;
-  const status = v ? STATUS_LABEL[v.status] : null;
+  const status = v ? statusOf(v) : null;
   const baseStatus = l ? BASE_STATUS[l.status] : undefined;
   const collateral = p?.position.collateral ?? v?.outstanding ?? v?.amount;
   const debt = p?.debt;
@@ -89,6 +99,10 @@ export function PositionView() {
   const borrowRoom = p ? maxBorrowAtTargetLtv(p.position.collateral, p.price) > p.debt : false;
   const toClaim = l ? refundsToClaim(l).length : 0;
   const fee = l ? feeClaim(l) : undefined;
+  // After a close from collateral: what went where, from the vault's claims on Base.
+  const claims = l?.claims ?? [];
+  const toUser = claims.find((c) => c.kind === "CloseUser");
+  const toMaker = claims.find((c) => c.kind === "CloseMarketMaker");
   const refresh = () => {
     void vault.refresh();
     void position.refresh();
@@ -109,7 +123,7 @@ export function PositionView() {
         content: <Exits loan={loan} vault={v} snapshot={p} onChanged={refresh} />,
       });
     }
-    if (borrowRoom && !loan.pendingClose && !frozen) {
+    if ((borrowRoom || shownTabs.current.has("borrow")) && !loan.pendingClose && !frozen) {
       tabs.push({ id: "borrow", label: "Borrow more", icon: <IconPlus size={16} />, content: <BorrowForm loan={loan} snapshot={p} onBorrowed={refresh} /> });
     }
     if (!loan.pendingClose && !frozen) {
@@ -121,14 +135,11 @@ export function PositionView() {
     if (!frozen) {
       tabs.push({ id: "protect", label: "Protect", icon: <IconShield size={16} />, content: <ProtectionCard loan={loan} snapshot={p} onChanged={refresh} /> });
     }
-    if (p.usdcBalance > 0n) {
+    if (p.usdcBalance > 0n || shownTabs.current.has("send")) {
       tabs.push({ id: "send", label: `Send ${token}`, icon: <UsdcMark size={16} />, content: <SendUsdcForm loan={loan} snapshot={p} onChanged={refresh} /> });
     }
   }
-  // After a close from collateral: what went where, from the vault's claims on Base.
-  const claims = l?.claims ?? [];
-  const toUser = claims.find((c) => c.kind === "CloseUser");
-  const toMaker = claims.find((c) => c.kind === "CloseMarketMaker");
+  for (const t of tabs) shownTabs.current.add(t.id);
 
   return (
     <div className="space-y-6">
@@ -145,7 +156,10 @@ export function PositionView() {
           ) : null}
           {baseStatus ? <Badge tone={baseStatus.tone}>{baseStatus.text}</Badge> : null}
         </div>
-        <nav aria-label="Loan pages" className="flex flex-wrap items-center gap-2">
+        <nav
+          aria-label="Loan pages"
+          className="flex flex-wrap items-center gap-2 max-sm:-mx-4 max-sm:w-[calc(100%+2rem)] max-sm:flex-nowrap max-sm:overflow-x-auto max-sm:px-4 [&>*]:flex-none"
+        >
           {/* DEMO: the replay never publishes a viewing key; the page says so. */}
           <Link href={vaultHref("verify", vaultId)} prefetch={false} className={buttonClass(REPLAY ? "ghost" : "secondary", undefined, "sm")}>
             <IconKey size={15} />
@@ -202,9 +216,13 @@ export function PositionView() {
             {collateral !== undefined ? <TokenAmount token="TAZ" value={zec(collateral)} size="xl" /> : <Skeleton className="h-9 w-40" />}
             <p className="text-[13px] text-muted">
               {closed
-                ? "All paid out: see the payouts below"
+                ? v?.status !== "closed"
+                  ? "Being paid out: see the payouts below"
+                  : toUser
+                    ? `All paid out: ${zec5(toUser.amount)} ${TICKER} to your new Ironwood address`
+                    : "All paid out: see the payouts below"
                 : p
-                  ? `≈ ${usd(collateralValue(p.position.collateral, p.price))} at ${formatUsdPrice(p.price)} (${priceSourceName()})`
+                  ? `≈ ${usd(collateralValue(p.position.collateral, p.price))} at ${formatUsdPrice(p.price)} (${priceLineName()})`
                   : "in the vault"}
             </p>
             <div aria-hidden="true" className="flex flex-wrap gap-1.5 pt-1">
@@ -227,7 +245,7 @@ export function PositionView() {
               <span className="text-[28px] font-bold text-ink-faint">—</span>
             )}
             <p className="text-[13px] text-ink-muted">
-              {rate !== null ? `${ratePct(rate)} a year, accruing every block` : "including accrued interest"}
+              {closed ? (toMaker ? "Repaid by the market maker" : "Repaid") : rate !== null ? `${ratePct(rate)} a year, accruing every block` : "including accrued interest"}
               {account ? (
                 <>
                   {" · "}account <span className="font-mono">{short(account)}</span>, gas sponsored
@@ -245,7 +263,7 @@ export function PositionView() {
           ) : (
             <HealthRunway health={health} size="l" />
           )}
-          {fee ? (
+          {fee && !closed ? (
             <p className="mt-3 text-[12px] text-muted">
               Collateral is the deposit less its opening fee ({formatTaz(fee.amount)}, paid to the signers from the vault&apos;s first payout).
             </p>
@@ -295,9 +313,9 @@ export function PositionView() {
             </p>
             <SplitBar mm={toMaker.amount} user={toUser.amount} userTo="to a new Ironwood address" />
             <div className="flex flex-wrap gap-2">
-              <a href="#payouts" className={buttonClass("secondary", undefined, "sm")}>
+              <button type="button" onClick={showPayouts} className={buttonClass("secondary", undefined, "sm")}>
                 See the payouts
-              </a>
+              </button>
               <Link href="/world" className={buttonClass("ghost", undefined, "sm")}>
                 What the world saw
               </Link>
@@ -314,7 +332,7 @@ export function PositionView() {
       {l ? <PendingRefundsCard ledger={l} /> : null}
       {l ? <RefundsCard ledger={l} loan={loan} onChanged={refresh} /> : null}
 
-      <div id="payouts" className="scroll-mt-24">
+      <div id="payouts" tabIndex={-1} className="scroll-mt-24 outline-none">
         {l ? (
           <ClaimsCard ledger={l} loan={loan} vault={v} onChanged={refresh} />
         ) : v && v.claims.length > 0 ? (

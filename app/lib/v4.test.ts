@@ -2,6 +2,7 @@ import { describe, expect, it } from "vitest";
 import {
   awaitingDeposit,
   capWait,
+  depositConfirmed,
   openingsNotice,
   openRefusal,
   PROOF_MINTING_SENTENCE,
@@ -75,6 +76,25 @@ describe("fixed sentences", () => {
     expect(SWAP_PRIVACY_SENTENCE).toBe("On a swap your Base account is visible; where the ZEC goes is not.");
     expect(PROOF_MINTING_SENTENCE).toMatch(/zero-knowledge proof/);
     expect(PROOF_MINTING_SENTENCE).not.toMatch(/signers (see|saw)/);
+  });
+});
+
+describe("a seen deposit has its confirmations (L-01: the live backend sends no count)", () => {
+  it("counts a deposit the signers saw, with no count reported, as confirmed", () => {
+    expect(depositConfirmed({ status: "awaiting_deposit", depositSeen: true }, 3)).toBe(true);
+    expect(depositConfirmed({ status: "deposit_seen" }, 10)).toBe(true);
+    expect(depositConfirmed({ status: "awaiting_deposit", depositSeen: true }, null)).toBe(true);
+  });
+
+  it("follows a reported count (the replay)", () => {
+    expect(depositConfirmed({ status: "deposit_seen", depositSeen: true, confirmations: 1 }, 3)).toBe(false);
+    expect(depositConfirmed({ status: "deposit_seen", depositSeen: true, confirmations: 3 }, 3)).toBe(true);
+  });
+
+  it("is false before the signers saw the deposit", () => {
+    expect(depositConfirmed(null, 3)).toBe(false);
+    expect(depositConfirmed({ status: "awaiting_deposit" }, 3)).toBe(false);
+    expect(depositConfirmed({ status: "expired", confirmations: 5 }, 3)).toBe(false);
   });
 });
 

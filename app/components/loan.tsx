@@ -58,11 +58,16 @@ export function TokenAmount({
 
 /** Zatoshi as "0.05" (the unit is drawn by TokenAmount). */
 export const zec = (zat: bigint) => formatZec(zat);
+/** Rounded to 5 decimals, for figures the eye adds up (the exact zatoshi stay in the terms and the payouts). */
+export const round5 = (zat: bigint) => ((zat + 500n) / 1_000n) * 1_000n;
+export const zec5 = (zat: bigint) => formatZec(round5(zat));
 /** USDC units as "12.50", thousands grouped for display ("100,000.00"). */
 export const usdc = (units: bigint) => {
   const [whole, frac] = formatUsdc(units).split(".");
   return `${whole!.replace(/\B(?=(\d{3})+(?!\d))/g, ",")}${frac !== undefined ? `.${frac}` : ""}`;
 };
+/** USDC to the cent, rounded down: what can still be borrowed ("25.17", never more than there is). */
+export const usdcFloor = (units: bigint) => usdc((units / 10_000n) * 10_000n);
 /** A dollar value (USDC units) to the cent, as people read prices: "$2.49", "$100,000.00". */
 export const usd = (units: bigint) => {
   const cents = (units + 5_000n) / 10_000n;
@@ -122,13 +127,15 @@ export function fallBeforeLiquidation(h: Health): bigint | null {
   return left > 0n ? left : 0n;
 }
 
-/** "ZEC can fall 42 % before liquidation ($50.00 → $28.94)", in words a borrower acts on. */
+/** "ZEC can fall 44 % before liquidation ($1,265.00 → $707.54)", in words a borrower acts on. */
+/** A fall in basis points as a borrower reads it: whole percents from 10 %, one decimal below. */
+export const fallPercent = (bps: bigint) => (bps >= 1_000n ? `${bps / 100n}` : `${bps / 100n}.${(bps % 100n) / 10n}`);
+
 export function fallSentence(h: Health): string {
   const fall = fallBeforeLiquidation(h);
   if (fall === null) return "No debt: nothing can be liquidated.";
   if (fall === 0n) return `Liquidatable at today's price (${formatUsdPrice(h.price)}).`;
-  const pct = fall >= 1_000n ? `${fall / 100n}` : `${fall / 100n}.${(fall % 100n) / 10n}`;
-  return `ZEC can fall ${pct} % before liquidation (${formatUsdPrice(h.price)} → ${formatUsdPrice(h.liquidationPrice!)}).`;
+  return `ZEC can fall ${fallPercent(fall)} % before liquidation (${formatUsdPrice(h.price)} → ${formatUsdPrice(h.liquidationPrice!)}).`;
 }
 
 const TONE_TEXT: Record<HealthTone, string> = { ok: "text-ok", warn: "text-warn", danger: "text-danger", muted: "text-muted" };
@@ -215,8 +222,19 @@ export function HealthRunway({ health, preview, size = "l" }: { health: Health |
         </p>
         {shown ? <p className={cx("text-soft", size === "l" ? "text-[14px]" : "text-[13px]")}>{fallSentence(shown)}</p> : null}
       </div>
-      {track}
-      <p className="flex flex-wrap justify-between gap-x-4 gap-y-1 text-[11.5px] text-muted tabular-nums">
+      <div className="space-y-1.5">
+        {track}
+        {/* The two lines' names, each under its own tick. */}
+        <div className="relative h-4 text-[11.5px] tabular-nums">
+          <span className="absolute top-0 -translate-x-1/2 whitespace-nowrap text-muted" style={{ left: at(target) }}>
+            target {target} %
+          </span>
+          <span className="absolute top-0 -translate-x-1/2 whitespace-nowrap text-danger" style={{ left: at(lltv) }}>
+            {size === "m" ? "liq." : "liquidation"} {lltv} %
+          </span>
+        </div>
+      </div>
+      <p className="text-[11.5px] text-muted tabular-nums">
         <span>
           {health?.ltv !== null && health?.ltv !== undefined ? (
             <>
@@ -231,16 +249,6 @@ export function HealthRunway({ health, preview, size = "l" }: { health: Health |
             "LTV —"
           )}
         </span>
-        <span className="flex items-center gap-3">
-          <span className="inline-flex items-center gap-1.5">
-            <span aria-hidden="true" className="h-3 w-px bg-soft/80" />
-            target {target} %
-          </span>
-          <span className="inline-flex items-center gap-1.5 text-danger">
-            <span aria-hidden="true" className="h-3 w-[2px] rounded-full bg-danger" />
-            liquidation {lltv} %
-          </span>
-        </span>
       </p>
     </div>
   );
@@ -253,8 +261,11 @@ export function HealthRunway({ health, preview, size = "l" }: { health: Health |
 export function SplitBar({ mm, user, mmFor, userTo }: { mm: bigint; user: bigint; mmFor?: ReactNode; userTo?: ReactNode }) {
   const total = mm + user;
   const mmPct = total > 0n ? Number((mm * 1000n) / total) / 10 : 0;
-  // Whole percents that add up to 100.
+  // Whole percents that add up to 100, and amounts to the hundred-thousandth that add up too (the exact ones are in
+  // the terms and the payouts).
   const mmRound = Math.round(mmPct);
+  const mmShown = round5(mm);
+  const userShown = round5(total) - mmShown;
   return (
     <div className="space-y-2.5">
       <div aria-hidden="true" className="flex h-3 gap-[2px] overflow-hidden rounded-full">
@@ -267,7 +278,7 @@ export function SplitBar({ mm, user, mmFor, userTo }: { mm: bigint; user: bigint
             <span aria-hidden="true" className="inline-block size-2 rounded-full bg-soft/70" />
             Market maker · {mmRound} %
           </span>
-          <TokenAmount token="TAZ" value={formatZec(mm)} size="md" className="mt-1" />
+          <TokenAmount token="TAZ" value={formatZec(mmShown)} size="md" className="mt-1" />
           {mmFor ? <span className="mt-0.5 block text-[12.5px] text-muted">{mmFor}</span> : null}
         </p>
         <p className="sm:text-right">
@@ -275,7 +286,7 @@ export function SplitBar({ mm, user, mmFor, userTo }: { mm: bigint; user: bigint
             <span aria-hidden="true" className="inline-block size-2 rounded-full bg-pool" />
             You · {100 - mmRound} %
           </span>
-          <TokenAmount token="TAZ" value={formatZec(user)} size="md" className="mt-1" />
+          <TokenAmount token="TAZ" value={formatZec(userShown)} size="md" className="mt-1" />
           {userTo ? <span className="mt-0.5 block text-[12.5px] text-muted">{userTo}</span> : null}
         </p>
       </div>
@@ -283,7 +294,3 @@ export function SplitBar({ mm, user, mmFor, userTo }: { mm: bigint; user: bigint
   );
 }
 
-/** "40.0 %" or "—". */
-export function ltvText(h: Health | null): string {
-  return h?.ltv !== null && h?.ltv !== undefined ? formatBps(h.ltv) : "—";
-}

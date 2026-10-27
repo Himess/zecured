@@ -41,16 +41,17 @@ const PLANK = v(0, 0.06, 3.0);
 /** What Base records, in order; `until` takes back what only the bridge's hypothesis wrote. */
 const EVENTS = [
   { t: 2.12, name: "HeaderAdded", fields: ["a later Zcash header,", "Equihash checked on Base"] },
-  { t: 2.7, name: "VaultActivated", fields: ["vault 0x59d5e63e…", "amount 1,000,000"], tone: "gold" },
+  { t: 2.7, name: "VaultActivated", fields: ["a vault id,", "amount 1,000,000"], tone: "gold" },
   { t: 3.5, name: "Borrow", fields: ["4 USDC", "to a fresh Safe"] },
-  { t: 4.24, name: "SpendCommitted", fields: ["payoutRef 0xcdf694fd…", "before it is signed"] },
-  { t: 4.88, name: "CloseRelease", fields: ["yours + the maker’s", "= the outstanding"], tone: "gold" },
+  { t: 4.14, name: "CloseRelease", fields: ["yours + the maker’s", "= the outstanding"] },
+  { t: 4.26, name: "SpendCommitted", fields: ["payoutRef 0xcdf694fd…", "before it is signed"] },
+  { t: 4.88, name: "PayoutProven", fields: ["in a Zcash block,", "under a planned header"], tone: "gold" },
   { t: 5.34, name: "OrderOpened", fields: ["USDC in escrow,", "keccak256(salt || receiver)"] },
   { t: 5.84, name: "OrderSettled", fields: ["on a payment proof:", "USDC to the maker"], tone: "gold" },
   { t: 6.38, name: "wZEC minted", fields: ["0.125 wZEC to", "0x7a3e…41c2"], tone: "leak", until: 6.6 },
   { t: 7.6, name: "ViolationProven", fields: ["a spend no commitment", "names: F1"], tone: "gold" },
-  { t: 7.78, name: "Slashed", fields: ["all five bonds", ""] },
-  { t: 7.94, name: "Compensated", fields: ["the victim’s debt repaid,", "3 → 12.65 USDC"] },
+  { t: 7.78, name: "BondSlashed", fields: ["all five bonds", ""] },
+  { t: 7.94, name: "VaultCompensated", fields: ["the victim’s debt repaid,", "3 → 12.65 USDC"] },
 ];
 
 // ------------------------------------------------------------------------------------------ helpers

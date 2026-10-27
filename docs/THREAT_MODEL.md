@@ -7,7 +7,7 @@ Zecured's claim, in full:
 > outside. A loan can be closed from its collateral, without a single unit of outside money
 > entering the account. The USDC you borrow is ordinary USDC; where it goes is your choice.
 > What stays public: the loan size, the collateral denomination, interest, liquidation events
-> and the amount of ZEC returned to you at close: none of it linked to you.
+> and the amount of ZEC returned to you at close: none of it names you or your wallet.
 
 This document says exactly what each party can see, every leakage vector we know of, what
 mitigates it and where that is enforced in the code. The findings of the internal security
@@ -106,7 +106,11 @@ review and their status are in [SECURITY_REVIEW.md](SECURITY_REVIEW.md).
 - The ZEC amount returned at close can be computed from Base events; the app advises not to
   deshield it immediately (L7).
 
-## Pre-submission checklist
+## Release checklist
+
+Run before every public deployment and release. For the hackathon's runs, [TESTING.md](TESTING.md) § 2 and § 4 record
+what was checked and how: the leak scan, `ovk = None`, no ETH and no zZEC in any account, the logs, the secret
+scanners.
 
 - [ ] No transparent, Sapling or Orchard-pool address or spend anywhere in a flow
 - [ ] Every Zcash output in the Ironwood pool

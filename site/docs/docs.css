@@ -1093,15 +1093,6 @@ html:not(.js) .sees[hidden] {
   font-size: 14px;
 }
 
-.placeholder {
-  margin-top: 18px;
-  padding: 16px 18px;
-  border: 1px dashed var(--hair-2);
-  border-radius: 12px;
-  color: var(--muted);
-  font-size: 14px;
-}
-
 .rm {
   display: grid;
   grid-template-columns: repeat(2, minmax(0, 1fr));
@@ -1224,7 +1215,17 @@ html:not(.js) .sees[hidden] {
     grid-template-columns: minmax(0, 1fr);
   }
 
+  /* Contents above the text on tablets and phones: the ten sections in two columns, no sub-entries. */
   .toc {
+    position: static;
+  }
+
+  .toc > ol {
+    grid-template-columns: repeat(2, minmax(0, 1fr));
+    column-gap: 12px;
+  }
+
+  .toc ol ol {
     display: none;
   }
 

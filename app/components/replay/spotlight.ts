@@ -27,9 +27,12 @@ function usable(el: HTMLElement): boolean {
 
 let clear: (() => void) | null = null;
 
+/** A step that has targets (an own key of the table: never an inherited name read back from storage). */
+const isTarget = (id: string): id is ReplayStepId => Object.hasOwn(REPLAY_TARGETS, id);
+
 /** Spotlights the first usable control of `id`'s targets; false when the page shows none (yet). */
 export function spotlight(id: ReplayStepId): boolean {
-  if (typeof document === "undefined") return false;
+  if (typeof document === "undefined" || !isTarget(id)) return false;
   clear?.();
   for (const target of REPLAY_TARGETS[id] ?? []) {
     const el = [...document.querySelectorAll<HTMLElement>(`[data-replay="${target}"]`)].find(usable);
@@ -67,7 +70,7 @@ export function takeArrival(): ReplayStepId | null {
   try {
     const id = sessionStorage.getItem(ARRIVAL_KEY);
     sessionStorage.removeItem(ARRIVAL_KEY);
-    return id as ReplayStepId | null;
+    return id !== null && isTarget(id) ? id : null;
   } catch {
     return null;
   }

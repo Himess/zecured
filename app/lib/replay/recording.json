@@ -17,7 +17,7 @@
     "registry": "0xa3f846f7c7a8a62f65bbf8be34d9a1f108118b21",
     "adapter": "0xd146f298980980dd574620abfaeb5b89a8bc9f66",
     "intake": "0xdD86fEbD0551b97b5c1298324590B6B27cc64285",
-    "confirmations": 3,
+    "confirmations": 10,
     "vaultExpiryBlocks": 480,
     "openVaultStampBits": 8,
     "sponsorship": true,
@@ -131,7 +131,7 @@
   "chain": {
     "baseBlock": 48600000,
     "zcashTip": 4541200,
-    "price": "500000000000000000000000000000000000",
+    "price": "12650000000000000000000000000000000000",
     "borrowRate": "317097919",
     "market": {
       "totalSupplyAssets": "100000000000",
@@ -197,15 +197,15 @@
     "anchor": "0xba0b79d6cde7ed814a67ae76a0f0a6ea559ddd4bcc3be1a90027fdb7651d814e",
     "versionId": "0xabb53c7425ef3be52156b791ea0cc8f323afc7e4e3d993efbe62121203339075",
     "borrow": {
-      "assets": "900000",
+      "assets": "22000000",
       "protected": false
     },
     "close": {
       "executor": "0x11f0a66D6674E0E9788d55E5387B43d6ad1eB738",
       "marginBps": 100,
-      "repayAssets": "900100",
-      "mmAmount": "1818202",
-      "userAmount": "3156798",
+      "repayAssets": "22000100",
+      "mmAmount": "1756530",
+      "userAmount": "3218470",
       "userCommitment": "0x9ea3eaf9cd5d5cfe2c9e0c00a9f4e0a6ee635f366593f548f729d158ffb55223",
       "mmCommitment": "0x593d17818ece4b5421facae13aa0e5c615aae767f089c7fd67f19dc22764f0e8",
       "payoutRef": "0x60818af0ee26b3fbef1eb114bc43634896db09fd98454943523c7c877f2a38b2",
@@ -222,7 +222,7 @@
     "maker": "0x27C08c142dC3edC61C022C03c8be4990fDc52156",
     "taker": "0xe0D641588D60200c6A39027Ee9df744cF5Ba734c",
     "takerUsdc": "100000000",
-    "zatoshi": "49500000",
+    "zatoshi": "1956500",
     "usdc": "25000000",
     "makerReceiverCommitment": "0xd9176524959b1557262f0afeda0118dcaaa2b60b2ea3e40b44e37dbab84f1c69",
     "receiverCommitment": "0x196bcf5817bf0dddda5603e59a53123eefe21fb86a0a63e9dc86ef6a28c5a629",
@@ -300,7 +300,7 @@
       "durationSeconds": null,
       "title": "Pay the vault from Ironwood",
       "detail": "The demo wallet pays the vault 0.05 TAZ in one Ironwood → Ironwood transaction on Zcash testnet.",
-      "hint": "Skip the key backup (the replay's key is a dummy), then press “Pay it with demo TAZ”.",
+      "hint": "Press “Skip the backup (demo key)”, then “Pay it with demo TAZ”.",
       "href": "/borrow",
       "tx": {
         "zcash": "0000000000000000000000000000000000000000000000000000000000000002"
@@ -322,7 +322,7 @@
       "at": null,
       "durationSeconds": null,
       "title": "Deposit confirmed on Zcash",
-      "detail": "The signers see the deposit with its confirmations, and a zero-knowledge proof that it is in a Zcash block is made.",
+      "detail": "The signers see the deposit confirmed, then a proof that it is in a Zcash block is made.",
       "hint": "Confirmations come in; the proof is being made.",
       "href": "/borrow",
       "tx": {},
@@ -336,7 +336,7 @@
       "at": null,
       "durationSeconds": null,
       "title": "Deposit proven on Base",
-      "detail": "attestDepositWithProof checks the proof against a Zcash header the relay already verified: nothing is minted on anyone's word.",
+      "detail": "Base checks the proof against a Zcash header its relay already verified: no one's word is taken.",
       "hint": "Base verifies the proof.",
       "href": "/borrow",
       "tx": {
@@ -363,7 +363,7 @@
       "at": null,
       "durationSeconds": null,
       "title": "zZEC minted into Morpho",
-      "detail": "A few Zcash blocks later the pending activation finalizes: zZEC is minted straight into the account's Morpho Blue position.",
+      "detail": "A few Zcash blocks later the activation finalizes: zZEC is minted straight into Morpho Blue.",
       "hint": "The keeper activates the deposit.",
       "href": "/borrow",
       "tx": {
@@ -385,9 +385,9 @@
       "delayMs": 0,
       "at": null,
       "durationSeconds": null,
-      "title": "Borrow USDC",
-      "detail": "One sponsored UserOp deploys a fresh Safe, authorizes Zecured on Morpho Blue and borrows 0.90 MockUSDC; the account never holds ETH.",
-      "hint": "Press “Borrow against it”, then “use the run's 0.90” and “Create account and borrow”.",
+      "title": "Borrow MockUSDC",
+      "detail": "One sponsored UserOp deploys a fresh Safe, authorizes Zecured on Morpho Blue and borrows 22.00 MockUSDC; the account never holds ETH.",
+      "hint": "Press “Borrow against it”, then “DEMO: fill in 22.00” and “Create account and borrow”.",
       "href": "/borrow",
       "tx": {
         "base": "0x0000000000000000000000000000000000000000000000000000000000000006",
@@ -425,7 +425,7 @@
       "durationSeconds": null,
       "title": "Close from collateral",
       "detail": "A market maker repays the debt on Morpho and takes its value in ZEC from the vault; the rest is owed to your destination.",
-      "hint": "Get a quote, then press “Sign and send to the market maker”.",
+      "hint": "Press “Get a market maker's quote”, then “Sign and send to the market maker”.",
       "href": "/position#0x9c9ad033ddbcef74d303b8e0bfa258cc29df408fb7db49e2a766ce509d9c5c4e",
       "tx": {
         "base": "0x0000000000000000000000000000000000000000000000000000000000000008"
@@ -447,7 +447,7 @@
       "at": null,
       "durationSeconds": null,
       "title": "Payout committed on Base",
-      "detail": "The signers commit the payout on Base before they sign it, so a payout to anyone else is provable theft.",
+      "detail": "The signers commit the payout on Base before signing it: paying anyone else is provable theft.",
       "hint": "The signers commit the payout.",
       "href": "/position#0x9c9ad033ddbcef74d303b8e0bfa258cc29df408fb7db49e2a766ce509d9c5c4e",
       "tx": {
@@ -470,7 +470,7 @@
       "at": null,
       "durationSeconds": null,
       "title": "Paid on Zcash",
-      "detail": "Three of the five signers sign one FROST transaction paying your remainder, the market maker and the opening fee.",
+      "detail": "Three of five signers sign one FROST transaction paying you, the market maker and the fee.",
       "hint": "The signers pay on Zcash.",
       "href": "/position#0x9c9ad033ddbcef74d303b8e0bfa258cc29df408fb7db49e2a766ce509d9c5c4e",
       "tx": {
@@ -519,9 +519,9 @@
       "delayMs": 0,
       "at": null,
       "durationSeconds": null,
-      "title": "Lock USDC in the swap",
-      "detail": "Your wallet approves 25 MockUSDC and opens an order with the maker's signed quote; the USDC waits in ZecuredSwap.",
-      "hint": "On Swap, press “use the run's 25.00”, then the one button as it changes: the quote, the demo wallet's address, connect, buy.",
+      "title": "Lock MockUSDC in the swap",
+      "detail": "Your wallet approves 25.00 MockUSDC and opens an order with the maker's signed quote; the MockUSDC waits in ZecuredSwap.",
+      "hint": "On Swap, press “DEMO: fill in 25.00”, then the one button each time it changes.",
       "href": "/buy",
       "tx": {
         "base": "0x000000000000000000000000000000000000000000000000000000000000000c",
@@ -529,7 +529,7 @@
       },
       "artifacts": [
         {
-          "label": "USDC approval",
+          "label": "MockUSDC approval",
           "chain": "base",
           "tx": null,
           "kind": "tx"
@@ -573,7 +573,7 @@
       "at": null,
       "durationSeconds": null,
       "title": "Payment proven on Base",
-      "detail": "The maker proves the payment in zero knowledge; the settlement waits for a deep enough Zcash header.",
+      "detail": "The maker proves its payment in zero knowledge; settling waits for a deep enough Zcash header.",
       "hint": "The maker proves its payment.",
       "href": "/buy",
       "tx": {
@@ -599,8 +599,8 @@
       "delayMs": 6000,
       "at": null,
       "durationSeconds": null,
-      "title": "USDC released to the maker",
-      "detail": "Settled: you hold shielded ZEC and the maker the USDC, with no custodian and no signer in between.",
+      "title": "MockUSDC released to the maker",
+      "detail": "Settled: you hold shielded ZEC, the maker the MockUSDC; no custodian, no signer in between.",
       "hint": "The order settles.",
       "href": "/buy",
       "tx": {

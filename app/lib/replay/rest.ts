@@ -13,7 +13,8 @@ import { decodeUnifiedAddress } from "../ua";
 import { demoKey } from "./demo-keys";
 import { evidenceDocument } from "./evidence";
 import { buildModel, kindName, type Model } from "./model";
-import { OffScriptError, ReplayUnavailableError, type ReplayWorld } from "./world";
+import { formatUsdc } from "../morpho";
+import { loanTokenOf, OffScriptError, ReplayUnavailableError, type ReplayWorld } from "./world";
 
 export interface RestAnswer {
   status: number;
@@ -47,6 +48,10 @@ function destinationCommitment(body: Json): Hex | RestAnswer {
   return commitTo(hexToBytes(body.salt), receiver);
 }
 
+/**
+ * GET /vaults/:id as the coordinator serves it: `awaiting_deposit` with `depositSeen` while the deposit's proof is
+ * made, `deposit_seen` once it is on Base. (The live backend sends no `confirmations`; the replay does.)
+ */
 function vaultJson(w: ReplayWorld, m: Model): Json {
   const r = w.rec;
   const status = m.confirmed
@@ -55,7 +60,7 @@ function vaultJson(w: ReplayWorld, m: Model): Json {
       ? "closing"
       : m.activated
         ? "active"
-        : m.seen
+        : m.proven
           ? "deposit_seen"
           : "awaiting_deposit";
   const out: Json = {
@@ -123,8 +128,8 @@ async function swapQuote(w: ReplayWorld, query: URLSearchParams): Promise<RestAn
   const usdc = query.get("usdc");
   const zatoshi = query.get("zatoshi");
   if ((usdc !== null && usdc !== s.usdc) || (zatoshi !== null && zatoshi !== s.zatoshi)) {
-    const amount = `${Number(BigInt(s.usdc)) / 1e6}`;
-    return refuse(409, `This replay buys with exactly ${amount} USDC, what the recorded run spent: enter ${amount}.`, "replay_off_script");
+    const amount = formatUsdc(BigInt(s.usdc));
+    return refuse(409, `This replay buys with exactly ${amount} ${loanTokenOf(r)}, what the recorded run spent: press “DEMO: fill in ${amount}”.`, "replay_off_script");
   }
   try {
     w.expect("swap-opened");

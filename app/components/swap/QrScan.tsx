@@ -59,6 +59,8 @@ export function QrScan({ onAddress }: { onAddress: (address: string) => void }) 
           await new Promise((r) => setTimeout(r, 300));
         }
       } catch {
+        // play() rejects when "Stop the camera" removed the video meanwhile: not a camera failure.
+        if (stop) return;
         setError("The camera is not available. Paste the address, or choose a picture of the QR code.");
         setScanning(false);
       }

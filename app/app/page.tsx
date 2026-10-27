@@ -14,11 +14,13 @@ export default function Home() {
           <p className="text-[13px] font-semibold text-muted">
             {REPLAY ? "ZECATHON 2026 · the app, as a guided replay" : TESTNET ? "Zcash testnet and Base Sepolia" : "Zecured mainnet beta"}
           </p>
-          <h1
-            id="hero"
-            className="max-w-[12em] text-[length:clamp(38px,5vw,64px)] leading-[0.98] font-extrabold tracking-[-0.02em] text-balance font-stretch-125%"
-          >
-            Borrow against shielded ZEC. Only the <span className="text-accent">proof</span> crosses.
+          <h1 id="hero" className="text-[length:clamp(38px,5vw,64px)] leading-[0.94] font-extrabold tracking-[-0.03em] font-stretch-116%">
+            <span className="block">Borrow against</span>
+            <span className="block">shielded ZEC.</span>
+            <span className="block">
+              Only the <span className="text-accent">proof</span>
+            </span>
+            <span className="block">crosses.</span>
           </h1>
           <p className="max-w-[38rem] text-[17px] text-soft">
             Borrow USDC on Base against ZEC that never leaves Ironwood, Zcash&apos;s newest shielded pool, or swap USDC into shielded

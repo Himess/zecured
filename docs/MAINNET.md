@@ -11,7 +11,7 @@ decisions are in docs/DECISIONS.md; the parties and the money are in docs/ECONOM
 
 | What | How | Result |
 |---|---|---|
-| Base contracts on mainnet's Morpho Blue and RISC Zero router | The whole contract suite on a Base mainnet fork: `ZECURED_FORK_NETWORK=base-mainnet ZECURED_FORK_BLOCK=52688338 forge test --isolate` (from `contracts/`; `BASE_MAINNET_RPC_URL` optional) | 533 tests pass and one is skipped (its EIP-712 vectors are for chain id 84532); the invariant campaign holds. Morpho Blue, the AdaptiveCurveIRM, the 62.5 % LLTV and the router are at the same addresses as on Base Sepolia (read on-chain, 2026-10-16) |
+| Base contracts on mainnet's Morpho Blue and RISC Zero router | The v3 contract suites on a Base mainnet fork (not yet re-run on v4.1): `ZECURED_FORK_NETWORK=base-mainnet ZECURED_FORK_BLOCK=52688338 forge test --isolate` (from `contracts/`; `BASE_MAINNET_RPC_URL` optional) | 533 tests pass and one is skipped (its EIP-712 vectors are for chain id 84532); the invariant campaign holds. Morpho Blue, the AdaptiveCurveIRM, the 62.5 % LLTV and the router are at the same addresses as on Base Sepolia (read on-chain, 2026-10-16) |
 | Real proofs on mainnet's verifier | The same suite's real Groth16 seals (a Testnet deposit, an F1 spend) | Both verify through the mainnet router (Groth16 selector `0x73c457ba`, its emergency-stop wrapper not paused): the deposit mints, the theft slashes all five bonds |
 | Zcash Mainnet header rules | `config/relay-mainnet.json`, checked against Zebra v7.0.0-rc.0 and 1,600 real Mainnet headers (docs/ref/FACTS.md, D49) | The relay follows the real Mainnet chain under the Mainnet rules, and refuses headers that break them (wrong bits, minimum difficulty after a long gap, times out of bounds, a bad Equihash solution, a hash above the target) |
 | Every deployment config | `test/script/DeployConfig.t.sol` reads each `config/zecured-*.json` through the deploy script's checks and the constructors' rules | `config/zecured-base-mainnet.json` passes and has the values below |
@@ -32,7 +32,7 @@ and a real Mainnet deposit into a Mainnet FROST vault, which the hackathon build
 | `loanToken` | MockUSDC, a test token we mint (MOCK: no value): the deploy script mints one on a local fork, and a Base Sepolia deployment takes one as `LOAN_TOKEN` (the file's default is Circle's Base Sepolia USDC, which no run used) | Circle USDC `0x8335…2913` | Test USDC the deployer can mint for the bonds, the lenders and the market makers; the contracts take any 6-decimal USDC |
 | `coverageBps` (k) | 10,000 | 5,000 | With independent operators the bonds should cover twice what is locked |
 | `maxTotalZat` | 5 TAZ | 100 ZEC | Start small. The cap is immutable: raising it means a new deployment; within it, the bonds decide |
-| `minBond` | 100 USDC | 50,000 USDC | Five equal bonds that cover 100 ZEC at k = 50 % and about 1,265 USD per ZEC |
+| `minBond` | 100 USDC | 50,000 USDC | Five equal bonds that cover about 100 ZEC at k = 50 % (105 ZEC at 1,187.68 USD per ZEC, 98.8 at 1,265) |
 | `bountyCap` | 50 USDC | 10,000 USDC | 10 % of a slash in both |
 | `tierMaxAmountZat` / `tierMinWork` | one tier, 3.5 M (about ten Testnet blocks) | up to 1 / 10 / 100 ZEC: the work of 6 / 20 / 190 Mainnet blocks | Faking a deposit should cost the attacker about three times its value in mining revenue; recompute the raw work from the difficulty at deployment |
 | `slashConfirmationWork` | 38 M | the work of 100 Mainnet blocks | at least `max(100 blocks, 3 x bountyCap / block value)`: a fake case gains at most the bounty |
@@ -150,7 +150,8 @@ labelled so in the app: "Mainnet beta — unaudited — invite only — small ca
   openings; exits and payouts never stop. No contract change.
 - **Configuration** (`config/zecured-base-mainnet-beta.json`, derived from the mainnet template and
   checked by the deploy script): `maxTotalZat` 1 ZEC, vaults of 0.05 and 0.1 ZEC, `minBond` 300
-  USDC, `coverageBps` 5,000, `feeBps` 50, the template's windows and work tiers, `bountyCap` 100
+  USDC (five bonds of 300 USDC cover about 0.6 ZEC at k = 50 % and 1,265 USD per ZEC; five of about 510 USDC open the
+  whole cap), `coverageBps` 5,000, `feeBps` 50, the template's windows and work tiers, `bountyCap` 100
   USDC, `refundDormancy` 7 days.
 - **Relay:** NU7's Mainnet height (3,543,405 proposed on 2026-10-20, not yet ratified; docs/ref/FACTS.md) in `config/relay-mainnet.json`, a
   checkpoint near the tip, two feeders (§ 3).

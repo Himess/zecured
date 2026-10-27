@@ -3,7 +3,7 @@ import { DRY_RUN_CONFIG, DRY_RUN_ENV } from "./__fixtures__/deployment";
 import { parseRemoteConfig } from "./api";
 import { buildConfig } from "./config";
 import { deploymentProfile } from "./deployment";
-import { loanTokenName, priceSourceName, realAndMock } from "./labels";
+import { loanTokenName, priceLineName, priceSourceName, realAndMock } from "./labels";
 
 const testnet = deploymentProfile("testnet").profile;
 const beta = deploymentProfile("mainnet-beta").profile;
@@ -13,6 +13,7 @@ describe("names from the deployment (section 9.3 of the v4 design)", () => {
     const judge = buildConfig(DRY_RUN_ENV, parseRemoteConfig(DRY_RUN_CONFIG));
     expect(loanTokenName(judge)).toBe("USDC");
     expect(priceSourceName(judge)).toBe("DemoShockOracle, DEMO");
+    expect(priceLineName(judge)).toBe("DEMO price");
     const list = realAndMock(judge, testnet);
     expect(list.real.join(" ")).toMatch(/Circle's test USDC on Base Sepolia/);
     expect(list.mock.join(" ")).not.toMatch(/USDC/);

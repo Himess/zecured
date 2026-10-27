@@ -10,13 +10,13 @@ import { useAction, usePreLiquidation } from "@/lib/hooks";
 import { short, type StoredLoan } from "@/lib/keys";
 import { REPLAY } from "@/lib/replay/flag";
 import { recording } from "@/lib/replay/recording";
-import { loanTokenName, priceSourceName } from "@/lib/labels";
+import { loanTokenName, priceLineName } from "@/lib/labels";
 import { PRE_LIQUIDATION_PRESETS, termsActive, termsOf, type PreLiquidationPreset } from "@/lib/preliq";
 import { ProtectionPresets } from "./position/Protection";
 import { collateralValue, formatBps, formatUsdc, formatUsdPrice, maxBorrowAtTargetLtv, parseUsdc, TARGET_LTV_BPS } from "@/lib/morpho";
 import { ActionError } from "./ActionError";
 import { IconArrowRight, IconShield } from "./icons";
-import { HealthRunway, healthOf, TokenAmount, usd, usdc } from "./loan";
+import { HealthRunway, healthOf, TokenAmount, usd, usdc, usdcFloor } from "./loan";
 import { UsdcMark, ZzecMark } from "./marks";
 import { Button, cx, Disclosure, Hint, Notice } from "./ui";
 import { TxResult } from "./TxResult";
@@ -38,10 +38,13 @@ export function BorrowForm({
   loan,
   snapshot,
   onBorrowed,
+  oneShot = false,
 }: {
   loan: StoredLoan;
   snapshot: PositionSnapshot | null;
   onBorrowed?: (r: SentUserOp) => void;
+  /** The wizard's borrow: once it went through, only its receipt stays (and, live, a way to borrow more). */
+  oneShot?: boolean;
 }) {
   const amountId = useId();
   const sliderId = useId();
@@ -57,6 +60,7 @@ export function BorrowForm({
   const [preset, setPreset] = useState<PreLiquidationPreset>(PRE_LIQUIDATION_PRESETS[1]!);
   // The receipt names what this borrow did: a first one also deployed the account.
   const [first, setFirst] = useState(false);
+  const [again, setAgain] = useState(false);
   const borrow = useAction(async (assets: bigint, to: `0x${string}`, withProtection: boolean) => {
     if (!snapshot) throw new Error("Position not loaded");
     const calls = borrowCalls({
@@ -131,6 +135,7 @@ export function BorrowForm({
   const cents = assets !== null && !amountError ? Math.min(maxCents, Number(assets / 10_000n)) : 0;
   const recorded = REPLAY ? BigInt(recording().loan.borrow.assets) : null;
   const result = borrow.result;
+  const finished = oneShot && result?.success === true && !again;
 
   return (
     <div className="grid gap-6 lg:grid-cols-[minmax(0,1fr)_minmax(0,20rem)]">
@@ -138,7 +143,7 @@ export function BorrowForm({
         {result ? (
           <TxResult
             result={result}
-            what={`Borrowed ${formatUsdc(result.assets)} ${token}`}
+            what={result.success ? `Borrowed ${formatUsdc(result.assets)} ${token}` : `The borrow of ${formatUsdc(result.assets)} ${token}`}
             amount={<TokenAmount token="USDC" value={`+${usdc(result.assets)}`} size="xl" />}
           >
             {result.to.toLowerCase() === loan.account.toLowerCase() ? (
@@ -153,21 +158,28 @@ export function BorrowForm({
             )}
           </TxResult>
         ) : null}
+        {finished ? (
+          // DEMO: the replay borrows once, as the recorded run did.
+          REPLAY ? null : (
+            <Button
+              variant="ghost"
+              onClick={() => {
+                setAgain(true);
+                borrow.reset();
+              }}
+            >
+              Borrow more
+            </Button>
+          )
+        ) : (
+          <>
         <div className="rounded-[22px] bg-bg/80 p-5 shadow-[inset_0_0_0_1px_var(--color-control)] focus-within:shadow-[inset_0_0_0_2px_var(--color-text)]">
           <div className="flex flex-wrap items-center justify-between gap-2 text-[13px]">
             <label htmlFor={amountId} className="font-semibold text-soft">
               You borrow
             </label>
             <span className="text-muted">
-              Available <strong className="font-semibold text-soft tabular-nums">{usdc(available)}</strong>{" "}
-              <button
-                type="button"
-                disabled={available === 0n}
-                onClick={() => setAmount(formatUsdc(available))}
-                className="ml-1 min-h-8 rounded-full px-2 font-semibold text-text underline underline-offset-4 disabled:opacity-50"
-              >
-                Max
-              </button>
+              Available <strong className="font-semibold text-soft tabular-nums">{usdcFloor(available)}</strong> {token}
             </span>
           </div>
           <div className="mt-2 flex items-center gap-3">
@@ -203,7 +215,8 @@ export function BorrowForm({
           />
           <div className="mt-2 flex flex-wrap items-center gap-2">
             {PICKS.map((p) => {
-              const value = (available * p.share) / 100n;
+              // To the cent, as the slider: "Max" is the most whole cents that stay within the target LTV.
+              const value = ((available * p.share) / 100n / 10_000n) * 10_000n;
               const active = assets !== null && assets === value && value > 0n;
               return (
                 <button
@@ -221,9 +234,10 @@ export function BorrowForm({
                 </button>
               );
             })}
-            {recorded !== null ? (
+            {/* DEMO: gone once used, so "Show me" moves on to the borrow itself. */}
+            {recorded !== null && amount !== formatUsdc(recorded) ? (
               <Button variant="demo" size="sm" data-replay="use-recorded-borrow" onClick={() => setAmount(formatUsdc(recorded))}>
-                DEMO: use the run&apos;s {formatUsdc(recorded)}
+                DEMO: fill in {formatUsdc(recorded)}
               </Button>
             ) : null}
           </div>
@@ -315,6 +329,8 @@ export function BorrowForm({
           ) : null}
         </div>
         <ActionError error={borrow.error} refusal={borrow.refusal} title="The borrow did not go through" />
+          </>
+        )}
       </div>
 
       <aside aria-label={preview ? "After this borrow" : "Your position"} className="space-y-4 rounded-[22px] bg-bg/60 p-5 shadow-[inset_0_0_0_1px_var(--color-hairline)]">
@@ -349,7 +365,7 @@ export function BorrowForm({
             <dt className="text-muted">ZEC price</dt>
             <dd className="text-right font-semibold tabular-nums">
               {formatUsdPrice(snapshot.price)}
-              <span className="block text-[11.5px] font-normal text-muted">{priceSourceName()}</span>
+              <span className="block text-[11.5px] font-normal text-muted">{priceLineName()}</span>
             </dd>
           </div>
         </dl>

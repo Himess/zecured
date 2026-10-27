@@ -11,7 +11,7 @@ import { buttonClass, Card, cx, EmptyState, Meter, SectionTitle, Skeleton, Stat 
 import { config } from "@/lib/config";
 import { DEPLOYMENT } from "@/lib/deployment";
 import { useLoans, useProtocol, useStatusReport } from "@/lib/hooks";
-import { priceSourceName } from "@/lib/labels";
+import { priceLineName } from "@/lib/labels";
 import { formatUsdPrice, WAD } from "@/lib/morpho";
 import { bondNumbers, marketNumbers } from "@/lib/public";
 import { REPLAY } from "@/lib/replay/flag";
@@ -129,7 +129,7 @@ export function Dashboard() {
                 </span>
                 <span className="text-right font-semibold tabular-nums">
                   {formatUsdPrice(s.price)}
-                  <span className="block text-[12px] font-normal text-muted">{priceSourceName()}</span>
+                  <span className="block text-[12px] font-normal text-muted">{priceLineName()}</span>
                 </span>
               </div>
               <p className="text-[12.5px] text-muted">Liquidation above 62.5 % loan-to-value; the app borrows up to 40 %.</p>
@@ -154,7 +154,11 @@ export function Dashboard() {
         <SectionTitle
           id="numbers"
           title="In the open"
-          sub="Public numbers only, read from Base through our proxy: nothing about any vault or user."
+          sub={
+            REPLAY
+              ? "Sample public numbers, as Base would show them: nothing about any vault or user."
+              : "Public numbers only, read from Base through our proxy: nothing about any vault or user."
+          }
           action={
             <span className="flex gap-4 text-[14px] font-semibold">
               <Link href="/status" className="text-soft">
@@ -203,7 +207,7 @@ export function Dashboard() {
           </div>
         </Card>
         <Card title="What is real and what is a mock" icon={<IconFileCheck size={18} />}>
-          <RealAndMockList />
+          <RealAndMockList verifierIsMock={status.data ? (status.data.deployment?.verifierIsMock ?? null) : status.error ? null : undefined} />
         </Card>
       </section>
     </div>

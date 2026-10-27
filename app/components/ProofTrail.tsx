@@ -109,8 +109,14 @@ export function ProofTrail({ vaultId, account, since, compact = false }: { vault
         <p className="flex items-start gap-2 text-[12px] text-muted">
           <BaseMark size={12} className="mt-[3px]" />
           <span>
-            Read from Base through our proxy.{" "}
-            {steps.some((s) => baseTxUrl(s.txHash)) ? "A Basescan link opens a third-party site, which then learns which transaction you look at." : null}
+            {sample ? (
+              "Sample data, played in this browser. The live app reads this ledger from Base through our proxy."
+            ) : (
+              <>
+                Read from Base through our proxy.{" "}
+                {steps.some((s) => baseTxUrl(s.txHash)) ? "A Basescan link opens a third-party site, which then learns which transaction you look at." : null}
+              </>
+            )}
           </span>
         </p>
       ) : null}

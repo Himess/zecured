@@ -30,7 +30,7 @@ export function ActionError({
   if (refusal && r.active) {
     const next = r.next?.status === "next" ? r.next : null;
     return (
-      <Notice tone="demo" title="Not part of the recorded run" live>
+      <Notice tone="demo" title={r.recording?.placeholder ? "Not part of this replay" : "Not part of the recorded run"} live>
         <p>{error}</p>
         {next ? (
           <p>

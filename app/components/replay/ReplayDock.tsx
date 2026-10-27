@@ -3,11 +3,15 @@
 import Link from "next/link";
 import { usePathname } from "next/navigation";
 import { useEffect, useId, useRef, useState } from "react";
-import { useReplay, type ReplayArtifact, type ReplayStepId, type ReplayStepView } from "@/lib/replay";
+import { loanTokenName } from "@/lib/labels";
+import { formatUsdc } from "@/lib/morpho";
+import { useReplay, type ReplayArtifact, type ReplayRecording, type ReplayStepId, type ReplayStepView } from "@/lib/replay";
+import { formatTaz, TICKER } from "@/lib/zcash";
+import { zec5 } from "../loan";
 import { useMounted } from "../client";
 import { IconArrowRight, IconCheck, IconChevronDown, IconExternal, IconPlay, IconRefresh, IconX } from "../icons";
 import { ProofSeal } from "../seam";
-import { Badge, buttonClass, cx } from "../ui";
+import { Badge, buttonClass, cx, Stat } from "../ui";
 import { clearSpotlight, showOnArrival, spotlight, takeArrival } from "./spotlight";
 
 /** The run in the site's five chapters (the recording's steps keep their own order). */
@@ -25,14 +29,14 @@ const PROOF_STEPS: ReadonlySet<ReplayStepId> = new Set(["proven", "payouts-confi
 /** What an automatic step says while it is under way. */
 const UNDER_WAY: Partial<Record<ReplayStepId, string>> = {
   "deposit-seen": "Confirming the deposit on Zcash…",
-  proven: "Proving the deposit on Base…",
+  proven: "Proving the deposit in zero knowledge…",
   activated: "Minting zZEC into Morpho…",
   "payouts-committed": "Committing the payout on Base…",
   "payouts-sent": "Paying on Zcash: 3 of 5 signers sign…",
-  "payouts-confirmed": "Proving the payout on Base…",
+  "payouts-confirmed": "Proving the payout in zero knowledge…",
   "swap-paid": "The maker pays on Zcash…",
-  "swap-proven": "Proving the maker's payment on Base…",
-  "swap-settled": "Releasing the locked USDC to the maker…",
+  "swap-proven": "Proving the maker's payment in zero knowledge…",
+  "swap-settled": "Releasing the locked tokens to the maker…",
 };
 
 /** A path without its trailing slash (the static export serves `/borrow/`) and fragment, to compare pages. */
@@ -182,16 +186,23 @@ export function ReplayDock() {
   const toggle = useRef<HTMLButtonElement | null>(null);
   const sheetHeading = useRef<HTMLHeadingElement | null>(null);
   const [announce, setAnnounce] = useState("");
-  const lastDone = useRef<number | null>(null);
+  const announced = useRef<Set<string> | null>(null);
   const next = r.next;
 
-  // A step done is announced once (screen readers), never on the first render.
+  // A step done is announced once (screen readers), never on the first render: the newest of those that just turned
+  // done, by time (the loan and the swap move independently, so the list's order says nothing).
   const done = r.steps.filter((s) => s.status === "done");
+  const doneKey = done.map((s) => s.id).join(",");
   useEffect(() => {
     if (!mounted || !r.active) return;
-    if (lastDone.current !== null && done.length > lastDone.current) setAnnounce(`Done: ${done[done.length - 1]!.title}`);
-    lastDone.current = done.length;
-  }, [mounted, r.active, done.length]);
+    const before = announced.current;
+    if (before) {
+      const fresh = done.filter((s) => !before.has(s.id)).sort((a, b) => (a.doneAt ?? 0) - (b.doneAt ?? 0));
+      if (fresh.length > 0) setAnnounce(`Done: ${fresh[fresh.length - 1]!.title}`);
+    }
+    announced.current = new Set(done.map((s) => s.id));
+    // eslint-disable-next-line react-hooks/exhaustive-deps -- once per change of the set of done steps
+  }, [mounted, r.active, doneKey]);
 
   // A link that brought the judge here ("Go there", "Start") asked for the control to be pointed at, once shown.
   useEffect(() => {
@@ -225,7 +236,7 @@ export function ReplayDock() {
   const total = r.steps.length;
   const finished = !next;
   const here = next && next.status === "next" && page(next.href) === page(pathname);
-  const title = next ? (next.status === "now" ? (UNDER_WAY[next.id] ?? next.title) : `Next: ${next.title}`) : "The whole run is replayed";
+  const title = next ? (next.status === "now" ? (UNDER_WAY[next.id] ?? next.title) : `Next: ${next.title}`) : "Replay complete";
   const hint = next ? (next.status === "now" ? next.detail : next.hint) : "Every step, with what it left on each chain, is in the recap.";
   const close = () => {
     setOpen(false);
@@ -237,8 +248,9 @@ export function ReplayDock() {
   };
   const proofs = r.steps.filter((s) => PROOF_STEPS.has(s.id)).length;
 
+  // On Home the hero's primary already goes there ("Start the replay", "Continue: …").
   const action =
-    next && next.status === "next" ? (
+    next && next.status === "next" && page(pathname) !== "/" ? (
       here ? (
         <button type="button" onClick={() => spotlight(next.id)} className={buttonClass("secondary", "flex-none", "sm")}>
           Show me
@@ -265,9 +277,16 @@ export function ReplayDock() {
               <Badge tone="demo">DEMO</Badge>
             </span>
             <div className="min-w-0 flex-1">
-              <p className="flex min-w-0 items-baseline gap-2 text-[13.5px]">
-                <span className={cx("font-semibold min-[1101px]:shrink-0", finished ? "text-text" : next?.status === "now" ? "text-text" : "text-demo")}>{title}</span>
-                <span className="min-w-0 truncate text-muted max-[1100px]:hidden" title={hint}>
+              <p className="flex min-w-0 items-baseline gap-2 text-[13.5px] max-[1100px]:flex-col max-[1100px]:gap-0">
+                <span
+                  className={cx(
+                    "font-semibold min-[1101px]:shrink-0 max-[1100px]:max-w-full max-[1100px]:truncate",
+                    finished ? "text-text" : next?.status === "now" ? "text-text" : "text-demo",
+                  )}
+                >
+                  {title}
+                </span>
+                <span className="min-w-0 truncate text-muted max-[1100px]:max-w-full max-[1100px]:text-[12.5px]" title={hint}>
                   {hint}
                 </span>
               </p>
@@ -279,7 +298,7 @@ export function ReplayDock() {
               </p>
             </div>
             {action}
-            {finished ? (
+            {finished && !open ? (
               <button type="button" onClick={() => setOpen(true)} className={buttonClass("primary", "flex-none", "sm")}>
                 See the recap
               </button>
@@ -310,7 +329,7 @@ export function ReplayDock() {
                   </h2>
                   <p className="mt-0.5 max-w-2xl text-[12.5px] text-muted">
                     {sample
-                      ? "Sample data in the shape of the live run, played by your browser: the hashes below are not real transactions."
+                      ? "Sample data, played by your browser: the hashes below are not real transactions."
                       : r.recording.note}{" "}
                     Progress is kept in this tab only.
                   </p>
@@ -330,7 +349,7 @@ export function ReplayDock() {
                   </button>
                 </div>
               </div>
-              {finished ? <Recap sample={sample} onRestart={restart} /> : null}
+              {finished ? <Recap rec={r.recording} /> : null}
               {CHAPTERS.map((c) => {
                 const list = c.ids.map((id) => r.steps.find((s) => s.id === id)).filter((s): s is ReplayStepView => Boolean(s));
                 return list.length ? (
@@ -354,15 +373,23 @@ export function ReplayDock() {
   );
 }
 
-/** The end of the run: what happened, and where to look next. */
-function Recap({ sample, onRestart }: { sample: boolean; onRestart: () => void }) {
+/** The end of the run: its figures, what happened, and where to look next. */
+function Recap({ rec }: { rec: ReplayRecording }) {
+  const sample = rec.placeholder;
+  const token = loanTokenName();
   return (
     <div className="mt-4 rounded-2xl bg-bg/60 p-4 shadow-[inset_0_0_0_1px_var(--color-hairline)]">
       <p className="flex items-center gap-2 text-[15px] font-bold">
         <ProofSeal size="sm" className="!size-[20px] !shadow-none" />
-        You replayed the whole run
+        A whole loan and a swap, replayed
       </p>
-      <ul className="mt-2 space-y-1 text-[13.5px] text-soft">
+      <dl className="mt-3 grid grid-cols-2 gap-4 sm:grid-cols-4">
+        <Stat label="Locked, shielded" value={formatTaz(BigInt(rec.loan.amount))} />
+        <Stat label="Borrowed" value={`${formatUsdc(BigInt(rec.loan.borrow.assets))} ${token}`} />
+        <Stat label="Back to you, shielded" value={`${zec5(BigInt(rec.loan.close.userAmount))} ${TICKER}`} />
+        <Stat label={`Swapped ${formatUsdc(BigInt(rec.swap.usdc))} ${token}`} value={formatTaz(BigInt(rec.swap.zatoshi))} />
+      </dl>
+      <ul className="mt-3 space-y-1 text-[13.5px] text-soft">
         <li>A vault opened off-chain, by five signers; nothing touched Base.</li>
         <li>Its deposit proven on Base in zero knowledge, and zZEC minted on that proof alone.</li>
         <li>USDC borrowed from a brand-new account that never held ETH.</li>
@@ -382,10 +409,6 @@ function Recap({ sample, onRestart }: { sample: boolean; onRestart: () => void }
         <a href={`${SITE}docs/`} className={buttonClass("ghost", undefined, "sm")}>
           The docs
         </a>
-        <button type="button" onClick={onRestart} className={buttonClass("ghost", undefined, "sm")}>
-          <IconRefresh size={15} />
-          Replay again
-        </button>
       </div>
     </div>
   );

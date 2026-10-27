@@ -106,7 +106,13 @@ export function StepMark({ chain, state, size = "md", className }: { chain: Chai
         <IconCheck size={size === "md" ? 11 : 9} strokeWidth={3.2} />
       </span>
     );
-  if (state === "now") return <span aria-hidden="true" className={cx("flex-none rounded-[2px] shadow-[inset_0_0_0_2px_var(--color-ink)]", box, className)} />;
+  // Current: a small solid square (an empty box would read as a checkbox left unticked).
+  if (state === "now")
+    return (
+      <span aria-hidden="true" className={cx("inline-flex flex-none items-center justify-center", box, className)}>
+        <span className="size-2 rounded-[1px] bg-ink" />
+      </span>
+    );
   return (
     <span aria-hidden="true" className={cx("inline-flex flex-none items-center justify-center", box, className)}>
       <span className="h-[2px] w-2.5 bg-ink-faint" />
@@ -160,13 +166,13 @@ const ROW_TEXT: Record<Chain, Record<MarkState, string>> = {
   base: { done: "text-ink", now: "font-semibold text-ink", todo: "text-ink-muted" },
 };
 
-function Rows({ chain, rows, big }: { chain: Chain; rows: TrackerRow[]; big: boolean }) {
+function Rows({ chain, rows, big, still }: { chain: Chain; rows: TrackerRow[]; big: boolean; still: boolean }) {
   return (
-    <ol className={cx("flex flex-col", big ? "mt-5 gap-4" : "mt-4 gap-3.5")}>
+    <ol className={cx("flex flex-col", big ? "mt-4 gap-3" : "mt-4 gap-3.5")}>
       {rows.map((r) => (
         <li key={r.key} aria-current={r.state === "now" ? "step" : undefined} className="grid grid-cols-[20px_minmax(0,1fr)_auto] items-start gap-x-3">
           {r.proof && r.state === "done" ? (
-            <ProofSeal size="sm" stamp className="mt-[1px] !size-[18px] !shadow-none" />
+            <ProofSeal size="sm" stamp={!still} className="mt-[1px] !size-[18px] !shadow-none" />
           ) : (
             <StepMark chain={chain} state={r.state} className="mt-[3px]" />
           )}
@@ -201,6 +207,7 @@ export function SeamTracker({
   zcashExtra,
   footer,
   size = "side",
+  still = false,
 }: {
   title: string;
   zcash: TrackerRow[];
@@ -210,23 +217,27 @@ export function SeamTracker({
   zcashExtra?: ReactNode;
   footer?: ReactNode;
   size?: "side" | "hero";
+  /** The proof landed on an earlier screen: drawn landed, not landing again. */
+  still?: boolean;
 }) {
   const big = size === "hero";
   return (
     <section aria-label={title} className="overflow-hidden rounded-t-[24px] rounded-b-[6px] shadow-[0_0_0_1px_var(--color-border),0_30px_60px_-36px_rgb(0_0_0/0.9)]">
-      <div className={cx("bg-[radial-gradient(120%_90%_at_20%_0%,#123224_0%,#0a1a12_45%,#060d09_100%)]", big ? "px-8 pt-7 pb-12" : "px-6 pt-6 pb-11")}>
+      <div className={cx("bg-[radial-gradient(120%_90%_at_20%_0%,#123224_0%,#0a1a12_45%,#060d09_100%)]", big ? "px-8 pt-6 pb-10" : "px-6 pt-6 pb-11")}>
         <ChainLabel chain="zcash">
           <span className="inline-flex items-center gap-2">
             On Zcash <span className="text-faint">· shielded</span>
           </span>
         </ChainLabel>
-        <Rows chain="zcash" rows={zcash} big={big} />
+        <Rows chain="zcash" rows={zcash} big={big} still={still} />
         {zcashExtra}
       </div>
       <div aria-hidden="true" className="relative z-[2] h-0">
-        <div className="absolute inset-x-0 top-0 -translate-y-1/2">{seam === "proven" ? <div className="seam-line-lit" /> : <div className="seam-line" />}</div>
+        <div className="absolute inset-x-0 top-0 -translate-y-1/2">
+          {seam === "proven" ? <div className={cx("seam-line-lit", still && "!animate-none")} /> : <div className="seam-line" />}
+        </div>
         <div className="absolute top-0 left-1/2 flex -translate-x-1/2 -translate-y-1/2 items-center gap-3">
-          <ProofSeal pulse={seam === "proving"} stamp={seam === "proven"} idle={seam === "idle"} className={big ? undefined : "!size-[52px]"} />
+          <ProofSeal pulse={seam === "proving"} stamp={seam === "proven" && !still} idle={seam === "idle"} className={big ? undefined : "!size-[52px]"} />
         </div>
         {seam === "proving" && provingLabel ? (
           <span className="absolute top-0 left-[calc(50%+40px)] inline-flex min-h-[26px] -translate-y-1/2 items-center rounded-full bg-accent px-3 text-[12.5px] font-bold whitespace-nowrap text-on-accent tabular-nums max-sm:hidden">
@@ -234,14 +245,14 @@ export function SeamTracker({
           </span>
         ) : null}
       </div>
-      <div className={cx("paper transition-[filter,opacity] duration-700", seam === "proven" ? "" : "opacity-[0.86] saturate-50", big ? "px-8 pt-12 pb-7" : "px-6 pt-11 pb-6")}>
+      <div className={cx("paper transition-[filter,opacity] duration-700", seam === "proven" ? "" : "opacity-[0.86] saturate-50", big ? "px-8 pt-10 pb-6" : "px-6 pt-11 pb-6")}>
         <ChainLabel chain="base">
           <span className="inline-flex items-center gap-2">
             On Base <span className="text-ink-faint">· in the open</span>
           </span>
         </ChainLabel>
-        <Rows chain="base" rows={base} big={big} />
-        {footer ? <div className="mt-5 border-t border-rule pt-4 text-[13px] leading-[1.55] text-ink-muted">{footer}</div> : null}
+        <Rows chain="base" rows={base} big={big} still={still} />
+        {footer ? <div className="mt-4 border-t border-rule pt-3 text-[13px] leading-[1.55] text-ink-muted">{footer}</div> : null}
       </div>
     </section>
   );

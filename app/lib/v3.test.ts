@@ -15,7 +15,6 @@ import {
   disputeState,
   EXITS_NEVER_STOP,
   feeClaim,
-  feeNotice,
   formatPeriod,
   mintingNotices,
   needsRefundDestination,
@@ -86,17 +85,6 @@ describe("the opening fee (T-06)", () => {
     expect(openingFee(4_000_001n, FEE)).toBe(20_000n); // 20,000.005 rounded down, not below the minimum
     expect(openingFee(3_999_999n, FEE)).toBe(0n);
     expect(openingFee(5_000_000n, { feeBps: 0, minFeeZat: 0n })).toBe(0n);
-  });
-
-  it("is said before the deposit only when the deployment charges one", () => {
-    expect(feeNotice(5_000_000n, null)).toBeNull();
-    expect(feeNotice(5_000_000n, { feeBps: 0, minFeeZat: 0n } as never)).toBeNull();
-    expect(feeNotice(5_000_000n, FEE as never)).toBe(
-      "Opening fee: 0.00025 TAZ (0.5 % of the deposit), owed to the signers' treasury and paid out of the vault with its first payout. The vault's collateral is 0.04975 TAZ.",
-    );
-    expect(feeNotice(1_000_000n, FEE as never)).toBe(
-      "No opening fee for 0.01 TAZ: the 0.5 % fee would be under 0.0002 TAZ, so it is waived.",
-    );
   });
 });
 
@@ -267,7 +255,7 @@ describe("claims in plain words", () => {
   });
 
   it("each status, with what happens next", () => {
-    expect(view({}).badge).toEqual({ tone: "warn", text: "Pending" });
+    expect(view({}).badge).toEqual({ tone: "neutral", text: "Pending" });
     expect(view({ kind: "Refund", commitment: NONE32, createdAt: NOW }).badge.text).toBe("Needs your destination");
     expect(view({ kind: "Refund", commitment: NONE32, createdAt: NOW }).detail).toContain(formatUtc(NOW + 2_592_000));
     expect(view({ kind: "Fee", claimant: ZERO }).detail).toMatch(/next payout, to the signers' treasury/);
@@ -287,8 +275,8 @@ describe("delivery badges (section 3 of the v4 design) and dormant refunds (R-11
   const view = (patch: Partial<LedgerClaim>) => claimView(claim(patch), ctx);
 
   it("queued, sent, confirmed and disputable, proven", () => {
-    expect(view({ committed: false }).badge).toEqual({ tone: "warn", text: "Pending" });
-    expect(view({ committed: null }).badge).toEqual({ tone: "warn", text: "Pending" });
+    expect(view({ committed: false }).badge).toEqual({ tone: "neutral", text: "Pending" });
+    expect(view({ committed: null }).badge).toEqual({ tone: "neutral", text: "Pending" });
     expect(view({ committed: true }).badge).toEqual({ tone: "info", text: "Sent" });
     expect(view({ committed: true }).detail).toMatch(/committed its payout on Base/);
     expect(view({ status: "Paid", paidAt: NOW - 60 }).badge).toEqual({

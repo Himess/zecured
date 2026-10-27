@@ -5,6 +5,7 @@ import { ApiError, createApi } from "../api";
 import { borrowCalls } from "../calls";
 import { isNonceUsed, readPosition, readRecentRegistryEvents, readVaultLedger } from "../chain";
 import { readJourney } from "../journey";
+import { formatUsdc } from "../morpho";
 import { buildConfig, type AppConfig } from "../config";
 import { solveDemoStamp } from "../demo";
 import { openVault, submitDestination } from "../owner";
@@ -91,7 +92,8 @@ describe("the replay", () => {
     const account = replayLoanAccount("0x01", w);
     const calls = (assets: bigint) =>
       borrowCalls({ account: rec.loan.account, assets, registryAuthorized: false, adapterAuthorized: false, config });
-    await expect(account.send(calls(900_000n))).rejects.toThrow(/next step here is “Open a vault”/);
+    const borrowed = BigInt(rec.loan.borrow.assets);
+    await expect(account.send(calls(borrowed))).rejects.toThrow(/next step here is “Open a vault”/);
 
     // 1. Open the vault: the five pinned signers' signatures check out in the app's own code.
     const loan = createReplayLoan(amount, Date.now());
@@ -121,11 +123,14 @@ describe("the replay", () => {
     await expect(api.demoPay(vaultId, pay)).rejects.toMatchObject({ code: "demo_already_paid" });
 
     // 3. Confirmations come in, the proof lands on Base, the deposit is activated.
-    advance(delay("deposit-seen"));
+    advance(delay("deposit-seen") - 1_000);
     let v = await api.getVault(vaultId);
-    expect([v.status, v.depositSeen, v.confirmations]).toEqual(["deposit_seen", true, 1]);
-    advance(3_000);
-    expect((await api.getVault(vaultId)).confirmations).toBe(rec.config.confirmations);
+    expect([v.status, v.depositSeen]).toEqual(["awaiting_deposit", false]);
+    expect(v.confirmations).toBeLessThan(rec.config.confirmations);
+    advance(1_000);
+    // As live: seen means confirmed, and the coordinator keeps `awaiting_deposit` while it proves the deposit.
+    v = await api.getVault(vaultId);
+    expect([v.status, v.depositSeen, v.confirmations]).toEqual(["awaiting_deposit", true, rec.config.confirmations]);
     expect((await api.getStatus()).depositProofs?.running).toBe(1);
     advance(delay("proven"));
     let ledger = await readVaultLedger(vaultId, { client, config });
@@ -143,15 +148,15 @@ describe("the replay", () => {
     expect([p.position.collateral, p.debt, p.accountDeployed, p.registryAuthorized]).toEqual([amount - fee, 0n, false, false]);
 
     // 4. Borrow: exactly the recorded amount, in one UserOp whose transaction is the run's.
-    await expect(account.send(calls(950_000n))).rejects.toThrow(/exactly 0.90 USDC/);
-    const sent = await account.send(calls(900_000n));
+    await expect(account.send(calls(borrowed + 50_000n))).rejects.toThrow(new RegExp(`exactly ${formatUsdc(borrowed)} MockUSDC`));
+    const sent = await account.send(calls(borrowed));
     expect(sent).toEqual({ userOpHash: txOf("borrowed").userOp, transactionHash: txOf("borrowed").base, success: true });
     advance(60_000);
     p = await readPosition(rec.loan.account, { client, config });
     expect(p.accountDeployed && p.registryAuthorized && p.adapterAuthorized).toBe(true);
-    expect(p.usdcBalance).toBe(900_000n);
-    expect(p.debt).toBeGreaterThanOrEqual(900_000n);
-    expect(p.debt).toBeLessThan(900_100n);
+    expect(p.usdcBalance).toBe(borrowed);
+    expect(p.debt).toBeGreaterThanOrEqual(borrowed);
+    expect(p.debt).toBeLessThan(borrowed + 100n);
 
     // 5. A destination the signers validate (the app checks the commitment is its own), then the close.
     const dest = await submitDestination(stored, vaultId, rec.demo.returnAddress, { api, config });
@@ -212,7 +217,7 @@ describe("the replay", () => {
     const wallet = replayWallet(w);
     const [taker] = (await wallet.request({ method: "eth_requestAccounts" })) as string[];
     expect(taker).toBe(getAddress(s.taker));
-    await expect(api.getSwapQuote({ usdc: 10_000_000n, taker: getAddress(taker!) })).rejects.toThrow(/exactly 25 USDC/);
+    await expect(api.getSwapQuote({ usdc: 10_000_000n, taker: getAddress(taker!) })).rejects.toThrow(/exactly 25\.00 MockUSDC/);
     const q = await api.getSwapQuote({ usdc: BigInt(s.usdc), taker: getAddress(taker!) });
     expect(quoteProblem(q, { swap: config.swap, taker: getAddress(taker!), nowSeconds: Math.floor(w.now() / 1000) })).toBeNull();
     expect(await quoteSignedByMaker(client, q)).toBe(true);

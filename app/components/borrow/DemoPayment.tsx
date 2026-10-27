@@ -20,7 +20,7 @@ import { formatTaz } from "@/lib/zcash";
  * Shown only in a build with the demo path and while the backend's demo wallet is on: a slim dashed row, its
  * button the step's one primary.
  */
-export function DemoPayment({ loan }: { loan: StoredLoan }) {
+export function DemoPayment({ loan, onPaid }: { loan: StoredLoan; onPaid?: () => void }) {
   const demo = useDemoStatus();
   const pay = useAction(async () => {
     const status = demo.data;
@@ -42,6 +42,7 @@ export function DemoPayment({ loan }: { loan: StoredLoan }) {
       });
       loanStore().update(loan.id, { demo: true });
       notifyLoansChanged();
+      onPaid?.();
       return r;
     } catch (e) {
       const why = demoRefusal(apiErrorCode(e));
@@ -87,9 +88,16 @@ export function DemoPayment({ loan }: { loan: StoredLoan }) {
               <CopyButton value={pay.result.txid} />
             </>
           )}
+          {REPLAY ? null : <span className="basis-full text-muted">Its confirmations on Zcash take a few blocks; this page follows them.</span>}
         </p>
       ) : null}
-      {pay.busy ? <p className="text-xs text-muted">A small proof of work in this browser, then the demo wallet builds and proves the payment (up to a minute)…</p> : null}
+      {pay.busy ? (
+        <p className="text-xs text-muted">
+          {REPLAY
+            ? "The replay plays the demo wallet's payment."
+            : "A small proof of work in this browser, then the demo wallet builds and proves the payment (up to a minute)…"}
+        </p>
+      ) : null}
       <ActionError error={pay.error} refusal={pay.refusal} title="DEMO: no demo payment" />
       {demo.data.lowBalance ? <p className="text-xs text-warn">The demo wallet runs low; demo payments may fail.</p> : null}
     </div>
