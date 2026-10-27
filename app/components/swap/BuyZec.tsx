@@ -190,12 +190,12 @@ export function BuyZec() {
     setInput("");
     return true;
   });
-
-  if (!mounted) return <p className="text-sm text-muted">Loading…</p>;
-  const recorded = REPLAY ? formatUsdc(BigInt(recording().swap.usdc)) : null;
   // P-1 (DEMO): on the testnet deployment, as on a loan's close, the demo wallet can receive the ZEC of a visitor
   // with no Ironwood wallet of their own; the replay offers its recorded demo wallet.
   const demo = useDemoStatus();
+
+  if (!mounted) return <p className="text-sm text-muted">Loading…</p>;
+  const recorded = REPLAY ? formatUsdc(BigInt(recording().swap.usdc)) : null;
   const demoAddress = REPLAY ? replayDemoAddress() : config.demoPath && demo.data?.enabled ? demo.data.returnAddress : null;
   const addressOk = Boolean(ua.trim()) && destinationError(ua) === null;
   // The one primary button: what is needed next, then the purchase.
