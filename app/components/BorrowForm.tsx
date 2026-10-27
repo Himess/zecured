@@ -20,6 +20,7 @@ import { HealthRunway, healthOf, TokenAmount, usd, usdc, usdcFloor } from "./loa
 import { UsdcMark, ZzecMark } from "./marks";
 import { Button, cx, Disclosure, Hint, Notice } from "./ui";
 import { TxResult } from "./TxResult";
+import { ChainRef } from "./ChainRef";
 
 /** The quick picks under the amount: shares of what can still be borrowed at the target LTV. */
 const PICKS = [
@@ -148,12 +149,12 @@ export function BorrowForm({
           >
             {result.to.toLowerCase() === loan.account.toLowerCase() ? (
               <>
-                In your loan account <span className="font-mono text-[13px]">{short(loan.account)}</span>.{" "}
+                In your loan account <ChainRef kind="base-address" value={loan.account}>{short(loan.account)}</ChainRef>.{" "}
                 {first ? "One transaction deployed it, authorized Zecured on Morpho and borrowed; it has never held ETH." : null}
               </>
             ) : (
               <>
-                Sent to <span className="font-mono text-[13px]">{short(result.to)}</span>.
+                Sent to <ChainRef kind="base-address" value={result.to}>{short(result.to)}</ChainRef>.
               </>
             )}
           </TxResult>
@@ -286,7 +287,7 @@ export function BorrowForm({
         ) : (
           <p className="flex flex-wrap items-center gap-x-2 text-[14px] text-muted">
             To <span className="font-semibold text-soft">this loan&apos;s account</span>
-            <span className="font-mono text-[12.5px]">{short(loan.account)}</span>
+            <ChainRef kind="base-address" value={loan.account}>{short(loan.account)}</ChainRef>
             <button type="button" onClick={() => setChoosing(true)} className="min-h-8 font-semibold text-text underline underline-offset-4">
               Change
             </button>

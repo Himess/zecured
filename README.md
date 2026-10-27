@@ -40,7 +40,9 @@
    the RISC Zero proofs and Morpho Blue are real, and they ran live together on Base Sepolia on 27 October 2026,
    every proof checked by RISC Zero's deployed router; the ZEC price, the loan token (MockUSDC) and the signers'
    independence are not ([the full list](#what-is-real-and-what-is-a-mock)).
-5. **Read on:** [what ran, and how to reproduce it](docs/TESTING.md), [the judges' FAQ](docs/JURY_FAQ.md),
+5. **On the explorers:** every transaction of the live run, on Zcash and on Base, and every contract, verified on
+   Basescan ([the list](#the-live-run-on-the-explorers)).
+6. **Read on:** [what ran, and how to reproduce it](docs/TESTING.md), [the judges' FAQ](docs/JURY_FAQ.md),
    [what is still open](docs/MAINNET.md#7-known-limitations-and-their-designs).
 
 ## What it does
@@ -133,7 +135,7 @@ last one, every proof of that run checked by RISC Zero's deployed router:
 | The app in a browser | Gasless: open, deposit, borrow with pre-liquidation terms, deleverage and close from collateral (Safe signatures), repay and release, a claim paid from the bonds |
 | Live on Base Sepolia (27 October) | The core flows on a public chain: a deposit minted on its Groth16 proof (made on a rented RTX 4090) through RISC Zero's router, a sponsored borrow from an account that never held ETH, a close from collateral paid in one 3-of-5 FROST Zcash transaction whose delivery was then proven on Base, and a swap settled on the proof of its Zcash payment ([docs/TESTING.md § 2c](docs/TESTING.md#2c-live-on-base-sepolia-2026-10-27)) |
 
-On 27 October 2026 the system ran live on Base Sepolia, its contracts verified on Basescan (all but our paymaster),
+On 27 October 2026 the system ran live on Base Sepolia, its contracts verified on Basescan ([the list](#the-live-run-on-the-explorers)),
 every proof made on a rented GPU and checked by RISC Zero's deployed router. The earlier end-to-end runs used local forks of Base
 Sepolia, against the real Morpho Blue deployment, and checked proofs with a MOCK verifier, since RISC Zero does not
 run on our Windows machine; real Groth16 seals of every guest (deposit, F1, inclusion, swap payment) also pass RISC
@@ -141,6 +143,49 @@ Zero's router on Base Sepolia and Base mainnet forks: `cd contracts && forge tes
 test/fork/RealSealsV2.t.sol --isolate`. No deployment is kept running through judging ([D82](docs/DECISIONS.md)):
 the live run's servers and GPU stopped after it, and the whole system runs on a local fork (below). Evidence (block
 heights, txids, timings) and how to reproduce every run: [docs/TESTING.md](docs/TESTING.md).
+
+### The live run on the explorers
+
+Every step of the recorded run of 27 October, on ZecBlock (Zcash testnet) and Basescan (Base Sepolia); its
+timings and the rehearsal before it are in [docs/TESTING.md § 2c](docs/TESTING.md#2c-live-on-base-sepolia-2026-10-27).
+
+| Step | Chain | Transaction |
+|---|---|---|
+| The vault's address: shielded only (the explorer shows its Orchard receiver, never a balance or a history) | Zcash | [`utest1cj0ssr88…fzjc29hjgv`](https://testnet.zecblock.com/address/utest1cj0ssr88lec8yhxfvshutftg6283kye4c79mk9cugk8z0cpsmgwk4s5ueeeeskmu3z30pqhjjwmelpmz9nk3qtru70e686fzjc29hjgv) |
+| The deposit, 0.05 TAZ, Ironwood → Ironwood (block 4,548,243) | Zcash | [`e5eaf50d…75825c`](https://testnet.zecblock.com/tx/e5eaf50dc641b30f25c2cdc7785099979c66fa3d6ced5c7baaf5ad580d75825c) |
+| The deposit proven in zero knowledge, through RISC Zero's router | Base | [`0x92af7a0f…64384b`](https://sepolia.basescan.org/tx/0x92af7a0f3260c389799961c49a4971e76e5938b3eaac3e02c70bfa6b1464384b) |
+| zZEC minted into Morpho | Base | [`0xbfe27bc5…f9e219`](https://sepolia.basescan.org/tx/0xbfe27bc562805b8d29cd853cac428e63769a83aa64088502580a9f7e63f9e219) |
+| 10 MockUSDC borrowed by a brand-new account, gas sponsored | Base | [`0x0e17d8c2…469c9d`](https://sepolia.basescan.org/tx/0x0e17d8c2a2ee01206b9372998e43dc71bd6c59416d30ba6ff39479d7b9469c9d) |
+| Closed from collateral | Base | [`0xf9c5f4bc…2059e3`](https://sepolia.basescan.org/tx/0xf9c5f4bcfda141209063d1e7a6e03c4f991d4995d845d88bee80c2ad102059e3) |
+| Both payouts in one 3-of-5 FROST transaction (block 4,548,312) | Zcash | [`0e82a053…3e29fa`](https://testnet.zecblock.com/tx/0e82a05392014ada0859325e570666bb205553849c9ffc6e529b41cda93e29fa) |
+| The payouts' delivery proven on Base: the claims final | Base | [`0xee567c75…3edce9`](https://sepolia.basescan.org/tx/0xee567c750be2e9f60096590b5f9fcbbb7af5e2792e17b64fed636fcbee3edce9) |
+| Swap: the order opened from the buyer's own wallet, 5 MockUSDC locked | Base | [`0x27198f05…180e1a`](https://sepolia.basescan.org/tx/0x27198f0529e57f14b69d92ecaf0d828cf68c3b474c807ec936baf0ed6f180e1a) |
+| Swap: the maker paid 0.00391343 TAZ (block 4,548,320) | Zcash | [`fa6ce860…245ee0`](https://testnet.zecblock.com/tx/fa6ce860bce2a39b3be793d36d6e767b1e9cd738b0d716bc9185ea7797245ee0) |
+| Swap: the payment proven on Base | Base | [`0xac5ad94f…c318fa`](https://sepolia.basescan.org/tx/0xac5ad94fc62de4dbe76d9b17243f39713bffe6f8fc29a2e8167699c394c318fa) |
+| Swap: settled, the tokens released to the maker | Base | [`0xd1c1989d…038d69`](https://sepolia.basescan.org/tx/0xd1c1989d699bb55d0b78d04a61f7ca77996043c4d139769d48b307bed7038d69) |
+
+The contracts, all verified on Basescan (`contracts/deployments/base-sepolia{,.swap,.relay,.paymaster}.json`):
+
+| Contract | Address |
+|---|---|
+| ZecuredRegistry | [`0xDC9C7E6abeF85A7bE0C65e4208bC87D098b86479`](https://sepolia.basescan.org/address/0xDC9C7E6abeF85A7bE0C65e4208bC87D098b86479#code) |
+| ZecuredSpendLogic | [`0xaED9Fea923D8DD915f5A1367b9bc67DdC763e94a`](https://sepolia.basescan.org/address/0xaED9Fea923D8DD915f5A1367b9bc67DdC763e94a#code) |
+| ZecuredIntake | [`0x90e5F23645529e5009eD3179ae0D6D9F1D0FbF78`](https://sepolia.basescan.org/address/0x90e5F23645529e5009eD3179ae0D6D9F1D0FbF78#code) |
+| ZZEC (zZEC, the collateral receipt) | [`0xAa823B4A4339f371fd3BB3cd502e8D3feCEb2e83`](https://sepolia.basescan.org/address/0xAa823B4A4339f371fd3BB3cd502e8D3feCEb2e83#code) |
+| SettlementAdapter | [`0xCFa5c24718Cc87C4731D1969Fd6a6EC88f3a74cb`](https://sepolia.basescan.org/address/0xCFa5c24718Cc87C4731D1969Fd6a6EC88f3a74cb#code) |
+| SignerBondV2 (the signers' bonds) | [`0x58A1b34a9a641F03C62D5D3A7Fb3D3AD85269e1d`](https://sepolia.basescan.org/address/0x58A1b34a9a641F03C62D5D3A7Fb3D3AD85269e1d#code) |
+| ZecuredSlasher | [`0x3983F1e1C7929A2208296895F01cE0d422917594`](https://sepolia.basescan.org/address/0x3983F1e1C7929A2208296895F01cE0d422917594#code) |
+| ZecuredCompensator | [`0x8F5cBBa2264D62ca16228eDd10253e3284bEB174`](https://sepolia.basescan.org/address/0x8F5cBBa2264D62ca16228eDd10253e3284bEB174#code) |
+| ZecuredVersions | [`0xae56343593A54C93043e0997c509607736EBEEA9`](https://sepolia.basescan.org/address/0xae56343593A54C93043e0997c509607736EBEEA9#code) |
+| ZecuredSwap | [`0xb8Cc1E883FFF77c098802317cC98A966248948fC`](https://sepolia.basescan.org/address/0xb8Cc1E883FFF77c098802317cC98A966248948fC#code) |
+| ZcashHeaderRelay (Equihash on Base) | [`0xEc34aA21cDe1366b397a99A4d90fc6B2f02cFaEa`](https://sepolia.basescan.org/address/0xEc34aA21cDe1366b397a99A4d90fc6B2f02cFaEa#code) |
+| MockUSDC (MOCK: the loan token) | [`0x637BBA9C47190C7a1ab2412F72cF0A9c088dE58b`](https://sepolia.basescan.org/address/0x637BBA9C47190C7a1ab2412F72cF0A9c088dE58b#code) |
+| MockZecOracle (MOCK: the ZEC price) | [`0x5CF271B75eC511FB12C3667a1dfc69AD566A12a9`](https://sepolia.basescan.org/address/0x5CF271B75eC511FB12C3667a1dfc69AD566A12a9#code) |
+| DemoShockOracle (DEMO: the market's oracle) | [`0x53a3D268683Cd748b3B71B55a202dF48B7cE633A`](https://sepolia.basescan.org/address/0x53a3D268683Cd748b3B71B55a202dF48B7cE633A#code) |
+| DemoCapPrice (DEMO: the coverage cap's price) | [`0xeC45AeDa5f0013fd37c9767eC79892Dd55834111`](https://sepolia.basescan.org/address/0xeC45AeDa5f0013fd37c9767eC79892Dd55834111#code) |
+| SingletonPaymasterV7 (our paymaster, Pimlico's contract) | [`0x86c16062083a64aDb333404204346C9e4E03bb1e`](https://sepolia.basescan.org/address/0x86c16062083a64aDb333404204346C9e4E03bb1e#code) |
+
+Used, not ours: [Morpho Blue](https://sepolia.basescan.org/address/0xBBBBBbbBBb9cC5e90e3b3Af64bdAF62C37EEFFCb#code), [RISC Zero's verifier router](https://sepolia.basescan.org/address/0x0b144E07A0826182B6b59788c34b32Bfa86Fb711#code), [ERC-4337 EntryPoint v0.7](https://sepolia.basescan.org/address/0x0000000071727De22E5E9d8BAf0edAc6f37da032#code).
 
 ## What is real and what is a mock
 

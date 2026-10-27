@@ -19,6 +19,7 @@ import {
   TARGET_LTV_BPS,
 } from "@/lib/morpho";
 import { formatTaz, ZATS_PER_ZEC } from "@/lib/zcash";
+import { ChainRef } from "./ChainRef";
 
 const TOKEN_KEY = "zecured:demo-token";
 const MODES: { mode: NodeMode; label: string; help: string }[] = [
@@ -423,7 +424,7 @@ function OracleCard({ token }: { token: string }) {
         <div className="mt-3">
           <Notice tone="ok" title={`MOCK price set to ${formatUsdPrice(oraclePriceFromCents(update.result.priceUsdCents))}`} live>
             <p className="flex flex-wrap items-center gap-2">
-              Owner transaction <Mono>{update.result.txHash}</Mono>
+              Owner transaction <ChainRef kind="base-tx" value={update.result.txHash} />
             </p>
             <p className="text-xs">Positions show it at their next refresh.</p>
           </Notice>

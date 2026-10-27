@@ -40,6 +40,7 @@ import { formatPeriod, openGate, openingFee } from "@/lib/v3";
 import { awaitingDeposit, capWait, depositConfirmed, openingsNotice, openRefusal, refundProofRefusal } from "@/lib/v4";
 import { blocksToDuration, formatTaz, formatZec } from "@/lib/zcash";
 import { DemoPayment } from "./DemoPayment";
+import { ChainRef } from "@/components/ChainRef";
 
 /** The flow in five chapters, as the site tells it; the π of "Prove" turns gold once the deposit is proven. */
 const STEPS = ["Vault", "Key", "Deposit", "Prove", "Borrow"];
@@ -179,7 +180,7 @@ export function BorrowWizard() {
                 <span className="flex flex-wrap items-center gap-3">
                   <TokenAmount token="TAZ" value={formatZec(BigInt(l.amount))} size="sm" />
                   <span className="text-muted">
-                    account <Mono>{short(l.account)}</Mono>
+                    account <ChainRef kind="base-address" value={l.account}>{short(l.account)}</ChainRef>
                   </span>
                   {l.vaultId ? null : <Badge tone="warn">Vault not opened</Badge>}
                 </span>
@@ -915,7 +916,7 @@ function DepositStep({
                       </span>
                     </p>
                     <div className="mt-1.5 rounded-xl bg-bg/80 px-3 py-2.5 shadow-[inset_0_0_0_1px_var(--color-border)]">
-                      <Mono className="block text-[12px] leading-relaxed">{loan.vaultAddress}</Mono>
+                      <ChainRef kind="zcash-address" value={loan.vaultAddress!} className="block text-[12px] leading-relaxed" />
                     </div>
                     <div className="mt-2 flex flex-wrap gap-2">
                       <CopyButton value={loan.vaultAddress!} label="Copy address" />

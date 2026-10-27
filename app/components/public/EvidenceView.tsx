@@ -11,6 +11,7 @@ import { explorerLink, orderedSections, type Evidence, type EvidenceSection } fr
 import { useEvidence } from "@/lib/hooks";
 import { short } from "@/lib/keys";
 import { formatPeriod } from "@/lib/v3";
+import { ChainRef } from "@/components/ChainRef";
 
 const DURATION_LABEL: Record<string, string> = {
   "deposit-to-proof": "Deposit on Zcash to its proof on Base",
@@ -45,7 +46,7 @@ function Section({ e, s, own }: { e: Evidence; s: EvidenceSection; own: boolean 
                   </span>
                 ) : (
                   <span key="c">
-                    <Mono>{m.commit}</Mono>
+                    <ChainRef kind="commit" value={m.commit} />
                     {m.tag ? <span className="text-muted"> (tag {m.tag})</span> : null}
                   </span>
                 ),
@@ -55,13 +56,13 @@ function Section({ e, s, own }: { e: Evidence; s: EvidenceSection; own: boolean 
                 (c): [string, ReactNode] => [
                   c.name,
                   <span key={c.name} className="inline-flex flex-wrap items-center gap-2">
-                    <Mono>{c.address}</Mono> <CopyButton value={c.address} />
+                    <ChainRef kind="base-address" value={c.address} /> <CopyButton value={c.address} />
                   </span>,
                 ],
               ),
-              ...(m.router ? [["Proof router", <Mono key="r">{m.router}</Mono>] as [string, ReactNode]] : []),
-              ...(m.relay ? [["Zcash header relay", <Mono key="h">{m.relay}</Mono>] as [string, ReactNode]] : []),
-              ...(m.oracle ? [["Market oracle", <Mono key="o">{m.oracle}</Mono>] as [string, ReactNode]] : []),
+              ...(m.router ? [["Proof router", <ChainRef key="r" kind="base-address" value={m.router} />] as [string, ReactNode]] : []),
+              ...(m.relay ? [["Zcash header relay", <ChainRef key="h" kind="base-address" value={m.relay} />] as [string, ReactNode]] : []),
+              ...(m.oracle ? [["Market oracle", <ChainRef key="o" kind="base-address" value={m.oracle} />] as [string, ReactNode]] : []),
               ...m.imageIds.map((g): [string, ReactNode] => [`Guest ${g.name}`, <Mono key={g.name}>{g.imageId}</Mono>]),
             ]}
           />
@@ -71,7 +72,7 @@ function Section({ e, s, own }: { e: Evidence; s: EvidenceSection; own: boolean 
                 <li key={x.name} className="flex flex-wrap items-baseline gap-2">
                   <Badge tone={x.label === "DEMO" ? "demo" : "warn"}>{x.label}</Badge>
                   <span className="font-medium">{x.name}</span>
-                  {x.address ? <Mono>{short(x.address, 10, 6)}</Mono> : null}
+                  {x.address ? <ChainRef kind="base-address" value={x.address}>{short(x.address, 10, 6)}</ChainRef> : null}
                   <span className="text-muted">{x.why}</span>
                 </li>
               ))}

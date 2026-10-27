@@ -30,6 +30,7 @@ import { SWAP_PRIVACY_SENTENCE } from "@/lib/v4";
 import { connectWallet, ensureChain, injectedWallet, sendFromWallet, WalletError } from "@/lib/wallet";
 import { formatTaz, formatZec, TICKER } from "@/lib/zcash";
 import { QrScan } from "./QrScan";
+import { ChainRef } from "@/components/ChainRef";
 
 const store = () => new SwapStore(browserStorage());
 const nowSeconds = () => Math.floor(Date.now() / 1000);
@@ -350,7 +351,7 @@ export function BuyZec() {
               </div>
               {quote ? (
                 <p className="text-[12.5px] text-muted">
-                  The maker <Mono>{short(quote.quote.maker)}</Mono> has {Math.round(quote.quote.payWindow / 3600)} h to pay and prove, or you take your{" "}
+                  The maker <ChainRef kind="base-address" value={quote.quote.maker}>{short(quote.quote.maker)}</ChainRef> has {Math.round(quote.quote.payWindow / 3600)} h to pay and prove, or you take your{" "}
                   {name} back.
                 </p>
               ) : null}
@@ -408,7 +409,7 @@ export function BuyZec() {
               {wallet ? (
                 <p className="flex flex-wrap items-center gap-2 text-[13px] text-soft">
                   <IconWallet size={15} />
-                  <Mono>{short(wallet)}</Mono>
+                  <ChainRef kind="base-address" value={wallet}>{short(wallet)}</ChainRef>
                   <span className="text-muted">· your wallet, visible on Base when you open the order</span>
                 </p>
               ) : null}
@@ -637,7 +638,7 @@ function OrderCard({
           Order <Mono>{short(order.orderId, 10, 8)}</Mono>
         </span>
         <span>
-          · paid to <Mono>{short(order.receiver, 12, 8)}</Mono>
+          · paid to <ChainRef kind="zcash-address" value={order.receiver}>{short(order.receiver, 12, 8)}</ChainRef>
         </span>
         <span>· destination {order.destinationSent ? "handed to the maker" : "not yet handed to the maker"}</span>
       </p>

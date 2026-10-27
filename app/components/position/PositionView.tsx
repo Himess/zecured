@@ -32,6 +32,7 @@ import { Deleverage } from "./Deleverage";
 import { ClaimsCard, PendingActivationCard, PendingRefundsCard, RefundsCard, TheftNotice } from "./Ledger";
 import { PartialRelease } from "./PartialRelease";
 import { ProtectionCard } from "./Protection";
+import { ChainRef } from "@/components/ChainRef";
 
 const ZERO_ACCOUNT = "0x0000000000000000000000000000000000000000";
 
@@ -248,7 +249,7 @@ export function PositionView() {
               {closed ? (toMaker ? "Repaid by the market maker" : "Repaid") : rate !== null ? `${ratePct(rate)} a year, accruing every block` : "including accrued interest"}
               {account ? (
                 <>
-                  {" · "}account <span className="font-mono">{short(account)}</span>, gas sponsored
+                  {" · "}account <ChainRef kind="base-address" value={account}>{short(account)}</ChainRef>, gas sponsored
                 </>
               ) : null}
             </p>
@@ -374,7 +375,7 @@ export function PositionView() {
               [
                 "Smart account",
                 <span key="a" className="flex flex-wrap items-center gap-2">
-                  <Mono>{account}</Mono>
+                  <ChainRef kind="base-address" value={account} />
                   <CopyButton value={account} />
                 </span>,
               ],

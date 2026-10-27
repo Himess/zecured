@@ -8,6 +8,7 @@ import { IconArrowRight } from "./icons";
 import { fallBeforeLiquidation, fallPercent, HealthRunway, healthOf, TokenAmount, usdc, zec } from "./loan";
 import { statusOf } from "./status";
 import { Badge, buttonClass, cx, Skeleton } from "./ui";
+import { ChainRef } from "./ChainRef";
 
 /**
  * One loan of this browser, live, in a row: its collateral and the vault's status (the signers' word), its debt on
@@ -51,7 +52,7 @@ export function LoanCard({ loan, compact = false }: { loan: StoredLoan; compact?
           {loan.demo ? <Badge tone="demo">Demo TAZ</Badge> : null}
         </div>
         <p className="text-[12.5px] text-muted">
-          shielded · account <span className="font-mono text-soft">{short(loan.account)}</span>
+          shielded · account <ChainRef kind="base-address" value={loan.account} className="text-soft">{short(loan.account)}</ChainRef>
           {loan.vaultId ? (
             <>
               {" · "}vault <span className="font-mono text-soft">{short(loan.vaultId, 8, 6)}</span>
