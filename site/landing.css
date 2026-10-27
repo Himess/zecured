@@ -528,6 +528,44 @@ main {
   color: var(--text);
 }
 
+/* Type hierarchy: the gold kicker, the white title with one gold word (as the hero's "proof"), the body a step
+   back, its key phrase in the title's white, and the note quieter still. The text runs a little wide, to sit with the
+   display face's width. */
+.title em {
+  font-style: normal;
+  color: var(--gold);
+}
+
+.kicker {
+  color: var(--gold);
+}
+
+.kicker-n {
+  color: var(--gold);
+  border-color: rgba(244, 183, 40, 0.42);
+  background: rgba(244, 183, 40, 0.08);
+}
+
+.body,
+.lead,
+.seen,
+.note {
+  font-stretch: 106%;
+}
+
+.body {
+  color: #aebfb5;
+}
+
+.body strong {
+  color: var(--text);
+  font-weight: 600;
+}
+
+.note {
+  color: #81968a;
+}
+
 .big-stat {
   display: grid;
   gap: 8px;
