@@ -259,8 +259,10 @@ cd app && pnpm install && pnpm test && cd ..    # the app, offline
 
 **3. The whole system, on a local fork of Base Sepolia** (below): five signer processes, the coordinator, the
 contracts, the bots and the app, paying real Zcash testnet notes. Plan an afternoon; our runs used one 16 GB
-desktop. Get TAZ from the Valar faucet (https://faucet.testnet.valargroup.dev, 0.125 TAZ a day per address). The
-Zcash side talks to `https://testnet.zec.rocks:443` (the public light wallet server on NU7).
+desktop. Get TAZ from the Valar faucet (https://faucet.testnet.valargroup.dev, 0.125 TAZ a day per address); on 27
+October it refused the Ironwood-only address `zecured-wallet address` prints ("the wallet cannot pay this address"),
+so if it still does, send TAZ from another testnet wallet. The Zcash side talks to `https://testnet.zec.rocks:443`
+(the public light wallet server on NU7).
 
 ### Local Base fork
 
