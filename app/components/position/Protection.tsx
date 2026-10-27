@@ -9,6 +9,7 @@ import type { PositionSnapshot } from "@/lib/chain";
 import { config } from "@/lib/config";
 import { useAction, usePreLiquidation } from "@/lib/hooks";
 import type { StoredLoan } from "@/lib/keys";
+import { loanTokenName } from "@/lib/labels";
 import { formatBps, formatUsdc, ltvBps } from "@/lib/morpho";
 import {
   formatIncentive,
@@ -33,7 +34,7 @@ function nowSentence(p: PreLiquidationNow): string {
     case "above":
       return "Above the market's liquidation LTV: a full liquidation applies.";
     case "band":
-      return `In the band: one pre-liquidation may repay up to ${formatUsdc(p.maxRepayAssets)} USDC (${formatWadPercent(p.closeFactor)} of the debt) and take about ${formatTaz(p.seizedAtMax)} of your collateral for it (a ${formatIncentive(p.incentive)} incentive).`;
+      return `In the band: one pre-liquidation may repay up to ${formatUsdc(p.maxRepayAssets)} ${loanTokenName()} (${formatWadPercent(p.closeFactor)} of the debt) and take about ${formatTaz(p.seizedAtMax)} of your collateral for it (a ${formatIncentive(p.incentive)} incentive).`;
   }
 }
 

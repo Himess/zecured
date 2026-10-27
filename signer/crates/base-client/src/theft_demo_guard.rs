@@ -17,16 +17,15 @@ use crate::events::IZecuredRegistry;
 
 /// The judge deployment's five signers (`deployments/base-sepolia.json`, `signers`).
 pub const JUDGE_SIGNERS: [Address; 5] = [
-    address!("0x2D9E846e519c61b452ef3ad4Be34B28b22A6f6F3"),
-    address!("0x492C397388982CFdDe71cA67d3C30E2Bc9e6643B"),
-    address!("0x99b3a2b14875200f643830bc81a91B0701e1cD76"),
-    address!("0xc19dfB0971D572Ef39182497E81B9Bc12692c4b9"),
-    address!("0xc76BAEd8F702e9CB69E54b196b2628633A2E57Ba"),
+    address!("0x293e0446E84420FC477CE34F79608693a9131086"),
+    address!("0x3a9B1b2AF1E37fF5b90B36667DF1058Ad841A31d"),
+    address!("0x8552AD9D7AAFBe315dbF0Ca950F3A6AfBc6a91e6"),
+    address!("0xD62BdAE4d63FFF774Bd4a49a8e5ce8FC8353e442"),
+    address!("0xeE66Db11851FB7363a88c776D10c7f5284667EcE"),
 ];
 
-/// The judge deployment's Registry (`deployments/base-sepolia.json`, `contracts.ZecuredRegistry`),
-/// added when it is deployed; until then the on-chain signer check stands in for it.
-pub const JUDGE_REGISTRIES: &[Address] = &[];
+/// The judge deployment's Registry (`deployments/base-sepolia.json`, `contracts.ZecuredRegistry`).
+pub const JUDGE_REGISTRIES: &[Address] = &[address!("0xDC9C7E6abeF85A7bE0C65e4208bC87D098b86479")];
 
 /// Refuses a theft-demo configuration that names the judge Registry or a judge signer.
 pub fn check(registry: Address, signers: &[Address]) -> Result<()> {

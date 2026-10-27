@@ -12,6 +12,7 @@ import { readReleaseClaim, type PositionSnapshot, type ReleaseClaim } from "@/li
 import { config } from "@/lib/config";
 import { notifyLoansChanged, useAction } from "@/lib/hooks";
 import { loanStore, short, type StoredLoan } from "@/lib/keys";
+import { loanTokenName } from "@/lib/labels";
 import {
   collateralValue,
   formatBps,
@@ -148,7 +149,7 @@ export function PartialRelease({
             <div>
               <KeyValue
                 rows={[
-                  ["Collateral after", `${formatTaz(remaining)} (≈ ${formatUsdc(collateralValue(remaining, price))} USDC)`],
+                  ["Collateral after", `${formatTaz(remaining)} (≈ ${formatUsdc(collateralValue(remaining, price))} ${loanTokenName()})`],
                   ["Loan-to-value after", `${ltvAfter !== null ? formatBps(ltvAfter) : "—"} (limit ${formatBps(MAX_WITHDRAW_LTV_BPS)})`],
                   ["Health factor after", hfAfter === null ? "∞ (no debt)" : formatWad(hfAfter)],
                   ["Liquidation price after", lpAfter ? `${formatUsdPrice(lpAfter)} per ZEC` : "—"],
