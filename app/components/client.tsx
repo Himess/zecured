@@ -11,6 +11,7 @@ import { api } from "@/lib/api";
 import { config } from "@/lib/config";
 import { useLoans } from "@/lib/hooks";
 import { loanTokenName, realAndMock } from "@/lib/labels";
+import { sampleTransactions } from "@/lib/explorer";
 import { REPLAY } from "@/lib/replay/flag";
 import { formatDenominations } from "@/lib/zcash";
 import { IconCheck, IconCopy, IconEye, IconHome, IconLoans, IconPlay, IconSwap, IconVault } from "./icons";
@@ -267,7 +268,11 @@ export function RealAndMockList({ verifierIsMock }: { verifierIsMock?: boolean |
   return (
     <>
       {REPLAY ? (
-        <p className="mb-3 text-sm font-semibold text-demo">DEMO: this replay plays sample data in your browser; none of the real parts below ran in it.</p>
+        <p className="mb-3 text-sm font-semibold text-demo">
+          {sampleTransactions()
+            ? "DEMO: this replay plays sample data in your browser; none of the real parts below ran in it."
+            : "DEMO: this replay plays our live run of 27 October 2026 in your browser. The real parts below ran in that run; the replay itself touches no chain."}
+        </p>
       ) : null}
     <ul className="list-disc space-y-2 pl-5 text-sm text-soft">
       {real.map((r) => (

@@ -127,7 +127,7 @@ Every number on the site comes from a recorded run, and each has its source:
 | A judge’s questions | JURY_FAQ |
 | Known limitations and their designs | MAINNET § 7 |
 | Built from 10 October 2026 | the repository’s first commit |
-| The app’s replay: a guided replay in the browser, with sample data (DEMO) | `app/README.md` (“The judges' replay”) |
+| The app’s replay: a guided replay of the live run of 27 October in the browser (DEMO) | `app/README.md` (“The judges' replay”) |
 
 When a run changes a number, change it on the site too. The docs’ “Real” and “Mock, or run by us” lists say what
 the README’s “What is real and what is a mock” says; when one changes, so does the other.
@@ -232,8 +232,8 @@ No custom domain (decided 2026-10-27).
 `.github/workflows/pages.yml` publishes everything in `site/` except its tooling, `site/dev`, to GitHub Pages; the
 pages’ canonical and social-card URLs name the github.io address, and the workflow rewrites it, and the 404 page’s
 `{{BASE}}`, from what `actions/configure-pages` reports. Beside them, at `app/`, the same workflow builds and
-publishes the judges' replay of the app (DEMO, `app/README.md`): its static export, which plays a guided replay with
-sample data in the browser. The site's “Try the app” buttons link there. The tests’ server (`site/dev/serve.mjs`)
+publishes the judges' replay of the app (DEMO, `app/README.md`): its static export, which replays the live run of
+27 October in the browser. The site's “Try the app” buttons link there. The tests’ server (`site/dev/serve.mjs`)
 serves the same files the same way, so a file the site needs and the tests find is a file Pages publishes. The
 workflow runs only by hand (`workflow_dispatch`): the site has been published from `main` since 2026-10-26.
 

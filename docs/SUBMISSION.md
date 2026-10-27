@@ -4,7 +4,7 @@ The text for the submission form, in the order the form asks for: what it does, 
 and what is a mock. Every link is absolute, so it works from the form.
 
 **Links.** The site: https://zecured.vercel.app/ (the details: https://zecured.vercel.app/docs/). The
-app as a guided replay in your browser, with sample data (DEMO, no server needed): https://zecured.vercel.app/app/.
+app replaying our live run of 27 October in your browser (DEMO, no server needed): https://zecured.vercel.app/app/.
 The code: https://github.com/Himess/zecured. The same pages on GitHub Pages: https://himess.github.io/zecured/.
 
 **Team.** Himess (https://github.com/Himess). Built from scratch for ZECATHON 2026, Cross-Chain track; first commit
@@ -22,9 +22,9 @@ loan token (MockUSDC) are mocks.
 
 ## For judges (5 minutes)
 
-- **Watch** the two-minute video. Its link goes here as soon as it is published.
-- **Click through** the app as a guided replay in your browser, with sample data in place of our servers (DEMO):
-  https://zecured.vercel.app/app/
+- **Watch** the video of the live run. Its link goes here as soon as it is published.
+- **Click through** the app as a guided replay in your browser: it replays our live run of 27 October in place of
+  our servers (DEMO), each step linked to its real transaction: https://zecured.vercel.app/app/
 - **Check a real proof in one command** (Foundry's `cast`, nothing to clone): RISC Zero's verifier router as deployed
   on Base Sepolia accepts the Groth16 proof of a real Zcash testnet deposit (the TEST-ONLY vault 9, block 4,488,543):
 
@@ -66,7 +66,7 @@ Built from scratch for ZECATHON 2026 (Cross-Chain track), first commit 10 Octobe
 invariants, 22 symbolic checks, a live run on Base Sepolia with every proof checked by RISC Zero's deployed router,
 real Groth16 proofs of every guest accepted by that router on Base forks, end-to-end runs with real Zcash testnet
 transactions, and a draft ZIP for shielded collateral vaults. Try it: the
-two-minute video, the app as a guided replay in your browser (https://zecured.vercel.app/app/), or the whole
+video of the live run, the app replaying that run in your browser (https://zecured.vercel.app/app/), or the whole
 system on a local fork (https://github.com/Himess/zecured#running-it).
 
 **Borrow.** You deposit ZEC into a fresh 3-of-5 FROST threshold vault in Ironwood. On a
@@ -178,9 +178,10 @@ like any claim. What the design cannot stop: all five signers colluding
   TAZ"), takes back a closed loan's ZEC and can receive a swap.
 - **The theft demonstration (DEMO).** It is a separate deployment with its own signers and a 2-minute
   challenge window. It never touches the lending deployment.
-- **The app's replay (DEMO).** A static build of the app whose in-browser simulator plays sample data in place of
-  our servers; it carries no private key, salt or viewing key.
+- **The app's replay (DEMO).** A static build of the app whose in-browser simulator replays our live run of 27
+  October in place of our servers; it carries no private key, salt or viewing key.
 - **No server kept running.** The system ran live on Base Sepolia on 27 October 2026, then its signers, prover and
-  bots stopped (D82); the contracts stay on Base Sepolia, unoperated. Earlier end-to-end runs used Base Sepolia
-  forks with a MOCK verifier, and the real Groth16 seal of every pinned guest passes RISC Zero's deployed router
-  (https://github.com/Himess/zecured/blob/main/docs/TESTING.md, § 2 and § 2b).
+  bots stopped (D82); the contracts stay on Base Sepolia, unoperated. That run's transactions and timings, and its
+  leak scan (0 matches): https://github.com/Himess/zecured/blob/main/docs/TESTING.md, § 2c. Earlier end-to-end runs
+  used Base Sepolia forks with a MOCK verifier, and the real Groth16 seal of every pinned guest passes RISC Zero's
+  deployed router (the same file, § 2 and § 2b).

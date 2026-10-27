@@ -2,12 +2,12 @@
 
 import { ActionError } from "@/components/ActionError";
 import { CopyButton } from "@/components/client";
-import { IconBolt, IconCheck } from "@/components/icons";
+import { IconBolt, IconCheck, IconExternal } from "@/components/icons";
 import { Badge, Button } from "@/components/ui";
 import { api, apiErrorCode } from "@/lib/api";
 import { config } from "@/lib/config";
 import { demoRefusal, solveDemoStamp } from "@/lib/demo";
-import { sampleTransactions } from "@/lib/explorer";
+import { sampleTransactions, zcashTxUrl } from "@/lib/explorer";
 import { notifyLoansChanged, useAction, useDemoStatus } from "@/lib/hooks";
 import { loanStore, short, type StoredLoan } from "@/lib/keys";
 import { REPLAY } from "@/lib/replay/flag";
@@ -53,6 +53,7 @@ export function DemoPayment({ loan, onPaid }: { loan: StoredLoan; onPaid?: () =>
 
   if (!config.demoPath || !demo.data?.enabled) return null;
   const amount = formatTaz(BigInt(loan.amount));
+  const txUrl = pay.result ? zcashTxUrl(pay.result.txid) : null;
   return (
     <div className="space-y-3 rounded-2xl border border-dashed border-demo/45 bg-demo/[0.04] p-4 sm:p-5">
       <div className="flex flex-wrap items-center justify-between gap-x-5 gap-y-3">
@@ -83,7 +84,23 @@ export function DemoPayment({ loan, onPaid }: { loan: StoredLoan; onPaid?: () =>
           ) : (
             <>
               <span className="text-muted">
-                Zcash transaction <span className="font-mono text-soft">{short(pay.result.txid, 8, 6)}</span>
+                Zcash transaction{" "}
+                {txUrl ? (
+                  <a
+                    href={txUrl}
+                    target="_blank"
+                    rel="noopener noreferrer"
+                    referrerPolicy="no-referrer"
+                    className="inline-flex items-center gap-1 font-mono text-soft hover:underline"
+                    title="A public block explorer learns which transaction you look at."
+                  >
+                    {short(pay.result.txid, 8, 6)}
+                    <IconExternal size={12} />
+                    <span className="sr-only">(a Zcash block explorer, opens a new tab: a third-party site that learns which transaction you look at)</span>
+                  </a>
+                ) : (
+                  <span className="font-mono text-soft">{short(pay.result.txid, 8, 6)}</span>
+                )}
               </span>
               <CopyButton value={pay.result.txid} />
             </>

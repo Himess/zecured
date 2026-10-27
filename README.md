@@ -10,14 +10,15 @@
 [![ci](https://github.com/Himess/zecured/actions/workflows/ci.yml/badge.svg)](https://github.com/Himess/zecured/actions/workflows/ci.yml)
 
 [The site](https://zecured.vercel.app/) · [the docs page](https://zecured.vercel.app/docs/) ·
-[the app as a guided replay](https://zecured.vercel.app/app/) (DEMO, with sample data, in your browser) ·
+[the app as a guided replay](https://zecured.vercel.app/app/) (DEMO: our live run of 27 October, in your browser) ·
 [run it yourself](#running-it) · the same pages on [GitHub Pages](https://himess.github.io/zecured/)
 
 ## For judges (5 minutes)
 
-1. **Watch** the two-minute video. Its link goes here as soon as it is published.
+1. **Watch** the video of the live run. Its link goes here as soon as it is published.
 2. **Click through** [the app as a guided replay](https://zecured.vercel.app/app/): the real app in your
-   browser, with a simulator and sample data in place of our servers (DEMO). Nothing to install.
+   browser, replaying our live run of 27 October on Base Sepolia and Zcash testnet in place of our servers (DEMO),
+   each step linked to its real transaction. Nothing to install.
 3. **Check a real proof in one command** (Foundry's `cast`, nothing to clone): RISC Zero's verifier router as
    deployed on Base Sepolia accepts the Groth16 proof of a real Zcash testnet deposit (the TEST-ONLY vault 9,
    0.01 TAZ at block 4,488,543):
@@ -130,7 +131,7 @@ last one, every proof of that run checked by RISC Zero's deployed router:
 | Zecured Swap | Buy and Sell orders settled on payment proofs (payment memo `"ZSWP" \|\| orderId`, ovk none); an unpaid order refunded after its pay window |
 | Theft demonstration | Three compromised signers sweep a vault; the borrower's viewing key detects F1 two minutes later; all five bonds slashed; the victim's debt repaid and the rest of its ZEC's value paid in USDC ([the timeline](docs/assets/theft.png)) |
 | The app in a browser | Gasless: open, deposit, borrow with pre-liquidation terms, deleverage and close from collateral (Safe signatures), repay and release, a claim paid from the bonds |
-| Live on Base Sepolia (27 October) | The core flows on a public chain: a deposit minted on its Groth16 proof (made on a rented RTX 4090) through RISC Zero's router, a sponsored borrow from an account that never held ETH, a close from collateral paid in one 3-of-5 FROST Zcash transaction whose delivery was then proven on Base, and a swap settled on the proof of its Zcash payment ([docs/TESTING.md](docs/TESTING.md)) |
+| Live on Base Sepolia (27 October) | The core flows on a public chain: a deposit minted on its Groth16 proof (made on a rented RTX 4090) through RISC Zero's router, a sponsored borrow from an account that never held ETH, a close from collateral paid in one 3-of-5 FROST Zcash transaction whose delivery was then proven on Base, and a swap settled on the proof of its Zcash payment ([docs/TESTING.md § 2c](docs/TESTING.md#2c-live-on-base-sepolia-2026-10-27)) |
 
 On 27 October 2026 the system ran live on Base Sepolia, its contracts verified on Basescan (all but our paymaster),
 every proof made on a rented GPU and checked by RISC Zero's deployed router. The earlier end-to-end runs used local forks of Base
@@ -196,8 +197,8 @@ Base mainnet:
 - DEMO: the theft demonstration runs on its own deployment with a 2-minute challenge window, never on the lending
   deployment.
 - DEMO: the judges' replay of the app (`app/lib/replay`, a static site with no backend): an in-browser simulator
-  plays a recorded walk-through with sample data (dummy hashes, no explorer links) in place of our servers, and it
-  carries no private key, salt or viewing key ([app/README.md](app/README.md)).
+  plays the recording of our live run of 27 October (its real transactions, each linked to its explorer) in place
+  of our servers, and it carries no private key, salt or viewing key ([app/README.md](app/README.md)).
 
 **Test-only mocks**, never deployed:
 
@@ -243,7 +244,7 @@ repository are published test vectors (such as ZIP 2005's) and anvil's well-know
 Three ways, from nothing to install to the whole system.
 
 **1. The replay.** Open [the app as a guided replay](https://zecured.vercel.app/app/) (DEMO): the same pages,
-with a simulator and sample data in place of our servers. To run it yourself:
+with a simulator that replays our live run of 27 October in place of our servers. To run it yourself:
 `cd app && pnpm install && node scripts/build-replay.mjs --dev --port 3001` ([app/README.md](app/README.md)).
 
 **2. The tests.** Prerequisites: Rust (the repo pins 1.99.0 via `rust-toolchain.toml`), Foundry 1.8.5

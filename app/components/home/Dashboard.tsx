@@ -10,6 +10,7 @@ import { MorphoMark, PairMarks, UsdcMark, ZecMark, ZzecMark } from "@/components
 import { buttonClass, Card, cx, EmptyState, Meter, SectionTitle, Skeleton, Stat } from "@/components/ui";
 import { config } from "@/lib/config";
 import { DEPLOYMENT } from "@/lib/deployment";
+import { sampleTransactions } from "@/lib/explorer";
 import { useLoans, useProtocol, useStatusReport } from "@/lib/hooks";
 import { priceLineName } from "@/lib/labels";
 import { formatUsdPrice, WAD } from "@/lib/morpho";
@@ -156,7 +157,9 @@ export function Dashboard() {
           title="In the open"
           sub={
             REPLAY
-              ? "Sample public numbers, as Base would show them: nothing about any vault or user."
+              ? sampleTransactions()
+                ? "Sample public numbers, as Base would show them: nothing about any vault or user."
+                : "The live run's public numbers, as Base showed them, replayed: nothing about any vault or user."
               : "Public numbers only, read from Base through our proxy: nothing about any vault or user."
           }
           action={

@@ -48,9 +48,10 @@ The replay never publishes a private key, a salt or a viewing key: its loan carr
 nothing, the viewing-key route answers `replay_unavailable`, and a destination the judge types stays in the browser.
 Every hook point tests the replay flag (`lib/replay/flag.ts`, `NEXT_PUBLIC_REPLAY=1`); a live build, where the
 variable is unset, never takes a replay path at runtime (`lib/replay/hooks.test.ts`), although the simulator's code
-still ships in its bundle. Until the run of 27 October on Base Sepolia is harvested into it, the recording is sample data: dummy hashes,
-no explorer links, and five DEMO signer keys that sign its vault. A recording of a real run carries its real
-transaction hashes, and the dock then links each on-chain step to its explorer.
+still ships in its bundle. The recording is our live run of 27 October on Base Sepolia and Zcash testnet
+(`lib/replay/recording.json`, harvested by `lib/replay/harvest.ts` from the run's snapshots and from Base): its real
+transaction hashes, each on-chain step linked to its explorer, and the real signers' signatures of its vault. The
+placeholder (`lib/replay/placeholder.ts`: dummy hashes, no explorer links, five DEMO signer keys) stays for the tests.
 
 ## Configuration
 
@@ -330,7 +331,7 @@ against independent sources:
 | Owner keys, EIP-712 signing, Safe address derivation, UA decoding, commitments | The market's price on testnets: the DemoShockOracle (MOCK / DEMO) around a MockZecOracle (MOCK), labelled in the UI; MockUSDC (MOCK) as the loan token on testnet |
 | Coordinator API client (against the running backend's shapes) | Sponsorship on a local fork: Pimlico's mock paymaster (MOCK, `tools/local-aa`), which sponsors whatever the backend's allowlist lets through |
 | Sponsored UserOps, the v3 ones (refund destination, pending refund, dispute, reopen, claim from the bonds) included: run in the browser on local forks of Base Sepolia, through the backend proxy and a local alto bundler (docs/TESTING.md § 2), and tested against a fake bundler and paymaster | Demo panel: the oracle it sets is the MOCK MockZecOracle; bot status is a placeholder |
-| Base reads through `/proxy/rpc`, the v3 ledger, refund reasons and compensation included: unit-tested against a mocked node, and run in the browser against the v4 deployments on local forks and against the live Base Sepolia deployment of 27 October (not kept running, D82) | DEMO: the judges' replay (`lib/replay/`, `NEXT_PUBLIC_REPLAY=1`), a simulator that plays a recording in the browser; sample data (dummy hashes, no explorer links) until a public run is recorded |
+| Base reads through `/proxy/rpc`, the v3 ledger, refund reasons and compensation included: unit-tested against a mocked node, and run in the browser against the v4 deployments on local forks and against the live Base Sepolia deployment of 27 October (not kept running, D82) | DEMO: the judges' replay (`lib/replay/`, `NEXT_PUBLIC_REPLAY=1`), a simulator that plays a recording in the browser: the live run of 27 October |
 | The minting banner and the borrow gate (GET /status, read by the backend from the Intake and the bond) | |
 | Demo panel price control (`GET` / `POST /admin/oracle`, the backend holds the owner key; refused where the market's oracle is a real feed, as on Base mainnet) | |
 | Close from collateral and deleverage: signed in the browser (the Safe's ERC-1271) and executed by the market-maker bot behind `GET /quotes/close` / `POST /closes` (docs/TESTING.md § 2) | |

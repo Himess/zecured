@@ -9,6 +9,7 @@ import { ReplayBand, ReplayDock } from "@/components/replay/ReplayDock";
 import { SeamMark } from "@/components/seam";
 import { Badge } from "@/components/ui";
 import { DEPLOYMENT } from "@/lib/deployment";
+import { sampleTransactions } from "@/lib/explorer";
 import { REPLAY, REPLAY_CSP } from "@/lib/replay/flag";
 import "./globals.css";
 
@@ -150,7 +151,7 @@ export default function RootLayout({ children }: { children: ReactNode }) {
             <nav aria-label="Proof" className="space-y-2.5">
               <p className="text-xs font-bold tracking-[0.08em] text-faint uppercase">Check it</p>
               <ul className="space-y-2">
-                <li><Link href="/evidence" className="text-soft no-underline hover:text-text hover:underline">{REPLAY ? "Evidence (sample data in this replay)" : "Evidence of real transactions"}</Link></li>
+                <li><Link href="/evidence" className="text-soft no-underline hover:text-text hover:underline">{sampleTransactions() ? "Evidence (sample data in this replay)" : "Evidence of real transactions"}</Link></li>
                 <li><Link href="/status" className="text-soft no-underline hover:text-text hover:underline">System status</Link></li>
                 <li><Link href="/world" className="text-soft no-underline hover:text-text hover:underline">What the world sees</Link></li>
                 <li><a href={SITE_URL} className="text-soft no-underline hover:text-text hover:underline">The site</a> · <a href={`${SITE_URL}docs/`} className="text-soft no-underline hover:text-text hover:underline">the docs</a></li>
