@@ -119,8 +119,8 @@
 <section class="chapter" id="how" data-scene="deposit" aria-labelledby="c-deposit">
   <div class="panel">
     <p class="kicker reveal"><span class="kicker-n">01</span> Deposit</p>
-    <h2 id="c-deposit" class="title reveal">Pay a vault no one holds alone.</h2>
-    <p class="body reveal">Five signers create a fresh <span class="nb">3-of-5</span> FROST vault for your loan. You pay it from Ironwood like any shielded payment: no amount and no address go public.</p>
+    <h2 id="c-deposit" class="title reveal">Pay a vault no one holds <em>alone</em>.</h2>
+    <p class="body reveal">Five signers create a fresh <strong><span class="nb">3-of-5</span> FROST vault</strong> for your loan. You pay it from Ironwood like any shielded payment: <strong>no amount and no address go public</strong>.</p>
     <ul class="seen reveal" aria-label="What each chain records">
       <li><span class="chip chip-z">Zcash</span> an encrypted payment</li>
       <li><span class="chip chip-b">Base</span> nothing at all</li>
@@ -132,8 +132,8 @@
 <section class="chapter" data-scene="prove" aria-labelledby="c-prove">
   <div class="panel">
     <p class="kicker reveal"><span class="kicker-n">02</span> Prove</p>
-    <h2 id="c-prove" class="title reveal">Base checks Zcash itself.</h2>
-    <p class="body reveal">Base verifies Zcash’s block headers and their proof of work on its own. A zero-knowledge proof then shows your deposit is in one of those blocks, without saying which. zZEC, a collateral receipt nobody can transfer, is minted on that proof alone: no signer vouches for it.</p>
+    <h2 id="c-prove" class="title reveal">Base checks Zcash <em>itself</em>.</h2>
+    <p class="body reveal">Base verifies Zcash’s block headers and their proof of work <strong>on its own</strong>. A zero-knowledge proof then shows your deposit is in one of those blocks, <strong>without saying which</strong>. zZEC, a collateral receipt nobody can transfer, is minted on that proof alone: <strong>no signer vouches for it</strong>.</p>
     <ul class="seen reveal" aria-label="What each chain records">
       <li><span class="chip chip-z">Zcash</span> nothing new</li>
       <li><span class="chip chip-b">Base</span> a vault id, a standard amount, a keyed tag</li>
@@ -148,8 +148,8 @@
 <section class="chapter" data-scene="borrow" aria-labelledby="c-borrow">
   <div class="panel">
     <p class="kicker reveal"><span class="kicker-n">03</span> Borrow</p>
-    <h2 id="c-borrow" class="title reveal">Borrow from a <span class="nb">brand-new</span> account.</h2>
-    <p class="body reveal">A fresh smart account borrows USDC on Morpho Blue against your zZEC. Its gas is sponsored, so it never holds ETH, and nothing on Base points back to your wallet.</p>
+    <h2 id="c-borrow" class="title reveal">Borrow from a <em class="nb">brand-new</em> account.</h2>
+    <p class="body reveal">A fresh smart account borrows USDC on Morpho Blue against your zZEC. Its gas is sponsored, so <strong>it never holds ETH</strong>, and <strong>nothing on Base points back to your wallet</strong>.</p>
     <p class="note reveal">Lenders on Morpho Blue supply the USDC and earn the interest, in a new market backed by Zcash collateral.</p>
   </div>
 </section>
@@ -157,8 +157,8 @@
 <section class="chapter" data-scene="close" aria-labelledby="c-close">
   <div class="panel">
     <p class="kicker reveal"><span class="kicker-n">04</span> Close</p>
-    <h2 id="c-close" class="title reveal">Leave without unshielding.</h2>
-    <p class="body reveal">Repay, or let a market maker repay for you out of your collateral. Your ZEC, or what is left of it, returns to a new Ironwood address, and every payout is recorded on Base before the signers sign it.</p>
+    <h2 id="c-close" class="title reveal">Leave without <em>unshielding</em>.</h2>
+    <p class="body reveal">Repay, or let a market maker repay for you out of your collateral. Your ZEC, or what is left of it, <strong>returns to a new Ironwood address</strong>, and every payout is <strong>recorded on Base before the signers sign it</strong>.</p>
     <p class="note reveal">If ZEC falls too far, a liquidator repays part of the debt and is paid in shielded ZEC too, which even your viewing key cannot see; the rest stays yours. You can also opt in to gentler, earlier partial liquidations.</p>
   </div>
 </section>
@@ -166,8 +166,8 @@
 <section class="chapter" id="swap" data-scene="swap" aria-labelledby="c-swap">
   <div class="panel">
     <p class="kicker reveal"><span class="kicker-n">05</span> Swap</p>
-    <h2 id="c-swap" class="title reveal">Buy shielded ZEC with USDC.</h2>
-    <p class="body reveal">The same light client settles a swap. A market maker fills your order from its own ZEC and USDC, at a price it signs for you alone. Your USDC waits in escrow on Base until a zero-knowledge proof shows the maker paid your shielded address for that very order.</p>
+    <h2 id="c-swap" class="title reveal">Buy <em>shielded ZEC</em> with USDC.</h2>
+    <p class="body reveal">The same light client settles a swap. A market maker fills your order from its own ZEC and USDC, at a price it signs for you alone. Your USDC <strong>waits in escrow on Base</strong> until <strong>a zero-knowledge proof shows the maker paid</strong> your shielded address for that very order.</p>
     <ul class="seen reveal" aria-label="What each chain records">
       <li><span class="chip chip-b">Base</span> the order and a salted hash, never your address</li>
       <li><span class="chip chip-z">Zcash</span> a shielded payment to you</li>
@@ -179,7 +179,7 @@
 <section class="chapter wide" id="privacy" data-scene="privacy" aria-labelledby="c-privacy">
   <div class="panel">
     <p class="kicker reveal"><span class="kicker-n">06</span> Privacy</p>
-    <h2 id="c-privacy" class="title reveal">A bridge leaves four links to you. Zecured leaves none of them.</h2>
+    <h2 id="c-privacy" class="title reveal">A bridge leaves four links to you. Zecured leaves <em>none of them</em>.</h2>
     <div class="versus">
       <div class="side side-bad reveal">
         <p class="side-h">Through a typical bridge</p>
@@ -207,15 +207,15 @@
 <section class="chapter" id="trust" data-scene="trust" aria-labelledby="c-trust">
   <div class="panel">
     <p class="kicker reveal"><span class="kicker-n">07</span> Trust</p>
-    <h2 id="c-trust" class="title reveal">We let three signers steal.</h2>
-    <p class="body reveal">On a separate DEMO deployment, three of five signers swept a vault. The borrower’s watchtower caught it two minutes later; a zero-knowledge proof of the theft slashed all five bonds (FROST hides which three signed), and the victim was made whole.</p>
+    <h2 id="c-trust" class="title reveal">We let three signers <em>steal</em>.</h2>
+    <p class="body reveal">On a separate DEMO deployment, three of five signers swept a vault. The borrower’s watchtower caught it two minutes later; <strong>a zero-knowledge proof of the theft slashed all five bonds</strong> (FROST hides which three signed), and <strong>the victim was made whole</strong>.</p>
     <p class="big-stat reveal"><span class="big-n"><span class="mono" aria-hidden="true">3 → 12.65</span><span class="sr">from 3 to 12.65</span> USDC</span><span class="big-cap">the victim’s account, before and after</span></p>
     <p class="note reveal">From the 3 USDC it had borrowed to 12.65 USDC, once the slashed bonds repaid its debt and paid out its equity: the full value of its stolen 0.01 ZEC at the demo’s price of $1,265. On that fork a MOCK verifier checked the proof; a real violation proof passes RISC Zero’s verifier in our fork tests. <a href="docs/#theft">The whole timeline</a></p>
   </div>
 </section>
 
 <section class="numbers" data-scene="numbers" data-veil="wide" aria-labelledby="n-h">
-  <h2 id="n-h" class="title reveal">Every number is a run you can repeat.</h2>
+  <h2 id="n-h" class="title reveal">Every number is a run you can <em>repeat</em>.</h2>
   <ul class="stats">
     <li class="stat reveal"><span class="stat-n" data-count="804" aria-hidden="true">804</span><span class="stat-l"><span class="sr">804 </span>contract tests pass</span></li>
     <li class="stat reveal"><span class="stat-n">4 of 4</span><span class="stat-l">kinds of real zero-knowledge proof (deposit, payout, theft, swap) pass RISC Zero’s verifier on Base forks; three of them live on Base Sepolia</span></li>
@@ -227,7 +227,7 @@
 
 <section class="demo demo-video" id="demo" data-scene="demo" data-veil="wide" aria-labelledby="demo-h">
   <div class="demo-copy">
-    <h2 id="demo-h" class="title reveal">See it run.</h2>
+    <h2 id="demo-h" class="title reveal">See it <em>run</em>.</h2>
     <p class="body reveal">Four minutes, recorded in our live run of 27 October on Zcash testnet and Base Sepolia: a loan opened in the browser, its deposit proven on Base, USDC borrowed from a brand-new account, a close from collateral, and a swap into shielded ZEC.</p>
     <p class="note reveal">Or click through it yourself: the app replays that run in your browser (DEMO), each step linked to its real transaction. The replay stands in for the signers, the prover and the chains, which are not kept running through judging.</p>
     <p class="ctas reveal"><a class="btn btn-gold" href="app/">Replay it in the app</a><a class="btn btn-line" href="https://youtu.be/iyXiao54KWk">Watch on YouTube<svg class="ext" width="12" height="12" viewBox="0 0 12 12" aria-hidden="true" focusable="false"><path d="M3.5 2.5h6v6M9.5 2.5 2.5 9.5" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round"/></svg></a></p>
@@ -243,7 +243,7 @@
 
 <section class="more" data-scene="end" data-veil="wide" aria-labelledby="more-h">
   <div class="more-head">
-    <h2 id="more-h" class="title reveal">Everything, in detail.</h2>
+    <h2 id="more-h" class="title reveal">Everything, in <em>detail</em>.</h2>
     <figure class="recap reveal">
       <img src="img/seam.svg" width="1000" height="600" loading="lazy" decoding="async" alt="What crosses from Zcash to Base: four zero-knowledge proofs (a deposit proof mints zZEC, an inclusion proof makes a payout final, a violation proof slashes the signers' bonds, a payment proof releases a swap's USDC) and salted commitments; never a Zcash transaction, note or address.">
       <figcaption>What crosses from Zcash to Base, and what never does.</figcaption>
