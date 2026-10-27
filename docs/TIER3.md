@@ -1,7 +1,7 @@
 # Tier 3: theft of collateral is provable on Base and slashes bonds
 
-Status (2026-10-27): **implemented, and deployed on Base Sepolia for the live run of 27 October** (Deploy 2). Contracts: Registry v2
-(`commitSpend`), `SignerBond`, `ZecuredSlasher`. Signers: the commitment in FROST round 1 and the
+Status (2026-10-27): **implemented, and deployed on Base Sepolia for the live run of 27 October** (Deploy 2). Contracts: `ZecuredRegistry`
+(`commitSpend`), `SignerBondV2`, `ZecuredSlasher`. Signers: the commitment in FROST round 1 and the
 round-2 checks (T3-4, T3-5). The violation statement, its zkVM guest, `build-violation` (F1, F2, F3)
 and the watcher (`zecured-wallet watch --tier3`) are done, and a real Testnet payout went through the
 whole protocol (`docs/TESTING.md` § 2); the review's E1 to E3 are in (D34), and so are the fixes of

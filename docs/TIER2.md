@@ -260,7 +260,7 @@ keep an off-chain refund from ever spending a note that backs zZEC, or could:
 | Guest | v1 guest: image id `0x08cc01a2f35fd80bb959e9403a7c08be1506139e3918b4d57b44b4326337bbc0` (2026-10-14 local build, after Tier 3's E1 changed the shared statement crate; any change to the crate changes it, so the deployed id comes from the reproducible build and is fixed with `export-elf`, § 8.1) |
 | Where the cycles go | Sinsemilla note commitments ~56 % (three: the witness note's validity check and two inside recovery), scalar multiplications, hash-to-curve, BLAKE2b ~7 %, SHA-256 ~1 % |
 | Optimizations so far | Pallas field multiplication and inversion through RISC Zero's 256-bit modular-multiplication accelerator (vendored `pasta_curves`, `ZECURED_PATCH.md`): ~3× fewer cycles; three redundant note commitments removed (the first run took 36.2 M cycles); witness read as one frame |
-| Local proving | a 22.1 M-cycle probe of the same code: succinct receipt in 108 min on this Apple M2 with 8 GB (CPU only, r0vm has no Metal backend, heavy swapping); the real deposit's proof: see `docs/TESTING.md` |
+| Local proving | a 22.1 M-cycle probe of the same code: succinct receipt in 108 min on our Apple M2 laptop with 8 GB (CPU only, r0vm has no Metal backend, heavy swapping); the real deposit's proof: see `docs/TESTING.md` |
 | On-chain | 222,380 + 163,179 gas with the MOCK verifier (§ 3) |
 
 ## 7. What still needs trust
@@ -281,8 +281,9 @@ keep an off-chain refund from ever spending a note that backs zZEC, or could:
   pending activation and `minConfirmationWork` are demonstrative on Testnet; on mainnet they inherit Zcash's proof of
   work, with the depth chosen by the value at risk. The relay is the same code on both networks: deployed with the
   Mainnet parameters (`networkId()` = keccak256("zcash-mainnet"): Mainnet PoWLimit, no minimum-difficulty blocks)
-  it accepts real Mainnet headers (180 in its tests, contracts/src/relay/README.md). The Mainnet NU7 height is to
-  be set on 2026-10-20 (ZIP 259); a Mainnet relay that must cross NU7 is deployed with it.
+  it accepts real Mainnet headers (180 in its tests, contracts/src/relay/README.md). The Mainnet NU7 height,
+  3,543,405, was proposed on 2026-10-20 and is not yet ratified (ZIP 259); a Mainnet relay that must cross NU7 is
+  deployed with it.
 
 ## 8. Remaining work
 
@@ -297,9 +298,9 @@ keep an off-chain refund from ever spending a note that backs zZEC, or could:
    § 2b): a deployment that proves its users' deposits needs a GPU. A deposit witness holds
    the vault's tag key K, not its viewing key (statement v2): the GPU server learns which notes and payouts are the
    vault's, not their amounts or recipients. The private alternative keeps the STARK on the depositor's machine.
-2. **Base Sepolia**: deploy a relay from a recent checkpoint (`script/DeployRelay.s.sol`, Testnet parameters by
-   default; the relay deployed on 2026-10-12 predates them and has no `networkId()`), keep it fed, deploy the v3
-   contracts with the router, the image ids below as the initial versions and the relay.
+2. **Base Sepolia**: done on 27 October for the live run: the relay `0xEc34aA21cDe1366b397a99A4d90fc6B2f02cFaEa`
+   (checkpoint 4,547,001, Testnet parameters), fed through the run, and the contracts with RISC Zero's router and the
+   image ids below as the initial versions ([TESTING.md](TESTING.md) § 2c).
 3. **Fewer cycles** (optional once proving runs on a GPU): one note commitment instead of three (own ZIP 212
    recovery), Pallas point operations through RISC Zero's elliptic-curve accelerator.
 

@@ -200,7 +200,7 @@
         </ul>
       </div>
     </div>
-    <p class="note reveal">Our leak scanner checks each deployment. In the last run, none of 302 Zcash identifiers from our own transactions (txids, note commitments, nullifiers, addresses, keys) appeared in its 77 events, 55 transactions’ calldata or 177 storage words.</p>
+    <p class="note reveal">Our leak scanner checks each deployment. In the live run on Base Sepolia, none of 181 Zcash identifiers from our own transactions (txids, note commitments, nullifiers, addresses, keys) appeared in its 89 events or 60 transactions’ calldata; in our last fork run, none of 302, storage included.</p>
   </div>
 </section>
 
@@ -219,7 +219,7 @@
   <ul class="stats">
     <li class="stat reveal"><span class="stat-n" data-count="804" aria-hidden="true">804</span><span class="stat-l"><span class="sr">804 </span>contract tests pass</span></li>
     <li class="stat reveal"><span class="stat-n">4 of 4</span><span class="stat-l">kinds of real zero-knowledge proof (deposit, payout, theft, swap) pass RISC Zero’s verifier on Base forks; three of them live on Base Sepolia</span></li>
-    <li class="stat reveal"><span class="stat-n">0</span><span class="stat-l">of 302 Zcash identifiers found on Base, on our forks</span></li>
+    <li class="stat reveal"><span class="stat-n">0</span><span class="stat-l">of 181 Zcash identifiers of the live run found on Base Sepolia</span></li>
     <li class="stat reveal"><span class="stat-n" data-count="28.1" data-decimals="1" aria-hidden="true">28.1</span><span class="stat-u" aria-hidden="true">s</span><span class="stat-l"><span class="sr">28.1 seconds: </span>a deposit’s proof on one GPU, before its Groth16 wrap</span></li>
   </ul>
   <p class="note reveal">All of it on Zcash testnet, Base Sepolia (live, 27 October), local forks of Base Sepolia and Base mainnet, and a rented GPU. <a href="docs/#evidence">The evidence</a></p>
@@ -229,11 +229,11 @@
   <div class="demo-copy">
     <h2 id="demo-h" class="title reveal">See it <em>run</em>.</h2>
     <p class="body reveal">Four minutes, recorded in our live run of 27 October on Zcash testnet and Base Sepolia: a loan opened in the browser, its deposit proven on Base, USDC borrowed from a brand-new account, a close from collateral, and a swap into shielded ZEC.</p>
-    <p class="note reveal">Or click through it yourself: the app replays that run in your browser (DEMO), each step linked to its real transaction. The replay stands in for the signers, the prover and the chains, which are not kept running through judging.</p>
+    <p class="note reveal">Or click through it yourself: the app replays that run in your browser (DEMO), each on-chain step linked to its real transaction. The replay stands in for the signers, the prover and the chains, which are not kept running through judging.</p>
     <p class="ctas reveal"><a class="btn btn-gold" href="app/">Replay it in the app</a><a class="btn btn-line" href="https://youtu.be/iyXiao54KWk">Watch on YouTube<svg class="ext" width="12" height="12" viewBox="0 0 12 12" aria-hidden="true" focusable="false"><path d="M3.5 2.5h6v6M9.5 2.5 2.5 9.5" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round"/></svg></a></p>
   </div>
   <figure class="frame reveal">
-    <video controls preload="none" playsinline width="1920" height="1080" poster="media/demo-poster.jpg" aria-describedby="demo-cap">
+    <video controls preload="none" playsinline width="1920" height="1080" poster="media/demo-poster.jpg" aria-label="The live run of 27 October: a loan and a swap" aria-describedby="demo-cap">
       <source src="media/demo.mp4" type="video/mp4">
       <track kind="captions" srclang="en" label="English" src="media/demo.en.vtt" default>
     </video>

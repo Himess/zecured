@@ -3,7 +3,7 @@
 **Can I try it?**
 Yes, four ways. Watch the video of the live run (https://youtu.be/iyXiao54KWk, 3:55). Open the app
 as a guided replay (https://zecured.vercel.app/app/, DEMO): the same app in your browser, replaying our live run of
-27 October in place of our servers, each step linked to its real transaction; you press the real buttons. Check a real proof with one `cast call`: RISC
+27 October in place of our servers, each on-chain step linked to its real transaction; you press the real buttons. Check a real proof with one `cast call`: RISC
 Zero's router on Base Sepolia accepts the Groth16 proof of a real Zcash testnet deposit
 ([README](../README.md#for-judges-5-minutes), item 3). Or run the whole system on a local fork of Base Sepolia with
 real Zcash testnet ([README](../README.md#running-it)). No hosted deployment runs through judging
@@ -16,6 +16,15 @@ It's a FROST threshold vault: one shielded address, signatures indistinguishable
 single signer's, and every signer enforces a written policy on every payout. Two compromised
 signers can't move funds: we ran it on Zcash testnet, two signers switched to "compromised" signed a
 sweep, the other three refused, and nothing moved. Three that steal are slashed (below).
+
+**Why are there signers at all, and what do they see?**
+Zcash's shielded pool has no scripts, and a loan must stay liquidatable when its borrower is gone, so someone has
+to be able to spend the collateral: a fresh 3-of-5 FROST vault per loan, whose signers may pay only what Base has
+recorded. Three of them could still move a vault's ZEC; the design makes that provable on Base, and it slashes
+their bonds, which repay the victims. The signers see the vault's notes and amounts, the Ironwood addresses it
+pays and the Base account it backs; never the depositor's wallet or identity. Whoever proves a deposit (our
+rented GPU machine in the live run) sees the deposit transaction and its note, the vault's id, owner, account,
+address and tag key, not its viewing key ([THREAT_MODEL.md](THREAT_MODEL.md)).
 
 **How do I pay interest without linking my identity?**
 Close from collateral: a market maker repays the debt on Morpho and takes ZEC from the vault;
@@ -61,9 +70,9 @@ on-chain: a Zcash Mainnet header costs about 600,000 gas, about 0.010 ETH a day 
 base fee of 0.005 gwei ([MAINNET.md](MAINNET.md) § 3).
 
 **How long does a loan take, and what does it cost?**
-About eight minutes in our browser run on a fork: the signers saw the deposit 2 min 50 s after its broadcast, its
-proof was on Base after 4 min 25 s (MOCK verifier on that fork; a real proof adds its GPU time, 28.1 s for a
-deposit's STARK on one RTX 4090, and about a minute for its Groth16 wrap), and the loan was active after 7 min 56 s.
+About 14 minutes from the deposit's block to an active loan in our live run on Base Sepolia: ten confirmations
+(4 min 38 s), the proof verified by RISC Zero's router 6 min 33 s later (2 min 10 s of it proving on a rented
+RTX 4090 and its CPU), and the activation 2 min 32 s after that.
 The account's gas is sponsored; the vault keeps a 0.5 % opening fee in ZEC (waived when it would be below 20,000
 zatoshi), and the Morpho market sets the interest.
 
@@ -182,8 +191,9 @@ tree restarting at the activation ([MAINNET.md](MAINNET.md)).
 The ZEC price (`MockZecOracle`, behind `DemoShockOracle`, whose owner-set shock shows a liquidation); the loan token
 (MockUSDC, a test token we mint); the verifier of the local-fork runs (`MockRiscZeroVerifier`; the live Base
 Sepolia run and the fork tests use RISC Zero's router); the local fork's
-paymaster (Pimlico's mock paymaster, behind our allowlist); and signer independence (all five nodes run by us; the
-bonds show the mechanism). The demo wallet, the theft demonstration (a separate deployment with a 2-minute
+paymaster (Pimlico's mock paymaster, behind our allowlist); signer independence (all five nodes run by us; the
+bonds show the mechanism); and the market's liquidity and bots (our deployer supplied the 100,000 MockUSDC; the
+market makers and the liquidator are ours, and anyone can run them). The demo wallet, the theft demonstration (a separate deployment with a 2-minute
 challenge window) and the app's replay are labelled DEMO. Real: Zcash testnet (NU7) Ironwood transactions, FROST
 threshold signing, the zero-knowledge statements and their seals, the on-chain Zcash header relay, Morpho Blue's own
 deployment (on Base Sepolia, live and on forks), and gasless smart accounts through our own proxy and allowlist. The full list

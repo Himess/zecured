@@ -649,7 +649,8 @@ export async function gatherFacts(inp: HarvestInputs, client: PublicClient): Pro
     },
     chain: {
       baseBlock: inp.t0.baseBlock,
-      zcashTip: num(status0, "zcashTip", "t0 status"),
+      // The Zcash tip as the vault opened (its birthday), not at t0: the replay's deposit deadline is then the run's.
+      zcashTip: Math.max(num(status0, "zcashTip", "t0 status"), typeof vault2.birthdayHeight === "number" ? vault2.birthdayHeight : 0),
       price: (price as bigint).toString(),
       borrowRate: borrowRate.toString(),
       market: {

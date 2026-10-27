@@ -18,10 +18,10 @@
 1. **Watch** [the video of the live run](https://youtu.be/iyXiao54KWk) (3:55, English captions).
 2. **Click through** [the app as a guided replay](https://zecured.vercel.app/app/): the real app in your
    browser, replaying our live run of 27 October on Base Sepolia and Zcash testnet in place of our servers (DEMO),
-   each step linked to its real transaction. Nothing to install.
+   each on-chain step linked to its real transaction. Nothing to install.
 3. **Check a real proof in one command** (Foundry's `cast`, nothing to clone): RISC Zero's verifier router as
    deployed on Base Sepolia accepts the Groth16 proof of a real Zcash testnet deposit (the TEST-ONLY vault 9,
-   0.01 TAZ at block 4,488,543):
+   a disposable test vault whose viewing key is public in the test fixtures; 0.01 TAZ at block 4,488,543):
 
    ```bash
    cast call 0x0b144E07A0826182B6b59788c34b32Bfa86Fb711 "verify(bytes,bytes32,bytes32)" \
@@ -49,7 +49,7 @@
 
 Using ZEC in DeFi today usually means taking it out of the shielded pool. Zecured doesn't. People already borrow
 against ZEC on Base: [Morpho's cbZEC/USDC market](https://app.morpho.org/base/variable/0xe458a501c1103ca3b256f2bcb45d223263fb34b6349d82675494ce3a94ce1327/usdc-cbzec), backed by Coinbase's custodial wrapped ZEC and public on-chain,
-held about USD 2.5 M of supplied USDC when we read it on 16 October 2026
+had about USD 2.7 M of USDC borrowed (USD 3.0 M supplied) when we read it on 27 October 2026
 ([docs/ref/FACTS.md](docs/ref/FACTS.md)). Zecured is that market for shielded ZEC.
 
 Two products, one Zcash light client on Base:
@@ -77,8 +77,12 @@ check a shielded Zcash payment, with no bridge. The vault design is written up a
 
 ![What crosses from Zcash to Base: four zero-knowledge proofs (deposit, inclusion, violation, payment) and salted commitments; never a Zcash transaction, note or address](docs/assets/seam.svg)
 
-**Who you have to trust.** Base never takes the signers' word: deposits are proven, payouts are proven, and
-misbehaviour is proven.
+**Who you have to trust.** Zcash's shielded pool has no scripts, and a loan must stay liquidatable when its
+borrower is gone, so someone has to be able to spend the collateral: a fresh 3-of-5 FROST vault per loan, whose
+signers may pay only what Base has recorded. Three signers could still move a vault's ZEC: the design makes that
+provable and slashable, not impossible. The signers see the vault's notes and amounts, the Ironwood addresses it
+pays and the Base account it backs; never the depositor's wallet or identity. Base checks them instead of
+trusting them:
 
 - **Deposits.** zZEC is minted only on a zero-knowledge proof that the deposit is in a Zcash block whose header
   Base verified; no signer vouches for it, and all five together can only add a new verifier after a public delay
@@ -113,6 +117,11 @@ Verified end to end on **Zcash testnet (NU7)** with five separate signer process
 ran on local forks of Base Sepolia for the rows below, and **live on Base Sepolia** on 27 October 2026 for the
 last one, every proof of that run checked by RISC Zero's deployed router:
 
+<sub>Labels: Tier 2 is minting on a deposit proof; Tier 3, every payout committed on Base before it is signed, with a
+theft provable and slashed. P0 to P6 are the signers' payout policies ([docs/ARCHITECTURE.md](docs/ARCHITECTURE.md));
+F1 to F3 the thefts a violation proof shows: a spend no commitment allowed, change withheld, a payment short of its
+claim.</sub>
+
 | Flow | Result |
 |---|---|
 | Vault creation | 5-party FROST DKG over HTTP (node-to-node encrypted), ZIP 2005 `use_qsk` keys, Ironwood-only address |
@@ -135,14 +144,10 @@ last one, every proof of that run checked by RISC Zero's deployed router:
 | The app in a browser | Gasless: open, deposit, borrow with pre-liquidation terms, deleverage and close from collateral (Safe signatures), repay and release, a claim paid from the bonds |
 | Live on Base Sepolia (27 October) | The core flows on a public chain: a deposit minted on its Groth16 proof (made on a rented RTX 4090) through RISC Zero's router, a sponsored borrow from an account that never held ETH, a close from collateral paid in one 3-of-5 FROST Zcash transaction whose delivery was then proven on Base, and a swap settled on the proof of its Zcash payment ([docs/TESTING.md § 2c](docs/TESTING.md#2c-live-on-base-sepolia-2026-10-27)) |
 
-On 27 October 2026 the system ran live on Base Sepolia, its contracts verified on Basescan ([the list](#the-live-run-on-the-explorers)),
-every proof made on a rented GPU and checked by RISC Zero's deployed router. The earlier end-to-end runs used local forks of Base
-Sepolia, against the real Morpho Blue deployment, and checked proofs with a MOCK verifier, since RISC Zero does not
-run on our Windows machine; real Groth16 seals of every guest (deposit, F1, inclusion, swap payment) also pass RISC
-Zero's router on Base Sepolia and Base mainnet forks: `cd contracts && forge test --match-path
-test/fork/RealSealsV2.t.sol --isolate`. No deployment is kept running through judging ([D82](docs/DECISIONS.md)):
-the live run's servers and GPU stopped after it, and the whole system runs on a local fork (below). Evidence (block
-heights, txids, timings) and how to reproduce every run: [docs/TESTING.md](docs/TESTING.md).
+Evidence for every row (block heights, txids, timings) and how to reproduce it: [docs/TESTING.md](docs/TESTING.md);
+the live run's transactions and contracts are [below](#the-live-run-on-the-explorers). No deployment is kept running
+through judging ([D82, D112](docs/DECISIONS.md)): the live run's servers and GPU stopped after it, and the whole
+system runs on a local fork ([Running it](#running-it)).
 
 ### The live run on the explorers
 
@@ -163,6 +168,9 @@ timings and the rehearsal before it are in [docs/TESTING.md § 2c](docs/TESTING.
 | Swap: the maker paid 0.00391343 TAZ (block 4,548,320) | Zcash | [`fa6ce860…245ee0`](https://testnet.zecblock.com/tx/fa6ce860bce2a39b3be793d36d6e767b1e9cd738b0d716bc9185ea7797245ee0) |
 | Swap: the payment proven on Base | Base | [`0xac5ad94f…c318fa`](https://sepolia.basescan.org/tx/0xac5ad94fc62de4dbe76d9b17243f39713bffe6f8fc29a2e8167699c394c318fa) |
 | Swap: settled, the tokens released to the maker | Base | [`0xd1c1989d…038d69`](https://sepolia.basescan.org/tx/0xd1c1989d699bb55d0b78d04a61f7ca77996043c4d139769d48b307bed7038d69) |
+
+We publish both chains' transactions of our own demo vault as evidence; nothing on Base links them (0 of the run's
+181 Zcash identifiers appear there).
 
 The contracts, all verified on Basescan (`contracts/deployments/base-sepolia{,.swap,.relay,.paymaster}.json`):
 
@@ -216,7 +224,6 @@ Base mainnet:
 - Our own RPC, bundler and paymaster proxy with a sponsorship allowlist; in the live run, our own paymaster contract
   (`SingletonPaymasterV7`) and alto bundler on Base Sepolia sponsored the loan account's UserOps.
 - The app's pages, the same in the live build and in the judges' replay.
-- An onion service configuration for the app and its API (`infra/onion`): configured, not deployed (D82).
 
 **Mock or demo, in the runs** (labelled MOCK or DEMO in the code):
 
@@ -227,6 +234,8 @@ Base mainnet:
   refuses the demo oracle there ([docs/MAINNET.md](docs/MAINNET.md)).
 - The loan token on testnet: MockUSDC, a test token we mint (MOCK: no value). The contracts take any 6-decimal
   USDC; the mainnet configuration names Circle's USDC.
+- The market's liquidity and bots: our deployer supplied the 100,000 MockUSDC the loans borrow; the market makers
+  and the liquidator are ours (anyone can run them).
 - The verifier in the local-fork runs: `MockRiscZeroVerifier` (MOCK: it accepts unproven journals, and also plays
   the router and its emergency stop for the version registry), fed by `mock-host` (MOCK, TEST ONLY), which checks
   each witness with the native statement and seals its journal where RISC Zero does not run (Windows). The live
@@ -238,7 +247,8 @@ Base mainnet:
 - Signer independence: all five nodes are run by us; the Tier 3 bonds show the mechanism, not economic security.
 - DEMO: on testnet only, the operators' demo wallet pays a vault real TAZ for a visitor without testnet ZEC ("Pay it
   with demo TAZ"), takes back a closed loan's ZEC ("Send my ZEC back to the demo wallet") and can receive a swap
-  ("DEMO: use the demo wallet's Ironwood address"). The live run used all three.
+  ("DEMO: use the demo wallet's Ironwood address"). The recorded run's deposit was paid this way; its close and its
+  swap paid our CLI wallet.
 - DEMO: the theft demonstration runs on its own deployment with a 2-minute challenge window, never on the lending
   deployment.
 - DEMO: the judges' replay of the app (`app/lib/replay`, a static site with no backend): an in-browser simulator
@@ -321,7 +331,7 @@ cp .env.example .env          # first fill in DEPLOYER_PRIVATE_KEY, SIGNER_ADDRE
 cargo build -p zecured-deposit-witness --bin update-headers && cargo build -p zecured-bots
 mkdir -p data/tier2 && python3 -I contracts/test/relay/tools/zcash_p2p_headers.py --count 1 \
   --from-height 4465014 --from-hash 000008e7829f03777ab23991cc9dba1521a1cb3fe5ce2dffa6824c7d7f935ac9 \
-  --out data/tier2/headers_nu7.json                         # first run only: the NU7 epoch's first header
+  --out data/tier2/headers_nu7.json                         # first run only: a header just before the NU7 epoch
 ./target/debug/update-headers data/tier2/headers_nu7.json   # then every header since, over P2P
 scripts/local-fork.sh start   # anvil fork, fresh deployment (contracts/deployments/anvil.json), the header relay fed
                               # from the Testnet, the guests' image ids, bundler :4337, paymaster :4338

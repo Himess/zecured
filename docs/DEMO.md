@@ -1,5 +1,7 @@
 # Demo runbook
 
+No live demo runs through judging (D82); this is how the run of 27 October and its video were made.
+
 ## Before the demo
 
 1. `scripts/signer-network.sh start`: 5 signer nodes + backend; check `scripts/signer-network.sh status`.
@@ -13,7 +15,7 @@
    never paid and their vaults never settle.
 6. Backup video recorded (see below) in case the testnet or the light wallet server is slow.
 
-## Live flow (≈ 6 minutes)
+## Live flow (about 14 minutes to an active loan on Base Sepolia, then the close and the swap)
 
 | Scene | What to show | Proof on screen |
 |---|---|---|
@@ -80,7 +82,7 @@ market's size and rates, the collateral, the bonds, the compensation order, and 
 
 ## Recording the video
 
-The submitted video runs about two minutes and follows the build being submitted. Rules for the recording:
+The submitted video runs 3 min 55 s (the live run of 27 October) and follows the build being submitted. Rules for the recording:
 
 - Testnet only, and only features that work in the build being submitted.
 - No real personal addresses on screen, and never a viewing key, a salt, an owner-key backup, the admin token,

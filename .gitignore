@@ -48,8 +48,8 @@ docs/ref/vendor/
 # Logs
 *.log
 
-# Local state directories (vault keys, node stores)
-/data/
+# Local state directories (vault keys, node stores), wherever a command runs from
+data/
 
 # What documented commands write where they run (README, DEMO.md, OPERATIONS.md, the tier2 host): viewing keys,
 # witnesses, receipts and seals, signed requests. Never published.
@@ -69,6 +69,8 @@ docs/ref/vendor/
 /req.json
 /sig.*.json
 /bundle.json
+# A loan's key backup from the app: it carries the loan's owner key.
+zecured-loan-backup-*.json
 *.env
 
 # Editor and OS leftovers

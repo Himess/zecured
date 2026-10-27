@@ -139,49 +139,9 @@ The landing page’s demo section plays the video of the live run of 27 October 
 150 KB) that opens it. The video lives in `site/media/`:
 `demo.mp4` (H.264, 1080p, CRF about 26, `+faststart` so that it plays before it has downloaded, at most about 30 MB:
 the repository keeps every version), a poster frame of the app, `demo-poster.jpg` (at most 150 KB), and English
-captions, `demo.en.vtt` (the site's file stays without burned-in captions, or drop `default` from the track). Then
-replace the whole `<section class="demo" ...>` with this, keeping the one sentence that says what the video was
-recorded from (the replay's sample data, or a live run on a given date), and in the hero change the second button to
-“Watch the 2-minute demo”. Keep the YouTube link a plain link, never an embed: the policy allows no frames.
-
-```html
-<section class="demo demo-video" id="demo" data-scene="demo" data-veil="wide" aria-labelledby="demo-h">
-  <div class="demo-copy">
-    <h2 id="demo-h" class="title reveal">See it run.</h2>
-    <p class="body reveal">Two minutes, recorded in the app’s replay (DEMO, sample data): a loan opened in the browser, its deposit proven on Base, USDC borrowed from a brand-new account, a close from collateral, and a swap into shielded ZEC.</p>
-    <!-- a live run: "Two minutes, recorded in our live run of <date> on Zcash testnet and Base Sepolia: ..." -->
-    <p class="note reveal">Or click through it yourself: the app runs as a guided replay in your browser, with sample data (DEMO).</p>
-    <p class="ctas reveal"><a class="btn btn-gold" href="app/">Replay it in the app</a><a class="btn btn-line" href="https://www.youtube.com/watch?v=VIDEO_ID">Watch on YouTube<svg class="ext" width="12" height="12" viewBox="0 0 12 12" aria-hidden="true" focusable="false"><path d="M3.5 2.5h6v6M9.5 2.5 2.5 9.5" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round"/></svg></a></p>
-  </div>
-  <figure class="frame reveal">
-    <video controls preload="none" playsinline width="1920" height="1080" poster="media/demo-poster.jpg" aria-describedby="demo-cap">
-      <source src="media/demo.mp4" type="video/mp4">
-      <track kind="captions" srclang="en" label="English" src="media/demo.en.vtt" default>
-    </video>
-    <figcaption id="demo-cap" class="frame-cap">2:00 · narrated · English captions</figcaption>
-  </figure>
-</section>
-```
-
-And in `landing.css`, after `.frame video { ... }`, so that the video takes the section's width and the app's words
-in it stay legible (at the side of the copy it would get about 660 px, a third of 1080p):
-
-```css
-.demo-video {
-  grid-template-columns: minmax(0, 1fr);
-}
-
-.demo-video .demo-copy {
-  max-width: 44rem;
-}
-
-.frame-cap {
-  padding: 10px 16px 12px;
-  border-top: 1px solid var(--hair);
-  color: var(--muted);
-  font-size: 13.5px;
-}
-```
+captions, `demo.en.vtt` (the site's file stays without burned-in captions, or drop `default` from the track). The section (`site/index.html`, `<section class="demo demo-video">`) and its styles (`landing.css`:
+`.demo-video`, `.frame-cap`) are in place. Keep the YouTube link a plain link, never an embed: the policy
+allows no frames.
 
 Encode with `ffmpeg -i master.mov -vf scale=1920:-2 -c:v libx264 -preset slow -crf 26 -profile:v high -pix_fmt yuv420p
 -movflags +faststart -c:a aac -b:a 128k site/media/demo.mp4`, and the poster with `ffmpeg -ss 2 -i site/media/demo.mp4

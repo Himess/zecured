@@ -397,7 +397,7 @@ function Recap({ rec }: { rec: ReplayRecording }) {
         <li>A swap of USDC into shielded ZEC, released by a proof of the maker&apos;s payment.</li>
       </ul>
       <p className="mt-2 text-[12.5px] text-muted">
-        {sample ? "This replay plays sample data; the steps and their checks are the app's own code." : "Each step above links to its real transaction."}
+        {sample ? "This replay plays sample data; the steps and their checks are the app's own code." : "Each on-chain step above links to its real transaction."}
       </p>
       <div className="mt-3 flex flex-wrap gap-2">
         <Link href="/world" className={buttonClass("secondary", undefined, "sm")}>

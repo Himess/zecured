@@ -17,15 +17,15 @@ verified on Basescan: https://github.com/Himess/zecured#the-live-run-on-the-expl
 Zcash's shielded pool, or swap USDC into shielded ZEC. Base sees zero-knowledge proofs, never your Zcash address,
 transaction or balance. The ZEC sits in a fresh 3-of-5 FROST vault; Base verifies Zcash's headers itself and mints
 a non-transferable collateral receipt on a RISC Zero proof of the deposit; a brand-new, gasless account borrows on
-Morpho Blue. It ran live on Zcash testnet and Base Sepolia on 27 October 2026, every proof made on a rented GPU and
-checked by RISC Zero's deployed router. Testnet only: the five signers are run by the team, and the ZEC price and the
+Morpho Blue. It ran live on Zcash testnet and Base Sepolia on 27 October 2026, every proof made on one rented
+machine (the STARKs on its RTX 4090, the Groth16 wraps on its CPU) and checked by RISC Zero's deployed router. Testnet only: the five signers are run by the team, and the ZEC price and the
 loan token (MockUSDC) are mocks.
 
 ## For judges (5 minutes)
 
 - **Watch** the video of the live run (3:55, English captions): https://youtu.be/iyXiao54KWk
 - **Click through** the app as a guided replay in your browser: it replays our live run of 27 October in place of
-  our servers (DEMO), each step linked to its real transaction: https://zecured.vercel.app/app/
+  our servers (DEMO), each on-chain step linked to its real transaction: https://zecured.vercel.app/app/
 - **Check a real proof in one command** (Foundry's `cast`, nothing to clone): RISC Zero's verifier router as deployed
   on Base Sepolia accepts the Groth16 proof of a real Zcash testnet deposit (the TEST-ONLY vault 9, block 4,488,543):
 
@@ -60,7 +60,7 @@ borrows USDC on Morpho Blue. The same Zcash light client releases a swap's escro
 proof that the market maker paid your shielded address.
 
 People already borrow against ZEC on Base: Morpho's cbZEC/USDC market (https://app.morpho.org/base/variable/0xe458a501c1103ca3b256f2bcb45d223263fb34b6349d82675494ce3a94ce1327/usdc-cbzec),
-backed by Coinbase's custodial wrapped ZEC and public on-chain, held about USD 2.5 M of supplied USDC when we read it on 16 October 2026. Zecured is that
+backed by Coinbase's custodial wrapped ZEC and public on-chain, had about USD 2.7 M of USDC borrowed (USD 3.0 M supplied) when we read it on 27 October 2026. Zecured is that
 market for shielded ZEC.
 
 Built from scratch for ZECATHON 2026 (Cross-Chain track), first commit 10 October: 804 contract tests, 35
@@ -83,8 +83,12 @@ off-chain; Base sees only its salted hash. The maker pays you shielded ZEC, with
 the memo, and proves the payment in zero knowledge; the USDC is released only then, and comes back to
 you if the maker never pays. No custodian, no signer, no wrapped ZEC.
 
-**Who you have to trust.** Base never takes the signers' word: deposits are proven, payouts are proven, and
-misbehaviour is proven.
+**Who you have to trust.** Zcash's shielded pool has no scripts, and a loan must stay liquidatable when its
+borrower is gone, so someone has to be able to spend the collateral: a fresh 3-of-5 FROST vault per loan, whose
+signers may pay only what Base has recorded. Three signers could still move a vault's ZEC: the design makes that
+provable and slashable, not impossible. The signers see the vault's notes and amounts, the Ironwood addresses it
+pays and the Base account it backs; never the depositor's wallet or identity. Base checks them instead of
+trusting them:
 - **Minting:** zZEC is minted only on a zero-knowledge proof (RISC Zero) that the deposit is in a
   Zcash block whose header an on-chain relay verified with Equihash. Minting needs no signer,
   except that all five together can schedule a new verifier version, which takes effect only after
@@ -138,8 +142,8 @@ like any claim. What the design cannot stop: all five signers colluding
 - the timing between a commitment on Base and its payout on Zcash, blurred by a random delay;
 - the anonymity sets, which are small on testnet: a deposit's proof places it among the Ironwood transactions of
   about 3 blocks (a random 0 to 2 extra confirmations), a payout or a swap payment among those of 8 blocks;
-- what the signers see: the vault's notes and the destinations it pays (they are run by us in
-  this demo).
+- what the signers see: the vault's notes and the destinations it pays, and the Base account it backs (they are
+  run by us in this demo).
 
 ## What is real and what is a mock
 
@@ -152,7 +156,7 @@ like any claim. What the design cannot stop: all five signers colluding
   transactions, the last on 12 October 2026 (0xab07317f7B9390394271D9c03FE2E912C0E58FA5);
 - the deposit, violation and payment statements, run in the RISC Zero zkVM, and the guests'
   reproducible image ids;
-- real Groth16 seals, made on a rented GPU: in the live run, accepted by RISC Zero's deployed verifier router on Base
+- real Groth16 seals (their STARKs on a rented RTX 4090 or a CPU server, wrapped on a CPU): in the live run, accepted by RISC Zero's deployed verifier router on Base
   Sepolia (deposits minted on their proofs, a payout's delivery, a swap's payment); for every pinned guest, on Base
   Sepolia and Base mainnet forks; and the deposit's seal of the one-command check above;
 - `ZecuredSwap` and its market maker (live on Base Sepolia: a swap settled on its payment proof);

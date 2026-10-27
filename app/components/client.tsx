@@ -271,7 +271,7 @@ export function RealAndMockList({ verifierIsMock }: { verifierIsMock?: boolean |
         <p className="mb-3 text-sm font-semibold text-demo">
           {sampleTransactions()
             ? "DEMO: this replay plays sample data in your browser; none of the real parts below ran in it."
-            : "DEMO: this replay plays our live run of 27 October 2026 in your browser. The real parts below ran in that run; the replay itself touches no chain."}
+            : "DEMO: this replay plays our live run of 27 October 2026 in your browser; the replay itself touches no chain. The real parts below were live in that run; slashing and compensation were deployed but not exercised (the theft demonstration shows them)."}
         </p>
       ) : null}
     <ul className="list-disc space-y-2 pl-5 text-sm text-soft">

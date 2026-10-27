@@ -120,11 +120,17 @@ our swap page. No custodian: your USDC waits on Base until the maker proves, in
 00:02:47.940 --> 00:02:53.020
 zero knowledge, that it paid your Ironwood address. I enter 5 USDC and get the maker's quote,
 
-00:02:53.020 --> 00:03:04.100
-and I will receive 0.0039 ZEC. Then I connect my wallet and sign
+00:02:53.020 --> 00:02:58.600
+and I will receive 0.0039 ZEC.
 
-00:03:04.100 --> 00:03:13.910
-in the wallet. The order is opened, and we are waiting for the maker. My USDC
+00:02:58.600 --> 00:03:04.100
+Then I connect my wallet and sign
+
+00:03:04.100 --> 00:03:09.000
+in the wallet. The order is opened,
+
+00:03:09.000 --> 00:03:13.910
+and we are waiting for the maker. My USDC
 
 00:03:13.910 --> 00:03:17.350
 waits in the contract. It is released only when the maker proves, in zero knowledge, that it
