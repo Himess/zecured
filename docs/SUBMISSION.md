@@ -5,7 +5,7 @@ and what is a mock. Every link is absolute, so it works from the form.
 
 **Links.** The site: https://zecured.vercel.app/ (the details: https://zecured.vercel.app/docs/). The
 app replaying our live run of 27 October in your browser (DEMO, no server needed): https://zecured.vercel.app/app/.
-The code: https://github.com/Himess/zecured. The same pages on GitHub Pages: https://himess.github.io/zecured/.
+The video of the live run: https://youtu.be/iyXiao54KWk. The code: https://github.com/Himess/zecured. The same pages on GitHub Pages: https://himess.github.io/zecured/.
 
 **Team.** Himess (https://github.com/Himess). Built from scratch for ZECATHON 2026, Cross-Chain track; first commit
 10 October 2026.
@@ -22,7 +22,7 @@ loan token (MockUSDC) are mocks.
 
 ## For judges (5 minutes)
 
-- **Watch** the video of the live run. Its link goes here as soon as it is published.
+- **Watch** the video of the live run (3:55, English captions): https://youtu.be/iyXiao54KWk
 - **Click through** the app as a guided replay in your browser: it replays our live run of 27 October in place of
   our servers (DEMO), each step linked to its real transaction: https://zecured.vercel.app/app/
 - **Check a real proof in one command** (Foundry's `cast`, nothing to clone): RISC Zero's verifier router as deployed
@@ -66,7 +66,7 @@ Built from scratch for ZECATHON 2026 (Cross-Chain track), first commit 10 Octobe
 invariants, 22 symbolic checks, a live run on Base Sepolia with every proof checked by RISC Zero's deployed router,
 real Groth16 proofs of every guest accepted by that router on Base forks, end-to-end runs with real Zcash testnet
 transactions, and a draft ZIP for shielded collateral vaults. Try it: the
-video of the live run, the app replaying that run in your browser (https://zecured.vercel.app/app/), or the whole
+video of the live run (https://youtu.be/iyXiao54KWk), the app replaying that run in your browser (https://zecured.vercel.app/app/), or the whole
 system on a local fork (https://github.com/Himess/zecured#running-it).
 
 **Borrow.** You deposit ZEC into a fresh 3-of-5 FROST threshold vault in Ironwood. On a

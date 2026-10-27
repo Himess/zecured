@@ -75,7 +75,7 @@
     <header class="doc-head">
       <p class="doc-kicker">Docs</p>
       <h1 class="doc-title">How Zecured works</h1>
-      <p class="doc-lead">Every txid, vault id, block height and timing on this page comes from our recorded runs on Zcash testnet and Base Sepolia forks, written down in <a href="https://github.com/Himess/zecured/blob/main/docs/TESTING.md">docs/TESTING.md</a>. The addresses are shortened examples. Amounts are testnet ZEC (TAZ); 1 ZEC is 100,000,000 zatoshi (zat).</p>
+      <p class="doc-lead">Every txid, vault id, block height and timing on this page comes from our recorded runs on Zcash testnet, on Base Sepolia (the live run of 27 October) and on Base Sepolia forks, written down in <a href="https://github.com/Himess/zecured/blob/main/docs/TESTING.md">docs/TESTING.md</a>. The addresses are shortened examples. Amounts are testnet ZEC (TAZ); 1 ZEC is 100,000,000 zatoshi (zat).</p>
     </header>
 
     <!-- Overview -->
@@ -440,6 +440,7 @@
       <p>Every number on this page comes from a run you can repeat, on testnets and local forks.</p>
       <div class="table" role="table" aria-label="Test results">
         <div class="tr th" role="row"><span role="columnheader">What</span><span role="columnheader">Result</span><span role="columnheader">How to run it</span></div>
+        <div class="tr" role="row"><span role="cell">The live run</span><span role="cell"><b>Base Sepolia, 27 October</b>: a deposit proven through RISC Zero’s router, a sponsored borrow, a close from collateral paid on Zcash, a swap settled on its payment’s proof, every step pressed in a browser</span><span role="cell" class="mono">docs/TESTING.md § 2c</span></div>
         <div class="tr" role="row"><span role="cell">Contract tests</span><span role="cell"><b>804 pass</b>, 6 skipped without a Base mainnet RPC</span><span role="cell" class="mono">forge test --isolate</span></div>
         <div class="tr" role="row"><span role="cell">Invariant campaigns</span><span role="cell"><b>4 campaigns, 35 invariants</b>, 12,800 calls each, no reverts</span><span role="cell" class="mono">forge test --isolate</span></div>
         <div class="tr" role="row"><span role="cell">Symbolic checks</span><span role="cell"><b>22 of 22</b> hold for every input of a single call (Halmos)</span><span role="cell" class="mono">FOUNDRY_PROFILE=halmos halmos</span></div>
@@ -447,9 +448,9 @@
         <div class="tr" role="row"><span role="cell">The live router</span><span role="cell"><b>Accepts</b> the Groth16 proof of a real Zcash testnet deposit on Base Sepolia today, by <span class="mono">eth_call</span>; one changed digit and it reverts</span><span role="cell" class="mono">cast call, the README’s “Check a real proof”</span></div>
         <div class="tr" role="row"><span role="cell">On a Base mainnet fork</span><span role="cell"><b>533 pass</b>, the v3 suites (not yet re-run on v4), against mainnet’s Morpho Blue and RISC Zero router</span><span role="cell" class="mono">ZECURED_FORK_NETWORK=base-mainnet ZECURED_FORK_BLOCK=52688338 forge test --isolate</span></div>
         <div class="tr" role="row"><span role="cell">Rust workspace</span><span role="cell"><b>600 pass</b> in CI on Linux</span><span role="cell" class="mono">cargo test --workspace --locked</span></div>
-        <div class="tr" role="row"><span role="cell">App</span><span role="cell"><b>451 pass</b></span><span role="cell" class="mono">pnpm test</span></div>
+        <div class="tr" role="row"><span role="cell">App</span><span role="cell"><b>464 pass</b></span><span role="cell" class="mono">pnpm test</span></div>
         <div class="tr" role="row"><span role="cell">GPU proofs</span><span role="cell"><b>28.1 s</b> for a deposit, 36.9 s for an F1 violation, on one RTX 4090 (the STARK; the Groth16 wrap runs on a CPU)</span><span role="cell" class="mono">scripts/gpu-prove.sh</span></div>
-        <div class="tr" role="row"><span role="cell">Leak scan</span><span role="cell"><b>0 matches</b> for 302 identifiers of our own runs</span><span role="cell" class="mono">cargo run -p zecured-leak-scan</span></div>
+        <div class="tr" role="row"><span role="cell">Leak scan</span><span role="cell"><b>0 matches</b> for the 181 Zcash identifiers of the live run on Base Sepolia, and the 302 of our fork runs</span><span role="cell" class="mono">cargo run -p zecured-leak-scan</span></div>
       </div>
 
       <h3 class="doc-h3">On Zcash testnet</h3>
@@ -460,6 +461,19 @@
         <li><span>A liquidation paid with no outgoing viewing key</span><span class="mono">dc7c669a…</span><span class="run-b">block 4,518,234</span></li>
         <li><span>A swap’s shielded payment, sent from the command line</span><span class="mono">d5aaef42…</span><span class="run-b">block 4,523,265</span></li>
         <li><span>The theft demonstration’s sweep, slashed on Base</span><span class="mono">43ea5e91…</span><span class="run-b">block 4,523,730</span></li>
+        <li><span>The live run’s deposit, 0.05 TAZ to a 3-of-5 vault</span><a class="mono" href="https://testnet.zecblock.com/tx/e5eaf50dc641b30f25c2cdc7785099979c66fa3d6ced5c7baaf5ad580d75825c" rel="noopener noreferrer" referrerpolicy="no-referrer">e5eaf50d…</a><span class="run-b">block 4,548,243</span></li>
+        <li><span>The live run’s close: borrower and market maker in one transaction</span><a class="mono" href="https://testnet.zecblock.com/tx/0e82a05392014ada0859325e570666bb205553849c9ffc6e529b41cda93e29fa" rel="noopener noreferrer" referrerpolicy="no-referrer">0e82a053…</a><span class="run-b">block 4,548,312</span></li>
+        <li><span>The live run’s swap, paid by the maker</span><a class="mono" href="https://testnet.zecblock.com/tx/fa6ce860bce2a39b3be793d36d6e767b1e9cd738b0d716bc9185ea7797245ee0" rel="noopener noreferrer" referrerpolicy="no-referrer">fa6ce860…</a><span class="run-b">block 4,548,320</span></li>
+      </ul>
+
+      <h3 class="doc-h3">On Base Sepolia, live</h3>
+      <p>The live run of 27 October, its proofs checked by RISC Zero’s deployed router (the links open Basescan).</p>
+      <ul class="runs">
+        <li><span>The deposit proven in zero knowledge</span><a class="mono" href="https://sepolia.basescan.org/tx/0x92af7a0f3260c389799961c49a4971e76e5938b3eaac3e02c70bfa6b1464384b" rel="noopener noreferrer" referrerpolicy="no-referrer">0x92af7a0f…</a><span class="run-b">18:11 UTC</span></li>
+        <li><span>zZEC minted into Morpho, 2.5 minutes later</span><a class="mono" href="https://sepolia.basescan.org/tx/0xbfe27bc562805b8d29cd853cac428e63769a83aa64088502580a9f7e63f9e219" rel="noopener noreferrer" referrerpolicy="no-referrer">0xbfe27bc5…</a><span class="run-b">18:14 UTC</span></li>
+        <li><span>Closed from collateral</span><a class="mono" href="https://sepolia.basescan.org/tx/0xf9c5f4bcfda141209063d1e7a6e03c4f991d4995d845d88bee80c2ad102059e3" rel="noopener noreferrer" referrerpolicy="no-referrer">0xf9c5f4bc…</a><span class="run-b">18:21 UTC</span></li>
+        <li><span>The payouts’ delivery proven on Base</span><a class="mono" href="https://sepolia.basescan.org/tx/0xee567c750be2e9f60096590b5f9fcbbb7af5e2792e17b64fed636fcbee3edce9" rel="noopener noreferrer" referrerpolicy="no-referrer">0xee567c75…</a><span class="run-b">19:36 UTC</span></li>
+        <li><span>The swap settled on its payment’s proof</span><a class="mono" href="https://sepolia.basescan.org/tx/0xd1c1989d699bb55d0b78d04a61f7ca77996043c4d139769d48b307bed7038d69" rel="noopener noreferrer" referrerpolicy="no-referrer">0xd1c1989d…</a><span class="run-b">18:45 UTC</span></li>
       </ul>
 
       <div class="rm" id="real">
@@ -517,7 +531,7 @@
     <!-- Run -->
     <section id="run" class="doc-sec" aria-labelledby="run-h">
       <h2 id="run-h" class="doc-h2"><span class="doc-n">10</span> Run it yourself</h2>
-      <p>No deployment is kept running through the judging period. Two ways to see it: the app’s replay plays our live run of 27 October, a whole loan and a swap, in your browser with nothing to install; or run everything on your machine (five signer processes, the coordinator, the contracts on a local fork of Base Sepolia and the app, paying real Zcash testnet notes from the faucet). Plan an afternoon for the local run; the README walks through it.</p>
+      <p>No deployment is kept running through the judging period. Three ways to see it: <a href="https://youtu.be/iyXiao54KWk">the video of the live run</a>; the app’s replay plays that run, a whole loan and a swap, in your browser with nothing to install; or run everything on your machine (five signer processes, the coordinator, the contracts on a local fork of Base Sepolia and the app, paying real Zcash testnet notes from the faucet). Plan an afternoon for the local run; the README walks through it.</p>
       <p class="ctas"><a class="btn btn-gold" href="../app/">Try the replay</a><a class="btn btn-line" href="https://github.com/Himess/zecured#running-it">Run it on a local fork<svg class="ext" width="11" height="11" viewBox="0 0 12 12" aria-hidden="true" focusable="false"><path d="M3.5 2.5h6v6M9.5 2.5 2.5 9.5" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round"/></svg></a><a class="btn btn-line" href="https://github.com/Himess/zecured">Read the code<svg class="ext" width="11" height="11" viewBox="0 0 12 12" aria-hidden="true" focusable="false"><path d="M3.5 2.5h6v6M9.5 2.5 2.5 9.5" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round"/></svg></a></p>
       <ul class="refs">
         <li><a href="https://github.com/Himess/zecured/blob/main/docs/ARCHITECTURE.md">Architecture</a></li>

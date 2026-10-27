@@ -9,13 +9,13 @@
 
 [![ci](https://github.com/Himess/zecured/actions/workflows/ci.yml/badge.svg)](https://github.com/Himess/zecured/actions/workflows/ci.yml)
 
-[The site](https://zecured.vercel.app/) · [the docs page](https://zecured.vercel.app/docs/) ·
+[The site](https://zecured.vercel.app/) · [the video](https://youtu.be/iyXiao54KWk) · [the docs page](https://zecured.vercel.app/docs/) ·
 [the app as a guided replay](https://zecured.vercel.app/app/) (DEMO: our live run of 27 October, in your browser) ·
 [run it yourself](#running-it) · the same pages on [GitHub Pages](https://himess.github.io/zecured/)
 
 ## For judges (5 minutes)
 
-1. **Watch** the video of the live run. Its link goes here as soon as it is published.
+1. **Watch** [the video of the live run](https://youtu.be/iyXiao54KWk) (3:55, English captions).
 2. **Click through** [the app as a guided replay](https://zecured.vercel.app/app/): the real app in your
    browser, replaying our live run of 27 October on Base Sepolia and Zcash testnet in place of our servers (DEMO),
    each step linked to its real transaction. Nothing to install.

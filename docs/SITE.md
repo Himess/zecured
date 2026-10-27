@@ -134,8 +134,9 @@ the README’s “What is real and what is a mock” says; when one changes, so 
 
 ## The video
 
-Until the demo video exists, the landing page’s demo section shows a picture of the app (`img/app.webp`, 16:10,
-at most 150 KB) that opens it, with “Replay it in the app”. Once the video is recorded it goes in `site/media/`:
+The landing page’s demo section plays the video of the live run of 27 October and links it on YouTube
+(https://youtu.be/iyXiao54KWk); before the video existed it showed a picture of the app (`img/app.webp`, 16:10, at most
+150 KB) that opens it. The video lives in `site/media/`:
 `demo.mp4` (H.264, 1080p, CRF about 26, `+faststart` so that it plays before it has downloaded, at most about 30 MB:
 the repository keeps every version), a poster frame of the app, `demo-poster.jpg` (at most 150 KB), and English
 captions, `demo.en.vtt` (the site's file stays without burned-in captions, or drop `default` from the track). Then

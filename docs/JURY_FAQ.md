@@ -1,7 +1,7 @@
 # Judges' FAQ
 
 **Can I try it?**
-Yes, four ways. Watch the video of the live run (linked from the README as soon as it is published). Open the app
+Yes, four ways. Watch the video of the live run (https://youtu.be/iyXiao54KWk, 3:55). Open the app
 as a guided replay (https://zecured.vercel.app/app/, DEMO): the same app in your browser, replaying our live run of
 27 October in place of our servers, each step linked to its real transaction; you press the real buttons. Check a real proof with one `cast call`: RISC
 Zero's router on Base Sepolia accepts the Groth16 proof of a real Zcash testnet deposit

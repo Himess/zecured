@@ -734,12 +734,28 @@ a.frame:hover {
   transform: translateY(-2px);
 }
 
-/* The demo video, once it exists, takes the same frame (docs/SITE.md, "The video"). */
+/* The demo video takes the same frame (docs/SITE.md, "The video"). */
 .frame video {
   width: 100%;
   height: auto;
   aspect-ratio: 16 / 9;
   background: var(--night);
+}
+
+/* The video takes the section's width, so that the app's words in it stay legible. */
+.demo-video {
+  grid-template-columns: minmax(0, 1fr);
+}
+
+.demo-video .demo-copy {
+  max-width: 44rem;
+}
+
+.frame-cap {
+  padding: 10px 16px 12px;
+  border-top: 1px solid var(--hair);
+  color: var(--muted);
+  font-size: 13.5px;
 }
 
 /* ---------------------------------------------------------------------------------------- doors */
