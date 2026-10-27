@@ -37,6 +37,8 @@ document.documentElement.classList.add("js");
         el.style.setProperty("--delay", `${Math.min(i, 6) * 0.07}s`);
       });
     });
+    // The hero is on screen from the start: it comes in at once, its siblings still one after another.
+    document.querySelectorAll(".hero-in .reveal, .hero-in .display").forEach((el) => el.classList.add("in"));
     const seen = new IntersectionObserver(
       (entries) => {
         entries.forEach((entry) => {

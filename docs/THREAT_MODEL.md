@@ -91,7 +91,8 @@ review and their status are in [SECURITY_REVIEW.md](SECURITY_REVIEW.md).
   A server that lies can delay payouts or hide a deposit from the signers' books; it cannot get a
   deposit minted, since every deposit is minted on a deposit proof verified on Base
   ([TIER2.md](TIER2.md)) by RISC Zero's verifier router (real Groth16 seals of a real deposit pass
-  it in the fork tests, `RealGroth16Seal.t.sol`). Independent operators run their own (the witness
+  it in the fork tests, `RealGroth16Seal.t.sol`, and every deposit of the live run of 27 October passed it on
+  Base Sepolia, TESTING § 2c). Independent operators run their own (the witness
   mechanism is in place).
 - The backend host holds the coordinator key, the demo token and the MOCK oracle key (one
   operator during the hackathon). Whoever holds the MOCK oracle key can crash the price and

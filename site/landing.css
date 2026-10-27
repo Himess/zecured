@@ -1135,3 +1135,11 @@ html:not(.js) .still-fig {
     background: linear-gradient(180deg, currentColor, rgba(255, 255, 255, 0));
   }
 }
+
+/* On a phone the two halves' names would land on the eyebrow under the scene; the scene speaks for itself there. */
+@media (max-width: 600px) {
+  .tag3d[data-tag="pool"],
+  .tag3d[data-tag="ledger"] {
+    display: none !important;
+  }
+}

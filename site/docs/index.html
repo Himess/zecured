@@ -226,7 +226,7 @@
               <li><span class="ev">ActivationPending</span><span class="fv"><span class="fld">a vault id</span><span class="fld">amount <span class="mono">1,000,000</span></span><span class="fld">a keyed depositTag</span></span></li>
               <li><span class="ev">VaultActivated</span><span class="fv">zZEC supplied to Morpho for the account</span></li>
             </ol>
-            <p class="note"><b>Measured</b> in the browser, on a fork with the MOCK verifier: the proof was on Base 4 min 25 s after the broadcast, and the loan active 7 min 56 s after it. A real deposit proof passes RISC Zero’s router in the fork tests.</p>
+            <p class="note"><b>Measured</b> live on Base Sepolia on 27 October: ten confirmations 4 min 38 s after the deposit’s block, the proof verified by RISC Zero’s router 6 min 33 s later (2 min 10 s of proving), and the loan active 2 min 32 s after that: about 14 minutes in all.</p>
           </div>
         </div>
 
@@ -332,7 +332,7 @@
       <div class="scan">
         <div>
           <h3 class="card-t">Checked by our leak scanner</h3>
-          <p>The leak scanner gathers the Zcash identifiers of our own runs (txids, note commitments, nullifiers, addresses, keys), then searches every event, every calldata and every storage word of a deployment for them. It prints counts, never values, and fails on any match. The last run looked for 302 identifiers in 77 events, 55 transactions’ calldata and 177 storage words.</p>
+          <p>The leak scanner gathers the Zcash identifiers of our own runs (txids, note commitments, nullifiers, addresses, keys), then searches every event, every calldata and every storage word of a deployment for them. It prints counts, never values, and fails on any match. In the live run on Base Sepolia it looked for 181 identifiers in 89 events and 60 transactions’ calldata; in our last fork run, for 302 in 77 events, 55 transactions’ calldata and 177 storage words. No match.</p>
         </div>
         <p class="scan-zero">0 matches</p>
       </div>
@@ -365,13 +365,13 @@
           <p class="lane-z"><span class="chip chip-z">Zcash</span><span>The ZEC is already in your wallet, shielded.</span></p>
         </li>
       </ol>
-      <p class="note"><b>Measured</b> on a Base Sepolia fork with real Zcash testnet payments: order <span class="mono">0x21660b10</span>, 0.01 ZEC for 11.115555 USDC, paid at 09:52:27, proven at 09:57:39, settled at 10:00:14 UTC. On that fork the payment’s seal came from the MOCK verifier; a real payment seal passes RISC Zero’s router in the fork tests. Any Ironwood address can receive.</p>
+      <p class="note"><b>Measured</b> live on Base Sepolia on 27 October: the order opened at 18:30:41, the maker paid at 18:32:45, its payment proven through RISC Zero’s router at 18:42:27, the order settled at 18:45:12 UTC. Any Ironwood address can receive.</p>
     </section>
 
     <!-- Trust -->
     <section id="trust" class="doc-sec" aria-labelledby="trust-h">
       <h2 id="trust-h" class="doc-h2"><span class="doc-n">06</span> Who you trust</h2>
-      <p>Base never takes the signers’ word. Deposits are proven, payouts are proven, and misbehaviour is proven.</p>
+      <p>Zcash’s shielded pool has no scripts, and a loan must stay liquidatable when its borrower is gone, so someone has to be able to spend the collateral: a fresh 3-of-5 FROST vault per loan, whose signers may pay only what Base has recorded. Three signers could still move a vault’s ZEC: the design makes that provable and slashable, not impossible. They see the vault’s notes and amounts, the Ironwood addresses it pays and the Base account it backs; never the depositor’s wallet or identity. Base checks them instead of trusting them.</p>
       <ul class="ladder">
         <li>
           <span class="dots" aria-hidden="true"><span class="d bad"></span><span class="d bad"></span><span class="d"></span><span class="d"></span><span class="d"></span></span>
@@ -427,7 +427,7 @@
         <dt>How do I pay interest without linking my identity?</dt>
         <dd>Close from collateral: a market maker repays the debt on Morpho and takes ZEC from the vault, and the rest returns to a new shielded address in the same transaction. No outside funds ever touch your account.</dd>
         <dt>How long does a loan take, and what does it cost?</dt>
-        <dd>About eight minutes in our browser run: the signers saw the deposit after 2 min 50 s, its proof was on Base after 4 min 25 s (MOCK verifier on that fork; a real proof adds its GPU and Groth16 time), and the loan was live after 7 min 56 s. The account’s gas is sponsored; the vault keeps a 0.5 % opening fee in ZEC (waived below 20,000 zatoshi), and the Morpho market sets the interest.</dd>
+        <dd>About 14 minutes in our live run on Base Sepolia: ten confirmations after 4 min 38 s, the proof verified by RISC Zero’s router 6 min 33 s later (2 min 10 s of proving), and the loan active 2 min 32 s after that. The account’s gas is sponsored; the vault keeps a 0.5 % opening fee in ZEC (waived below 20,000 zatoshi), and the Morpho market sets the interest.</dd>
         <dt>Isn’t a Zcash light client on Base a bridge?</dt>
         <dd>It is the opposite of a lock-and-mint bridge: no asset moves through it and nobody holds coins for it. It lets Base read Zcash headers, their proof of work checked on-chain, and verify zero-knowledge proofs about shielded transactions under them. Zecured uses it to mint a non-transferable receipt and to release escrowed USDC; any contract can use it to check a shielded payment.</dd>
       </dl>
@@ -472,8 +472,8 @@
         <li><span>The deposit proven in zero knowledge</span><a class="mono" href="https://sepolia.basescan.org/tx/0x92af7a0f3260c389799961c49a4971e76e5938b3eaac3e02c70bfa6b1464384b" rel="noopener noreferrer" referrerpolicy="no-referrer">0x92af7a0f…</a><span class="run-b">18:11 UTC</span></li>
         <li><span>zZEC minted into Morpho, 2.5 minutes later</span><a class="mono" href="https://sepolia.basescan.org/tx/0xbfe27bc562805b8d29cd853cac428e63769a83aa64088502580a9f7e63f9e219" rel="noopener noreferrer" referrerpolicy="no-referrer">0xbfe27bc5…</a><span class="run-b">18:14 UTC</span></li>
         <li><span>Closed from collateral</span><a class="mono" href="https://sepolia.basescan.org/tx/0xf9c5f4bcfda141209063d1e7a6e03c4f991d4995d845d88bee80c2ad102059e3" rel="noopener noreferrer" referrerpolicy="no-referrer">0xf9c5f4bc…</a><span class="run-b">18:21 UTC</span></li>
-        <li><span>The payouts’ delivery proven on Base</span><a class="mono" href="https://sepolia.basescan.org/tx/0xee567c750be2e9f60096590b5f9fcbbb7af5e2792e17b64fed636fcbee3edce9" rel="noopener noreferrer" referrerpolicy="no-referrer">0xee567c75…</a><span class="run-b">19:36 UTC</span></li>
         <li><span>The swap settled on its payment’s proof</span><a class="mono" href="https://sepolia.basescan.org/tx/0xd1c1989d699bb55d0b78d04a61f7ca77996043c4d139769d48b307bed7038d69" rel="noopener noreferrer" referrerpolicy="no-referrer">0xd1c1989d…</a><span class="run-b">18:45 UTC</span></li>
+        <li><span>The payouts’ delivery proven on Base</span><a class="mono" href="https://sepolia.basescan.org/tx/0xee567c750be2e9f60096590b5f9fcbbb7af5e2792e17b64fed636fcbee3edce9" rel="noopener noreferrer" referrerpolicy="no-referrer">0xee567c75…</a><span class="run-b">19:36 UTC</span></li>
       </ul>
 
       <div class="rm" id="real">
@@ -492,13 +492,13 @@
             <li>Zecured Swap: the contract, the payment statement and the market maker</li>
             <li>Our own RPC, bundler and paymaster proxy, with a sponsorship allowlist</li>
             <li>The app’s pages, the same in the live build and in the judges’ replay</li>
-            <li>An onion service configuration for the app and its API (configured, not deployed)</li>
           </ul>
         </div>
         <div>
           <h3 class="doc-h3">Mock, or run by us</h3>
           <ul class="rm-l mock">
             <li>The five signers, all run by the team: the bonds show the mechanism, not economic security</li>
+            <li>The market’s liquidity and bots: our deployer supplied the 100,000 MockUSDC; the market makers and the liquidator are ours (anyone can run them)</li>
             <li>The ZEC price on Base Sepolia: MockZecOracle behind DemoShockOracle, so the demo can show a liquidation, read by the coverage cap through DemoCapPrice; mainnet reads Chainlink and API3</li>
             <li>USDC on testnet: MockUSDC, a test token we mint (MOCK: no value), on the local forks and on Base Sepolia. The contracts take any 6-decimal USDC; the mainnet configuration names Circle’s USDC</li>
             <li>On the local fork: MockRiscZeroVerifier for the fork runs’ proofs, and mock-host where RISC Zero does not run (the live Base Sepolia run used RISC Zero’s router)</li>

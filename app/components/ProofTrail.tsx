@@ -4,6 +4,8 @@ import type { Address, Hex } from "viem";
 import { baseTxUrl, sampleTransactions } from "@/lib/explorer";
 import { JOURNEY_LABEL, useJourney, type JourneyKind } from "@/lib/journey";
 import { short } from "@/lib/keys";
+import { REPLAY } from "@/lib/replay/flag";
+import { recording } from "@/lib/replay/recording";
 import { CopyButton } from "./client";
 import { IconCheck, IconExternal, IconLayers, IconSwap } from "./icons";
 import { BaseMark, UsdcMark, ZzecMark } from "./marks";
@@ -35,6 +37,21 @@ const time = (s: number) =>
   " UTC";
 
 /**
+ * DEMO: when each recorded step's own Base transaction was mined (its block's time in the live run), by hash. The
+ * replay's chain has its own blocks and clock; next to a real hash it shows the recorded time instead, or none.
+ */
+function recordedTimes(): Map<string, number> {
+  const times = new Map<string, number>();
+  if (!REPLAY) return times;
+  const r = recording();
+  if (r.placeholder) return times;
+  for (const s of r.steps) {
+    if (s.tx.base && s.at) times.set(s.tx.base.toLowerCase(), Math.floor(Date.parse(s.at) / 1000));
+  }
+  return times;
+}
+
+/**
  * "What Base saw": the vault's trail on Base (lib/journey.ts) as Base keeps it, a light ruled ledger, each step with
  * its transaction, linked to the deployment's block explorer where the profile allows it. Nothing on it is a Zcash
  * identifier. `since`: the loan's creation, which bounds the search.
@@ -43,6 +60,7 @@ export function ProofTrail({ vaultId, account, since, compact = false }: { vault
   const journey = useJourney(vaultId, account, { since });
   const steps = journey.data?.steps ?? [];
   const sample = sampleTransactions();
+  const recorded = recordedTimes();
 
   const body = (
     <div className="space-y-3">
@@ -62,7 +80,7 @@ export function ProofTrail({ vaultId, account, since, compact = false }: { vault
           {steps.map((s, i) => {
             const proof = s.kind === "proven" || s.kind === "payout-proven";
             const url = baseTxUrl(s.txHash);
-            const at = journey.data?.times.get(s.blockNumber);
+            const at = REPLAY ? recorded.get(s.txHash.toLowerCase()) : journey.data?.times.get(s.blockNumber);
             return (
               <li
                 key={`${s.txHash}:${s.logIndex}`}
@@ -94,7 +112,7 @@ export function ProofTrail({ vaultId, account, since, compact = false }: { vault
                       <CopyButton value={s.txHash} label="Copy" className="!min-h-7 !bg-white !text-ink !shadow-[inset_0_0_0_1px_var(--color-rule)]" />
                     </span>
                   )}
-                  <span className="tabular-nums">#{s.blockNumber.toLocaleString("en-US")}</span>
+                  {REPLAY ? null : <span className="tabular-nums">#{s.blockNumber.toLocaleString("en-US")}</span>}
                   {at ? <span className="tabular-nums">{time(at)}</span> : null}
                 </div>
               </li>
@@ -113,7 +131,7 @@ export function ProofTrail({ vaultId, account, since, compact = false }: { vault
               "Sample data, played in this browser. The live app reads this ledger from Base through our proxy."
             ) : (
               <>
-                Read from Base through our proxy.{" "}
+                {REPLAY ? "Recorded from Base in the live run." : "Read from Base through our proxy."}{" "}
                 {steps.some((s) => baseTxUrl(s.txHash)) ? "A Basescan link opens a third-party site, which then learns which transaction you look at." : null}
               </>
             )}

@@ -77,7 +77,7 @@ export function HeroActions() {
           <p className="text-[12.5px] text-muted">
             {r.recording.placeholder
               ? `${r.steps.length} steps in your browser, with sample data: the app's own code, no chain touched.`
-              : `${r.steps.length} steps of the live run, each linked to its real transaction.`}
+              : `${r.steps.length} steps of the live run, each on-chain one linked to its real transaction.`}
           </p>
         </div>
       </div>

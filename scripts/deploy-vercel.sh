@@ -6,8 +6,9 @@
 #   bash scripts/deploy-vercel.sh DIR               builds into DIR (a new folder), then deploys it to production
 #   bash scripts/deploy-vercel.sh --build-only DIR  builds into DIR, deploys nothing
 # ZECURED_SITE_URL is the address the canonical and social-card links name (default https://zecured.vercel.app).
-# ZECURED_LIVE_BACKEND, only while a live run's box is up: the backend's public HTTPS address. The live app is then
-# also published, unlisted, at /live/, talking to that backend; a later deployment without it drops the page (D82).
+# ZECURED_LIVE_BACKEND, only while a live run's box is up: the backend's public HTTPS address (its /health must answer).
+# The live app is then also published, unlisted, at /live/, talking to that backend; a later deployment without it
+# drops the page (D82) and sends /live/ to the replay at /app/.
 set -euo pipefail
 
 build_only=0
@@ -37,6 +38,8 @@ cp -R "$root/app/out" "$out/app"
 live="${ZECURED_LIVE_BACKEND:-}"
 live_csp=""
 if [ -n "$live" ]; then
+  # A live page whose backend is gone only shows errors: refuse it rather than publish one.
+  curl -sf --max-time 15 "${live%/}/health" >/dev/null || { echo "$live/health does not answer: unset ZECURED_LIVE_BACKEND" >&2; exit 1; }
   backend_origin=$(node -e 'console.log(new URL(process.argv[1]).origin)' "$live")
   pins=$(cd "$root/app" && node scripts/pin-deployment.mjs base-sepolia "$live" | grep '^NEXT_PUBLIC_')
   (cd "$root/app" && set -a && eval "$pins" && set +a && export MSYS2_ENV_CONV_EXCL=NEXT_PUBLIC_BASE_PATH \
@@ -77,6 +80,13 @@ if [ -n "$live_csp" ]; then
       { key: "Permissions-Policy", value: "camera=(self), microphone=(), geolocation=(), payment=(), usb=(), browsing-topics=()" },
     ] });
     fs.writeFileSync(file, JSON.stringify(v, null, 2) + "\n");' "$out/vercel.json" "$live_csp"
+fi
+# Without a live backend, /live/ (the address the live run's video shows) sends a visitor to the replay of that run.
+if [ -z "$live" ]; then
+  node -e '
+    const fs = require("fs"), file = process.argv[1], v = JSON.parse(fs.readFileSync(file, "utf8"));
+    v.redirects = [{ source: "/live/:path*", destination: "/app/:path*", permanent: false }];
+    fs.writeFileSync(file, JSON.stringify(v, null, 2) + "\n");' "$out/vercel.json"
 fi
 if [ "$build_only" = 1 ]; then echo "Built into $out"; exit 0; fi
 

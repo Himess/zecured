@@ -189,7 +189,7 @@ export function Dashboard() {
       <section aria-labelledby="trust" className="grid gap-4 lg:grid-cols-2">
         <Card title={<span id="trust">Trust, stated plainly</span>} icon={<IconShield size={18} />}>
           <ul className="space-y-2.5 text-[14.5px] text-soft">
-            <li>Base never takes the signers&apos; word: deposits, payouts and misbehaviour are all proven.</li>
+            <li>Base checks the signers instead of trusting them: deposits are proven, payouts are recorded before they are signed, and theft is provable.</li>
             <li>Two signers can&apos;t move anything; if three collude, the theft is provable and their bonds pay the victims.</li>
             <li>If the signers stop paying a claim, their bonds pay it instead, once a signer has confirmed its destination.</li>
             <li>
