@@ -1,5 +1,6 @@
 import { afterEach, describe, expect, it, vi } from "vitest";
-import { DRY_RUN_CONFIG, DRY_RUN_ENV } from "./__fixtures__/deployment";
+import { DRY_RUN_CONFIG, DRY_RUN_CONTRACTS, DRY_RUN_ENV } from "./__fixtures__/deployment";
+import CI_DEPLOYMENT from "./__fixtures__/deployment.dry-run.json";
 import { parseRemoteConfig } from "./api";
 import {
   buildConfig,
@@ -101,6 +102,16 @@ describe("build-time pins (production rules)", () => {
     expect(parseSigners([...SIGNERS.slice(0, 4), "0x1234"].join(","))).toBeNull();
     const c = buildConfig({ ...DRY_RUN_ENV, NEXT_PUBLIC_SIGNERS: SIGNERS.slice(1).join(",") });
     expect(c.problems).toEqual(["NEXT_PUBLIC_SIGNERS is set but is not 5 distinct addresses separated by commas."]);
+  });
+
+  it("ci.yml's live build pins the same dry-run deployment (deployment.dry-run.json, via scripts/pin-deployment.mjs)", () => {
+    const { chainId, contracts, market, signers } = CI_DEPLOYMENT;
+    expect({ chainId, contracts, market, signers }).toEqual({
+      chainId: DRY_RUN_CONFIG.chainId,
+      contracts: DRY_RUN_CONTRACTS,
+      market: DRY_RUN_CONFIG.market,
+      signers: SIGNERS,
+    });
   });
 });
 
