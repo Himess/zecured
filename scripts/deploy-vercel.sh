@@ -85,7 +85,8 @@ fi
 if [ -z "$live" ]; then
   node -e '
     const fs = require("fs"), file = process.argv[1], v = JSON.parse(fs.readFileSync(file, "utf8"));
-    v.redirects = [{ source: "/live/:path*", destination: "/app/:path*", permanent: false }];
+    // Vercel matches a source strictly, trailing slash included (trailingSlash above): (.*) takes it along.
+    v.redirects = [{ source: "/live/(.*)", destination: "/app/$1", permanent: false }];
     fs.writeFileSync(file, JSON.stringify(v, null, 2) + "\n");' "$out/vercel.json"
 fi
 if [ "$build_only" = 1 ]; then echo "Built into $out"; exit 0; fi
