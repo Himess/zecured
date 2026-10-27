@@ -2,7 +2,7 @@
 
 **Can I try it?**
 Yes, four ways. Watch the two-minute video (linked from the README as soon as it is published). Open the app as a
-guided replay (https://himess.github.io/zecured/app/, DEMO): the same app in your browser, with a simulator and
+guided replay (https://zecured.vercel.app/app/, DEMO): the same app in your browser, with a simulator and
 sample data in place of our servers; you press the real buttons. Check a real proof with one `cast call`: RISC
 Zero's router on Base Sepolia accepts the Groth16 proof of a real Zcash testnet deposit
 ([README](../README.md#for-judges-5-minutes), item 3). Or run the whole system on a local fork of Base Sepolia with

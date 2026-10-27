@@ -3,9 +3,9 @@
 The text for the submission form, in the order the form asks for: what it does, why it does not leak, what is real
 and what is a mock. Every link is absolute, so it works from the form.
 
-**Links.** The site: https://himess.github.io/zecured/ (the details: https://himess.github.io/zecured/docs/). The
-app as a guided replay in your browser, with sample data (DEMO, no server needed): https://himess.github.io/zecured/app/.
-The code: https://github.com/Himess/zecured.
+**Links.** The site: https://zecured.vercel.app/ (the details: https://zecured.vercel.app/docs/). The
+app as a guided replay in your browser, with sample data (DEMO, no server needed): https://zecured.vercel.app/app/.
+The code: https://github.com/Himess/zecured. The same pages on GitHub Pages: https://himess.github.io/zecured/.
 
 **Team.** Himess (https://github.com/Himess). Built from scratch for ZECATHON 2026, Cross-Chain track; first commit
 10 October 2026.
@@ -24,13 +24,13 @@ command.
 
 - **Watch** the two-minute video. Its link goes here as soon as it is published.
 - **Click through** the app as a guided replay in your browser, with sample data in place of our servers (DEMO):
-  https://himess.github.io/zecured/app/
+  https://zecured.vercel.app/app/
 - **Check a real proof in one command** (Foundry's `cast`, nothing to clone): RISC Zero's verifier router as deployed
   on Base Sepolia accepts the Groth16 proof of a real Zcash testnet deposit (the TEST-ONLY vault 9, block 4,488,543):
 
   ```bash
   cast call 0x0b144E07A0826182B6b59788c34b32Bfa86Fb711 "verify(bytes,bytes32,bytes32)" \
-    $(curl -sL https://himess.github.io/zecured/evidence/deposit-test.seal) \
+    $(curl -sL https://zecured.vercel.app/evidence/deposit-test.seal) \
     0x406c6d268f29270226c775db1fe4bec04acf51ba919e250078125d71c10bff41 \
     0x1a9dcbc10182a251b4e24fdc01740df36a90f7eb9397cb89be1a9316d35867f4 \
     --rpc-url https://sepolia.base.org && echo "accepted by RISC Zero's router"
@@ -64,7 +64,7 @@ market for shielded ZEC.
 Built from scratch for ZECATHON 2026 (Cross-Chain track), first commit 10 October: 804 contract tests, 35
 invariants, 22 symbolic checks, real Groth16 proofs of every guest accepted by RISC Zero's router on Base forks,
 end-to-end runs with real Zcash testnet transactions, and a draft ZIP for shielded collateral vaults. Try it: the
-two-minute video, the app as a guided replay in your browser (https://himess.github.io/zecured/app/), or the whole
+two-minute video, the app as a guided replay in your browser (https://zecured.vercel.app/app/), or the whole
 system on a local fork (https://github.com/Himess/zecured#running-it).
 
 **Borrow.** You deposit ZEC into a fresh 3-of-5 FROST threshold vault in Ironwood. On a
