@@ -226,16 +226,21 @@ hinting. The licence is `site/fonts/OFL.txt`.
 
 ## Publishing
 
-`.github/workflows/pages.yml` publishes everything in `site/` except its tooling, `site/dev`, to GitHub Pages, at
-https://himess.github.io/zecured/; the pages’ canonical and social-card URLs name that address, and the workflow
-rewrites it, and the 404 page’s `{{BASE}}`, from what `actions/configure-pages` reports, so the same files serve a
-custom domain. Beside them, at `app/`, the same workflow builds and publishes the judges' replay of the app (DEMO,
-`app/README.md`): its static export, which plays a guided replay with sample data in the browser. The site's “Try
-the app” buttons link there. The tests’ server (`site/dev/serve.mjs`) serves the same files the same way, so a
-file the site needs and the tests find is a file Pages publishes. The workflow runs only by hand
-(`workflow_dispatch`): the site has been published from `main` since 2026-10-26, and every change to `site/` or to the
-app's replay needs a run of the workflow. Running it is the project owner’s decision at the time, and so is a custom
-domain, which is set in the repository’s Pages settings: with deployments from Actions a `CNAME` file is ignored. A
-domain needs its DNS records (and GitHub's domain verification) first; saving it changes the site’s base path at
-once, so the app and the 404 page are broken until the workflow runs again, which should follow at once and again
-once HTTPS is enforced. Keep the domain paid through the judging. Serving the site as an onion service too is optional (`infra/onion`).
+The site is at https://zecured.vercel.app/, and the same files are on GitHub Pages at https://himess.github.io/zecured/.
+No custom domain (decided 2026-10-27).
+
+`.github/workflows/pages.yml` publishes everything in `site/` except its tooling, `site/dev`, to GitHub Pages; the
+pages’ canonical and social-card URLs name the github.io address, and the workflow rewrites it, and the 404 page’s
+`{{BASE}}`, from what `actions/configure-pages` reports. Beside them, at `app/`, the same workflow builds and
+publishes the judges' replay of the app (DEMO, `app/README.md`): its static export, which plays a guided replay with
+sample data in the browser. The site's “Try the app” buttons link there. The tests’ server (`site/dev/serve.mjs`)
+serves the same files the same way, so a file the site needs and the tests find is a file Pages publishes. The
+workflow runs only by hand (`workflow_dispatch`): the site has been published from `main` since 2026-10-26.
+
+`scripts/deploy-vercel.sh` builds the same files for the root of the vercel.app address (the replay at `/app/`, the
+canonical URLs naming that address) and deploys them with the Vercel CLI, from the project owner’s account; it has
+served them since 2026-10-27. Vercel also sends the headers Pages cannot: `frame-ancestors 'none'` (which a meta tag
+cannot carry), `nosniff`, `no-referrer`, and a year’s cache for the replay’s hashed assets. Both hosts serve static
+files only, and nothing of ours runs there (D82). Every change to `site/` or to the app's replay needs a run of the
+workflow and of the script, each the project owner’s decision at the time. Serving the site as an onion service too
+is optional (`infra/onion`).

@@ -1,6 +1,6 @@
 # Zecured
 
-[![Zecured: the shielded pool on the left, Base on the right, and a gold proof crossing the seam between them](docs/assets/hero.png)](https://himess.github.io/zecured/)
+[![Zecured: the shielded pool on the left, Base on the right, and a gold proof crossing the seam between them](docs/assets/hero.png)](https://zecured.vercel.app/)
 
 > **Borrow against shielded ZEC. Only the proof crosses.**
 >
@@ -9,14 +9,14 @@
 
 [![ci](https://github.com/Himess/zecured/actions/workflows/ci.yml/badge.svg)](https://github.com/Himess/zecured/actions/workflows/ci.yml)
 
-[The site](https://himess.github.io/zecured/) · [the docs page](https://himess.github.io/zecured/docs/) ·
-[the app as a guided replay](https://himess.github.io/zecured/app/) (DEMO, with sample data, in your browser) ·
-[run it yourself](#running-it)
+[The site](https://zecured.vercel.app/) · [the docs page](https://zecured.vercel.app/docs/) ·
+[the app as a guided replay](https://zecured.vercel.app/app/) (DEMO, with sample data, in your browser) ·
+[run it yourself](#running-it) · the same pages on [GitHub Pages](https://himess.github.io/zecured/)
 
 ## For judges (5 minutes)
 
 1. **Watch** the two-minute video. Its link goes here as soon as it is published.
-2. **Click through** [the app as a guided replay](https://himess.github.io/zecured/app/): the real app in your
+2. **Click through** [the app as a guided replay](https://zecured.vercel.app/app/): the real app in your
    browser, with a simulator and sample data in place of our servers (DEMO). Nothing to install.
 3. **Check a real proof in one command** (Foundry's `cast`, nothing to clone): RISC Zero's verifier router as
    deployed on Base Sepolia accepts the Groth16 proof of a real Zcash testnet deposit (the TEST-ONLY vault 9,
@@ -24,7 +24,7 @@
 
    ```bash
    cast call 0x0b144E07A0826182B6b59788c34b32Bfa86Fb711 "verify(bytes,bytes32,bytes32)" \
-     $(curl -sL https://himess.github.io/zecured/evidence/deposit-test.seal) \
+     $(curl -sL https://zecured.vercel.app/evidence/deposit-test.seal) \
      0x406c6d268f29270226c775db1fe4bec04acf51ba919e250078125d71c10bff41 \
      0x1a9dcbc10182a251b4e24fdc01740df36a90f7eb9397cb89be1a9316d35867f4 \
      --rpc-url https://sepolia.base.org && echo "accepted by RISC Zero's router"
@@ -230,7 +230,7 @@ repository are published test vectors (such as ZIP 2005's) and anvil's well-know
 
 Three ways, from nothing to install to the whole system.
 
-**1. The replay.** Open [the app as a guided replay](https://himess.github.io/zecured/app/) (DEMO): the same pages,
+**1. The replay.** Open [the app as a guided replay](https://zecured.vercel.app/app/) (DEMO): the same pages,
 with a simulator and sample data in place of our servers. To run it yourself:
 `cd app && pnpm install && node scripts/build-replay.mjs --dev --port 3001` ([app/README.md](app/README.md)).
 
