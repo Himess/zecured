@@ -27,6 +27,14 @@ describe("the deployment a build serves (NEXT_PUBLIC_ZECURED_DEPLOYMENT)", () =>
     expect(profile.defaultDenominations).toEqual([5_000_000n, 10_000_000n]);
   });
 
+  it("links explorers on the judge testnet only: the mainnet beta shows ids, since an explorer learns what one looks at", () => {
+    expect(deploymentProfile("testnet").profile).toMatchObject({
+      baseExplorerTx: "https://sepolia.basescan.org/tx/",
+      zcashExplorerTx: "https://testnet.zecblock.com/tx/",
+    });
+    expect(deploymentProfile("mainnet-beta").profile).toMatchObject({ baseExplorerTx: null, zcashExplorerTx: null });
+  });
+
   it("anything else is not a deployment: the config reports it rather than guess a chain", () => {
     for (const raw of ["mainnet", "beta", "base"]) {
       const { profile, valid } = deploymentProfile(raw);

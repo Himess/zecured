@@ -27,6 +27,7 @@ import { readCompensation, type Compensation, type LedgerClaim, type VaultLedger
 import { config } from "@/lib/config";
 import { notifyLoansChanged, useAction, useRefundReason } from "@/lib/hooks";
 import { browserStorage, loanStore, short, type StoredLoan } from "@/lib/keys";
+import { loanTokenName } from "@/lib/labels";
 import { formatUsdc } from "@/lib/morpho";
 import { armedNote, armingState, checkReceipt, rememberArming, rememberedArmings, wasArmedHere } from "@/lib/receipt";
 import {
@@ -492,12 +493,12 @@ function ClaimRow({
       {mine && bond && bp.kind === "now" ? (
         <div className="space-y-2">
           <p className="text-xs">
-            Overdue: the signers&apos; bonds would pay you <strong>{formatUsdc(bp.usdc)} USDC</strong> now.
+            Overdue: the signers&apos; bonds would pay you <strong>{formatUsdc(bp.usdc)} {loanTokenName()}</strong> now.
           </p>
           <p className="text-xs text-muted">{bondPaymentExplainer(config.v3?.livenessPremiumBps ?? null)}</p>
           {!bp.covered ? (
             <p className="text-xs text-warn">
-              The bonds hold less than that right now ({formatUsdc(ledger.bondsSlashable ?? 0n)} USDC). The claim stays
+              The bonds hold less than that right now ({formatUsdc(ledger.bondsSlashable ?? 0n)} {loanTokenName()}). The claim stays
               payable on Zcash; try again later.
             </p>
           ) : !confirmingBonds ? (
@@ -505,7 +506,7 @@ function ClaimRow({
               Claim from the bonds
             </Button>
           ) : (
-            <Notice tone="warn" title={`Take ${formatUsdc(bp.usdc)} USDC from the bonds?`}>
+            <Notice tone="warn" title={`Take ${formatUsdc(bp.usdc)} ${loanTokenName()} from the bonds?`}>
               <p>
                 This cannot be undone: the claim&apos;s ZEC then goes to the bonds, not to you. The amount follows the price
                 until the transaction lands.
@@ -740,9 +741,9 @@ function CompromisedCard({ ledger }: { ledger: VaultLedger }) {
                   "This vault",
                   !data.victim.tallied
                     ? "Not tallied yet"
-                    : `Tallied: ${formatTaz(data.victim.outstanding)} of collateral, ${formatUsdc(data.victim.debt)} USDC of debt${data.victim.settled ? "; settled" : ""}${data.victim.authorized ? "" : " (the account no longer authorizes the Registry: no repayment, no equity)"}`,
+                    : `Tallied: ${formatTaz(data.victim.outstanding)} of collateral, ${formatUsdc(data.victim.debt)} ${loanTokenName()} of debt${data.victim.settled ? "; settled" : ""}${data.victim.authorized ? "" : " (the account no longer authorizes the Registry: no repayment, no equity)"}`,
                 ],
-                ["Your equity", data.victim.settled ? `${formatUsdc(data.equity)} USDC` : "Fixed once the vault is settled"],
+                ["Your equity", data.victim.settled ? `${formatUsdc(data.equity)} ${loanTokenName()}` : "Fixed once the vault is settled"],
               ]}
             />
             {data.entitlements.length > 0 ? (
@@ -753,7 +754,7 @@ function CompromisedCard({ ledger }: { ledger: VaultLedger }) {
                       Claim <Mono>{short(e.claimId, 10, 6)}</Mono> ({e.layer === 2 ? "third party" : "yours"}): {formatTaz(e.zat)}
                     </span>
                     <span className="tabular-nums">
-                      {e.usdc === null ? "USDC amount fixed when the incident is finalized" : `${formatUsdc(e.usdc)} USDC`}
+                      {e.usdc === null ? `${loanTokenName()} amount fixed when the incident is finalized` : `${formatUsdc(e.usdc)} ${loanTokenName()}`}
                       {e.paid ? ", paid" : ""}
                     </span>
                   </li>

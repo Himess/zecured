@@ -1,0 +1,25 @@
+{
+  "ZecuredSwap": "0xb8Cc1E883FFF77c098802317cC98A966248948fC",
+  "block": 50859156,
+  "chainId": 84532,
+  "contracts": {
+    "ZecuredSwap": "0xb8Cc1E883FFF77c098802317cC98A966248948fC"
+  },
+  "deployer": "0xd3Cda9780085b1c97ED36F9Bb1CB2F100424D531",
+  "feeBps": 0,
+  "feeRecipient": "0x0000000000000000000000000000000000000000",
+  "finalizeDelay": 150,
+  "finalizeDepth": 6,
+  "maxOrderUsdc": 200000000,
+  "maxOrderZat": 1000000000,
+  "maxPayWindow": 21600,
+  "minPayWindow": 7200,
+  "network": "base-sepolia",
+  "paymentImageId": "0x199bf772d0780413a07081b4889f0473c8ae558c6d8c4dca96eef49b5e486134",
+  "relay": "0xEc34aA21cDe1366b397a99A4d90fc6B2f02cFaEa",
+  "swapVersionActive": true,
+  "usdc": "0x637BBA9C47190C7a1ab2412F72cF0A9c088dE58b",
+  "verifier": "0x0b144E07A0826182B6b59788c34b32Bfa86Fb711",
+  "versions": "0xae56343593A54C93043e0997c509607736EBEEA9",
+  "zcashNetwork": "zcash-testnet"
+}

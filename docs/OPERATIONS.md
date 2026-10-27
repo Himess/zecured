@@ -69,7 +69,7 @@ These are measured costs at Base Sepolia's usual 0.006 gwei. A higher gas price 
 | A single NU7 light wallet server (`testnet.zec.rocks`) | any time | deposits and payouts stall while it is down | our own Zebra and light wallet server on the VM as the fallback endpoint |
 | Zebra's end-of-support halt | mainnet only; testnet nodes do not halt | none for testnet | — |
 | Public Base RPC limits (200-block logs, rate limits) | any time | slower event sync | adaptive log ranges; a keyed RPC for the backend; a witness RPC per node |
-| Faucets (TAZ) for visitors | any time | a visitor cannot fund a vault | the demo wallet ("Try with demo TAZ"); DEMO.md fallback |
+| Faucets (TAZ) for visitors | any time | a visitor cannot fund a vault | the demo wallet ("Pay it with demo TAZ"); DEMO.md fallback |
 | Gas price spikes on Base Sepolia | any time | the relay costs more | watchdog balance alarms; treasury reserve |
 | RISC Zero's emergency stop of a verifier | any time | proofs under its router selector revert: deposits wait, slashing and inclusion proofs fail | keep two working violation versions, on different router selectors where RISC Zero offers them (a working one can then go only while the other works, R-22); schedule a replacement, which takes `estopDelay` while every violation verifier is stopped; drop the pending items of a removed version and prove them again |
 | Server billing, disk and logs | monthly | the server stops | prepay through 23 Nov; journald size limit |

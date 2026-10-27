@@ -1,8 +1,8 @@
 {
   "schema": "zecured-replay/1",
-  "placeholder": true,
-  "recordedAt": null,
-  "note": "Placeholder until the live Base Sepolia run is recorded: its hashes are dummies and nothing links to an explorer.",
+  "placeholder": false,
+  "recordedAt": "2026-10-27T17:52:31.000Z",
+  "note": "Our live run of 2026-10-27 on Base Sepolia and Zcash testnet, with real zero-knowledge proofs verified by RISC Zero's router: every hash below is that run's transaction. Your browser replays it (DEMO): no backend, no chain.",
   "network": {
     "base": "base-sepolia",
     "zcash": "zcash-testnet",
@@ -10,90 +10,90 @@
   },
   "explorers": {
     "base": "https://sepolia.basescan.org/tx/",
-    "zcash": null
+    "zcash": "https://testnet.zecblock.com/tx/"
   },
   "config": {
+    "adapter": "0xcfa5c24718cc87c4731d1969fd6a6ec88f3a74cb",
     "chainId": 84532,
-    "registry": "0xa3f846f7c7a8a62f65bbf8be34d9a1f108118b21",
-    "adapter": "0xd146f298980980dd574620abfaeb5b89a8bc9f66",
-    "intake": "0xdD86fEbD0551b97b5c1298324590B6B27cc64285",
     "confirmations": 10,
-    "vaultExpiryBlocks": 480,
-    "openVaultStampBits": 8,
-    "sponsorship": true,
+    "contracts": {
+      "BaseOracle": "0x5CF271B75eC511FB12C3667a1dfc69AD566A12a9",
+      "CapPrice": "0xeC45AeDa5f0013fd37c9767eC79892Dd55834111",
+      "DemoShockOracle": "0x53a3D268683Cd748b3B71B55a202dF48B7cE633A",
+      "LoanToken": "0x637BBA9C47190C7a1ab2412F72cF0A9c088dE58b",
+      "MarketOracle": "0x53a3D268683Cd748b3B71B55a202dF48B7cE633A",
+      "MockUSDC": "0x637BBA9C47190C7a1ab2412F72cF0A9c088dE58b",
+      "MockZecOracle": "0x5CF271B75eC511FB12C3667a1dfc69AD566A12a9",
+      "SettlementAdapter": "0xCFa5c24718Cc87C4731D1969Fd6a6EC88f3a74cb",
+      "SignerBond": "0x58A1b34a9a641F03C62D5D3A7Fb3D3AD85269e1d",
+      "ZZEC": "0xAa823B4A4339f371fd3BB3cd502e8D3feCEb2e83",
+      "ZecuredCompensator": "0x8F5cBBa2264D62ca16228eDd10253e3284bEB174",
+      "ZecuredIntake": "0x90e5F23645529e5009eD3179ae0D6D9F1D0FbF78",
+      "ZecuredRegistry": "0xDC9C7E6abeF85A7bE0C65e4208bC87D098b86479",
+      "ZecuredSlasher": "0x3983F1e1C7929A2208296895F01cE0d422917594",
+      "ZecuredSpendLogic": "0xaED9Fea923D8DD915f5A1367b9bc67DdC763e94a",
+      "ZecuredVersions": "0xae56343593A54C93043e0997c509607736EBEEA9",
+      "ZecuredSwap": "0xb8Cc1E883FFF77c098802317cC98A966248948fC"
+    },
     "denominations": [
       "5000000"
     ],
-    "signers": [
-      "0x4BbbBa696eA6179eEd4F1DC0A5b609146f82D87F",
-      "0x6cA331571E5605D21B6B4e77B22C93573abBc062",
-      "0x6e9c75fe890261c498DE3bba2Aa7CacA1dA0DB61",
-      "0xc824b56c9834a3EA23FcF898385EbB53D61Ef106",
-      "0xCcfeaB6F968Cb51DAEA06c011c795fb66b590A45"
-    ],
-    "openings": {
-      "open": true,
-      "inviteOnly": false
-    },
-    "contracts": {
-      "BaseOracle": "0xE4079E41738c5c365B9EAdE39e9ec67971DF63dE",
-      "CapPrice": "0xd6a41044a7485e4f0B2d2ab079af2EDa3c231fa4",
-      "DemoShockOracle": "0xb36157EA2E28df291e6f4805E0582Bf0d3BDc113",
-      "LoanToken": "0x8228b67b43E671511E07a4A547add6471de9d4F0",
-      "MarketOracle": "0xb36157EA2E28df291e6f4805E0582Bf0d3BDc113",
-      "MockUSDC": "0x8228b67b43E671511E07a4A547add6471de9d4F0",
-      "MockZecOracle": "0xE4079E41738c5c365B9EAdE39e9ec67971DF63dE",
-      "SettlementAdapter": "0xD146f298980980dD574620abFaeB5B89A8BC9F66",
-      "SignerBond": "0xa9D70e64Ff000DbFab3332A665d9CA5e190E53Ce",
-      "ZZEC": "0x1E2e751452CaB7a3ef59f319D08D4Fbba861440d",
-      "ZecuredCompensator": "0x5CF271B75eC511FB12C3667a1dfc69AD566A12a9",
-      "ZecuredIntake": "0xdD86fEbD0551b97b5c1298324590B6B27cc64285",
-      "ZecuredRegistry": "0xa3f846F7C7a8a62F65bBf8be34D9A1f108118b21",
-      "ZecuredSlasher": "0xEc34aA21cDe1366b397a99A4d90fc6B2f02cFaEa",
-      "ZecuredSpendLogic": "0x1c1068d4Cf5CE052da15ff3467fcb5A27cF2C508",
-      "ZecuredSwap": "0x3983F1e1C7929A2208296895F01cE0d422917594",
-      "ZecuredVersions": "0x53a3D268683Cd748b3B71B55a202dF48B7cE633A"
-    },
+    "intake": "0x90e5F23645529e5009eD3179ae0D6D9F1D0FbF78",
     "market": {
-      "collateralToken": "0x1E2e751452CaB7a3ef59f319D08D4Fbba861440d",
+      "collateralToken": "0xAa823B4A4339f371fd3BB3cd502e8D3feCEb2e83",
       "irm": "0x46415998764C29aB2a25CbeA6254146D50D22687",
       "lltv": "625000000000000000",
-      "loanToken": "0x8228b67b43E671511E07a4A547add6471de9d4F0",
-      "marketId": "0xdb98e90105d5872cd5066976f0ee5ab6188496db83472c48db3165c5ad26558f",
+      "loanToken": "0x637BBA9C47190C7a1ab2412F72cF0A9c088dE58b",
+      "marketId": "0xd7bc7e9a16e02118e917cf1d50e327254fbcb286d4eb34390d70ceb040b19fa6",
       "morphoBlue": "0xBBBBBbbBBb9cC5e90e3b3Af64bdAF62C37EEFFCb",
-      "oracle": "0xb36157EA2E28df291e6f4805E0582Bf0d3BDc113"
+      "oracle": "0x53a3D268683Cd748b3B71B55a202dF48B7cE633A"
     },
+    "openVaultStampBits": 8,
+    "openings": {
+      "inviteOnly": false,
+      "open": true
+    },
+    "registry": "0xdc9c7e6abef85a7be0c65e4208bc87d098b86479",
+    "signers": [
+      "0x293e0446e84420fc477ce34f79608693a9131086",
+      "0x3a9b1b2af1e37ff5b90b36667df1058ad841a31d",
+      "0x8552ad9d7aafbe315dbf0ca950f3a6afbc6a91e6",
+      "0xd62bdae4d63fff774bd4a49a8e5ce8fc8353e442",
+      "0xee66db11851fb7363a88c776d10c7f5284667ece"
+    ],
+    "sponsorship": true,
     "v3": {
+      "commitGrace": 7200,
+      "coverageBps": 10000,
       "feeBps": 50,
+      "incidentWindow": 259200,
+      "livenessPeriod": 86400,
+      "livenessPremiumBps": 500,
+      "maxPause": 2592000,
+      "maxTotalZat": 500000000,
       "minFeeZat": 20000,
       "minRefundZat": 20000,
-      "refundAbandonPeriod": 86400,
-      "pendingRefundDelay": 300,
-      "maxPause": 2592000,
-      "livenessPeriod": 600,
-      "commitGrace": 7200,
-      "livenessPremiumBps": 500,
-      "coverageBps": 10000,
-      "maxTotalZat": 150000000,
-      "incidentWindow": 600
-    }
+      "pendingRefundDelay": 86400,
+      "refundAbandonPeriod": 2592000
+    },
+    "vaultExpiryBlocks": 288
   },
   "links": {
-    "relay": "0x637BBA9C47190C7a1ab2412F72cF0A9c088dE58b",
-    "disputeWindow": 600,
-    "inclusionWindow": 1200,
-    "refundDormancy": 2592000,
+    "relay": "0xEc34aA21cDe1366b397a99A4d90fc6B2f02cFaEa",
+    "disputeWindow": 86400,
+    "inclusionWindow": 21600,
+    "refundDormancy": 172800,
     "maxMarginBps": 500,
-    "feeCommitment": "0x4c240d3fbe45206bf8b96a11c5a1ca09130dee390c70068ca8bf988161154ad8"
+    "feeCommitment": "0x792f2790f428b477f79ef01559efcd240213ffaa6222fad8cd2f251f59993fd0"
   },
   "status": {
-    "commit": "0000000",
+    "commit": "b578df5a0e438ca620706b2e8dd72655eddd9fdf",
     "treeClean": true,
     "deployment": {
       "chainId": 84532,
-      "registry": "0xa3f846F7C7a8a62F65bBf8be34D9A1f108118b21",
-      "intake": "0xdD86fEbD0551b97b5c1298324590B6B27cc64285",
-      "signerBond": "0xa9D70e64Ff000DbFab3332A665d9CA5e190E53Ce",
+      "registry": "0xDC9C7E6abeF85A7bE0C65e4208bC87D098b86479",
+      "intake": "0x90e5F23645529e5009eD3179ae0D6D9F1D0FbF78",
+      "signerBond": "0x58A1b34a9a641F03C62D5D3A7Fb3D3AD85269e1d",
       "mintMode": "proof-only",
       "verifierIsMock": false,
       "depositImageId": "0x406c6d268f29270226c775db1fe4bec04acf51ba919e250078125d71c10bff41",
@@ -102,37 +102,43 @@
     "versions": {
       "deposit": [
         {
-          "versionId": "0xabb53c7425ef3be52156b791ea0cc8f323afc7e4e3d993efbe62121203339075",
-          "selector": "0x73c457ba",
-          "imageId": "0x406c6d268f29270226c775db1fe4bec04acf51ba919e250078125d71c10bff41",
-          "branches": [
-            1998129881
-          ],
-          "activeAt": 1792591229,
           "active": true,
-          "removed": false
+          "activeAt": 1793093659,
+          "branches": [
+            1998129881,
+            0,
+            0,
+            0
+          ],
+          "imageId": "0x406c6d268f29270226c775db1fe4bec04acf51ba919e250078125d71c10bff41",
+          "removed": false,
+          "selector": "0x73c457ba",
+          "versionId": "0x8fb08d6a5391f74843b0af111265a906d0ba2844e6f83f40fdd2c3937ad9cf37"
         }
       ],
       "violation": [
         {
-          "versionId": "0xcd57ef4bc1c055c3fdca96a7920d4fed2aa7a1e7e52f2a674bb924ed6bff5309",
-          "selector": "0x73c457ba",
-          "imageId": "0x65705f75c5482b2b0cf6fee12760b2364d48213bb2933f3882dc2d92f824866e",
-          "branches": [
-            1998129881
-          ],
-          "activeAt": 1792591229,
           "active": true,
-          "removed": false
+          "activeAt": 1793093659,
+          "branches": [
+            0,
+            0,
+            0,
+            0
+          ],
+          "imageId": "0x65705f75c5482b2b0cf6fee12760b2364d48213bb2933f3882dc2d92f824866e",
+          "removed": false,
+          "selector": "0x73c457ba",
+          "versionId": "0x2fa4640600fa4b80c1f850cdf9a6e60c0de572164f5d0db37f0fa89276a4bc1b"
         }
       ]
     }
   },
   "chain": {
-    "baseBlock": 48600000,
-    "zcashTip": 4541200,
+    "baseBlock": 50984649,
+    "zcashTip": 4548023,
     "price": "12650000000000000000000000000000000000",
-    "borrowRate": "317097919",
+    "borrowRate": "301731102",
     "market": {
       "totalSupplyAssets": "100000000000",
       "totalSupplyShares": "100000000000000000",
@@ -156,105 +162,111 @@
       "totalSlashable": "500000000",
       "minBond": "100000000"
     },
-    "relayChainWork": "1000000000"
+    "relayChainWork": "318314528"
   },
   "loan": {
-    "owner": "0x5393a9bb30f1968fF21702E1b980950BE616Fd4B",
-    "account": "0xcc6caF9b1faA20FA23689194190528Dcf57Bd4f3",
-    "requestId": "0xfa2ade39400c6a857a8d92ab0d5721fe0348687de0df3ecc4a8a3f705cd79895",
+    "owner": "0xeD4725876861a0A851b029211b97A6B2a9516d0E",
+    "account": "0x8e5872715630a742A945f56e411Df042Eb765A9D",
+    "requestId": "0xfec077cea752f92e5fb1b4b04d639a8c1cdee5da76b42699a976b532e3f091ff",
     "amount": "5000000",
     "vault": {
-      "vaultId": "0x9c9ad033ddbcef74d303b8e0bfa258cc29df408fb7db49e2a766ce509d9c5c4e",
-      "address": "utest12rtd5lg7g7eusrs5wxcsq7zcxkp5dte0vf8m4a5sdufx30rtl9phw9yge0s426eesynw64aqau5v6jmvqtpr6uanm2apurfagsds3yjn",
-      "zip321": "zcash:utest12rtd5lg7g7eusrs5wxcsq7zcxkp5dte0vf8m4a5sdufx30rtl9phw9yge0s426eesynw64aqau5v6jmvqtpr6uanm2apurfagsds3yjn?amount=0.05",
-      "expiryHeight": 4541630,
-      "birthdayHeight": 4541150,
-      "tagKeyHash": "0x7c2733a6080e43e5fe15519b88a93f6caddba95a96bd8e2dcffc1a150fca2e46",
+      "vaultId": "0x64197b7179a4d1b617bad0808d9ef54c05aa5a99c0a1d672e90da63611a20862",
+      "address": "utest1cj0ssr88lec8yhxfvshutftg6283kye4c79mk9cugk8z0cpsmgwk4s5ueeeeskmu3z30pqhjjwmelpmz9nk3qtru70e686fzjc29hjgv",
+      "zip321": "zcash:utest1cj0ssr88lec8yhxfvshutftg6283kye4c79mk9cugk8z0cpsmgwk4s5ueeeeskmu3z30pqhjjwmelpmz9nk3qtru70e686fzjc29hjgv?amount=0.05",
+      "expiryHeight": 4548505,
+      "birthdayHeight": 4548217,
+      "tagKeyHash": "0xe3f585b8da0e18815f7fbeeda86c945f7d1d34b992e89f8fc2d64994376cbac4",
       "signatures": [
         {
-          "index": 0,
-          "signature": "0x24dbd22c4cc14acfecda6d3f392a2a97d5fd725d3ba4d0c92a7cd40c3021dd5d7c6dbaad844b50179a26aaefba8e95b7e694ed64101fce8376b194cd87e8205b1b"
-        },
-        {
           "index": 1,
-          "signature": "0xf67d4dde1dd122dd5f004f9c1b08cadb84ea2e4b70e5bac6dff4c29dec87d1510b1383d7988305e2e6c881fabb959edbe9296101a0b2a79036d0b3a725f2ef271c"
+          "signature": "0xbc433a0180d31688a589eaa05dac49338af739208f358d51bcf7c624a8b30c4474bc0bf398f5d30530f4d10a188acdc54efa30995597ecb09845320369f5a06b1b"
         },
         {
           "index": 2,
-          "signature": "0x2263a109843658a073dc5b541c71d89ce0629482c0506dc57946a723f8a9ed46732d2d95a61270df45a9d48f27e9f521d0039a49fc3d1a8b0b9a602cb88700981b"
+          "signature": "0x31a1f5e7502300e1e484ab807256142e1480f1afa23b6da595f391811d84a4c704d0bb070ad568995854817bf8748298749f5835974442040ed17b3bb63470ad1c"
         },
         {
           "index": 3,
-          "signature": "0xccc5efaff564c3ec09b8245ce3ca8cd0d9db71f49271e0c3bc9cee67913b3af442df3fd85cdce5246c084dbadac2c3a036ddbfb1d6bd9cc45a481be7bf9bb8501c"
+          "signature": "0x7bd73c6d40049208b222fc35b218aa63559bc776af7a8f0b5b8a8c8383738b9d2b8b0f781c7075f1cb02c3f3644fa839e7647b3e70855cf9adc951d8e571fdc61b"
         },
         {
           "index": 4,
-          "signature": "0xa1326b8c435339ea22665de4a3e7a634f7c658120e9d3e438909d658de99c80f04bda1998e580b1b50096b281e1c95a9920c2fe76ae43927cd34248c8a24e99e1b"
+          "signature": "0xa402aed5c29eba8c115b427aafc77d5f29d5b064ec40dcc2fcab7e09a511dd877ccc70f4a1577eafb9129aae581a288b70aacc16fb716d7209bc5aa28581c0911c"
+        },
+        {
+          "index": 5,
+          "signature": "0xa440fb5d6a88eb5c6a2bfe222eb10c83369d3f22d5298e1c06391c070ce075d7667ac925263867f0169b3f8960dc7ed8d84ae211d08225007a28040390d8e1331c"
         }
       ]
     },
-    "depositTag": "0x8479b7cd461bcf25796c4d4c819e73e6cb07e3e29b643d0e1a57d7313b90835f",
-    "anchor": "0xba0b79d6cde7ed814a67ae76a0f0a6ea559ddd4bcc3be1a90027fdb7651d814e",
-    "versionId": "0xabb53c7425ef3be52156b791ea0cc8f323afc7e4e3d993efbe62121203339075",
+    "depositTag": "0x7713a7eeeedb271253f1d3c706eeed413bdd5db5d98800449379defcffde2038",
+    "anchor": "0x4e4e36256150cc8bf1b4f12eeab00b9d1633e720d942e7863a855268d6230000",
+    "versionId": "0x8fb08d6a5391f74843b0af111265a906d0ba2844e6f83f40fdd2c3937ad9cf37",
     "borrow": {
-      "assets": "22000000",
+      "assets": "10000000",
       "protected": false
     },
     "close": {
-      "executor": "0x11f0a66D6674E0E9788d55E5387B43d6ad1eB738",
+      "executor": "0xE9EE379b6a3e5aBF43D529E2697cd2C640d888F6",
       "marginBps": 100,
-      "repayAssets": "22000100",
-      "mmAmount": "1756530",
-      "userAmount": "3218470",
-      "userCommitment": "0x9ea3eaf9cd5d5cfe2c9e0c00a9f4e0a6ee635f366593f548f729d158ffb55223",
-      "mmCommitment": "0x593d17818ece4b5421facae13aa0e5c615aae767f089c7fd67f19dc22764f0e8",
-      "payoutRef": "0x60818af0ee26b3fbef1eb114bc43634896db09fd98454943523c7c877f2a38b2",
-      "inputTag": "0x005f6b56747bcf07427ed0aa58b3c8b9555687342b65d81d39981496be42394b"
+      "repayAssets": "10000000",
+      "mmAmount": "798419",
+      "userAmount": "4176581",
+      "userCommitment": "0xdab0f05bb5ce4499d49de1f985debf360f9a0793b0a035ef25b03eeef3ec7349",
+      "mmCommitment": "0xcbd18a8e893164a19b3fc2c759f3fe8fe242e1a681113996f55a7708d6b8c1ea",
+      "payoutRef": "0x8df17eff84ad950a20b234dc55bb962591c20ba4a501f9618a4cc99ceb75e58f",
+      "inputTag": "0xee83b9e30c23b670bde4a7cb6785ff6776ca7ced8ca494b6e436f6f0f0702dd4"
     }
   },
   "demo": {
-    "returnAddress": "utest1z6hw43grsf55qwnrjkewd3wljd6mscwqnpnvmzrd46tuu8empen5595tg0geyd3cknqjqe2jfmxkx0jrg2c8wxn7mpkj0g4g7ceefjld",
+    "returnAddress": "utest126v2ct77mquy4vydt55a9fx48fh2hjrq33h5l28w2r2hyjm023fd7c3hl3g5hqm5rxrc5q3cj6s0cwslewvkfp4xxu8g0cu4qqnyazu0",
     "stampBits": 8,
     "dailyCapZat": "50000000"
   },
   "swap": {
-    "swap": "0x3983F1e1C7929A2208296895F01cE0d422917594",
-    "maker": "0x27C08c142dC3edC61C022C03c8be4990fDc52156",
-    "taker": "0xe0D641588D60200c6A39027Ee9df744cF5Ba734c",
+    "swap": "0xb8Cc1E883FFF77c098802317cC98A966248948fC",
+    "maker": "0xA9A5D935517702439590c2ca67e12524c588b0d3",
+    "taker": "0xF46b0357A6CD11935a8B5e17c329F24544eF316F",
     "takerUsdc": "100000000",
-    "zatoshi": "1956500",
-    "usdc": "25000000",
-    "makerReceiverCommitment": "0xd9176524959b1557262f0afeda0118dcaaa2b60b2ea3e40b44e37dbab84f1c69",
-    "receiverCommitment": "0x196bcf5817bf0dddda5603e59a53123eefe21fb86a0a63e9dc86ef6a28c5a629",
-    "payWindow": 3600,
-    "nonce": "1",
-    "orderId": "0x197eba8f4721ac1695c9cc7284e1c42b3efbacc727ae0ce1a04629858c07d59e",
-    "anchor": "0x2606e702b32addff92976b0fa3d8227c39d7008c704eedb83f1bc24f8cdf609b",
-    "signing": "demo-key",
-    "signature": null
+    "zatoshi": "391343",
+    "usdc": "5000000",
+    "makerReceiverCommitment": "0x0000000000000000000000000000000000000000000000000000000000000000",
+    "receiverCommitment": "0xbe94ee10307e58be371350ccb1a96837c7b4c3b7986f686bf933362c368af7f9",
+    "payWindow": 21600,
+    "nonce": "70166552006291872740820596994000972006667272453456915191955766898318522852113",
+    "orderId": "0x4ca8074026ab62270ffcc258eea558f12c103ea068f7e3513eab579b296ae509",
+    "anchor": "0x321635ac6137fa670b56e032f0fa6e0d5470091f8ddf6f02ebbc52c53a020000",
+    "signing": "erc1271",
+    "signature": "0xb10555ea75316f562e182fa9aa7bdc84f562a27d8f8491f8b61da9e4de5847b879ef872d1ae90f45a827fa0ea46001cde8ec4f095e4fa4c371b7ca5c15024f7d1c"
   },
   "evidence": {
-    "commit": "0000000",
+    "commit": "b578df5a0e438ca620706b2e8dd72655eddd9fdf",
     "tag": null,
-    "deployedAtBlock": null,
+    "deployedAtBlock": 50858809,
     "mocks": [
       {
         "name": "MockUSDC",
-        "address": "0x8228b67b43E671511E07a4A547add6471de9d4F0",
+        "address": "0x637BBA9C47190C7a1ab2412F72cF0A9c088dE58b",
         "label": "MOCK",
         "why": "The loan token, minted by the deployer."
       },
       {
         "name": "DemoShockOracle",
-        "address": "0xb36157EA2E28df291e6f4805E0582Bf0d3BDc113",
+        "address": "0x53a3D268683Cd748b3B71B55a202dF48B7cE633A",
         "label": "MOCK / DEMO",
         "why": "An owner-set shock on the price, to show a liquidation."
       },
       {
         "name": "MockZecOracle",
-        "address": "0xE4079E41738c5c365B9EAdE39e9ec67971DF63dE",
+        "address": "0x5CF271B75eC511FB12C3667a1dfc69AD566A12a9",
         "label": "MOCK",
         "why": "An owner-set ZEC/USD price."
+      },
+      {
+        "name": "DemoCapPrice",
+        "address": "0xeC45AeDa5f0013fd37c9767eC79892Dd55834111",
+        "label": "MOCK / DEMO",
+        "why": "The coverage cap's price, always fresh."
       },
       {
         "name": "This replay",
@@ -263,7 +275,13 @@
         "why": "The judges' build replays the run in the browser: no backend, no chain."
       }
     ],
-    "leakScan": null
+    "leakScan": {
+      "result": "0 matches",
+      "fromBlock": 50858809,
+      "toBlock": 51039726,
+      "identifiers": 181,
+      "at": "2026-10-27T19:36:54Z"
+    }
   },
   "steps": [
     {
@@ -271,7 +289,7 @@
       "track": "loan",
       "auto": false,
       "delayMs": 0,
-      "at": null,
+      "at": "2026-10-27T17:52:31.000Z",
       "durationSeconds": null,
       "title": "Open a vault",
       "detail": "Five signer nodes run a distributed key generation for a new 3-of-5 vault, and each signs its Ironwood address; nothing touches Base.",
@@ -296,20 +314,20 @@
       "track": "loan",
       "auto": false,
       "delayMs": 0,
-      "at": null,
-      "durationSeconds": null,
+      "at": "2026-10-27T18:00:23.000Z",
+      "durationSeconds": 472,
       "title": "Pay the vault from Ironwood",
       "detail": "The demo wallet pays the vault 0.05 TAZ in one Ironwood → Ironwood transaction on Zcash testnet.",
       "hint": "Press “Skip the backup (demo key)”, then “Pay it with demo TAZ”.",
       "href": "/borrow",
       "tx": {
-        "zcash": "0000000000000000000000000000000000000000000000000000000000000002"
+        "zcash": "e5eaf50dc641b30f25c2cdc7785099979c66fa3d6ced5c7baaf5ad580d75825c"
       },
       "artifacts": [
         {
           "label": "The deposit on Zcash",
           "chain": "zcash",
-          "tx": null,
+          "tx": "e5eaf50dc641b30f25c2cdc7785099979c66fa3d6ced5c7baaf5ad580d75825c",
           "kind": "tx"
         }
       ]
@@ -319,8 +337,8 @@
       "track": "loan",
       "auto": true,
       "delayMs": 4000,
-      "at": null,
-      "durationSeconds": null,
+      "at": "2026-10-27T18:05:01.000Z",
+      "durationSeconds": 278,
       "title": "Deposit confirmed on Zcash",
       "detail": "The signers see the deposit confirmed, then a proof that it is in a Zcash block is made.",
       "hint": "Confirmations come in; the proof is being made.",
@@ -333,24 +351,24 @@
       "track": "loan",
       "auto": true,
       "delayMs": 9000,
-      "at": null,
-      "durationSeconds": null,
+      "at": "2026-10-27T18:11:34.000Z",
+      "durationSeconds": 393,
       "title": "Deposit proven on Base",
       "detail": "Base checks the proof against a Zcash header its relay already verified: no one's word is taken.",
       "hint": "Base verifies the proof.",
       "href": "/borrow",
       "tx": {
-        "base": "0x0000000000000000000000000000000000000000000000000000000000000004"
+        "base": "0x92af7a0f3260c389799961c49a4971e76e5938b3eaac3e02c70bfa6b1464384b"
       },
       "artifacts": [
         {
           "label": "attestDepositWithProof: the deposit proof, verified on Base",
           "chain": "base",
-          "tx": null,
+          "tx": "0x92af7a0f3260c389799961c49a4971e76e5938b3eaac3e02c70bfa6b1464384b",
           "kind": "proof",
           "meta": {
             "imageId": "0x406c6d268f29270226c775db1fe4bec04acf51ba919e250078125d71c10bff41",
-            "prover": "RISC Zero zkVM, Groth16"
+            "prover": "RISC Zero zkVM (RTX 4090), Groth16"
           }
         }
       ]
@@ -360,21 +378,49 @@
       "track": "loan",
       "auto": true,
       "delayMs": 7000,
-      "at": null,
-      "durationSeconds": null,
+      "at": "2026-10-27T18:14:06.000Z",
+      "durationSeconds": 152,
       "title": "zZEC minted into Morpho",
       "detail": "A few Zcash blocks later the activation finalizes: zZEC is minted straight into Morpho Blue.",
       "hint": "The keeper activates the deposit.",
       "href": "/borrow",
       "tx": {
-        "base": "0x0000000000000000000000000000000000000000000000000000000000000005"
+        "base": "0xbfe27bc562805b8d29cd853cac428e63769a83aa64088502580a9f7e63f9e219"
       },
       "artifacts": [
         {
           "label": "Activation: zZEC supplied as collateral",
           "chain": "base",
-          "tx": null,
+          "tx": "0xbfe27bc562805b8d29cd853cac428e63769a83aa64088502580a9f7e63f9e219",
           "kind": "tx"
+        },
+        {
+          "label": "Opening fee: the payout's commitment",
+          "chain": "base",
+          "tx": "0x6928fc1d7f946a7b799fbf5e702acb5c90d0e65c7a1d123528121279fd6458a2",
+          "kind": "tx"
+        },
+        {
+          "label": "Opening fee: paid on Zcash, alone",
+          "chain": "zcash",
+          "tx": "769188431dddce153a4769bfeb0f6994c100d34bd0c74bc3a7b03dd1bb2b82a0",
+          "kind": "tx"
+        },
+        {
+          "label": "Opening fee: confirmed by the signers",
+          "chain": "base",
+          "tx": "0x9cfc89e450e016a023f423e096ca12b40e92ae57c807137f411b99a1650d77a6",
+          "kind": "tx"
+        },
+        {
+          "label": "Opening fee: its payout proven on Base",
+          "chain": "base",
+          "tx": "0x968fdd7f8f5d64ab9c4f6a7feab73e8ab5208c4c048221e1db45e6118cd34fb5",
+          "kind": "proof",
+          "meta": {
+            "imageId": "0x65705f75c5482b2b0cf6fee12760b2364d48213bb2933f3882dc2d92f824866e",
+            "prover": "RISC Zero zkVM (RTX 4090), Groth16"
+          }
         }
       ]
     },
@@ -383,21 +429,21 @@
       "track": "loan",
       "auto": false,
       "delayMs": 0,
-      "at": null,
-      "durationSeconds": null,
+      "at": "2026-10-27T18:18:13.000Z",
+      "durationSeconds": 247,
       "title": "Borrow MockUSDC",
-      "detail": "One sponsored UserOp deploys a fresh Safe, authorizes Zecured on Morpho Blue and borrows 22.00 MockUSDC; the account never holds ETH.",
-      "hint": "Press “Borrow against it”, then “DEMO: fill in 22.00” and “Create account and borrow”.",
+      "detail": "One sponsored UserOp deploys a fresh Safe, authorizes Zecured on Morpho Blue and borrows 10.00 MockUSDC; the account never holds ETH.",
+      "hint": "Press “Borrow against it”, then “DEMO: fill in 10.00” and “Create account and borrow”.",
       "href": "/borrow",
       "tx": {
-        "base": "0x0000000000000000000000000000000000000000000000000000000000000006",
-        "userOp": "0x0000000000000000000000000000000000000000000000000000000000000060"
+        "base": "0x0e17d8c2a2ee01206b9372998e43dc71bd6c59416d30ba6ff39479d7b9469c9d",
+        "userOp": "0x657fd81854652e7c697c95eb2097ef3551d50b55b754c45f37d00affc6774c66"
       },
       "artifacts": [
         {
           "label": "Sponsored UserOp: deploy, authorize, borrow",
           "chain": "base",
-          "tx": null,
+          "tx": "0x0e17d8c2a2ee01206b9372998e43dc71bd6c59416d30ba6ff39479d7b9469c9d",
           "kind": "tx"
         }
       ]
@@ -412,7 +458,7 @@
       "title": "Give an Ironwood destination",
       "detail": "The signers validate a fresh Ironwood address for the payout; Base only ever sees a salted commitment to it.",
       "hint": "On your loan, under “What next?”, press “Send my ZEC back to the demo wallet”.",
-      "href": "/position#0x9c9ad033ddbcef74d303b8e0bfa258cc29df408fb7db49e2a766ce509d9c5c4e",
+      "href": "/position#0x64197b7179a4d1b617bad0808d9ef54c05aa5a99c0a1d672e90da63611a20862",
       "tx": {},
       "artifacts": []
     },
@@ -421,20 +467,20 @@
       "track": "loan",
       "auto": false,
       "delayMs": 0,
-      "at": null,
+      "at": "2026-10-27T18:21:33.000Z",
       "durationSeconds": null,
       "title": "Close from collateral",
       "detail": "A market maker repays the debt on Morpho and takes its value in ZEC from the vault; the rest is owed to your destination.",
       "hint": "Press “Get a market maker's quote”, then “Sign and send to the market maker”.",
-      "href": "/position#0x9c9ad033ddbcef74d303b8e0bfa258cc29df408fb7db49e2a766ce509d9c5c4e",
+      "href": "/position#0x64197b7179a4d1b617bad0808d9ef54c05aa5a99c0a1d672e90da63611a20862",
       "tx": {
-        "base": "0x0000000000000000000000000000000000000000000000000000000000000008"
+        "base": "0xf9c5f4bcfda141209063d1e7a6e03c4f991d4995d845d88bee80c2ad102059e3"
       },
       "artifacts": [
         {
           "label": "closeWithCollateral, sent by the market maker",
           "chain": "base",
-          "tx": null,
+          "tx": "0xf9c5f4bcfda141209063d1e7a6e03c4f991d4995d845d88bee80c2ad102059e3",
           "kind": "tx"
         }
       ]
@@ -444,20 +490,20 @@
       "track": "loan",
       "auto": true,
       "delayMs": 5000,
-      "at": null,
-      "durationSeconds": null,
+      "at": "2026-10-27T18:25:11.000Z",
+      "durationSeconds": 218,
       "title": "Payout committed on Base",
       "detail": "The signers commit the payout on Base before signing it: paying anyone else is provable theft.",
       "hint": "The signers commit the payout.",
-      "href": "/position#0x9c9ad033ddbcef74d303b8e0bfa258cc29df408fb7db49e2a766ce509d9c5c4e",
+      "href": "/position#0x64197b7179a4d1b617bad0808d9ef54c05aa5a99c0a1d672e90da63611a20862",
       "tx": {
-        "base": "0x0000000000000000000000000000000000000000000000000000000000000009"
+        "base": "0x7fdbf4711abefc85427f9c5602fff64cac33d529c18323fee8878fdcb72761a7"
       },
       "artifacts": [
         {
           "label": "The payout's commitment",
           "chain": "base",
-          "tx": null,
+          "tx": "0x7fdbf4711abefc85427f9c5602fff64cac33d529c18323fee8878fdcb72761a7",
           "kind": "tx"
         }
       ]
@@ -467,20 +513,20 @@
       "track": "loan",
       "auto": true,
       "delayMs": 5000,
-      "at": null,
-      "durationSeconds": null,
+      "at": "2026-10-27T18:29:07.000Z",
+      "durationSeconds": 236,
       "title": "Paid on Zcash",
-      "detail": "Three of five signers sign one FROST transaction paying you, the market maker and the fee.",
+      "detail": "Three of five signers sign one FROST transaction paying you and the market maker.",
       "hint": "The signers pay on Zcash.",
-      "href": "/position#0x9c9ad033ddbcef74d303b8e0bfa258cc29df408fb7db49e2a766ce509d9c5c4e",
+      "href": "/position#0x64197b7179a4d1b617bad0808d9ef54c05aa5a99c0a1d672e90da63611a20862",
       "tx": {
-        "zcash": "000000000000000000000000000000000000000000000000000000000000000a"
+        "zcash": "0e82a05392014ada0859325e570666bb205553849c9ffc6e529b41cda93e29fa"
       },
       "artifacts": [
         {
           "label": "The FROST 3-of-5 payout on Zcash",
           "chain": "zcash",
-          "tx": null,
+          "tx": "0e82a05392014ada0859325e570666bb205553849c9ffc6e529b41cda93e29fa",
           "kind": "tx"
         }
       ]
@@ -490,25 +536,31 @@
       "track": "loan",
       "auto": true,
       "delayMs": 8000,
-      "at": null,
-      "durationSeconds": null,
+      "at": "2026-10-27T19:36:21.000Z",
+      "durationSeconds": 4034,
       "title": "Payout proven on Base",
       "detail": "A zero-knowledge proof that the payout is in a Zcash block makes every claim of the vault final.",
       "hint": "The payout's proof lands on Base.",
-      "href": "/position#0x9c9ad033ddbcef74d303b8e0bfa258cc29df408fb7db49e2a766ce509d9c5c4e",
+      "href": "/position#0x64197b7179a4d1b617bad0808d9ef54c05aa5a99c0a1d672e90da63611a20862",
       "tx": {
-        "base": "0x000000000000000000000000000000000000000000000000000000000000000b"
+        "base": "0xee567c750be2e9f60096590b5f9fcbbb7af5e2792e17b64fed636fcbee3edce9"
       },
       "artifacts": [
         {
           "label": "The payout, confirmed and proven on Base",
           "chain": "base",
-          "tx": null,
+          "tx": "0xee567c750be2e9f60096590b5f9fcbbb7af5e2792e17b64fed636fcbee3edce9",
           "kind": "proof",
           "meta": {
             "imageId": "0x65705f75c5482b2b0cf6fee12760b2364d48213bb2933f3882dc2d92f824866e",
-            "prover": "RISC Zero zkVM, Groth16"
+            "prover": "RISC Zero zkVM (RTX 4090), Groth16"
           }
+        },
+        {
+          "label": "PayoutConfirmed: the signers' confirmation of the payout",
+          "chain": "base",
+          "tx": "0x4bf98a8fd468b265a9c7f083300b917317a529b8027b0234b9fce976812d6c9d",
+          "kind": "tx"
         }
       ]
     },
@@ -517,27 +569,27 @@
       "track": "swap",
       "auto": false,
       "delayMs": 0,
-      "at": null,
+      "at": "2026-10-27T18:30:41.000Z",
       "durationSeconds": null,
       "title": "Lock MockUSDC in the swap",
-      "detail": "Your wallet approves 25.00 MockUSDC and opens an order with the maker's signed quote; the MockUSDC waits in ZecuredSwap.",
-      "hint": "On Swap, press “DEMO: fill in 25.00”, then the one button each time it changes.",
+      "detail": "Your wallet approves 5.00 MockUSDC and opens an order with the maker's signed quote; the MockUSDC waits in ZecuredSwap.",
+      "hint": "On Swap, press “DEMO: fill in 5.00”, then the one button each time it changes.",
       "href": "/buy",
       "tx": {
-        "base": "0x000000000000000000000000000000000000000000000000000000000000000c",
-        "approve": "0x00000000000000000000000000000000000000000000000000000000000000c0"
+        "base": "0x27198f0529e57f14b69d92ecaf0d828cf68c3b474c807ec936baf0ed6f180e1a",
+        "approve": "0x2f7cc9593f1e64005906e7e1b1f3ef4dc1e42d25bcf2b3c8e7c657cb8dceacd8"
       },
       "artifacts": [
         {
           "label": "MockUSDC approval",
           "chain": "base",
-          "tx": null,
+          "tx": "0x2f7cc9593f1e64005906e7e1b1f3ef4dc1e42d25bcf2b3c8e7c657cb8dceacd8",
           "kind": "tx"
         },
         {
           "label": "The order, opened on ZecuredSwap",
           "chain": "base",
-          "tx": null,
+          "tx": "0x27198f0529e57f14b69d92ecaf0d828cf68c3b474c807ec936baf0ed6f180e1a",
           "kind": "tx"
         }
       ]
@@ -547,20 +599,20 @@
       "track": "swap",
       "auto": true,
       "delayMs": 6000,
-      "at": null,
-      "durationSeconds": null,
+      "at": "2026-10-27T18:32:45.000Z",
+      "durationSeconds": 124,
       "title": "The maker pays on Zcash",
       "detail": "The maker pays the ZEC to your Ironwood address, with the order id in the memo.",
       "hint": "The maker pays.",
       "href": "/buy",
       "tx": {
-        "zcash": "000000000000000000000000000000000000000000000000000000000000000d"
+        "zcash": "fa6ce860bce2a39b3be793d36d6e767b1e9cd738b0d716bc9185ea7797245ee0"
       },
       "artifacts": [
         {
           "label": "The maker's payment on Zcash",
           "chain": "zcash",
-          "tx": null,
+          "tx": "fa6ce860bce2a39b3be793d36d6e767b1e9cd738b0d716bc9185ea7797245ee0",
           "kind": "tx"
         }
       ]
@@ -570,24 +622,24 @@
       "track": "swap",
       "auto": true,
       "delayMs": 8000,
-      "at": null,
-      "durationSeconds": null,
+      "at": "2026-10-27T18:42:27.000Z",
+      "durationSeconds": 582,
       "title": "Payment proven on Base",
       "detail": "The maker proves its payment in zero knowledge; settling waits for a deep enough Zcash header.",
       "hint": "The maker proves its payment.",
       "href": "/buy",
       "tx": {
-        "base": "0x000000000000000000000000000000000000000000000000000000000000000e"
+        "base": "0xac5ad94fc62de4dbe76d9b17243f39713bffe6f8fc29a2e8167699c394c318fa"
       },
       "artifacts": [
         {
           "label": "The payment proof, verified on Base",
           "chain": "base",
-          "tx": null,
+          "tx": "0xac5ad94fc62de4dbe76d9b17243f39713bffe6f8fc29a2e8167699c394c318fa",
           "kind": "proof",
           "meta": {
             "imageId": "0x199bf772d0780413a07081b4889f0473c8ae558c6d8c4dca96eef49b5e486134",
-            "prover": "RISC Zero zkVM, Groth16"
+            "prover": "RISC Zero zkVM (RTX 4090), Groth16"
           }
         }
       ]
@@ -597,20 +649,20 @@
       "track": "swap",
       "auto": true,
       "delayMs": 6000,
-      "at": null,
-      "durationSeconds": null,
+      "at": "2026-10-27T18:45:12.000Z",
+      "durationSeconds": 165,
       "title": "MockUSDC released to the maker",
       "detail": "Settled: you hold shielded ZEC, the maker the MockUSDC; no custodian, no signer in between.",
       "hint": "The order settles.",
       "href": "/buy",
       "tx": {
-        "base": "0x000000000000000000000000000000000000000000000000000000000000000f"
+        "base": "0xd1c1989d699bb55d0b78d04a61f7ca77996043c4d139769d48b307bed7038d69"
       },
       "artifacts": [
         {
           "label": "Settlement",
           "chain": "base",
-          "tx": null,
+          "tx": "0xd1c1989d699bb55d0b78d04a61f7ca77996043c4d139769d48b307bed7038d69",
           "kind": "tx"
         }
       ]

@@ -1,8 +1,8 @@
 # Testing and evidence
 
 What is tested automatically, what was run end to end, which failure scenarios were exercised, and
-how to reproduce all of it. Everything here ran on testnets only: Zcash testnet, and local forks of Base Sepolia
-and Base mainnet. Amounts are testnet ZEC (TAZ, also written ZEC below); 1 ZEC = 100,000,000 zatoshi (zat). A full
+how to reproduce all of it. Everything here ran on testnets only: Zcash testnet, Base Sepolia itself (the live run of
+27 October 2026), and local forks of Base Sepolia and Base mainnet. Amounts are testnet ZEC (TAZ, also written ZEC below); 1 ZEC = 100,000,000 zatoshi (zat). A full
 Zcash txid links to ZecBlock's testnet explorer, which shows NU7's v6 transactions and their Ironwood actions (checked
 on 2026-10-27).
 
@@ -12,11 +12,12 @@ on 2026-10-27).
 |---|---|---|
 | Real zero-knowledge proofs are accepted on Base | Real Groth16 seals of every pinned guest (deposit, F1, `Included`, swap payment) pass RISC Zero's deployed verifier router on Base Sepolia and Base mainnet forks, in 12 tests: `cd contracts && forge test --match-path test/fork/RealSealsV2.t.sol --isolate`. The live router accepts the deposit's seal by `eth_call`: one `cast call`, in the README | § 2b |
 | Base checked Zcash's proof of work on a public chain | An earlier version of the header relay (`src/relay` at `f5f1d91`) took real Testnet headers on public Base Sepolia in 274 transactions up to height 4,491,413, the last on 12 October 2026 at 07:32 UTC; one header with its Equihash costs about 620,000 to 670,000 gas: [`0xab07…8FA5`](https://sepolia.basescan.org/address/0xab07317f7B9390394271D9c03FE2E912C0E58FA5) | § 2b |
-| The flows work end to end | Loans opened, proven, borrowed against, repaid, released, closed from collateral and liquidated; refunds, disputes, payments by the bonds, the swap and the app in a browser; real Zcash testnet transactions, the Base side on local forks of Base Sepolia, proofs checked by a MOCK verifier | § 2 |
-| Nothing on Base names a Zcash transaction | The leak scanner found none of the 302 Zcash identifiers of the v4.1 run in its deployments' 77 events, 55 transactions' calldata and 177 storage words, and none in any earlier scan | § 2, § 4 |
+| The whole system ran live on a public chain | On 27 October 2026, on Base Sepolia and Zcash testnet, from the app in a browser: a 0.05 TAZ deposit minted on its Groth16 proof (made on a rented RTX 4090) through RISC Zero's deployed router, 10 MockUSDC borrowed by a brand-new account that never held ETH, a close from collateral paid in one 3-of-5 FROST Zcash transaction whose delivery was then proven on Base, and a swap of 5 MockUSDC settled on the proof of its Zcash payment | § 2c |
+| The flows work end to end | Loans opened, proven, borrowed against, repaid, released, closed from collateral and liquidated; refunds, disputes, payments by the bonds, the swap and the app in a browser; real Zcash testnet transactions, the Base side on local forks of Base Sepolia, proofs checked by a MOCK verifier, and live on Base Sepolia with real proofs | § 2, § 2c |
+| Nothing on Base names a Zcash transaction | On the live deployment, none of the 181 Zcash identifiers of its runs (5 wallets, 3 vaults) in its 89 events and 60 transactions' calldata; on the forks, none of the 302 of the v4.1 run in its deployments' 77 events, 55 transactions' calldata and 177 storage words, and none in any earlier scan | § 2c, § 4 |
 | Two signers cannot move funds, and three that steal are slashed | The threshold demo (two compromised signers sign a sweep, nothing moves) and the theft demo (three sweep a vault, F1 detected two minutes later, all five bonds slashed, the victim repaid) | § 2 |
 | The contracts hold their rules | 804 tests, 35 invariants in four campaigns, 22 symbolic checks (Halmos) | § 1, § 1b |
-| How long it takes | In the browser: the deposit seen 2 min 50 s after its broadcast, its proof on Base after 4 min 25 s (MOCK verifier), the loan active after 7 min 56 s; a deposit's STARK takes 28.1 s on one RTX 4090, and its Groth16 wrap about a minute on an x86 machine | § 2, § 2b |
+| How long it takes | Live: the deposit proven on Base 11 min after it was mined (ten Zcash confirmations, then 2 min 10 s of proving on a rented RTX 4090 and its CPU), the loan active 2.5 min later, a swap settled 14.5 min after its order. On a fork, in the browser: the deposit seen 2 min 50 s after its broadcast, its proof on Base after 4 min 25 s (MOCK verifier), the loan active after 7 min 56 s; a deposit's STARK takes 28.1 s on one RTX 4090, and its Groth16 wrap about a minute on an x86 machine | § 2, § 2b, § 2c |
 
 ## 1. Automated tests
 
@@ -114,8 +115,8 @@ from symbolic storage, which no change to the token can break.
 ## 2. End-to-end runs
 
 The runs in the first table used the v2 contracts (signer attestations, 2026-10-11 to 10-14); the v3 runs on a local
-fork follow it (2026-10-16), then the v4 runs (2026-10-19 and 10-20) and v4.1's (2026-10-21). No deployment was kept
-running on Base Sepolia itself (D82).
+fork follow it (2026-10-16), then the v4 runs (2026-10-19 and 10-20) and v4.1's (2026-10-21). On 27 October the whole
+system ran live on Base Sepolia (§ 2c); no deployment was kept running after it (D82).
 
 Setup: Zcash **testnet** after NU7 through `testnet.zec.rocks`, five signer node processes plus
 the coordinator talking over HTTP, and the Base side on a local fork of Base Sepolia (the real
@@ -294,6 +295,55 @@ on the nodes (armings, treasury recipients) now look again every 30 seconds.
 | The live router, by anyone (2026-10-27) | `cast call` of `verify(seal, imageId, sha256(journal))` on RISC Zero's router on Base Sepolia (`0x0b14…b711`), with the deposit-test seal of the row above (published as `site/evidence/deposit-test.seal`) and its journal v2 | Accepted (an empty return); the same call with one digit of the journal's digest changed reverts with `VerificationFailed` (`0x439cc0cd`) |
 | On-chain | `DepositProofs.t.sol`: the same journal against header 4,488,560 verified by the relay on-chain, MOCK verifier | Vault reserved and then activated: 446,148 gas for the proof with the MOCK verifier (676,458 with the real router, row above), 251,507 for `finalizeActivation` (v4.1: its version must be working, W-13, and its note free of F1 cases, W-2); 20 tests, among them every refusal (a seal or image id that is not an active version, the journal's length and words, the anchor's work, the signatures) and the journal v2 golden vector |
 | Headers over P2P (Rust) | `update-headers` / `build-witness --update-headers` | 969 new headers from Testnet peers; the rebuilt witness gives the same journal |
+
+## 2c. Live on Base Sepolia (2026-10-27)
+
+The whole system on a public chain for one day, then stopped (D82). The contracts of
+`contracts/deployments/base-sepolia.json` (with its `.swap`, `.relay` and `.paymaster` records), verified on Basescan,
+the loan token our MockUSDC (D109); RISC Zero's deployed router (selector `0x73c457ba`) checked every proof. The five
+signer processes, the coordinator, the prover, our bundler and paymaster proxy, the market maker and the swap maker
+ran on one rented machine: the STARKs on its RTX 4090, the Groth16 wraps on its CPU. The app was the live build,
+published at an unlisted address that talked to that backend; every step below was pressed in a browser.
+
+- **Rehearsal**, 12:40 to 13:51 UTC: vault `0xd03284d0658761da6fc5983cb473fac7bdd932cff38e23aa541e401f4cb80647`
+  closed from collateral by the market maker
+  ([`0xbf8852f9…a603`](https://sepolia.basescan.org/tx/0xbf8852f90d59a3e0637a13db2db91adcd34954079d832aec0936f9f09674a603)),
+  its payout's delivery proven at 13:51:35; swap order `0xaf8f05b7…52a7`, 2 MockUSDC for 156,537 zat, settled; and a
+  0.01 TAZ vault opened from a check of the app, left unpaid to expire.
+- **The recorded run**, 17:52 to 19:36 UTC, in the video and in the judges' replay (`app/lib/replay/recording.json`):
+  vault `0x64197b7179a4d1b617bad0808d9ef54c05aa5a99c0a1d672e90da63611a20862`, 0.05 TAZ paid by the demo wallet; the
+  close's payout and the swap's payment went to the CLI wallet.
+
+| Step of the recorded run | UTC | After the previous step | Transaction |
+|---|---|---|---|
+| Vault opened, signed by 5 of 5 | 17:52:31 | | |
+| Deposit mined: 0.05 TAZ, Ironwood → Ironwood | 18:00:23 | | [`e5eaf50d…75825c`](https://testnet.zecblock.com/tx/e5eaf50dc641b30f25c2cdc7785099979c66fa3d6ced5c7baaf5ad580d75825c) (block 4,548,243) |
+| Ten confirmations | 18:05:01 | 4 min 38 s | |
+| Deposit proven on Base (STARK and Groth16 wrap: 2 min 10 s) | 18:11:34 | 6 min 33 s | [`0x92af7a0f…4384b`](https://sepolia.basescan.org/tx/0x92af7a0f3260c389799961c49a4971e76e5938b3eaac3e02c70bfa6b1464384b) |
+| Activated: zZEC minted into Morpho | 18:14:06 | 2 min 32 s | [`0xbfe27bc5…f9e219`](https://sepolia.basescan.org/tx/0xbfe27bc562805b8d29cd853cac428e63769a83aa64088502580a9f7e63f9e219) |
+| Borrowed 10 MockUSDC, gas sponsored | 18:18:13 | 4 min 7 s | [`0x0e17d8c2…469c9d`](https://sepolia.basescan.org/tx/0x0e17d8c2a2ee01206b9372998e43dc71bd6c59416d30ba6ff39479d7b9469c9d) (UserOp `0x657fd818…774c66`) |
+| Closed from collateral: 0.04176581 TAZ to the borrower, 0.00798419 TAZ to the market maker | 18:21:33 | 3 min 20 s | [`0xf9c5f4bc…2059e3`](https://sepolia.basescan.org/tx/0xf9c5f4bcfda141209063d1e7a6e03c4f991d4995d845d88bee80c2ad102059e3) |
+| Payouts committed (2 claims) | 18:25:11 | 3 min 38 s | [`0x7fdbf471…2761a7`](https://sepolia.basescan.org/tx/0x7fdbf4711abefc85427f9c5602fff64cac33d529c18323fee8878fdcb72761a7) |
+| Both paid in one 3-of-5 FROST transaction | 18:29:07 | 3 min 56 s | [`0e82a053…3e29fa`](https://testnet.zecblock.com/tx/0e82a05392014ada0859325e570666bb205553849c9ffc6e529b41cda93e29fa) (block 4,548,312) |
+| Their delivery proven on Base: the claims final | 19:36:21 | 67 min 14 s | [`0xee567c75…3edce9`](https://sepolia.basescan.org/tx/0xee567c750be2e9f60096590b5f9fcbbb7af5e2792e17b64fed636fcbee3edce9) |
+| Swap: the order opened from the user's own wallet, 5 MockUSDC locked | 18:30:41 | | [`0x27198f05…180e1a`](https://sepolia.basescan.org/tx/0x27198f0529e57f14b69d92ecaf0d828cf68c3b474c807ec936baf0ed6f180e1a) (approval [`0x2f7cc959…ceacd8`](https://sepolia.basescan.org/tx/0x2f7cc9593f1e64005906e7e1b1f3ef4dc1e42d25bcf2b3c8e7c657cb8dceacd8)) |
+| Swap: the maker paid 391,343 zat | 18:32:45 | 2 min 4 s | [`fa6ce860…245ee0`](https://testnet.zecblock.com/tx/fa6ce860bce2a39b3be793d36d6e767b1e9cd738b0d716bc9185ea7797245ee0) (block 4,548,320) |
+| Swap: the payment proven on Base | 18:42:27 | 9 min 42 s | [`0xac5ad94f…c318fa`](https://sepolia.basescan.org/tx/0xac5ad94fc62de4dbe76d9b17243f39713bffe6f8fc29a2e8167699c394c318fa) |
+| Swap: settled, the tokens released to the maker | 18:45:12 | 2 min 45 s | [`0xd1c1989d…038d69`](https://sepolia.basescan.org/tx/0xd1c1989d699bb55d0b78d04a61f7ca77996043c4d139769d48b307bed7038d69) |
+
+Times are block times. The vault's opening fee, 25,000 zat, was paid alone to the treasury (15,000 zat after its
+network fee, [`76918843…2b82a0`](https://testnet.zecblock.com/tx/769188431dddce153a4769bfeb0f6994c100d34bd0c74bc3a7b03dd1bb2b82a0),
+block 4,548,282). The CLI wallet received 4,166,581 zat from the close (its 4,176,581 less the payout's 10,000 fee)
+and 391,343 zat from the swap. Each payout's delivery proof took about 1 min 20 s to make; the coordinator queued it
+about an hour after the payment (priority `RoutineInclusion`). Zcash testnet reorganized four times that day (the maker
+saw the chain change below heights 4,547,942, 4,548,266, 4,548,471 and 4,548,495): the signers and the maker rescanned
+and carried on, and no step was affected. Feeding the relay cost the relayer about 0.0025 ETH an hour.
+
+**Leak scan of the live deployment**, once both runs were over (blocks 50,858,809 to 51,039,726): `zecured-leak-scan`
+with the coordinator's three vaults and the five wallets of the runs (the demo wallet, the treasury, the market maker,
+the swap maker and the CLI wallet): 181 identifiers, 89 events and 60 transactions' calldata, **0 matches**. The
+deployment record's 13 contracts went in two records of 7 and 6, since the public RPC takes at most 10 addresses per
+`eth_getLogs`.
 
 ## 3. Robustness scenarios
 

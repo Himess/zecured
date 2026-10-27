@@ -51,6 +51,34 @@ docs/ref/vendor/
 # Local state directories (vault keys, node stores)
 /data/
 
+# What documented commands write where they run (README, DEMO.md, OPERATIONS.md, the tier2 host): viewing keys,
+# witnesses, receipts and seals, signed requests. Never published.
+/ufvk.txt
+*.ufvk
+/f[1-3].json
+*.receipt
+*.seal.json
+/witness.json
+/violation.json
+/vault.json
+/opening.json
+/receipt.bin
+/seal.json
+/p254.bin
+/tx.json
+/req.json
+/sig.*.json
+/bundle.json
+*.env
+
+# Editor and OS leftovers
+Thumbs.db
+desktop.ini
+*.swp
+*~
+*.orig
+*.rej
+
 # Internal planning documents (not published)
 docs/private/
 

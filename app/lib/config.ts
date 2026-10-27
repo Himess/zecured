@@ -138,7 +138,7 @@ export interface AppConfig {
    */
   swap: Address | null;
   /**
-   * P-1, the demo path ("Try with demo TAZ"): `NEXT_PUBLIC_DEMO_PATH=1` on the judge deployment's
+   * P-1, the demo path ("Pay it with demo TAZ"): `NEXT_PUBLIC_DEMO_PATH=1` on the judge deployment's
    * build; always false on the mainnet beta. The backend must also have a demo wallet (GET /demo/status).
    */
   demoPath: boolean;

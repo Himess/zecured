@@ -1,13 +1,14 @@
 # Tier 2: minting zZEC on a proof of the deposit
 
-Status (2026-10-12): **implemented and run on real Testnet data, verified on-chain with a MOCK verifier; the only
-mint path of the Base Sepolia deployment (D25).** The statement, the RISC Zero guest, the witness builder, the
+Status (2026-10-27): **implemented, and live on Base Sepolia: on 27 October deposits minted on real Groth16 proofs
+through RISC Zero's deployed router (local forks: a MOCK verifier); the only mint path of the Base Sepolia
+deployment (D25).** The statement, the RISC Zero guest, the witness builder, the
 Registry entry points (proof, pending activation, finalization), the header relay and the refund path for unminted
 deposits are in the repository with tests, including a negative test for every relation of the statement, run
 natively and in the zkVM executor (§ 6). A real deposit's proof was produced locally as a RISC Zero succinct (STARK)
 receipt, then (2026-10-14) on a rented GPU and wrapped in Groth16: RISC Zero's verifier router accepts the seal, and
-`RealGroth16Seal.t.sol` mints the deposit through it on a Base Sepolia fork. Not done yet: the deployment on Base
-Sepolia. "Verified" below means checked against a primary source (ZIP text, Zebra or librustzcash source,
+`RealGroth16Seal.t.sol` mints the deposit through it on a Base Sepolia fork; on 27 October the Base Sepolia deployment minted live
+deposits the same way. "Verified" below means checked against a primary source (ZIP text, Zebra or librustzcash source,
 live chain data); "estimate" marks numbers not measured here.
 
 **Statement v2 (the guest round, design notes T-09 and H-10b, 2026-10-15).** The witness carries the vault's tag key

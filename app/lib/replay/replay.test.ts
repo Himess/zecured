@@ -217,7 +217,9 @@ describe("the replay", () => {
     const wallet = replayWallet(w);
     const [taker] = (await wallet.request({ method: "eth_requestAccounts" })) as string[];
     expect(taker).toBe(getAddress(s.taker));
-    await expect(api.getSwapQuote({ usdc: 10_000_000n, taker: getAddress(taker!) })).rejects.toThrow(/exactly 25\.00 MockUSDC/);
+    // Any other amount is refused, naming the recorded one.
+    const recorded = formatUsdc(BigInt(s.usdc));
+    await expect(api.getSwapQuote({ usdc: BigInt(s.usdc) + 1_000_000n, taker: getAddress(taker!) })).rejects.toThrow(`exactly ${recorded} MockUSDC`);
     const q = await api.getSwapQuote({ usdc: BigInt(s.usdc), taker: getAddress(taker!) });
     expect(quoteProblem(q, { swap: config.swap, taker: getAddress(taker!), nowSeconds: Math.floor(w.now() / 1000) })).toBeNull();
     expect(await quoteSignedByMaker(client, q)).toBe(true);

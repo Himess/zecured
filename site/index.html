@@ -108,10 +108,10 @@
     <p class="lead reveal">Your ZEC never leaves Ironwood, Zcash’s newest shielded pool. Borrow USDC on Base against it, or swap USDC into shielded ZEC. Base sees zero-knowledge proofs, never your Zcash address, transaction or balance.</p>
     <div class="ctas reveal">
       <a class="btn btn-gold" href="app/">Try the app</a>
-      <a class="btn btn-line" href="#demo">See it run</a>
-      <p class="cta-note">A guided replay in your browser, with sample data. No wallet, nothing to install.</p>
+      <a class="btn btn-line" href="#demo">Watch the demo</a>
+      <p class="cta-note">A guided replay of our live run, in your browser. No wallet, nothing to install.</p>
     </div>
-    <p class="proofline reveal">Tested end to end on Zcash testnet and Base Sepolia forks. Its real zero-knowledge proofs pass RISC Zero’s deployed verifier in our fork tests.</p>
+    <p class="proofline reveal">Ran live on Zcash testnet and Base Sepolia on 27 October 2026, every proof checked by RISC Zero’s deployed verifier.</p>
   </div>
   <a class="cue" href="#how"><span class="cue-line" aria-hidden="true"></span><span class="cue-t">Scroll</span></a>
 </section>
@@ -218,21 +218,27 @@
   <h2 id="n-h" class="title reveal">Every number is a run you can repeat.</h2>
   <ul class="stats">
     <li class="stat reveal"><span class="stat-n" data-count="804" aria-hidden="true">804</span><span class="stat-l"><span class="sr">804 </span>contract tests pass</span></li>
-    <li class="stat reveal"><span class="stat-n">4 of 4</span><span class="stat-l">kinds of real zero-knowledge proof (deposit, payout, theft, swap) pass RISC Zero’s verifier on Base forks</span></li>
+    <li class="stat reveal"><span class="stat-n">4 of 4</span><span class="stat-l">kinds of real zero-knowledge proof (deposit, payout, theft, swap) pass RISC Zero’s verifier on Base forks; three of them live on Base Sepolia</span></li>
     <li class="stat reveal"><span class="stat-n">0</span><span class="stat-l">of 302 Zcash identifiers found on Base, on our forks</span></li>
     <li class="stat reveal"><span class="stat-n" data-count="28.1" data-decimals="1" aria-hidden="true">28.1</span><span class="stat-u" aria-hidden="true">s</span><span class="stat-l"><span class="sr">28.1 seconds: </span>a deposit’s proof on one GPU, before its Groth16 wrap</span></li>
   </ul>
-  <p class="note reveal">All of it on Zcash testnet, local forks of Base Sepolia and Base mainnet, and one rented GPU. <a href="docs/#evidence">The evidence</a></p>
+  <p class="note reveal">All of it on Zcash testnet, Base Sepolia (live, 27 October), local forks of Base Sepolia and Base mainnet, and a rented GPU. <a href="docs/#evidence">The evidence</a></p>
 </section>
 
-<section class="demo" id="demo" data-scene="demo" data-veil="wide" aria-labelledby="demo-h">
+<section class="demo demo-video" id="demo" data-scene="demo" data-veil="wide" aria-labelledby="demo-h">
   <div class="demo-copy">
     <h2 id="demo-h" class="title reveal">See it run.</h2>
-    <p class="body reveal">Click through a whole loan and a swap yourself: the app runs as a guided replay in your browser, with sample data (DEMO). No wallet, nothing to install.</p>
-    <p class="note reveal">Every screen is the real app. The replay stands in for the signers, the prover and the chains, which are not kept running through judging.</p>
-    <p class="ctas reveal"><a class="btn btn-gold" href="app/">Replay it in the app</a></p>
+    <p class="body reveal">Four minutes, recorded in our live run of 27 October on Zcash testnet and Base Sepolia: a loan opened in the browser, its deposit proven on Base, USDC borrowed from a brand-new account, a close from collateral, and a swap into shielded ZEC.</p>
+    <p class="note reveal">Or click through it yourself: the app replays that run in your browser (DEMO), each step linked to its real transaction. The replay stands in for the signers, the prover and the chains, which are not kept running through judging.</p>
+    <p class="ctas reveal"><a class="btn btn-gold" href="app/">Replay it in the app</a><a class="btn btn-line" href="https://youtu.be/iyXiao54KWk">Watch on YouTube<svg class="ext" width="12" height="12" viewBox="0 0 12 12" aria-hidden="true" focusable="false"><path d="M3.5 2.5h6v6M9.5 2.5 2.5 9.5" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round"/></svg></a></p>
   </div>
-  <a class="frame reveal" href="app/"><img src="img/app.webp" width="1440" height="900" loading="lazy" decoding="async" alt="The Zecured app: open its replay"></a>
+  <figure class="frame reveal">
+    <video controls preload="none" playsinline width="1920" height="1080" poster="media/demo-poster.jpg" aria-describedby="demo-cap">
+      <source src="media/demo.mp4" type="video/mp4">
+      <track kind="captions" srclang="en" label="English" src="media/demo.en.vtt" default>
+    </video>
+    <figcaption id="demo-cap" class="frame-cap">3:55 · narrated · English captions</figcaption>
+  </figure>
 </section>
 
 <section class="more" data-scene="end" data-veil="wide" aria-labelledby="more-h">

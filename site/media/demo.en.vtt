@@ -1,0 +1,158 @@
+WEBVTT
+
+00:00:00.000 --> 00:00:03.880
+Hi, I'm Semih. This is Zecured: borrow against shielded ZEC. Only the proof crosses.
+
+00:00:03.880 --> 00:00:06.940
+No bridge. No wrapped token. No single custodian.
+
+00:00:06.940 --> 00:00:11.540
+So using it in DeFi means giving up that privacy. $2.7 million is borrowed against ZEC today,
+
+00:00:11.540 --> 00:00:13.460
+through a custodian, in public.
+
+00:00:13.460 --> 00:00:17.260
+DeFi for shielded ZEC. Zecured is DeFi for shielded ZEC. Borrow USDC on Morpho against
+
+00:00:17.260 --> 00:00:20.260
+it, or swap into it. No bridge. No wrapped token.
+
+00:00:20.260 --> 00:00:24.980
+Your ZEC sits in a fresh three-of-five FROST vault. No single key exists, and a theft slashes the
+
+00:00:24.980 --> 00:00:27.030
+signers.
+
+00:00:27.030 --> 00:00:28.830
+Only one proof crosses to Base.
+
+00:00:28.830 --> 00:00:32.550
+A RISC Zero proof shows the deposit is in a Zcash block that Base verified itself.
+
+00:00:32.550 --> 00:00:33.550
+Only that proof crosses.
+
+00:00:33.550 --> 00:00:38.990
+Here it is, live. This is our home page: you can borrow here, you can swap into
+
+00:00:38.990 --> 00:00:43.670
+ZEC here, and you can see your loans here. This is a real Morpho Blue
+
+00:00:43.670 --> 00:00:47.190
+market: you can see the borrow rate and the supply. And here is what's real
+
+00:00:47.190 --> 00:00:50.590
+and what's a mock. Now I'll show you how it works. This is our borrow tab,
+
+00:00:50.590 --> 00:00:57.200
+you choose the amount of ZEC here, and I'll lock 0.05 ZEC.
+
+00:00:57.200 --> 00:01:00.880
+The loan's key lives only in my browser. I save a backup, download it, and continue.
+
+00:01:00.880 --> 00:01:04.960
+This is my vault's shielded Ironwood address. Any Zcash wallet can pay it by scanning this QR code,
+
+00:01:04.960 --> 00:01:08.760
+so we built our own Ironwood wallet, and our demo wallet pays the vault: a real shielded
+
+00:01:08.760 --> 00:01:13.360
+payment on Zcash testnet. And we are waiting... done. Now we wait about ten minutes
+
+00:01:13.360 --> 00:01:19.040
+for confirmations on Zcash. It now has ten confirmations on Zcash. A GPU makes a RISC Zero proof
+
+00:01:19.040 --> 00:01:24.370
+that my payment is in a Zcash block. My address and my transaction stay private. And after
+
+00:01:24.370 --> 00:01:28.890
+about three minutes: proven on Base. RISC Zero's verifier on Base accepts the proof. All done, and
+
+00:01:28.890 --> 00:01:33.850
+here you can see the transaction hash. Now we have zZEC, and we can borrow against
+
+00:01:33.850 --> 00:01:41.730
+it. As you can see, we deposited 0.05 ZEC, and I borrow 10 USDC, and you
+
+00:01:41.730 --> 00:01:45.670
+can see the health factor and the collateral right here. Create the account.
+
+00:01:45.670 --> 00:01:50.350
+A brand-new account borrows test USDC. Its gas is sponsored: it never held any ETH.
+
+00:01:50.350 --> 00:01:54.910
+We just borrowed 10 USDC, and you can see the transaction hash. This is our loan page:
+
+00:01:54.910 --> 00:01:58.750
+you can see the health, the utilization and the LTV here. You can close or repay
+
+00:01:58.750 --> 00:02:03.950
+from here, borrow more, or withdraw part of the collateral,
+
+00:02:03.950 --> 00:02:08.510
+reduce the debt, protect your position, or send USDC to another Base address
+
+00:02:08.510 --> 00:02:14.390
+here. Here I choose close from collateral, recommended, and I paste a fresh Ironwood
+
+00:02:14.390 --> 00:02:20.340
+address, check this address, and get a market maker's quote. Then we sign and
+
+00:02:20.340 --> 00:02:27.060
+send it to the market maker. We are waiting for the market maker to close our position.
+
+00:02:27.060 --> 00:02:29.940
+My ZEC goes back to an address from our own Ironwood wallet. The signers check it,
+
+00:02:29.940 --> 00:02:33.900
+and Base only sees a salted commitment. A market maker repays my debt and takes its
+
+00:02:33.900 --> 00:02:39.780
+share in ZEC, and the rest comes back to me, shielded. We are waiting... committed on
+
+00:02:39.780 --> 00:02:44.260
+Base. Both shares are paid on Zcash, signed by three of the five signers, and confirmed on Base. This is
+
+00:02:44.260 --> 00:02:47.940
+our swap page. No custodian: your USDC waits on Base until the maker proves, in
+
+00:02:47.940 --> 00:02:53.020
+zero knowledge, that it paid your Ironwood address. I enter 5 USDC and get the maker's quote,
+
+00:02:53.020 --> 00:03:04.100
+and I will receive 0.0039 ZEC. Then I connect my wallet and sign
+
+00:03:04.100 --> 00:03:13.910
+in the wallet. The order is opened, and we are waiting for the maker. My USDC
+
+00:03:13.910 --> 00:03:17.350
+waits in the contract. It is released only when the maker proves, in zero knowledge, that it
+
+00:03:17.350 --> 00:03:21.070
+paid my shielded address. We wait about ten minutes for the payment to be proven on Base.
+
+00:03:21.070 --> 00:03:24.390
+The swap settled. The maker paid my shielded address on Zcash and proved it on Base, in
+
+00:03:24.390 --> 00:03:28.750
+zero knowledge. Only then did the contract release my USDC. Base sees my wallet and the order,
+
+00:03:28.750 --> 00:03:34.780
+never where the ZEC went. No custodian. No bridge. And I can show you: it's finished,
+
+00:03:34.780 --> 00:03:38.100
+the loan closed from collateral. This is our market page: you can see the total
+
+00:03:38.100 --> 00:03:41.260
+supply, total borrow, the borrow rate, what lenders earn, and the details here. Everything
+
+00:03:41.260 --> 00:03:45.620
+you just saw ran live, with real transactions on Zcash testnet and Base Sepolia. Proving needs
+
+00:03:45.620 --> 00:03:49.660
+a GPU, so that backend ran only for this recording. On our site, the app replays this
+
+00:03:49.660 --> 00:03:54.580
+exact run in your browser. Zecured is open source. Your ZEC stays shielded. Only the proof crosses.
+

@@ -4,6 +4,7 @@ import Link from "next/link";
 import { useEffect, useState, type ReactNode } from "react";
 import { isHex, type Hex } from "viem";
 import { useMounted } from "./client";
+import { usdc } from "./loan";
 import { IconGlobe, IconKey, IconSigners } from "./icons";
 import { BaseMark } from "./marks";
 import { ChainChip, Leaky, type Chain } from "./seam";
@@ -14,8 +15,8 @@ import { readMarket, readPrice, readRecentRegistryEvents, type RegistryEvent } f
 import { config } from "@/lib/config";
 import { useLoans, useVault } from "@/lib/hooks";
 import { short, type StoredLoan } from "@/lib/keys";
-import { formatUsdc, formatUsdPrice, type MarketState } from "@/lib/morpho";
-import { priceSourceName } from "@/lib/labels";
+import { formatUsdPrice, type MarketState } from "@/lib/morpho";
+import { loanTokenName, priceSourceName } from "@/lib/labels";
 import { REPLAY } from "@/lib/replay/flag";
 import { SWAP_PRIVACY_SENTENCE } from "@/lib/v4";
 import { formatTaz } from "@/lib/zcash";
@@ -181,8 +182,8 @@ export function WorldView() {
                 <dl className="border-t-[1.5px] border-ink text-sm">
                   {(
                     [
-                      ["Supplied", base.market ? `${formatUsdc(base.market.totalSupplyAssets)} USDC` : "—"],
-                      ["Borrowed", base.market ? `${formatUsdc(base.market.totalBorrowAssets)} USDC` : "—"],
+                      ["Supplied", base.market ? `${usdc(base.market.totalSupplyAssets)} ${loanTokenName()}` : "—"],
+                      ["Borrowed", base.market ? `${usdc(base.market.totalBorrowAssets)} ${loanTokenName()}` : "—"],
                       [`ZEC price (${priceSourceName()})`, base.price ? formatUsdPrice(base.price) : "—"],
                     ] as const
                   ).map(([k, v]) => (

@@ -41,6 +41,12 @@ export interface DeploymentProfile {
    * shows hashes only, since opening an explorer tells it which account one cares about.
    */
   baseExplorerTx: string | null;
+  /**
+   * Where the app links a Zcash transaction (a block explorer's `/tx/` prefix, for an id in display order), or null.
+   * The judge testnet links the demo wallet's payment, which an explorer shows as an Ironwood transaction with nothing
+   * readable in it; the mainnet beta shows ids only, for the same reason as `baseExplorerTx`.
+   */
+  zcashExplorerTx: string | null;
 }
 
 /** The band of the mainnet beta (the v4 design's section 6), shown on every page. */
@@ -59,6 +65,7 @@ const TESTNET: DeploymentProfile = {
   // D7: 0.01 and 0.05 TAZ, and 0.125 TAZ, what the Valar testnet faucet pays (S13).
   defaultDenominations: [1_000_000n, 5_000_000n, 12_500_000n],
   baseExplorerTx: "https://sepolia.basescan.org/tx/",
+  zcashExplorerTx: "https://testnet.zecblock.com/tx/",
 };
 
 const MAINNET_BETA: DeploymentProfile = {
@@ -74,6 +81,7 @@ const MAINNET_BETA: DeploymentProfile = {
   // The beta configuration's sizes: 0.05 and 0.1 ZEC.
   defaultDenominations: [5_000_000n, 10_000_000n],
   baseExplorerTx: null,
+  zcashExplorerTx: null,
 };
 
 /**

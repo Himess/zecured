@@ -56,14 +56,14 @@ Setup, once:
 | Slash | `cast send <ZecuredSlasher> "proveViolation(uint8,bytes,bytes,bytes32)" 1 <journal> <seal> <violation image id>`; two minutes later `cast send <ZecuredSlasher> "executeSlash(bytes32)" <caseId>` | All five bonds slashed, the bounty owed to the prover, `halted()` true: no new vault can be activated |
 | Compensate | `cast send <ZecuredCompensator> "tallyVault(bytes32)" <vault id>`; once the incident window is over (10 minutes here), `finalizeIncident(uint256)` with `currentIncident()`, then `settleVault(bytes32)` and `withdrawEquity(bytes32)` | The slashed bonds repay the vault's debt, its unbacked zZEC is retired, and the rest of its value goes to its account in USDC: the victim is made whole up to the bonds |
 
-## Try with demo TAZ (P-1, DEMO)
+## Pay it with demo TAZ (P-1, DEMO)
 
-On a testnet deployment the deposit step offers "Try with demo TAZ" to a visitor without testnet ZEC:
+On a testnet deployment the deposit step offers "Pay it with demo TAZ" to a visitor without testnet ZEC:
 the operators' demo wallet pays the vault its exact amount from its own Ironwood notes. It is a real
 Zcash testnet payment, proven on Base like any deposit. Each vault gets one demo payment, within a
 daily budget, after a second of proof of work in the browser. When the loan is closed its ZEC goes
 back to the demo wallet, unless the visitor gives an Ironwood address of their own (the destination
-form offers the demo wallet's address).
+form offers "Send my ZEC back to the demo wallet"; the swap offers "DEMO: use the demo wallet's Ironwood address").
 
 Operators: run `zecured-wallet --wallet data/demo/wallet.json init`, fund the address it prints with
 TAZ, then set `DEMO_WALLET_SPENDING_KEY` (the file's `spending_key`: secret, never logged) and

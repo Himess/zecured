@@ -1,6 +1,6 @@
 # Publishes the site to GitHub Pages: everything in site/ except its tooling, site/dev (docs/SITE.md, "Publishing"),
-# and under app/ the judges' replay of the app (DEMO, app/README.md): the same pages as a static site that plays a
-# guided replay with sample data, since no server of ours runs through the judging (D82).
+# and under app/ the judges' replay of the app (DEMO, app/README.md): the same pages as a static site that replays
+# our live run of 27 October, since no server of ours runs through the judging (D82).
 # Only by hand, and only when the project owner decides to: Pages has to be turned on first in the repository's
 # settings, with GitHub Actions as its source, and on GitHub Free that needs a public repository.
 name: pages

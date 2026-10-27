@@ -39,6 +39,14 @@ const csp = [
  */
 const replay = process.env.NEXT_PUBLIC_REPLAY === "1";
 
+/**
+ * A live static export (`ZECURED_STATIC_EXPORT=1`): the live app, talking to the backend that NEXT_PUBLIC_BACKEND_URL
+ * names, as files for a static host under NEXT_PUBLIC_BASE_PATH (the recorded run's page on Vercel,
+ * scripts/deploy-vercel.sh). It is the export below without the replay; the host sends the Content Security
+ * Policy that `headers()` sends here, its `connect-src` naming that backend.
+ */
+const staticLive = process.env.ZECURED_STATIC_EXPORT === "1";
+
 const replayConfig: NextConfig = {
   reactStrictMode: true,
   poweredByHeader: false,
@@ -77,4 +85,4 @@ const nextConfig: NextConfig = {
   },
 };
 
-export default replay ? replayConfig : nextConfig;
+export default replay || staticLive ? replayConfig : nextConfig;

@@ -10,6 +10,7 @@ import { config } from "@/lib/config";
 import { DEPLOYMENT } from "@/lib/deployment";
 import { useEvidence, useProtocol, useStatusReport, useVaultStats } from "@/lib/hooks";
 import { short } from "@/lib/keys";
+import { loanTokenName } from "@/lib/labels";
 import { formatBps, formatUsdc } from "@/lib/morpho";
 import { formatWadPercent } from "@/lib/preliq";
 import { anonymitySets, bondNumbers, capNumbers, relayLag, SIGNERS } from "@/lib/public";
@@ -213,8 +214,8 @@ export function StatusView() {
         {bonds ? (
           <div className="space-y-4">
             <dl className="grid gap-x-6 gap-y-5 sm:grid-cols-3">
-              <Stat label="ΣB (sum of the bonds)" value={`${formatUsdc(bonds.sum)} USDC`} hint={`${bonds.bonded} of ${SIGNERS} at the ${formatUsdc(bonds.minBond)} USDC minimum`} />
-              <Stat label="B_eff (what the cap counts)" value={`${formatUsdc(bonds.effective)} USDC`} hint="min(ΣB, 5/3 × the three smallest)" />
+              <Stat label="ΣB (sum of the bonds)" value={`${formatUsdc(bonds.sum)} ${loanTokenName()}`} hint={`${bonds.bonded} of ${SIGNERS} at the ${formatUsdc(bonds.minBond)} ${loanTokenName()} minimum`} />
+              <Stat label="B_eff (what the cap counts)" value={`${formatUsdc(bonds.effective)} ${loanTokenName()}`} hint="min(ΣB, 5/3 × the three smallest)" />
               <Stat
                 label="Bonds per dollar locked"
                 value={bonds.perCollateralWad === null ? "—" : formatWadPercent(bonds.perCollateralWad)}
@@ -225,11 +226,11 @@ export function StatusView() {
               {s!.bonds!.each.map((b, i) => (
                 <li key={i} className="border-t border-border pt-2.5">
                   <span className="block text-xs text-muted">Signer {i + 1}</span>
-                  <span className="tabular-nums">{formatUsdc(b)} USDC</span>
+                  <span className="tabular-nums">{formatUsdc(b)} {loanTokenName()}</span>
                 </li>
               ))}
             </ul>
-            <p className="text-xs text-muted">A slash of a proven theft takes up to {formatUsdc(bonds.totalSlashable)} USDC (bonds and unbonding amounts).</p>
+            <p className="text-xs text-muted">A slash of a proven theft takes up to {formatUsdc(bonds.totalSlashable)} {loanTokenName()} (bonds and unbonding amounts).</p>
           </div>
         ) : (
           <p className="text-sm text-muted">

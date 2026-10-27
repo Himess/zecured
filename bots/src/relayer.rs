@@ -82,6 +82,10 @@ pub fn network_of(network_id: B256) -> Option<ZcashNetwork> {
 struct PeerBook {
     reachable: Vec<p2p::Reachable>,
     probed: Option<Instant>,
+    /// Set when the relay refused the headers that continue its tip. Some peers can follow a branch whose next
+    /// blocks the relay rejects, and while the relay's tip is on it only they answer (Testnet, 2026-10-27): the
+    /// next pass then fetches from `STEP_BACK` below the tip, as after a reorg.
+    step_back: bool,
 }
 
 /// Runs passes forever; a failed pass is logged and retried at the next interval.
@@ -114,16 +118,18 @@ pub async fn run(r: Relayer) -> Result<()> {
 }
 
 /// The headers that follow the relay's best tip, from the peers; from up to `STEP_BACK` blocks
-/// below the tip if the peers do not continue from it. Also returns the relay's tip height and
-/// the peer that answered.
+/// below the tip if the peers do not continue from it, or at once with `step_back`. Also returns
+/// the relay's tip height and the peer that answered.
 async fn headers_after<P: Provider>(
     relay: &IZcashHeaderRelay::IZcashHeaderRelayInstance<P>,
     network: ZcashNetwork,
     peers: &[SocketAddr],
+    step_back: bool,
 ) -> Result<(Vec<HeaderLine>, u32, Option<SocketAddr>)> {
     let tip = relay.bestChainTip().call().await.context("relay.bestChainTip")?;
     let height = u32::try_from(tip.height)?;
-    for back in [0, STEP_BACK] {
+    let backs: &[u32] = if step_back { &[STEP_BACK] } else { &[0, STEP_BACK] };
+    for &back in backs {
         let from = height.saturating_sub(back);
         let hash = if back == 0 {
             tip.blockHash
@@ -173,7 +179,7 @@ async fn pass(r: &Relayer, network: ZcashNetwork, book: &mut PeerBook) -> Result
         info!(reachable = book.reachable.len(), best_height = ?best, %network, "peers probed");
     }
     let peers: Vec<SocketAddr> = book.reachable.iter().map(|p| p.addr).collect();
-    let (lines, tip_height, _) = headers_after(&relay, network, &peers).await?;
+    let (lines, tip_height, _) = headers_after(&relay, network, &peers, book.step_back).await?;
     let fetch_ms = elapsed_ms(started);
     let seen = lines.last().map_or(0, |l| l.height).max(book.reachable.first().map_or(0, |p| p.height));
     if !should_submit(r.standby_lag, seen, tip_height) {
@@ -192,7 +198,8 @@ async fn pass(r: &Relayer, network: ZcashNetwork, book: &mut PeerBook) -> Result
         if submit(&relay, raws(chunk)?).await.is_err() {
             let left = unknown(&relay, chunk).await?;
             if left.len() == chunk.len() {
-                return submit(&relay, raws(chunk)?).await; // not a race: report the error
+                book.step_back = true; // not a race: the next pass steps back below the tip
+                return submit(&relay, raws(chunk)?).await; // and this one reports the error
             }
             if !left.is_empty() {
                 submit(&relay, raws(&left)?).await?;
@@ -202,6 +209,7 @@ async fn pass(r: &Relayer, network: ZcashNetwork, book: &mut PeerBook) -> Result
             submitted += chunk.len();
         }
     }
+    book.step_back = false;
 
     let submit_ms = elapsed_ms(started) - fetch_ms;
 
