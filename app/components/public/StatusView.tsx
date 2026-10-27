@@ -15,6 +15,7 @@ import { formatBps, formatUsdc } from "@/lib/morpho";
 import { formatWadPercent } from "@/lib/preliq";
 import { anonymitySets, bondNumbers, capNumbers, relayLag, SIGNERS } from "@/lib/public";
 import { formatTaz } from "@/lib/zcash";
+import { ChainRef } from "@/components/ChainRef";
 
 const MODE_TONE: Record<StatusReport["nodes"][number]["mode"], "ok" | "warn" | "danger"> = {
   normal: "ok",
@@ -297,7 +298,7 @@ export function StatusView() {
               [
                 "Commit",
                 <span key="c">
-                  <Mono>{r.commit}</Mono> {r.treeClean ? null : <Badge tone="warn">uncommitted changes</Badge>}
+                  <ChainRef kind="commit" value={r.commit} /> {r.treeClean ? null : <Badge tone="warn">uncommitted changes</Badge>}
                 </span>,
               ],
               ["Started", r.startedAt ? formatUtc(r.startedAt) : "—"],

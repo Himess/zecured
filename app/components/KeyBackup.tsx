@@ -7,6 +7,7 @@ import { REPLAY } from "@/lib/replay/flag";
 import { CopyButton } from "./client";
 import { IconArrowRight, IconDownload, IconKey, IconUpload } from "./icons";
 import { Button, buttonClass, cx, Disclosure, Notice } from "./ui";
+import { ChainRef } from "./ChainRef";
 
 /** Saves a loan backup as a local file (Blob URL: no network). */
 export function downloadBackup(loan: StoredLoan): void {
@@ -114,7 +115,7 @@ export function KeyBackup({ loan, onConfirmed }: { loan: StoredLoan; onConfirmed
           ••••••••••••••
         </span>
         <span className="text-[13px] text-muted">
-          account <span className="font-mono text-soft">{short(loan.account)}</span>
+          account <ChainRef kind="base-address" value={loan.account} className="text-soft">{short(loan.account)}</ChainRef>
         </span>
         <span className="text-[12.5px] text-faint sm:ml-auto">only in this browser</span>
       </div>

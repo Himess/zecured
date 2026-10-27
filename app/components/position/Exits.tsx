@@ -20,6 +20,7 @@ import { loanStore, short, type StoredLoan } from "@/lib/keys";
 import { loanTokenName } from "@/lib/labels";
 import { formatUsdc, parseUsdc } from "@/lib/morpho";
 import { formatTaz } from "@/lib/zcash";
+import { ChainRef } from "@/components/ChainRef";
 
 /** The borrower accepts up to 1 % less ZEC than quoted (price moves between quote and execution). */
 const CLOSE_SLIPPAGE_BPS = 100n;
@@ -213,7 +214,7 @@ function RepayFlow({ loan, vault, snapshot, commitment, onChanged }: FlowProps) 
       {!enough ? (
         <Notice tone="info" title={`Not enough ${loanTokenName()} in the loan account`}>
           <p>
-            Send at least {formatUsdc(needed - snapshot.usdcBalance)} more {loanTokenName()} to <Mono>{loan.account}</Mono>, then
+            Send at least {formatUsdc(needed - snapshot.usdcBalance)} more {loanTokenName()} to <ChainRef kind="base-address" value={loan.account} />, then
             refresh. That transfer is public: send it from an address with no link to you, or close from collateral
             instead.
           </p>
@@ -319,7 +320,7 @@ function CloseFlow({ loan, vault, snapshot, commitment, onChanged }: FlowProps) 
             <KeyValue
               rows={[
                 ["Minimum you accept", formatTaz((quote.userAmount * (10_000n - CLOSE_SLIPPAGE_BPS)) / 10_000n)],
-                ["Market maker", <Mono key="e">{quote.executor}</Mono>],
+                ["Market maker", <ChainRef key="e" kind="base-address" value={quote.executor} />],
                 ["Quote valid until", formatUtc(quote.expiresAt)],
               ]}
             />
@@ -380,14 +381,14 @@ export function PendingClose({ loan, vault, onChanged }: { loan: StoredLoan; vau
                   ? "Expired without execution"
                   : "Waiting for the market maker",
           ],
-          ["Market maker", <Mono key="e">{pending.executor}</Mono>],
+          ["Market maker", <ChainRef key="e" kind="base-address" value={pending.executor} />],
           ["Valid until", formatUtc(Number(pending.deadline))],
           ["Nonce", <Mono key="n">{short(pending.nonce, 8, 6)}</Mono>],
           ...(pending.txHash
             ? ([
                 [
                   "Market maker's transaction",
-                  sampleTransactions() ? <span key="t" className="text-muted">sample data</span> : <Mono key="t">{short(pending.txHash, 10, 8)}</Mono>,
+                  sampleTransactions() ? <span key="t" className="text-muted">sample data</span> : <ChainRef key="t" kind="base-tx" value={pending.txHash}>{short(pending.txHash, 10, 8)}</ChainRef>,
                 ],
               ] as [string, ReactNode][])
             : []),

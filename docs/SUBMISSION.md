@@ -5,7 +5,8 @@ and what is a mock. Every link is absolute, so it works from the form.
 
 **Links.** The site: https://zecured.vercel.app/ (the details: https://zecured.vercel.app/docs/). The
 app replaying our live run of 27 October in your browser (DEMO, no server needed): https://zecured.vercel.app/app/.
-The video of the live run: https://youtu.be/iyXiao54KWk. The code: https://github.com/Himess/zecured. The same pages on GitHub Pages: https://himess.github.io/zecured/.
+The video of the live run: https://youtu.be/iyXiao54KWk. Its transactions on ZecBlock and Basescan, and the contracts,
+verified on Basescan: https://github.com/Himess/zecured#the-live-run-on-the-explorers. The code: https://github.com/Himess/zecured. The same pages on GitHub Pages: https://himess.github.io/zecured/.
 
 **Team.** Himess (https://github.com/Himess). Built from scratch for ZECATHON 2026, Cross-Chain track; first commit
 10 October 2026.

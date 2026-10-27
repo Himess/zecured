@@ -44,6 +44,7 @@ import {
   refundClaims,
 } from "@/lib/v3";
 import { blocksToDuration, formatTaz } from "@/lib/zcash";
+import { ChainRef } from "@/components/ChainRef";
 
 const now = () => Math.floor(Date.now() / 1000);
 
@@ -767,7 +768,7 @@ function CompromisedCard({ ledger }: { ledger: VaultLedger }) {
             </p>
             {ledger.links.compensator ? (
               <p className="flex flex-wrap items-center gap-2 text-xs text-muted">
-                Compensator <Mono>{ledger.links.compensator}</Mono> <CopyButton value={ledger.links.compensator} />
+                Compensator <ChainRef kind="base-address" value={ledger.links.compensator} /> <CopyButton value={ledger.links.compensator} />
               </p>
             ) : null}
           </>

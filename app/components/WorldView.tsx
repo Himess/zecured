@@ -20,6 +20,7 @@ import { loanTokenName, priceSourceName } from "@/lib/labels";
 import { REPLAY } from "@/lib/replay/flag";
 import { SWAP_PRIVACY_SENTENCE } from "@/lib/v4";
 import { formatTaz } from "@/lib/zcash";
+import { ChainRef } from "./ChainRef";
 
 interface PublicData {
   market: MarketState | null;
@@ -129,6 +130,7 @@ function LedgerHeading({ children }: { children: ReactNode }) {
 
 function fieldValue(event: RegistryEvent, key: string, value: string): ReactNode {
   if (/amount/i.test(key) && /^\d+$/.test(value)) return <Mono>{formatTaz(BigInt(value))}</Mono>;
+  if (/^0x[0-9a-fA-F]{40}$/.test(value)) return <ChainRef kind="base-address" value={value}>{short(value, 8, 6)}</ChainRef>;
   if (/^0x[0-9a-fA-F]{40,}$/.test(value)) return <Mono>{short(value, 8, 6)}</Mono>;
   return <Mono>{value}</Mono>;
 }
@@ -204,6 +206,9 @@ export function WorldView() {
                         <p className="mt-1 flex flex-wrap gap-x-4 gap-y-1 text-[13px] text-ink-muted">
                           <span>
                             vault <Mono>{short(e.vaultId, 8, 6)}</Mono>
+                          </span>
+                          <span>
+                            tx <ChainRef kind="base-tx" value={e.transactionHash}>{short(e.transactionHash, 8, 6)}</ChainRef>
                           </span>
                           {Object.entries(e.fields).map(([k, v]) => (
                             <span key={k}>
@@ -316,14 +321,14 @@ function YouView({ loan }: { loan: StoredLoan }) {
   return (
     <div className="space-y-1 rounded-[14px] bg-bg p-3.5 text-xs text-soft">
       <p>
-        Owner key: <span className="text-text">held here (secret)</span>, owner <Mono>{short(loan.owner)}</Mono>
+        Owner key: <span className="text-text">held here (secret)</span>, owner <ChainRef kind="base-address" value={loan.owner}>{short(loan.owner)}</ChainRef>
       </p>
       <p>
-        Account <Mono>{short(loan.account)}</Mono>
+        Account <ChainRef kind="base-address" value={loan.account}>{short(loan.account)}</ChainRef>
       </p>
       {loan.vaultAddress ? (
         <p>
-          Vault address <Mono>{short(loan.vaultAddress, 12, 8)}</Mono>
+          Vault address <ChainRef kind="zcash-address" value={loan.vaultAddress}>{short(loan.vaultAddress, 12, 8)}</ChainRef>
         </p>
       ) : null}
       {loan.destinationCommitment ? (

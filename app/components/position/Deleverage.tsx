@@ -15,6 +15,7 @@ import type { StoredLoan } from "@/lib/keys";
 import { loanTokenName } from "@/lib/labels";
 import { formatBps, formatUsdc, formatUsdPrice, formatWad, ltvBps, parseUsdc } from "@/lib/morpho";
 import { formatTaz } from "@/lib/zcash";
+import { ChainRef } from "@/components/ChainRef";
 
 /**
  * P-7, "Reduce debt with collateral" (S18): a market maker repays the amount asked for and takes
@@ -148,7 +149,7 @@ export function Deleverage({
               ],
               ["Health factor after", preview.healthAfter === null ? "∞ (no debt left)" : formatWad(preview.healthAfter)],
               ["Liquidation price after", preview.liquidationPriceAfter === null ? "—" : `${formatUsdPrice(preview.liquidationPriceAfter)} per ZEC`],
-              ["Executor", <Mono key="e">{quote.executor}</Mono>],
+              ["Executor", <ChainRef key="e" kind="base-address" value={quote.executor} />],
               ["Quote valid until", new Date(quote.expiresAt * 1000).toLocaleTimeString()],
             ]}
           />
@@ -184,7 +185,7 @@ export function Deleverage({
           <p>
             {submit.result.tx ? (
               <>
-                The market maker&apos;s transaction: <Mono>{submit.result.tx}</Mono>
+                The market maker&apos;s transaction: <ChainRef kind="base-tx" value={submit.result.tx} />
               </>
             ) : (
               "Executed by the market maker."

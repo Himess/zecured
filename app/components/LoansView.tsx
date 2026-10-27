@@ -12,6 +12,7 @@ import { notifyLoansChanged, useLoans, useVault } from "@/lib/hooks";
 import { importLoan, loanStore, short, type StoredLoan } from "@/lib/keys";
 import { vaultHref } from "@/lib/routes";
 import { formatZec } from "@/lib/zcash";
+import { ChainRef } from "./ChainRef";
 
 export function LoansView() {
   const mounted = useMounted();
@@ -102,7 +103,7 @@ function LoanRow({ loan }: { loan: StoredLoan }) {
             )}
           </p>
           <p className="text-muted">
-            Account <Mono>{short(loan.account)}</Mono>
+            Account <ChainRef kind="base-address" value={loan.account}>{short(loan.account)}</ChainRef>
             {loan.vaultId ? (
               <>
                 , vault <Mono>{short(loan.vaultId, 10, 6)}</Mono>
