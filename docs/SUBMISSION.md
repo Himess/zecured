@@ -16,9 +16,9 @@ The code: https://github.com/Himess/zecured. The same pages on GitHub Pages: htt
 Zcash's shielded pool, or swap USDC into shielded ZEC. Base sees zero-knowledge proofs, never your Zcash address,
 transaction or balance. The ZEC sits in a fresh 3-of-5 FROST vault; Base verifies Zcash's headers itself and mints
 a non-transferable collateral receipt on a RISC Zero proof of the deposit; a brand-new, gasless account borrows on
-Morpho Blue. Testnet only: the five signers are run by the team, and the ZEC price, the loan token (MockUSDC) and
-the verifier in our end-to-end runs are mocks; a real proof of a real deposit passes RISC Zero's live router in one
-command.
+Morpho Blue. It ran live on Zcash testnet and Base Sepolia on 27 October 2026, every proof made on a rented GPU and
+checked by RISC Zero's deployed router. Testnet only: the five signers are run by the team, and the ZEC price and the
+loan token (MockUSDC) are mocks.
 
 ## For judges (5 minutes)
 
@@ -39,8 +39,9 @@ command.
   Change one digit of the last hash and the router reverts. Every guest, with minting and slashing through the real
   router, on a fork: `cd contracts && forge test --match-path test/fork/RealSealsV2.t.sol --isolate`.
 - **Real and mock:** Zcash testnet transactions, the FROST vaults, the on-chain Zcash header relay, the RISC Zero
-  proofs and Morpho Blue are real; the ZEC price, the loan token (MockUSDC), the verifier inside the end-to-end runs
-  and the signers' independence are not.
+  proofs and Morpho Blue are real, and they ran live together on Base Sepolia on 27 October 2026 (a loan and a swap),
+  every proof of that run checked by RISC Zero's deployed router; the ZEC price, the loan token (MockUSDC) and the
+  signers' independence are not.
 - **Details:** what ran and how to reproduce it, https://github.com/Himess/zecured/blob/main/docs/TESTING.md; the
   judges' FAQ, https://github.com/Himess/zecured/blob/main/docs/JURY_FAQ.md.
 
@@ -62,8 +63,9 @@ backed by Coinbase's custodial wrapped ZEC and public on-chain, held about USD 2
 market for shielded ZEC.
 
 Built from scratch for ZECATHON 2026 (Cross-Chain track), first commit 10 October: 804 contract tests, 35
-invariants, 22 symbolic checks, real Groth16 proofs of every guest accepted by RISC Zero's router on Base forks,
-end-to-end runs with real Zcash testnet transactions, and a draft ZIP for shielded collateral vaults. Try it: the
+invariants, 22 symbolic checks, a live run on Base Sepolia with every proof checked by RISC Zero's deployed router,
+real Groth16 proofs of every guest accepted by that router on Base forks, end-to-end runs with real Zcash testnet
+transactions, and a draft ZIP for shielded collateral vaults. Try it: the
 two-minute video, the app as a guided replay in your browser (https://zecured.vercel.app/app/), or the whole
 system on a local fork (https://github.com/Himess/zecured#running-it).
 
@@ -144,15 +146,18 @@ like any claim. What the design cannot stop: all five signers colluding
 - Zcash testnet (NU7) Ironwood transactions;
 - 3-of-5 FROST threshold signing (re-randomized FROST over RedPallas, ZIP 2005 keys);
 - every signer's per-payout policy checks;
-- the Zcash header relay, which verifies Equihash on Base (an earlier version took real Testnet headers on public
-  Base Sepolia in 274 transactions, the last on 12 October 2026: 0xab07317f7B9390394271D9c03FE2E912C0E58FA5);
+- the Zcash header relay, which verifies Equihash on Base: live on Base Sepolia for the run of 27 October 2026
+  (0xEc34aA21cDe1366b397a99A4d90fc6B2f02cFaEa); an earlier version took real Testnet headers there in 274
+  transactions, the last on 12 October 2026 (0xab07317f7B9390394271D9c03FE2E912C0E58FA5);
 - the deposit, violation and payment statements, run in the RISC Zero zkVM, and the guests'
   reproducible image ids;
-- real Groth16 seals of every pinned guest, accepted by RISC Zero's deployed verifier router on Base Sepolia and
-  Base mainnet forks, and the deposit's seal by the live router itself (the one-command check above);
-- `ZecuredSwap` and its market maker;
-- Morpho Blue's own deployment on Base Sepolia (on forks);
-- our own RPC proxy, bundler and paymaster with a sponsorship allowlist;
+- real Groth16 seals, made on a rented GPU: in the live run, accepted by RISC Zero's deployed verifier router on Base
+  Sepolia (deposits minted on their proofs, a payout's delivery, a swap's payment); for every pinned guest, on Base
+  Sepolia and Base mainnet forks; and the deposit's seal of the one-command check above;
+- `ZecuredSwap` and its market maker (live on Base Sepolia: a swap settled on its payment proof);
+- Morpho Blue's own deployment on Base Sepolia (live, and on forks);
+- our own RPC proxy, bundler and paymaster with a sponsorship allowlist (in the live run, our `SingletonPaymasterV7`
+  and alto bundler sponsored the loan account on Base Sepolia);
 - the bonds and the slasher.
 
 **Mock, demo, or not independent:**
@@ -166,15 +171,16 @@ like any claim. What the design cannot stop: all five signers colluding
   demo show a liquidation.
 - **The loan token.** MockUSDC, a test token we mint (MOCK: no value). The contracts take any 6-decimal USDC; the
   mainnet configuration names Circle's USDC.
-- **The verifier in the end-to-end runs.** `MockRiscZeroVerifier` (MOCK), since RISC Zero does not run on our
-  Windows machine; the real seals pass the real router separately (above).
+- **The verifier in the local-fork runs.** `MockRiscZeroVerifier` (MOCK), where RISC Zero does not run (our Windows
+  machine); the live Base Sepolia run used RISC Zero's router.
 - **Sponsorship on the local fork.** Pimlico's mock paymaster, behind our proxy's allowlist.
-- **The demo wallet (DEMO).** On testnet it pays a vault real TAZ for a visitor without testnet ZEC.
+- **The demo wallet (DEMO).** On testnet it pays a vault real TAZ for a visitor without testnet ZEC ("Pay it with demo
+  TAZ"), takes back a closed loan's ZEC and can receive a swap.
 - **The theft demonstration (DEMO).** It is a separate deployment with its own signers and a 2-minute
   challenge window. It never touches the lending deployment.
 - **The app's replay (DEMO).** A static build of the app whose in-browser simulator plays sample data in place of
   our servers; it carries no private key, salt or viewing key.
-- **No deployment kept running.** Nothing stays deployed through judging (D82). The system ran end to end on Base
-  Sepolia forks with real Zcash testnet transactions, checking proofs with a MOCK verifier; separately, the real
-  Groth16 seal of every pinned guest passes RISC Zero's deployed router
+- **No server kept running.** The system ran live on Base Sepolia on 27 October 2026, then its signers, prover and
+  bots stopped (D82); the contracts stay on Base Sepolia, unoperated. Earlier end-to-end runs used Base Sepolia
+  forks with a MOCK verifier, and the real Groth16 seal of every pinned guest passes RISC Zero's deployed router
   (https://github.com/Himess/zecured/blob/main/docs/TESTING.md, § 2 and § 2b).

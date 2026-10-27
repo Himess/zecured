@@ -290,11 +290,11 @@ function SweepCard({ token }: { token: string }) {
   );
 }
 
-/** The deployment's price ($40) and one at which loans borrowed at the app's limit are liquidatable. */
-const NORMAL_PRICE_CENTS = 4_000n;
+/** The deployment's price ($1,265) and one at which loans borrowed at the app's limit are liquidatable. */
+const NORMAL_PRICE_CENTS = 126_500n;
 const PRICE_PRESETS: { cents: bigint; label: string }[] = [
   { cents: NORMAL_PRICE_CENTS, label: "normal" },
-  { cents: 2_000n, label: "typical loans liquidatable" },
+  { cents: 63_250n, label: "typical loans liquidatable" },
 ];
 
 function OracleCard({ token }: { token: string }) {
@@ -379,7 +379,7 @@ function OracleCard({ token }: { token: string }) {
                 autoComplete="off"
                 value={draft}
                 onChange={(e) => setDraft(e.target.value)}
-                placeholder="40.00"
+                placeholder="1265.00"
                 aria-invalid={draftError ? true : undefined}
                 className="field tabular-nums"
               />

@@ -1,12 +1,12 @@
 # Tier 3: theft of collateral is provable on Base and slashes bonds
 
-Status (2026-10-14): **implemented, not yet deployed** (Deploy 2). Contracts: Registry v2
+Status (2026-10-27): **implemented, and deployed on Base Sepolia for the live run of 27 October** (Deploy 2). Contracts: Registry v2
 (`commitSpend`), `SignerBond`, `ZecuredSlasher`. Signers: the commitment in FROST round 1 and the
 round-2 checks (T3-4, T3-5). The violation statement, its zkVM guest, `build-violation` (F1, F2, F3)
 and the watcher (`zecured-wallet watch --tier3`) are done, and a real Testnet payout went through the
 whole protocol (`docs/TESTING.md` § 2); the review's E1 to E3 are in (D34), and so are the fixes of
-the red-team review of 2026-10-14 (D38), including the fourth violation kind, F4. Still to come: the
-theft demo deployment (T3-6). The guest round (2026-10-15, design notes T-09) made the Zcash network a
+the red-team review of 2026-10-14 (D38), including the fourth violation kind, F4. The theft
+demonstration (T3-6) runs on its own deployment, on a fork. The guest round (2026-10-15, design notes T-09) made the Zcash network a
 build parameter (one violation guest per network), gave F4 the vault's tag key K instead of its
 viewing key, and added a fifth kind, `Included`, for a later contract (§ 6). This document fixes what
 the contracts, the signers and the violation guest agree on:

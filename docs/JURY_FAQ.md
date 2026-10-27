@@ -163,12 +163,15 @@ shielded ZEC by the vault's next payout. If the signers stall once one of them a
 bonds pay the claim's value plus 5 %, in USDC, after the liveness period (24 hours; 72 on mainnet).
 
 **Did anything run on a public chain?**
-Yes, twice. An earlier version of our Zcash header relay took real Testnet headers on public Base Sepolia, Equihash
-checked on-chain, in 274 transactions up to Zcash height 4,491,413, the last on 12 October 2026
-([0xab07…8FA5](https://sepolia.basescan.org/address/0xab07317f7B9390394271D9c03FE2E912C0E58FA5)). And RISC Zero's
-router on Base Sepolia accepts the Groth16 proof of a real Zcash testnet deposit today: the one-command check in the
-[README](../README.md#for-judges-5-minutes). The loans, the swap and the theft demonstration ran on Base Sepolia forks
-([TESTING.md](TESTING.md)).
+Yes. On 27 October 2026 the system ran live on Base Sepolia: a deposit minted on its real Groth16 proof through RISC
+Zero's deployed router, a sponsored borrow from an account that never held ETH, a close from collateral paid on
+Zcash by 3-of-5 FROST with its delivery then proven on Base, and a swap settled on the proof of its Zcash payment
+([TESTING.md](TESTING.md)). Before that, an earlier version of our Zcash header relay took real Testnet headers on
+public Base Sepolia, Equihash checked on-chain, in 274 transactions up to Zcash height 4,491,413, the last on 12
+October 2026 ([0xab07…8FA5](https://sepolia.basescan.org/address/0xab07317f7B9390394271D9c03FE2E912C0E58FA5)), and
+RISC Zero's router there accepts the Groth16 proof of a real deposit today: the one-command check in the
+[README](../README.md#for-judges-5-minutes). Liquidations, disputes, refunds and the theft demonstration ran on Base
+Sepolia forks.
 
 **Why wait for NU7 on mainnet?**
 Nothing in the design needs NU7: the mainnet deposit guest proves NU6.3's and NU7's epochs. The beta waits for NU7's
@@ -177,11 +180,11 @@ tree restarting at the activation ([MAINNET.md](MAINNET.md)).
 
 **What's mocked?**
 The ZEC price (`MockZecOracle`, behind `DemoShockOracle`, whose owner-set shock shows a liquidation); the loan token
-(MockUSDC, a test token we mint); the verifier inside the end-to-end runs (`MockRiscZeroVerifier`, while real
-zero-knowledge proofs of every kind are verified by RISC Zero's router in the fork tests); the local fork's
+(MockUSDC, a test token we mint); the verifier of the local-fork runs (`MockRiscZeroVerifier`; the live Base
+Sepolia run and the fork tests use RISC Zero's router); the local fork's
 paymaster (Pimlico's mock paymaster, behind our allowlist); and signer independence (all five nodes run by us; the
 bonds show the mechanism). The demo wallet, the theft demonstration (a separate deployment with a 2-minute
 challenge window) and the app's replay are labelled DEMO. Real: Zcash testnet (NU7) Ironwood transactions, FROST
 threshold signing, the zero-knowledge statements and their seals, the on-chain Zcash header relay, Morpho Blue's own
-deployment (on Base Sepolia forks), and gasless smart accounts through our own proxy and allowlist. The full list
+deployment (on Base Sepolia, live and on forks), and gasless smart accounts through our own proxy and allowlist. The full list
 is in the [README](../README.md#what-is-real-and-what-is-a-mock).

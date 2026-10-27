@@ -1,7 +1,7 @@
 import { defineConfig, devices } from "@playwright/test";
 
 // The site's checks (docs/SITE.md): `pnpm test`. Its images, the README's and the social card: `pnpm shots`,
-// which writes site/img/still.jpg, site/og.png, docs/assets/*.png and site/dev/shots/ (not committed).
+// which writes site/img/still.jpg, site/og.jpg, docs/assets/*.png and site/dev/shots/ (not committed).
 export default defineConfig({
   testDir: ".",
   fullyParallel: true,

@@ -6,7 +6,9 @@ docs/INTERFACES.md and this log disagree, fix the docs: this log is the history.
 Code comments cite the v3 round's design items as "design notes T-01" to "T-12" (rows D40 to D58 below) and the
 v4 round's specification as "the v4 work order" (its content is in docs/TIER3.md, docs/SWAP.md and docs/MAINNET.md
 § 5). W-1 to W-31 are the findings of our internal v4 review (2026-10-21, by reviewers who did not write the code), rows D83 to D103; N-1 to N-12 those
-of the review of the v4.1 diff (off chain only; the contracts did not change), rows D104 onward.
+of the review of the v4.1 diff (off chain only; the contracts did not change), rows D104 onward. Other labels in code
+comments (K-, RQ-, S-, C-, E- and the like) name findings of our internal reviews between 15 and 27 October; the
+changes they led to are in this log and in the commits that made them.
 
 | # | Date | Decision | Why | Affects |
 |---|---|---|---|---|

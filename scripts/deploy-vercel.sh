@@ -26,12 +26,13 @@ printf 'User-agent: *\nAllow: /\nDisallow: /app/\nDisallow: /live/\nSitemap: %s/
 printf '<?xml version="1.0" encoding="UTF-8"?>\n<urlset xmlns="http://www.sitemaps.org/schemas/sitemap/0.9"><url><loc>%s/</loc></url><url><loc>%s/docs/</loc></url></urlset>\n' "$url" "$url" > "$out/sitemap.xml"
 
 # The app's replay (DEMO), a static export served at /app/. (Git Bash would pass /app on as a Windows path.)
+[ -d "$root/app/node_modules" ] || (cd "$root/app" && pnpm install --frozen-lockfile)
 (cd "$root/app" && export MSYS2_ENV_CONV_EXCL=NEXT_PUBLIC_BASE_PATH NEXT_PUBLIC_BASE_PATH=/app &&
   node scripts/build-replay.mjs && node scripts/check-export.mjs)
 cp -R "$root/app/out" "$out/app"
 
-# The live app (ZECURED_LIVE_BACKEND), pinned to the committed deployment records like a box's build (2.6 of the run's
-# runbook), as a static export at /live/. Its Content Security Policy is the live build's own (app/next.config.ts),
+# The live app (ZECURED_LIVE_BACKEND), pinned to the committed deployment records by app/scripts/pin-deployment.mjs
+# like a live build, as a static export at /live/. Its Content Security Policy is the live build's own (app/next.config.ts),
 # sent as a header below, its connect-src naming the backend.
 live="${ZECURED_LIVE_BACKEND:-}"
 live_csp=""

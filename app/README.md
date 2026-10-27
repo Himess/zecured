@@ -48,7 +48,7 @@ The replay never publishes a private key, a salt or a viewing key: its loan carr
 nothing, the viewing-key route answers `replay_unavailable`, and a destination the judge types stays in the browser.
 Every hook point tests the replay flag (`lib/replay/flag.ts`, `NEXT_PUBLIC_REPLAY=1`); a live build, where the
 variable is unset, never takes a replay path at runtime (`lib/replay/hooks.test.ts`), although the simulator's code
-still ships in its bundle. Until a public run on Base Sepolia is recorded, the recording is sample data: dummy hashes,
+still ships in its bundle. Until the run of 27 October on Base Sepolia is harvested into it, the recording is sample data: dummy hashes,
 no explorer links, and five DEMO signer keys that sign its vault. A recording of a real run carries its real
 transaction hashes, and the dock then links each on-chain step to its explorer.
 
@@ -77,7 +77,7 @@ values that carry no authority.
 | `NEXT_PUBLIC_IRM` | `0x46415998764C29aB2a25CbeA6254146D50D22687` | AdaptiveCurveIRM (the default is a pin too). |
 | `NEXT_PUBLIC_ZECURED_DEPLOYMENT` | `testnet` | v4: `testnet` (Base Sepolia, Zcash testnet, TAZ) or `mainnet-beta` (Base 8453, Zcash mainnet, ZEC): the band "Mainnet beta — unaudited — invite only — small caps" on every page, an invite code sent with `POST /vaults`, the demo path off, the evidence page's mainnet section first. Any other value keeps Base disabled. |
 | `NEXT_PUBLIC_SWAP` | none | v4: ZecuredSwap, pinned like the other contracts (the user's own wallet sends `open` and `refund` to it); empty: the Buy page says the build has no swap. |
-| `NEXT_PUBLIC_DEMO_PATH` | off | v4, P-1 (DEMO, testnet only): `1` shows "Try with demo TAZ" while the backend's demo wallet is on (`GET /demo/status`). Ignored on the mainnet beta. |
+| `NEXT_PUBLIC_DEMO_PATH` | off | v4, P-1 (DEMO, testnet only): `1` shows "Pay it with demo TAZ" while the backend's demo wallet is on (`GET /demo/status`). Ignored on the mainnet beta. |
 
 All values are public (inlined into the bundle at build time). Rebuild after changing them.
 
@@ -120,7 +120,7 @@ NEXT_PUBLIC_IRM=\(.market.irm)
 NEXT_PUBLIC_SIGNERS=\(.signers | join(","))"' ../contracts/deployments/anvil.json >> .env.local
 ```
 
-(`base-sepolia.json` once deployed publicly.) Or, with the swap contract and the demo path too (testnet only), without
+(`base-sepolia.json`: the Base Sepolia deployment of 27 October.) Or, with the swap contract and the demo path too (testnet only), without
 jq: `node scripts/pin-deployment.mjs base-sepolia http://127.0.0.1:8080 > .env.local`. Review the result before
 building: these addresses are what the app trusts.
 
@@ -140,7 +140,7 @@ building: these addresses are what the app trusts.
 | `/market` | v4, P-4: supplied, borrowed, utilization, rates, the locked collateral, the signers' bonds against it and the compensation order; optional lending from the user's own wallet (EIP-1193). |
 | `/status` | v4, P-2: the signers' modes, the Zcash tip against the header relay, the deposit-proof queue, the minting gates, the coverage cap's fill, ΣB and B_eff, the anonymity set of each vault size, the proof versions and the running commit. |
 | `/evidence` | v4, P-3: the backend's evidence file (`zecured-evidence/1`, lib/evidence.ts): the manifest, every flow's transactions linked to the explorers, the leak scan, the measured durations. |
-| `/demo` | Admin-token panel: node modes, the sweep (threshold) demo, the MOCK oracle price (presets $40 and $20); bot status is a placeholder. |
+| `/demo` | Admin-token panel: node modes, the sweep (threshold) demo, the MOCK oracle price (presets $1,265 and $632.50); bot status is a placeholder. |
 
 The vault id travels in the URL **fragment**, never in the path or the query (security review
 M-6): browsers do not send fragments to the server, so the app host's logs and prefetches never
@@ -330,7 +330,7 @@ against independent sources:
 | Owner keys, EIP-712 signing, Safe address derivation, UA decoding, commitments | The market's price on testnets: the DemoShockOracle (MOCK / DEMO) around a MockZecOracle (MOCK), labelled in the UI; MockUSDC (MOCK) as the loan token on testnet |
 | Coordinator API client (against the running backend's shapes) | Sponsorship on a local fork: Pimlico's mock paymaster (MOCK, `tools/local-aa`), which sponsors whatever the backend's allowlist lets through |
 | Sponsored UserOps, the v3 ones (refund destination, pending refund, dispute, reopen, claim from the bonds) included: run in the browser on local forks of Base Sepolia, through the backend proxy and a local alto bundler (docs/TESTING.md § 2), and tested against a fake bundler and paymaster | Demo panel: the oracle it sets is the MOCK MockZecOracle; bot status is a placeholder |
-| Base reads through `/proxy/rpc`, the v3 ledger, refund reasons and compensation included: unit-tested against a mocked node, and run in the browser against the v4 deployments on local forks (no deployment is kept on Base Sepolia, D82) | DEMO: the judges' replay (`lib/replay/`, `NEXT_PUBLIC_REPLAY=1`), a simulator that plays a recording in the browser; sample data (dummy hashes, no explorer links) until a public run is recorded |
+| Base reads through `/proxy/rpc`, the v3 ledger, refund reasons and compensation included: unit-tested against a mocked node, and run in the browser against the v4 deployments on local forks and against the live Base Sepolia deployment of 27 October (not kept running, D82) | DEMO: the judges' replay (`lib/replay/`, `NEXT_PUBLIC_REPLAY=1`), a simulator that plays a recording in the browser; sample data (dummy hashes, no explorer links) until a public run is recorded |
 | The minting banner and the borrow gate (GET /status, read by the backend from the Intake and the bond) | |
 | Demo panel price control (`GET` / `POST /admin/oracle`, the backend holds the owner key; refused where the market's oracle is a real feed, as on Base mainnet) | |
 | Close from collateral and deleverage: signed in the browser (the Safe's ERC-1271) and executed by the market-maker bot behind `GET /quotes/close` / `POST /closes` (docs/TESTING.md § 2) | |

@@ -111,7 +111,7 @@ export interface HarvestInputs {
   t0: { at: string; baseBlock: number; config: Json; status: Json; demo: Json; stats: Json };
   t1?: { at: string; baseBlock: number; takerUsdc: string } | null;
   t2: { at: string; baseBlock: number; status: Json; vault: Json; order?: Json | null };
-  /** contracts/deployments/<network>.json, after the MockUSDC patch (runbook § 3.2). */
+  /** contracts/deployments/<network>.json, after the MockUSDC patch (scripts/mark-mock-loan-token.py, D109). */
   deployment: Json;
   /** contracts/deployments/<network>.swap.json */
   swapDeployment: Json;
@@ -438,7 +438,7 @@ export async function gatherFacts(inp: HarvestInputs, client: PublicClient): Pro
   const bond = addr(contracts.SignerBond, "deployment.contracts.SignerBond");
   const token = addr(contracts.LoanToken, "deployment.contracts.LoanToken");
   if (!same(contracts.MockUSDC as string | undefined, token)) {
-    throw new HarvestError("the deployment file does not name its loan token as MockUSDC: patch it first (runbook § 3.2)");
+    throw new HarvestError("the deployment file does not name its loan token as MockUSDC: patch it first (scripts/mark-mock-loan-token.py)");
   }
   const morpho = addr(market.morphoBlue, "deployment.market.morphoBlue");
   const oracle = addr(market.oracle, "deployment.market.oracle");

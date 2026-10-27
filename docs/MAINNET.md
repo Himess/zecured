@@ -1,7 +1,7 @@
 # Mainnet
 
-Zecured is built for Zcash testnet and Base Sepolia, and its Base side is tested on forks of Base Sepolia and
-Base mainnet. The mainnet beta changes configuration, not code. Full mainnet also needs the designs not yet built
+Zecured is built for Zcash testnet and Base Sepolia, where its Base side ran live on 27 October 2026, and it is
+tested on forks of Base Sepolia and Base mainnet. The mainnet beta changes configuration, not code. Full mainnet also needs the designs not yet built
 (a dispute bond, per-signer reimbursement, the fixes in Known limitations), and what code can't bring: independent
 operators, real bonds and liquidity, and an audit. This page says what was checked against mainnet, what the
 configuration changes and why, what a deployment needs, and what is designed but not built. The

@@ -402,7 +402,7 @@
 
       <div class="theft" id="theft">
         <h3 class="doc-h3">The theft demonstration</h3>
-        <p>We let three signers steal, on a separate deployment labelled DEMO, with its own five signers and a 2-minute challenge window instead of 24 hours. Times are UTC, from the run of October 21, which went past midnight.</p>
+        <p>We let three signers steal, on a separate deployment labelled DEMO, with its own five signers and a 2-minute challenge window instead of 24 hours. Times are UTC, from the run of October 20, which went past midnight.</p>
         <ol class="tl">
           <li class="tl-z"><span class="tl-m mono">sweep 43ea5e91, block 4,523,730</span><p>Signers 3, 4 and 5 sweep the vault to a wallet of ours. Nothing is committed on Base.</p></li>
           <li class="tl-z"><span class="tl-m">Two minutes later</span><p>The borrower’s watchtower reads the vault with its viewing key and finds its note spent by a transaction no commitment names: violation F1.</p></li>
@@ -469,9 +469,9 @@
             <li>Shielded Ironwood transactions on Zcash testnet (NU7)</li>
             <li>3-of-5 FROST vaults: re-randomized FROST over RedPallas, keys per ZIP 2005</li>
             <li>Every signer’s policy checks on every payout</li>
-            <li>The Zcash header relay, verifying Equihash on Base; an earlier version took real Testnet headers on public Base Sepolia in October</li>
-            <li>The deposit, violation and payment statements in the RISC Zero zkVM, with reproducible image ids; real Groth16 seals of the pinned guests pass RISC Zero’s router</li>
-            <li>Morpho Blue’s own deployment on Base Sepolia (on forks); the v3 contract suites (533 tests) also pass against mainnet’s Morpho Blue and RISC Zero router on a fork</li>
+            <li>The Zcash header relay, verifying Equihash on Base: live on Base Sepolia on 27 October (an earlier version took Testnet headers there on 12 October)</li>
+            <li>The deposit, violation and payment statements in the RISC Zero zkVM, with reproducible image ids; real Groth16 seals of the pinned guests pass RISC Zero’s router, live on Base Sepolia on 27 October and on forks</li>
+            <li>Morpho Blue’s own deployment on Base Sepolia (live on 27 October, and on forks); the v3 contract suites (533 tests) also pass against mainnet’s Morpho Blue and RISC Zero router on a fork</li>
             <li>The contracts: zZEC, the Registry and its spend logic, the Intake, the settlement adapter, the bonds, the slasher, the compensator and the version registry; and the mainnet price feed, tested on the live Chainlink and API3 feeds</li>
             <li>Liquidation, close from collateral and refunds of non-conforming deposits</li>
             <li>Every payout committed on Base before it is signed; bonds, slashing, compensation, the liveness penalty and disputes; the watchtower</li>
@@ -486,10 +486,10 @@
           <ul class="rm-l mock">
             <li>The five signers, all run by the team: the bonds show the mechanism, not economic security</li>
             <li>The ZEC price on Base Sepolia: MockZecOracle behind DemoShockOracle, so the demo can show a liquidation, read by the coverage cap through DemoCapPrice; mainnet reads Chainlink and API3</li>
-            <li>USDC on testnet: MockUSDC, a test token we mint (MOCK: no value), on the local forks. The contracts take any 6-decimal USDC; the mainnet configuration names Circle’s USDC</li>
-            <li>On the local fork: MockRiscZeroVerifier for every end-to-end run’s proofs, and mock-host where RISC Zero does not run</li>
+            <li>USDC on testnet: MockUSDC, a test token we mint (MOCK: no value), on the local forks and on Base Sepolia. The contracts take any 6-decimal USDC; the mainnet configuration names Circle’s USDC</li>
+            <li>On the local fork: MockRiscZeroVerifier for the fork runs’ proofs, and mock-host where RISC Zero does not run (the live Base Sepolia run used RISC Zero’s router)</li>
             <li>On the local fork: Pimlico’s mock paymaster (<span class="mono">tools/local-aa</span>) sponsors UserOps behind our proxy’s allowlist</li>
-            <li>The demo wallet, on a testnet only: it pays a vault testnet ZEC for a visitor who has none</li>
+            <li>The demo wallet, on a testnet only: it pays a vault testnet ZEC for a visitor who has none, takes back a closed loan’s ZEC and can receive a swap</li>
             <li>The swap payment fixture of the tests, which is synthetic</li>
             <li>Test-only mocks in the unit and symbolic tests, each labelled MOCK in the code</li>
             <li>The theft demonstration: its own deployment, labelled DEMO, with a 2-minute window</li>
